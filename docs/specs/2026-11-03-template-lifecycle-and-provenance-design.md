@@ -208,14 +208,15 @@ record) and `check` records (§7.1) and queues the build for a host agent (§6.1
 the image, the spec as sent, the profile and the gate record's sha256 on the caller's own template;
 the builder (Moca commit, kernel) is not compared (one deployment's hosts build with one builder),
 and a failed or rejected build is never reused. With host agents (§6.1), a registered build is
-reused only while some host's last inventory holds its snapshot (its manifest hash); when none does,
-the create is admitted as a new build (`202`), with the usual quota and gate checks, and registers
-under the same manifest hash. A build on its way has no snapshot yet and is reused as before, and a
-deployment without host agents reuses as before. The check is only as current as the hosts' last
-inventories: a snapshot removed since a host's last report still counts as held, and right after a
-control-plane restart, before any host has reported, a create builds again (a duplicate build,
-never an answer that names a missing snapshot). It does not repair the old build: that stays
-`registered` until it is retired.
+reused only while a fresh host holds its snapshot (its manifest hash): a host whose last inventory
+is at most `HOST_STALE_S` (360 s) old, the hosts placement and a sandbox create count (§6.2). When
+none does, the create is admitted as a new build (`202`), with the usual quota and gate checks; it
+registers under the same manifest hash and supersedes the old build (§6.1, rule `T.unique`). A
+build on its way has no snapshot yet and is reused as before, and a deployment without host agents
+reuses as before. The check is only as current as the hosts' last inventories: a snapshot removed
+since a host's last report still counts as held, and right after a control-plane restart, before
+any host has reported, or while every holder is briefly stale, a create builds again (a duplicate
+build, never an answer that names a missing snapshot).
 
 **Cancel** (built, #737): `POST /v1/templates/{id}/builds/{build}/cancel`, by the owner or an
 admin, withdraws a `queued`, `building` or `probing` build: it becomes `failed` with
@@ -540,12 +541,33 @@ more reports; the check is made again inside the template's update, with the rep
 an owner's cancel that lands while a report is being written stands and no record says it
 registered. On `built` the control plane stores T and S byte for byte, writes a `build` record
 and the registration `check` (§8.2); a registered build's id becomes its manifest hash, and a
-template's first registered build takes the `default` tag. A build id names one build of a
+template's first registered build takes the `default` tag. A build id names one build in use of a
 template: a build whose manifest hash another build of the template already has (the same image
 and spec created again under another profile or gate record, which the build finds already built)
 is rejected, rule `T.unique`, naming that build. When that build is retired (a host's "already built"
 short cut found its snapshot still there: removal has not run, or keeps it because its worker or id is
 shared), the message says to change the spec or create again after the snapshot's removal.
+
+**A rebuild supersedes a registered build whose snapshot is gone** (#816). When that other build is
+`registered` and no fresh host (§4, Reuse) holds the manifest hash, its snapshot was removed from
+every host, and a create built it again (§4, Reuse). Then the new build registers and, in the same
+catalog update, supersedes the old one: the old build becomes `retired` (`reason.step:
+superseded`, its leases gone, as a retire's) and keeps its build id, and the tags that named that
+id, `default` included, name the new build. The registration `check` passes `T.unique` with a
+message naming the superseded build, and a `retire` record by `policy` follows it, with `from:
+registered`, the superseded build's `buildRecord`, `supersededBy` (the new build's handle),
+`supersededByRecord` (its `build` record) and `tags`. When a fresh host does hold the hash, the
+rebuild is rejected as above; a rebuild that fails leaves the old build untouched. Two builds then
+share one build id, one retired: everywhere a build id names a build of a template (a reference
+`id@<build>`, a tag, the build routes, an activation, a lease, placement, a host's reports), it
+names the one not ended, and the superseded build is found by its handle. A sandbox or session
+recorded under the id is use of that build. The superseded build shares its snapshot with a build
+neither retired nor rejected, so its snapshot and worker are never stopped or removed for it (its
+`shared` is true), and a host's `removed` for the id is refused.
+
+The check counts fresh hosts as they last reported. A host that built the snapshot and reported it
+in an inventory before its `built` report counts as holding it, so the rebuild is rejected rule
+`T.unique`; the old build is then held again, and the next create reuses it.
 
 **Nothing that names where an image lives leaves the host.** The control plane keeps what it is
 sent, readable by clients and append-only in provenance, so the agent redacts a failed build's
@@ -830,7 +852,7 @@ follows) so the chain from the image to a sandbox can be walked and checked. Eve
 | `check`                        | policy is applied, at create and at registration                              | the policy's digest, the profile, each rule and its result, the outcome (`admitted`, `registered`, `rejected`); at registration, `build` is the digest of the `build` record it judged                                                                           |
 | `activate` · `deactivate`      | readiness changes                                                             | host, worker, manifest hash, subject, reason; each lease stores its `activate` record's digest                                                                                                                                                                   |
 | `tag` · `visibility` · `owner` | the owner or an admin changes one                                             | the new value and the one before                                                                                                                                                                                                                                 |
-| `retire` · `reject`            | a template or build is retired or rejected, or a host removes it              | subject, reason, `from` (the status before), `buildRecord`; a host's removal is a `retire` by `host:<id>`, `event: removed`                                                                                                                                      |
+| `retire` · `reject`            | a template or build is retired or rejected, or a host removes it              | subject, reason, `from` (the status before), `buildRecord`; a host's removal is a `retire` by `host:<id>`, `event: removed`; a build superseded at registration (§6.1), a `retire` by `policy` with `supersededBy`, `supersededByRecord` and `tags`              |
 | `sandbox`                      | a sandbox is created, and when it ends                                        | at create: sandboxId, buildId, templateManifestHash, `lease` (null with no lease), expiresAt; at end: `state: terminated`, `reason` (`deleted` with endedAt, or `expired`, written once by the janitor's sweep when it first sees it; the true end is expiresAt) |
 | `session`                      | a Moca Pi session pinned through the store is created, and when it is deleted | at create: sessionId, buildId, templateManifestHash, `lease` (null with no lease), `state: created`; at delete: sessionId, buildId, `state: terminated`, `reason: deleted`, endedAt                                                                              |
 | `use` (summary)                | sessions start                                                                | per build and day: count, first and last, by subject                                                                                                                                                                                                             |

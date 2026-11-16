@@ -5,19 +5,31 @@ changes, the major only with a `/v2` ([change policy](../reference/change-policy
 
 ## 1.22.0
 
-A template create reuses a registered build only while a host holds its snapshot
+A template create reuses a registered build only while a host holds its snapshot, and the
+rebuild it admits otherwise supersedes the old build
 ([#816](https://github.com/rossoctl/moca/issues/816)), as the
 [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §4
-(Reuse) asks. No route, field or error code changes; when a create is answered `reused: true`
-does.
+(Reuse) and §6.1 ask. No route or error code changes, and one value is added (`reason.step:
+superseded`); when a create is answered `reused: true` changes, and so does what a rebuild of the
+same snapshot registers as.
 
 - POST /v1/templates and POST /v1/templates/{id}/builds: on a deployment with host agents, a
-  registered build with the same inputs is reused (`200`, `reused: true`) only while some host's
-  last inventory holds its manifest hash. When none does, the create is admitted as a new build
-  (`202`, no `reused`), with the usual quota and gate checks, instead of an answer naming a build
-  whose sandbox create is refused `409 template_unavailable`. A build on its way (`queued` to
-  `built`) is reused as before, and a deployment without host agents is unchanged. Right after a
-  control-plane restart, before any host has reported, such a create builds again.
+  registered build with the same inputs is reused (`200`, `reused: true`) only while a fresh host
+  (its last inventory at most HOST_STALE_S, 360 s, old, as placement counts hosts) holds its
+  manifest hash. When none does, the create is admitted as a new build (`202`, no `reused`), with
+  the usual quota and gate checks, instead of an answer naming a build whose sandbox create is
+  refused `409 template_unavailable`. A build on its way (`queued` to `built`) is reused as before,
+  and a deployment without host agents is unchanged. Right after a control-plane restart, before
+  any host has reported, such a create builds again.
+- Registration: that rebuild has the old build's manifest hash. When no fresh host holds it, the
+  rebuild registers and supersedes the old build in the same update: the old build becomes
+  `retired` with `reason: {step: superseded}` and keeps its build id, and the tags that named it,
+  `default` included, name the new build. A `retire` record by `policy` names both builds. When a
+  fresh host does hold the hash, the rebuild is rejected, rule `T.unique`, as before.
+- GET /v1/templates/{id}/builds/{build}, DELETE /v1/templates/{id}/builds/{build}, POST
+  /v1/templates/{id}/builds/{build}/reject, activate `{build}`, tags and `id@<build>`: a build id
+  a superseded build shares names the build that took it over; the superseded build is found by
+  its handle. A superseded build lists no tags.
 
 ## 1.21.0
 

@@ -588,7 +588,13 @@ components:
       required:
         [buildId, status, profile, readiness, capacity, lastUsedAt, tags, createdAt, provenance]
       properties:
-        buildId: { type: string, description: '`sha256:<manifest hash>` or `imported:<12 hex>`' }
+        buildId:
+          type: string
+          description: |
+            `sha256:<manifest hash>` or `imported:<12 hex>`. A build that a rebuild of its snapshot
+            superseded at registration (1.22.0, template lifecycle spec §6.1) keeps its id,
+            `retired`, beside the build that took it over: a build id then names that build, and
+            the superseded one is found by its handle
         status:
           type: string
           enum: [queued, building, probing, built, registered, rejected, failed, retired]
@@ -681,7 +687,12 @@ components:
             reported. A retired build stays held until its host removes it: the host's `removed`
             report drops it at once (§6.1 step 7). `[]` when no host holds it; null on a
             deployment without host agents
-        tags: { type: array, items: { type: string } }
+        tags:
+          type: array
+          items: { type: string }
+          description: |
+            the tags naming this build; a tag names a build id, so a superseded build lists none:
+            its tags name the build that took its id over
         createdAt: { type: integer, description: epoch seconds }
         provenance:
           type: [string, 'null']
@@ -693,11 +704,15 @@ components:
             built (then its buildId is its manifest hash); equal to buildId for an imported build
         reason:
           type: [object, 'null']
-          description: on a `failed` or `rejected` build, why; null otherwise
+          description: |
+            on a `failed` or `rejected` build, why; on a build retired because a rebuild of its
+            snapshot superseded it (1.22.0), why, with step `superseded`; null otherwise
           required: [message]
           properties:
             message: { type: string }
-            step: { type: string, description: 'the step that failed; `cancelled` for a cancel' }
+            step:
+              type: string
+              description: 'the step that failed; `cancelled` for a cancel; `superseded` for a superseded build'
             rule:
               type: string
               description: the gating rule, on a rejection; `admin` for a reject after the fact (§5.2)
@@ -799,7 +814,7 @@ components:
             true when the create matched a build of the caller's template with the same inputs
             (image, spec, profile, gate record's sha256) that is registered or on its way there
             (§3.2): that build is answered, and no second one is queued. A registered build counts
-            only while a host holds its snapshot (with host agents). Absent for a new build
+            only while a fresh host holds its snapshot (with host agents). Absent for a new build
     LimitUse:
       type: object
       required: [limit, used]
@@ -2294,9 +2309,13 @@ paths:
         a build host; follow it at `build`. A create whose inputs match a build of the caller's
         template that is registered or on its way (§3.2) queues nothing and answers that build with
         `reused: true`: `200` when it is registered, `202` while it is not. On a deployment with
-        host agents, a registered build is reused only while some host's last inventory holds its
-        snapshot; when none does, the create is admitted as a new build (`202`, no `reused`), with
-        the usual quota and gate checks. A failed or rejected build is never reused.
+        host agents, a registered build is reused only while a fresh host (one whose last inventory
+        is at most HOST_STALE_S, 360 s, old: a host placement counts) holds its snapshot; when none
+        does, the create is admitted as a new build (`202`, no `reused`), with the usual quota and
+        gate checks. That build registers under the same build id and supersedes the old one,
+        which becomes `retired` (`reason.step: superseded`), and the tags that named it, `default`
+        included, name the new build; unless a fresh host holds the snapshot by then, when the new
+        build is rejected, rule `T.unique`. A failed or rejected build is never reused.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true
@@ -2527,8 +2546,10 @@ paths:
       description: |
         Both profiles (§4.1). The build id is `sha256:<manifest hash>`, or `imported:<12 hex>` for
         a template imported from SH_SANDBOX_TEMPLATES (no snapshot named); URL-encode it. A build
-        created through the API is also found by the `b-<26 hex>` handle its create answered.
-        `404 template_not_found` for an unknown template or build.
+        created through the API is also found by the `b-<26 hex>` handle its create answered. A
+        build id that a superseded build shares (1.22.0) names the build that took it over; the
+        superseded one is found by its handle. `404 template_not_found` for an unknown template or
+        build.
       security: [{ sessionToken: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
