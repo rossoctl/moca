@@ -250,8 +250,10 @@ describe('the inference listener (MI1 §6.3, §8.6; decision D1)', () => {
       console.warn = original;
     }
     expect(lines).toHaveLength(2);
-    expect(lines[0]).toContain('10.0.0.7');
-    expect(lines[1]).toContain('0.0.0.0');
+    expect(lines[0]).toContain('MOCA_INFERENCE_ADDR is not a loopback address');
+    // The address itself is deliberately NOT in the line: it is read from the env copy that holds
+    // resolved secrets, and the setting's name is what an operator needs anyway.
+    expect(lines[0]).not.toContain('10.0.0.7');
   });
 
   it('answers 503 when the endpoint is unreachable, naming no secret', async () => {

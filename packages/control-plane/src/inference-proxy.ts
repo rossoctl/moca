@@ -151,10 +151,13 @@ const LOOPBACK = new Set(['127.0.0.1', '::1', '[::1]', 'localhost']);
  */
 export function warnIfExposed(host?: string): void {
   if (host && LOOPBACK.has(host)) return;
+  // The address is NOT echoed: it comes out of the env copy that also holds resolved secrets, and a
+  // value read from there has no business in a log line (CodeQL js/clear-text-logging, #822). The
+  // operator set MOCA_INFERENCE_ADDR, so naming the setting is enough to act on.
   console.warn(
-    `[inference] listening on ${host ?? '0.0.0.0'}, which is not loopback: this listener redeems ` +
-      'grants for real provider credentials and authenticates nothing else, so the network it is ' +
-      "on must reach only this deployment's own workers (MI1 §8.6)",
+    '[inference] MOCA_INFERENCE_ADDR is not a loopback address: this listener redeems grants for ' +
+      'real provider credentials and authenticates nothing else, so the network it is on must ' +
+      "reach only this deployment's own workers (MI1 §8.6)",
   );
 }
 
