@@ -51,7 +51,7 @@ printf 'ssh %s\n' "$*" >>"$MOCK_LOG"
 args=("$@") n=${#args[@]}
 target="${args[$((n - 2))]}" remote="${args[$((n - 1))]}"
 [[ "$target" != "${MOCK_SSH_FAIL:-}" ]] || { echo 'ssh: connect to host: Connection refused' >&2; exit 255; }
-[[ "$remote" =~ ^sudo\ -n\ bash\ -s\ --\ --host\ --token-ttl-seconds\ [0-9]+$ ]] || { echo "mock ssh: unexpected remote command: $remote" >&2; exit 98; }
+[[ "$remote" =~ ^sudo\ -n\ bash\ -s\ --\ --host\ --token-ttl-seconds\ [0-9]+(\ --max-lifetime-seconds\ [0-9]+)?$ ]] || { echo "mock ssh: unexpected remote command: $remote" >&2; exit 98; }
 exec bash -s -- ${remote#sudo -n bash -s -- }
 MOCK
 cat >"$TMP/bin/systemctl" <<'MOCK'
@@ -237,6 +237,28 @@ has 'janitor last run: none in the journal'
 ! bash "$STATUS" --host --token-ttl-seconds 15m >"$TMP/out" 2>&1 || fail 'accepted a non-numeric lifetime'
 pass 'host: the wait warns at <= ttl + 30 s, notes an unknown lifetime, refuses a leading zero, reports none installed'
 
+# The workers' installed idle must exceed the longest lifetime a sandbox can have (#770): the
+# workspace reclaim would otherwise take a live sandbox's files. 720h is exactly 2592000 s: warns.
+mkdir -p "$SBX_ENV_DIR/workers"
+printf 'SH_WORKSPACE_IDLE=768h\n' >"$SBX_ENV_DIR/workers/sbx_a.env"
+printf 'X=1\nSH_WORKSPACE_IDLE=216h\n' >"$SBX_ENV_DIR/workers/sbx_b.env"
+printf 'SH_WORKSPACE_IDLE=720h\n' >"$SBX_ENV_DIR/workers/sbx_c.env"
+printf 'SH_WORKSPACE_IDLE=9d\n' >"$SBX_ENV_DIR/workers/sbx_d.env"
+printf 'SH_WORKSPACE_IDLE=0768h\n' >"$SBX_ENV_DIR/workers/sbx_e.env"
+bash "$STATUS" --host --token-ttl-seconds 900 --max-lifetime-seconds 2592000 >"$TMP/out" 2>&1 || fail "exited $?"
+has 'worker idle sbx_a: 768h (outlasts the longest lifetime 2592000 s)'
+has "worker idle sbx_b: 216h; WARNING: not above the longest lifetime 2592000 s, so this worker can reclaim a live sandbox's workspace: re-run deploy/sbx/install-host.sh with the current bundle"
+grep -q '^worker idle sbx_c: 720h; WARNING: not above the longest lifetime 2592000 s' "$TMP/out" || fail 'no warning at idle == maximum'
+has 'worker idle sbx_d: unreadable (SH_WORKSPACE_IDLE in '"$SBX_ENV_DIR"'/workers/sbx_d.env is not whole hours)'
+grep -q '^worker idle sbx_e: unreadable' "$TMP/out" || fail 'read a leading-zero idle as a number'
+bash "$STATUS" --host >"$TMP/out" 2>&1 || fail "exited $?"
+has 'worker idle sbx_a: 768h (not checked: the longest lifetime is unknown; pass --max-lifetime-seconds, or run status.sh from the cluster side)'
+! bash "$STATUS" --host --max-lifetime-seconds 30d >"$TMP/out" 2>&1 || fail 'accepted a non-numeric maximum'
+rc=0; bash "$STATUS" --host --max-lifetime-seconds 30d >"$TMP/out" 2>&1 || rc=$?
+[[ "$rc" == 2 ]] || fail "a bad --max-lifetime-seconds exited $rc, not 2"
+rm -rf "$SBX_ENV_DIR/workers"
+pass 'host: a worker idle warns at <= the longest lifetime, notes an unknown maximum, reports an unreadable idle'
+
 # 6. The cluster side runs the host side on every SBX_STATUS_HOSTS target over ssh, with the
 #    cluster's token lifetime, and reports an unreachable host without failing.
 printf 'SBX_JANITOR_AGE=900\n' >"$SBX_ENV_DIR/janitor.env"
@@ -255,3 +277,18 @@ grep -q '^ssh -o BatchMode=yes -o ConnectTimeout=10 kvm-a.example.invalid sudo -
 printf 'SBX_STATUS_HOSTS="-oProxyCommand=evil"\n' >>"$TMP/sbx.env"
 ! bash "$STATUS" --env-file "$TMP/sbx.env" >"$TMP/out" 2>&1 || fail 'accepted an ssh option as a host'
 pass 'cluster: each SBX_STATUS_HOSTS host is reported over ssh with the cluster lifetime; unreachable reported; options refused'
+
+# The cluster side passes the longest lifetime too: SH_SANDBOX_MAX_LIFETIME_SECONDS, else the
+# control plane's own fallback, SH_SANDBOX_LIFETIME_SECONDS (#770).
+sed -i.bak '$d' "$TMP/sbx.env" && rm -f "$TMP/sbx.env.bak"
+printf '{"data":{"SH_SANDBOX_TOKEN_TTL_SECONDS":"900","SH_SANDBOX_MAX_LIFETIME_SECONDS":"2592000","SH_SANDBOX_LIFETIME_SECONDS":"604800"}}\n' >"$MOCK_DIR/settings.json"
+: >"$MOCK_LOG"
+bash "$STATUS" --env-file "$TMP/sbx.env" >"$TMP/out" 2>&1 || fail "exited $?"
+grep -q '^ssh .* kvm-a.example.invalid sudo -n bash -s -- --host --token-ttl-seconds 900 --max-lifetime-seconds 2592000$' "$MOCK_LOG" ||
+  fail 'ssh did not pass the maximum lifetime'
+printf '{"data":{"SH_SANDBOX_TOKEN_TTL_SECONDS":"900","SH_SANDBOX_LIFETIME_SECONDS":"604800"}}\n' >"$MOCK_DIR/settings.json"
+: >"$MOCK_LOG"
+bash "$STATUS" --env-file "$TMP/sbx.env" >"$TMP/out" 2>&1 || fail "exited $?"
+grep -q '^ssh .* kvm-a.example.invalid sudo -n bash -s -- --host --token-ttl-seconds 900 --max-lifetime-seconds 604800$' "$MOCK_LOG" ||
+  fail 'ssh did not fall back to the default lifetime'
+pass 'cluster: the longest lifetime is passed to the host side, falling back to SH_SANDBOX_LIFETIME_SECONDS'

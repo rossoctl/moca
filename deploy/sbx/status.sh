@@ -4,7 +4,8 @@
 # changes nothing.
 #
 #   deploy/sbx/status.sh [--env-file FILE]                    the cluster side (kubectl)
-#   sudo deploy/sbx/status.sh --host [--token-ttl-seconds N]  on a KVM host
+#   sudo deploy/sbx/status.sh --host [--token-ttl-seconds N] [--max-lifetime-seconds N]
+#                                                             on a KVM host
 #
 # The cluster side reads setup.sh's own env file (SBX_NAMESPACE, SBX_WORKERS) and, optionally,
 # SBX_STATUS_HOSTS: ssh targets ([user@]host, whitespace-separated) on which it also runs the host
@@ -34,13 +35,19 @@
 #     for the bundle it writes: a host still running an older bundle after SBX_TOKEN_TTL_MINUTES was
 #     raised would free workspaces a valid token can still reach. The cluster side passes the
 #     current lifetime.
+#   - worker idle <id>: SH_WORKSPACE_IDLE from each INSTALLED workers/<id>.env, with a WARNING when
+#     it does not exceed --max-lifetime-seconds: a worker whose idle is not above the longest
+#     lifetime a sandbox can have may reclaim a live sandbox's workspace (#770). setup.sh refuses
+#     such an idle for the bundles it writes; a host not reinstalled afterwards still runs the old
+#     one. The cluster side passes SH_SANDBOX_MAX_LIFETIME_SECONDS (or, as the control plane does
+#     when it is unset, SH_SANDBOX_LIFETIME_SECONDS).
 # SBX_ENV_DIR and SBX_SRV default to /etc/sbx and /srv/sbx, as install-host.sh's do.
 #
 # Exit: 0 whenever it could report, even when something was unreachable (that is reported as
 # `unavailable` or `unreachable`); 2 for a usage or settings error.
 set -euo pipefail
 
-USAGE='status.sh [--env-file FILE] | status.sh --host [--token-ttl-seconds N]'
+USAGE='status.sh [--env-file FILE] | status.sh --host [--token-ttl-seconds N] [--max-lifetime-seconds N]'
 die() { echo "deploy/sbx/status.sh: $*" >&2; exit 2; }
 say() { printf '%s: %s\n' "$1" "$2"; }
 
@@ -111,13 +118,40 @@ host_janitor() {
   fi
 }
 
+host_worker_idle() {
+  local max="$1" f id idle h
+  for f in "$SBX_ENV_DIR"/workers/*.env; do
+    [[ -f "$f" ]] || continue
+    id="$(basename "$f" .env)"
+    idle="$(env_value SH_WORKSPACE_IDLE "$f")"
+    # Whole hours without a leading zero, as install-host.sh writes them.
+    if [[ ! "$idle" =~ ^[1-9][0-9]{0,5}h$ ]]; then
+      say "worker idle $id" "unreadable (SH_WORKSPACE_IDLE in $f is not whole hours)"
+      continue
+    fi
+    h="${idle%h}"
+    if [[ -z "$max" ]]; then
+      say "worker idle $id" "$idle (not checked: the longest lifetime is unknown; pass --max-lifetime-seconds, or run status.sh from the cluster side)"
+    elif ((h * 3600 > max)); then
+      say "worker idle $id" "$idle (outlasts the longest lifetime $max s)"
+    else
+      say "worker idle $id" "$idle; WARNING: not above the longest lifetime $max s, so this worker can reclaim a live sandbox's workspace: re-run deploy/sbx/install-host.sh with the current bundle"
+    fi
+  done
+}
+
 host_main() {
-  local ttl=''
+  local ttl='' max=''
   while (($#)); do
     case "$1" in
     --token-ttl-seconds)
       [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]{0,5}$ ]] || die '--token-ttl-seconds needs whole seconds'
       ttl="$2"
+      shift 2
+      ;;
+    --max-lifetime-seconds)
+      [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]{0,8}$ ]] || die '--max-lifetime-seconds needs whole seconds'
+      max="$2"
       shift 2
       ;;
     *) die "unknown argument: $1 (usage: $USAGE)" ;;
@@ -127,6 +161,7 @@ host_main() {
   host_units
   host_disk
   host_janitor "$ttl"
+  host_worker_idle "$max"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -136,9 +171,12 @@ redis() { kubectl exec -n "$NS" statefulset/redis -c redis -- redis-cli "$@" </d
 
 cluster_settings() {
   local json
-  TTL=''
+  TTL='' MAXLIFE=''
   if json="$(kubectl get configmap sbx-settings -n "$NS" -o json </dev/null 2>/dev/null)"; then
     TTL="$(printf '%s' "$json" | jq -r '.data.SH_SANDBOX_TOKEN_TTL_SECONDS // empty' 2>/dev/null)" || TTL=''
+    # The control plane falls back to SH_SANDBOX_LIFETIME_SECONDS when the maximum is unset.
+    MAXLIFE="$(printf '%s' "$json" | jq -r '.data.SH_SANDBOX_MAX_LIFETIME_SECONDS // .data.SH_SANDBOX_LIFETIME_SECONDS // empty' 2>/dev/null)" || MAXLIFE=''
+    [[ "$MAXLIFE" =~ ^[1-9][0-9]{0,8}$ ]] || MAXLIFE=''
   fi
   if [[ "$TTL" =~ ^[1-9][0-9]{0,5}$ ]]; then
     say 'token lifetime' "$TTL s"
@@ -219,6 +257,7 @@ cluster_hosts() {
   [[ -n "${SBX_STATUS_HOSTS:-}" ]] || return 0
   remote='sudo -n bash -s -- --host'
   [[ -z "$TTL" ]] || remote+=" --token-ttl-seconds $TTL"
+  [[ -z "$MAXLIFE" ]] || remote+=" --max-lifetime-seconds $MAXLIFE"
   err="$(mktemp)"
   for t in $SBX_STATUS_HOSTS; do
     rc=0
