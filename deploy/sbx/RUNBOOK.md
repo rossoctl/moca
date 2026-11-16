@@ -104,6 +104,19 @@ running, and reattach when the relay comes back; Execs running through the old r
 setting (templates, subjects, quotas, lifetimes) rolls the control plane alone, and running Execs
 carry on.
 
+**Moving to idle lifetimes (#770).** The first run of this `setup.sh` on an existing deployment
+changes every worker's idle from 216 h to 768 h, and starts idle lifetimes: the control plane counts
+idle time only when `SH_SANDBOX_MAX_LIFETIME_SECONDS` is set, and keeps the old absolute lifetime
+otherwise. In this order:
+
+```bash
+SBX_ACK_HOSTS=1 deploy/sbx/setup.sh --env-file <env file>
+```
+
+then re-run `install-host.sh` with the new bundles on every host **the same day**, and then run
+`status.sh` and check that it prints no `worker idle` WARNING. See
+[§3](#3-changing-the-sandbox-lifetime).
+
 **From 1a:** unset `SBX_CLIENTS` (the run refuses it), move `SBX_IMAGE` off the team-only 1a image,
 and run with `SBX_ACK_HOSTS=1`, because every 1a worker bundle lacks the workspace idle time and
 must be reinstalled:
@@ -170,13 +183,19 @@ replacing `SBX_WORKER_BIN` and restarting the unit alone; if that happened, stop
 
 ## 3. Changing the sandbox lifetime
 
-`SBX_LIFETIME_DAYS` (default 7) sets how long a sandbox lives, and each worker's idle reclaim,
-`SH_WORKSPACE_IDLE`, is that plus two days. **A change means reinstalling every host's workers.**
-The control plane takes the new lifetime at once, but a running worker keeps the idle it was
-installed with until `install-host.sh` is re-run on its host; after a raise, that idle can be
-shorter than a live sandbox's lifetime, and the worker would reclaim its workspace.
+Two settings. `SBX_LIFETIME_DAYS` (default 7) is the default idle lifetime: a sandbox ends after
+that many days without use. `SBX_MAX_LIFETIME_DAYS` (default 30) is the longest an owner may pick,
+and each worker's idle reclaim, `SH_WORKSPACE_IDLE`, is that plus two days. The default must not
+exceed the maximum.
 
-So `setup.sh` refuses a lifetime that changes the idle in the bundles it last wrote. Either
+**Changing only `SBX_LIFETIME_DAYS`** touches no host: re-run `setup.sh` and the control plane rolls.
+
+**Changing `SBX_MAX_LIFETIME_DAYS` means reinstalling every host's workers.** The control plane
+takes the new maximum at once, but a running worker keeps the idle it was installed with until
+`install-host.sh` is re-run on its host; after a raise, that idle can be shorter than a live
+sandbox's lifetime, and the worker would reclaim its workspace.
+
+So `setup.sh` refuses a maximum that changes the idle in the bundles it last wrote. Either
 reinstall every host first, with bundles made from the new value, or:
 
 ```bash
@@ -184,6 +203,13 @@ SBX_ACK_HOSTS=1 deploy/sbx/setup.sh --env-file <env file>
 ```
 
 and then, right after, re-run `install-host.sh` with the new bundle for each worker the run names.
+
+**Lowering the maximum:** run with `SBX_ACK_HOSTS=1`, but reinstall the hosts only once the old
+maximum has passed since the run. Sandboxes keep the deadlines set under the old maximum (the
+control plane never shortens a deadline), and a shorter idle would reclaim their workspaces.
+
+`status.sh` prints `worker idle <id>: ...` for each host and a WARNING when a worker's idle does
+not exceed the maximum.
 
 ## 4. Adding or removing a user
 

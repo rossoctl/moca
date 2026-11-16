@@ -43,7 +43,8 @@ Optional inputs:
 | -------------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `SBX_EGRESS_CREDENTIALS`               | off                 | `1` enables user-scoped egress credentials (`mocactl sbx credentials`); needs host steps after: [runbook](RUNBOOK.md#credential-injection---egress)                                                                                                                                                                                 |
 | `SBX_REDIS_IMAGE`                      | the base's Valkey 9 | `repository[:tag]@sha256:<digest>`: the image Redis runs. Set it to Redis 7 for a namespace whose data a Redis 7.4 wrote: Valkey 9 cannot read RDB format 12, and its load aborts ([runbook §2](RUNBOOK.md#2-upgrading)). Unset, `setup.sh` refuses to run on a namespace whose `redis` StatefulSet runs an image other than Valkey |
-| `SBX_LIFETIME_DAYS`                    | 7                   | 1-30; each worker's idle reclaim is set to this plus two days (below)                                                                                                                                                                                                                                                               |
+| `SBX_LIFETIME_DAYS`                    | 7                   | 1-30, at most `SBX_MAX_LIFETIME_DAYS`: the default idle lifetime. A sandbox ends after this many days without use (`SH_SANDBOX_LIFETIME_SECONDS`)                                                                                                                                                                                   |
+| `SBX_MAX_LIFETIME_DAYS`                | 30                  | 1-30: the longest idle lifetime an owner may pick (`mocactl sbx create --lifetime`); each worker's idle reclaim is set to this plus two days (below)                                                                                                                                                                                |
 | `SBX_TOKEN_TTL_MINUTES`                | 15                  | 5-60: a sandbox token's lifetime, the longest command, and the delete delay                                                                                                                                                                                                                                                         |
 | `SBX_RETENTION_DAYS`                   | 14                  | 1-90: how long a deleted or expired sandbox stays in `mocactl sbx ls`                                                                                                                                                                                                                                                               |
 | `SBX_MAX_PER_SUBJECT`, `SBX_MAX_TOTAL` | 3, 40               | live sandboxes per user, and in all                                                                                                                                                                                                                                                                                                 |
@@ -121,15 +122,27 @@ overlap window. Delete `moca-mu1` and re-run: every API token and sandbox token 
 refused at once. Refresh tokens are not signed and survive, so `mocactl sbx` gets new ones on its
 next call, but an Exec in flight fails, and a direct client must fetch a new sandbox token.
 
-**Changing `SBX_LIFETIME_DAYS` means reinstalling every host's workers.** The control plane takes
-the new lifetime at once, but a running worker keeps the idle reclaim (`SH_WORKSPACE_IDLE`) it was
-installed with until `install-host.sh` is re-run on its host. After a raise, that idle can be shorter
-than a live sandbox's lifetime, and the worker would reclaim its workspace. So the run refuses a
-lifetime that changes the idle in the bundles it last wrote, unless `SBX_ACK_HOSTS=1` is set. To
-raise it, ideally re-run `install-host.sh` on every host first, with bundles made from the new value;
-otherwise set `SBX_ACK_HOSTS=1` and reinstall every host right after the run, which names them.
-The check reads the bundles in `deploy/sbx/.generated/workers/`: keep that directory between runs
-(it is gitignored), or the run cannot see the idle the hosts were given.
+**Changing `SBX_MAX_LIFETIME_DAYS` means reinstalling every host's workers.** The control plane
+takes the new maximum at once, but a running worker keeps the idle reclaim (`SH_WORKSPACE_IDLE`) it
+was installed with until `install-host.sh` is re-run on its host. After a raise, that idle can be
+shorter than a live sandbox's lifetime, and the worker would reclaim its workspace. So the run
+refuses a maximum that changes the idle in the bundles it last wrote, unless `SBX_ACK_HOSTS=1` is
+set. To raise it, ideally re-run `install-host.sh` on every host first, with bundles made from the
+new value; otherwise set `SBX_ACK_HOSTS=1` and reinstall every host right after the run, which names
+them. The check reads the bundles in `deploy/sbx/.generated/workers/`: keep that directory between
+runs (it is gitignored), or the run cannot see the idle the hosts were given. Changing only
+`SBX_LIFETIME_DAYS`, within the maximum, touches no host. `status.sh` shows each worker's idle
+against the maximum and warns when it is not above it.
+
+**Lowering the maximum** also needs `SBX_ACK_HOSTS=1`, but reinstall the hosts only once the old
+maximum has passed since the run. Sandboxes keep the deadlines they were given under the old
+maximum (the control plane never shortens a deadline), and a worker with a shorter idle would
+reclaim their workspaces.
+
+**The first run of this `setup.sh` on an existing deployment** both raises every worker's idle
+(216 h to 768 h at the defaults) and turns idle lifetimes on: the control plane counts idle time
+only when `SH_SANDBOX_MAX_LIFETIME_SECONDS` is set, and keeps the old absolute lifetime when it is
+not. See [the runbook](RUNBOOK.md#2-upgrading) for the order.
 
 **Delete and de-enrollment are not immediate.** A sandbox token already issued keeps working until
 it expires, plus the relay's 30 s clock leeway: up to `SBX_TOKEN_TTL_MINUTES` plus 30 s after a
