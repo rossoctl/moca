@@ -72,7 +72,7 @@ export function prepareServerProcess(env: NodeJS.ProcessEnv = process.env): {
     }
     // SH_MODEL_HEADERS is sent on the custom openai-completions path, so it reaches every caller's
     // model request, and its `${VAR}` interpolation reads the process environment. An inline secret,
-    // or a variable named outside PROVIDER_CREDENTIAL's shapes (`${LITELLM_KEY}`), survives the
+    // or a variable named outside PROVIDER_CREDENTIAL's shapes (`${GATEWAY_KEY}`), survives the
     // scrub and would spend one operator's credential for every tenant -- the cross-principal spend
     // R2 forbids. Nothing can tell a secret header from a harmless one, so it is refused outright.
     if (env.SH_MODEL_HEADERS) {

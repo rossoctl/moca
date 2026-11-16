@@ -211,15 +211,15 @@ describe('prepareServerProcess', () => {
   });
 
   it('under multi tenancy refuses SH_MODEL_HEADERS, interpolated or inline (#363)', () => {
-    // `${LITELLM_KEY}` matches none of the scrub's shapes, so it would survive into every tenant's
+    // `${GATEWAY_KEY}` matches none of the scrub's shapes, so it would survive into every tenant's
     // model requests; an inline literal needs no interpolation at all. Both are refused.
-    for (const headers of ['{"Authorization":"Bearer ${LITELLM_KEY}"}', '{"X-Key":"inline"}']) {
+    for (const headers of ['{"Authorization":"Bearer ${GATEWAY_KEY}"}', '{"X-Key":"inline"}']) {
       const env: NodeJS.ProcessEnv = {
         MOCA_TENANCY: 'multi',
         SH_REQUIRE_AUTH: 'true',
         HOME: emptyHome(),
         SH_MODEL_HEADERS: headers,
-        LITELLM_KEY: 'sk-litellm-planted', // notsecret
+        GATEWAY_KEY: 'sk-gateway-planted', // notsecret
       };
       expect(() => prepareServerProcess(env), headers).toThrow(
         /MOCA_TENANCY=multi refuses SH_MODEL_HEADERS/,
