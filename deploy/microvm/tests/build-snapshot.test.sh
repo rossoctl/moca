@@ -2065,6 +2065,8 @@ check "the guest kernel is probed into MANIFEST_GUEST_KERNEL on both boot paths"
   "$(grep -cF 'MANIFEST_GUEST_KERNEL="$(probe_guest_kernel "$vsock_uds")"' "$SCRIPT")" "2"
 check "check_lease_support never sends a lease request" \
   "$(fn_body check_lease_support | grep -ciE 'lease"?: *true|-lease')" "0"
+check "check_lease_support logs once on success, with its duration (#721)" \
+  "$(fn_body check_lease_support | grep -cF 'log "$checks check ok in $((SECONDS - t0)) s')" "1"
 check "write_manifest records the guest kernel" \
   "$(grep -cF '"kernel_release": "$MANIFEST_GUEST_KERNEL"' "$SCRIPT")" "1"
 check "write_manifest no longer records the build host's kernel" \
@@ -2187,6 +2189,7 @@ ls_harness() { # $1 = work dir, $2 = what the guest prints, $3 = VMM (default fi
   chmod 0755 "$1/stage/guest_client"
   {
     echo "STAGE='$1/stage'; VMM='${3:-firecracker}'"
+    grep '^log() ' "$SCRIPT"
     fn_body sbx_tracked_passwd
     fn_body check_lease_support
     echo 'check_lease_support /uds'
@@ -2207,6 +2210,8 @@ kill-ok
 $tracked_line
 $grp_line
 ")" "0"
+check "lease support: a pass logs the checks and their duration (#721)" \
+  "$(grep -cE '^build-snapshot.sh: lease-v1 and lease-processes-v1 check ok in [0-9]+ s ' "$LT/ok/out")" "1"
 check "lease support: no cgroup2 fails" "$([ "$(ls_harness "$LT/nocg" "no-cg2
 userns-ok
 $sbx_pw
@@ -2313,6 +2318,7 @@ STUB
   chmod 0755 "$1/stage/guest_client"
   {
     echo "STAGE='$1/stage'; VMM='${2:-firecracker}'"
+    grep '^log() ' "$SCRIPT"
     fn_body sbx_tracked_passwd
     fn_body check_lease_support
     echo 'check_lease_support /uds'
@@ -2348,7 +2354,7 @@ check "real guest command, cloud-hypervisor: no cgroup.kill, tracked or group pr
   "$(grep -cE 'moca-kill-probe|sbxp|/etc/group' "$w/cmd")" "0"
 mkdir -p "$LT/fail/stage"; printf '#!/bin/sh\necho "guest_client: dial: refused" >&2\nexit 1\n' >"$LT/fail/stage/guest_client"
 chmod 0755 "$LT/fail/stage/guest_client"
-{ echo "STAGE='$LT/fail/stage'"; fn_body sbx_tracked_passwd; fn_body check_lease_support; echo 'check_lease_support /uds'; } >"$LT/fail/run.sh"
+{ echo "STAGE='$LT/fail/stage'"; grep '^log() ' "$SCRIPT"; fn_body sbx_tracked_passwd; fn_body check_lease_support; echo 'check_lease_support /uds'; } >"$LT/fail/run.sh"
 bash "$LT/fail/run.sh" >"$LT/fail/out" 2>&1; rc=$?
 check "lease support: a transport failure fails" "$([ "$rc" != 0 ] && echo yes || echo no)" "yes"
 check "lease support: a transport failure shows guest_client's diagnostics" "$(grep -c 'dial: refused' "$LT/fail/out")" "1"
