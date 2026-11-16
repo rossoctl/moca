@@ -183,7 +183,7 @@ func attachOnce(
 	}
 	// Serve gets attachCtx, the context the stream was created from (its precondition). The attempt's
 	// own cancel tears the stream down on return, before the re-dial, even when Serve ended it on its
-	// own (ErrEgressWedged): left open, the relay refuses the re-dial as a duplicate sandbox_id (#839).
+	// own (ErrEgressWedged): left open, the relay refuses the re-dial as a duplicate sandbox_id.
 	// SIGTERM reaches it through ctx.
 	attemptCtx, cancelAttempt := context.WithCancel(ctx)
 	defer cancelAttempt()

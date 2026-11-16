@@ -278,7 +278,7 @@ func TestAttachOnceServesWithTheBearer(t *testing.T) {
 	}
 }
 
-// #839: Serve can end the session itself (ErrEgressWedged) on a healthy stream. attachOnce must
+// Serve can end the session itself (ErrEgressWedged) on a healthy stream. attachOnce must
 // tear that stream down, or the relay keeps the sandbox parked on it and refuses the re-dial as a
 // duplicate sandbox_id.
 func TestAttachOnceTearsTheStreamDownWhenServeEndsItself(t *testing.T) {

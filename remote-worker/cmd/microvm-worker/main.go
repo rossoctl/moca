@@ -628,8 +628,7 @@ func verifyInstanceType(get func(string) string, manifestType string, detect fun
 // serveOnce is one pass of the reconnect loop: attach, then serve until the session ends. It
 // returns how long the session lasted (zero when the attach failed). The attempt's context is
 // cancelled on return, so the stream is torn down before the re-dial even when Serve ended it on
-// its own (ErrEgressWedged); left open, the relay refuses the re-dial as a duplicate sandbox_id
-// (#839).
+// its own (ErrEgressWedged); left open, the relay refuses the re-dial as a duplicate sandbox_id.
 func serveOnce(
 	ctx context.Context,
 	token string,

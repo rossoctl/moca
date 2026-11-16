@@ -230,7 +230,7 @@ func TestALeaseRoundTripOverTheAttachContract(t *testing.T) {
 	}
 }
 
-// #839: a session Serve ends itself (ErrEgressWedged) leaves the stream healthy, so serveOnce
+// When Serve ends the session itself (ErrEgressWedged), the stream is still healthy, so serveOnce
 // must cancel the stream's context before the loop re-dials; SIGTERM's ctx is left alone.
 func TestServeOnceTearsTheStreamDownWhenServeEndsItself(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
