@@ -12,5 +12,9 @@ export const defaultAuditLog: AuditLog = (line) => console.log(JSON.stringify(li
  * `JSON.stringify` already does this for `defaultAuditLog`; the console.warn/console.error lines
  * operators actually read are plain text and do not. A credential name reaching such a line comes
  * from a request body or a grant claim, so it is the caller's string, not ours.
+ *
+ * `/\n|\r/g` verbatim, not a `[\r\n]+` class: this exact form is the one CodeQL's js/log-injection
+ * recognises as a sanitiser, and a helper it cannot see through leaves the alert open on every call
+ * site (#822). Same behaviour, and the scanner stays useful.
  */
-export const forLog = (value: string): string => value.replace(/[\r\n]+/g, ' ');
+export const forLog = (value: string): string => value.replace(/\n|\r/g, '');

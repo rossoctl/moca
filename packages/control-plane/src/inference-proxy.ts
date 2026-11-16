@@ -138,6 +138,26 @@ async function forward(req: IncomingMessage, res: ServerResponse, deps: CpDeps):
   await pipeline(Readable.fromWeb(upstream.body as NodeReadableStream), res);
 }
 
+const LOOPBACK = new Set(['127.0.0.1', '::1', '[::1]', 'localhost']);
+
+/**
+ * Say so, once, when the listener is reachable from off the host.
+ *
+ * This is a CREDENTIAL BOUNDARY whose only caller check is the grant it redeems: there is no source
+ * allowlist, so the bind address IS the access control (MI1 §8.6). Loopback enforces itself, and
+ * anything else -- a pod IP, a wildcard -- trusts the network to carry only this deployment's own
+ * workers. That is a real deployment decision, and an operator should meet it in the log they are
+ * already reading at boot rather than only in the configuration reference.
+ */
+export function warnIfExposed(host?: string): void {
+  if (host && LOOPBACK.has(host)) return;
+  console.warn(
+    `[inference] listening on ${host ?? '0.0.0.0'}, which is not loopback: this listener redeems ` +
+      'grants for real provider credentials and authenticates nothing else, so the network it is ' +
+      "on must reach only this deployment's own workers (MI1 §8.6)",
+  );
+}
+
 /**
  * Bind the listener. Loopback on deploy/vm, where the worker shares the host; a pod or container IP
  * under compose and Kubernetes, where `MOCA_INFERENCE_URL` names the service.
@@ -155,6 +175,7 @@ export function startInferenceProxy(deps: CpDeps, port: number, host?: string): 
   // that are not this deployment's own workers.
   server.requestTimeout = 0;
   server.headersTimeout = 60_000;
+  warnIfExposed(host);
   // `listen` takes an ADDRESS, not a URL authority: given `[::1]` it resolves the brackets as a
   // hostname and dies ENOTFOUND. `MOCA_INFERENCE_ADDR` is written the way a URL is, so strip them
   // here -- `inferenceUrlFromEnv` keeps them, because the URL side needs them.

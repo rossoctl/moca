@@ -1,7 +1,7 @@
 import { createServer, request, type Server } from 'node:http';
 import { gzipSync } from 'node:zlib';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { startInferenceProxy } from '../src/inference-proxy.js';
+import { startInferenceProxy, warnIfExposed } from '../src/inference-proxy.js';
 import { seedCredential, type TestDeps } from './helpers/deps.js';
 import { grantDeps, mint, seedSession, tombstone } from './helpers/grants.js';
 
@@ -233,6 +233,25 @@ describe('the inference listener (MI1 §6.3, §8.6; decision D1)', () => {
     });
     s.close();
     expect(['listening', 'EADDRNOTAVAIL', 'EAFNOSUPPORT']).toContain(code);
+  });
+
+  it('says so at boot when it binds somewhere other than loopback, and stays quiet on loopback', () => {
+    // The bind address is the only thing restricting who may reach a credential boundary (MI1
+    // §8.6), so a non-loopback bind is a decision an operator should meet in the boot log.
+    const lines: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => void lines.push(args.join(' '));
+    try {
+      for (const quiet of ['127.0.0.1', '::1', '[::1]', 'localhost']) warnIfExposed(quiet);
+      expect(lines).toEqual([]);
+      warnIfExposed('10.0.0.7');
+      warnIfExposed(undefined); // a wildcard bind: no host at all
+    } finally {
+      console.warn = original;
+    }
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('10.0.0.7');
+    expect(lines[1]).toContain('0.0.0.0');
   });
 
   it('answers 503 when the endpoint is unreachable, naming no secret', async () => {
