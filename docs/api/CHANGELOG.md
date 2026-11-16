@@ -3,7 +3,7 @@
 The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
 
-## 1.22.0
+## 1.23.0
 
 A template create reuses a registered build only while a host holds its snapshot, and the
 rebuild it admits otherwise supersedes the old build
@@ -33,6 +33,24 @@ same snapshot registers as.
   /v1/templates/{id}/builds/{build}/reject, activate `{build}`, tags and `id@<build>`: a build id
   a superseded build shares names the build that took it over; the superseded build is found by
   its handle. A superseded build lists no tags.
+
+## 1.22.0
+
+A retire, or an admin's reject, is refused while an active Moca Pi session is pinned to the build
+([#817](https://github.com/rossoctl/moca/issues/817)), per the
+[template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md) §5.1
+and §5.2. No route, field or error code is added; `409 build_in_use` gains a cause.
+
+- POST /v1/templates/{id}/retire, DELETE /v1/templates/{id}/builds/{build} and
+  POST /v1/templates/{id}/builds/{build}/reject: refused `409 build_in_use` ("is pinned by an
+  active session") while an active session created with a sandbox template is pinned to the
+  build, as while a live sandbox runs on it. Deleting the session lets the retire or reject
+  through. Before, only live sandboxes counted, so a retire could stop the worker and remove the
+  snapshot a pinned session's next turn needs.
+- Stored data: a new sorted set per build, `sh:cp:build:<hash of the build id>:sessions`, of the
+  sessions pinned to it: added at session create, removed by the delete cascade, and pruned of
+  members that are no longer active as a retire or reject checks it. An older control plane
+  ignores it. Sessions created before it existed are not in it, so they never block a retire.
 
 ## 1.21.0
 

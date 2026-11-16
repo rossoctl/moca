@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.22.0
+  version: 1.23.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -592,7 +592,7 @@ components:
           type: string
           description: |
             `sha256:<manifest hash>` or `imported:<12 hex>`. A build that a rebuild of its snapshot
-            superseded at registration (1.22.0, template lifecycle spec §6.1) keeps its id,
+            superseded at registration (1.23.0, template lifecycle spec §6.1) keeps its id,
             `retired`, beside the build that took it over: a build id then names that build, and
             the superseded one is found by its handle
         status:
@@ -706,7 +706,7 @@ components:
           type: [object, 'null']
           description: |
             on a `failed` or `rejected` build, why; on a build retired because a rebuild of its
-            snapshot superseded it (1.22.0), why, with step `superseded`; null otherwise
+            snapshot superseded it (1.23.0), why, with step `superseded`; null otherwise
           required: [message]
           properties:
             message: { type: string }
@@ -2549,7 +2549,7 @@ paths:
         Both profiles (§4.1). The build id is `sha256:<manifest hash>`, or `imported:<12 hex>` for
         a template imported from SH_SANDBOX_TEMPLATES (no snapshot named); URL-encode it. A build
         created through the API is also found by the `b-<26 hex>` handle its create answered. A
-        build id that a superseded build shares (1.22.0) names the build that took it over; the
+        build id that a superseded build shares (1.23.0) names the build that took it over; the
         superseded one is found by its handle. `404 template_not_found` for an unknown template or
         build.
       security: [{ sessionToken: [] }]
@@ -2612,7 +2612,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: '`build_in_use`: a live sandbox runs on the build'
+          description: '`build_in_use`: a live sandbox runs on the build, or an active session is pinned to it'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2628,8 +2628,8 @@ paths:
         create naming it answers `400 unknown_template`, as for a build policy rejected at
         registration. A `reject` record names the admin, `from` (the status before),
         `buildRecord` (the digest of the build's `build` record) and the reason. Refused
-        `409 build_in_use` while a live sandbox runs on it. Idempotent: an already rejected build
-        is answered with `record: null`. Not reversible: a new build is the way back. Needs
+        `409 build_in_use` while a live sandbox runs on it or an active session is pinned to it.
+        Idempotent: an already rejected build is answered with `record: null`. Not reversible: a new build is the way back. Needs
         SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       parameters:
@@ -2682,7 +2682,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: '`build_in_use`: a live sandbox runs on the build'
+          description: '`build_in_use`: a live sandbox runs on the build, or an active session is pinned to it'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2741,7 +2741,8 @@ paths:
         and `buildRecord` (the digest of the build's `build` record; null for one never built);
         its earlier records stay. Idempotent: an already retired build is listed with
         `record: null` (no second record). Refused `409 build_in_use` while a live sandbox runs on
-        any of its builds: delete it, then retire. A retire never cuts off running work. It cannot
+        any of its builds, or an active session (`POST /v1/sessions` with a sandbox template) is
+        pinned to one: delete it, then retire. A retire never cuts off running work. It cannot
         be undone: a new build of the template (`POST /v1/templates/{id}/builds`) is the way back,
         and the id stays its owner's. Needs SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
@@ -2787,7 +2788,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
         '409':
-          description: '`build_in_use`: a live sandbox runs on one of its builds'
+          description: '`build_in_use`: a live sandbox runs on one of its builds, or an active session is pinned to one'
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

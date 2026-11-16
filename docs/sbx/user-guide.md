@@ -747,13 +747,14 @@ has changes not yet pulled, so a plain `rm` refuses it. Pull what you want to ke
 **Change and retire it:** `mocactl sbx templates tag ID default --build B` points new creates at
 another build; `templates edit ID` changes its description and visibility. `mocactl sbx templates
 retire my-python --wait` returns once no host holds it; `--build B` retires one build. A retire is
-refused while a sandbox or session still uses the build (`409 build_in_use`): delete those first. A
-create after a retire answers `410 template_retired`.
+refused while a live sandbox runs on the build, or an active Moca Pi session is pinned to it
+(`409 build_in_use`): delete those first. A create after a retire answers `410 template_retired`.
 
-**Waits and their exit.** `follow` waits up to 3600 s, `retire --wait` 300 s; `activate --wait` at
-least 1800 s, more for a build queued behind its host's start limit: (position ÷ starts at once,
-rounded up, plus 1) × the host's measured start time × 1.25, read at the first poll, and at most
-4 h. `--timeout S` sets another. Past it they exit **5**; nothing is undone.
+**Waits and their exit.** `follow` waits up to 3600 s, `retire --wait` 900 s (past the 600 s a
+host keeps shipping an ended sandbox's egress before it removes the build, plus a few host polls);
+`activate --wait` at least 1800 s, more for a build queued behind its host's start limit:
+(position ÷ starts at once, rounded up, plus 1) × the host's measured start time × 1.25, read at
+the first poll, and at most 4 h. `--timeout S` sets another. Past it they exit **5**; nothing is undone.
 
 **What your sandbox reached.** For a template with egress, `mocactl sbx egress <sandbox>` lists the
 hosts the sandbox connected to, from the KVM host's egress proxy, and the sandbox's end record names
