@@ -566,46 +566,7 @@ func (s *Session) Serve(ctx context.Context, st Stream) error {
 	// That is ErrEgressWedged, as before, and main.go re-dials.
 	deferred := &deferQueue{wake: make(chan struct{}, 1)}
 	trySend := func(f *pb.WorkerFrame) bool {
-		deferred.mu.Lock()
-		defer deferred.mu.Unlock()
-		if deferred.pending == 0 {
-			s.unsent.Add(1)
-			select {
-			case outbound <- outFrame{frame: f, reserved: true}:
-				return true
-			default:
-				s.unsent.Add(-1)
-			}
-		}
-		if since := sendingSince.Load(); since != 0 && time.Since(time.Unix(0, since)) >= wedgeAfter {
-			s.wedgedConns.Add(1)
-			log.Printf("session: WARNING one Send has been blocked for over %s with %d terminal frames "+
-				"waiting behind the reserve, so the terminal frame for %s cannot be delivered; treating "+
-				"egress as wedged and dropping the connection so the harness re-dials",
-				wedgeAfter, deferred.pending, frameRef(f))
-			return false
-		}
-		if deferred.pending >= DeferredCap {
-			s.wedgedConns.Add(1)
-			log.Printf("session: WARNING %d terminal frames are waiting behind the reserve (the cap), so "+
-				"the terminal frame for %s cannot be queued; treating egress as wedged and dropping the "+
-				"connection so the harness re-dials", deferred.pending, frameRef(f))
-			return false
-		}
-		if deferred.pending == 0 {
-			log.Printf("session: the terminal-frame reserve (%d slots) is full; deferring terminal frames "+
-				"in order until the sender drains it (first: %s)", TerminalReserve, frameRef(f))
-		}
-		deferred.frames = append(deferred.frames, f)
-		deferred.pending++
-		s.unsent.Add(1)
-		s.deferredFrames.Add(1)
-		s.deferredNow.Add(1)
-		select {
-		case deferred.wake <- struct{}{}:
-		default:
-		}
-		return true
+		return s.offerTerminal(deferred, outbound, &sendingSince, wedgeAfter, f)
 	}
 
 	var wg sync.WaitGroup // producers: heartbeat + pool workers
@@ -856,6 +817,61 @@ type deferQueue struct {
 	frames  []*pb.WorkerFrame
 	pending int
 	wake    chan struct{}
+	// closed is set when drainDeferred drops what is left and returns: from then on nothing is
+	// queued here (offerTerminal).
+	closed bool
+}
+
+// offerTerminal is trySend's body: it queues terminal frame f in outbound's reserve, or defers it
+// behind the reserve in order (#705), and reports false only when egress is wedged. A queue that
+// drainDeferred has already closed takes nothing: the connection is ending, its drainer is gone,
+// and a frame counted into unsent here would never be sent or dropped, leaving Idle false for the
+// life of the process. The harness fails that Exec on the disconnect, as any frame lost then.
+func (s *Session) offerTerminal(q *deferQueue, outbound chan<- outFrame, sendingSince *atomic.Int64,
+	wedgeAfter time.Duration, f *pb.WorkerFrame) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.closed {
+		return true
+	}
+	if q.pending == 0 {
+		s.unsent.Add(1)
+		select {
+		case outbound <- outFrame{frame: f, reserved: true}:
+			return true
+		default:
+			s.unsent.Add(-1)
+		}
+	}
+	if since := sendingSince.Load(); since != 0 && time.Since(time.Unix(0, since)) >= wedgeAfter {
+		s.wedgedConns.Add(1)
+		log.Printf("session: WARNING one Send has been blocked for over %s with %d terminal frames "+
+			"waiting behind the reserve, so the terminal frame for %s cannot be delivered; treating "+
+			"egress as wedged and dropping the connection so the harness re-dials",
+			wedgeAfter, q.pending, frameRef(f))
+		return false
+	}
+	if q.pending >= DeferredCap {
+		s.wedgedConns.Add(1)
+		log.Printf("session: WARNING %d terminal frames are waiting behind the reserve (the cap), so "+
+			"the terminal frame for %s cannot be queued; treating egress as wedged and dropping the "+
+			"connection so the harness re-dials", q.pending, frameRef(f))
+		return false
+	}
+	if q.pending == 0 {
+		log.Printf("session: the terminal-frame reserve (%d slots) is full; deferring terminal frames "+
+			"in order until the sender drains it (first: %s)", TerminalReserve, frameRef(f))
+	}
+	q.frames = append(q.frames, f)
+	q.pending++
+	s.unsent.Add(1)
+	s.deferredFrames.Add(1)
+	s.deferredNow.Add(1)
+	select {
+	case q.wake <- struct{}{}:
+	default:
+	}
+	return true
 }
 
 // drainDeferred moves deferred terminal frames into outbound's reserve, oldest first, blocking
@@ -871,6 +887,7 @@ func (s *Session) drainDeferred(ctx context.Context, q *deferQueue, outbound cha
 		s.deferredNow.Add(-int64(n))
 		q.pending -= n
 		q.frames = nil
+		q.closed = true
 	}
 	for {
 		q.mu.Lock()
