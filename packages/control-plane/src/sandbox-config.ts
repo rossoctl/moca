@@ -29,8 +29,16 @@ export interface SandboxConfig {
   templates: SandboxTemplate[];
   /** `SH_ALLOWED_SUBJECTS`: who may log in and use the profile, besides admins (spec §4.2). */
   allowedSubjects: string[];
-  /** `SH_SANDBOX_LIFETIME_SECONDS`: a sandbox expires this long after creation. */
+  /**
+   * `SH_SANDBOX_LIFETIME_SECONDS`: the default idle lifetime: a sandbox expires this long after its
+   * last activity mint.
+   */
   lifetimeS: number;
+  /**
+   * `SH_SANDBOX_MAX_LIFETIME_SECONDS`: the most an owner may set as a sandbox's idle lifetime.
+   * Unset means `lifetimeS`: nothing longer than the default is offered.
+   */
+  maxLifetimeS: number;
   /** `SH_SANDBOX_RETENTION_SECONDS`: a terminated record is kept this long. */
   retentionS: number;
   /** `SH_SANDBOX_TOKEN_TTL_SECONDS`: the sandbox token's lifetime (spec §4.3). */
@@ -89,6 +97,9 @@ export const MAX_SANDBOX_TOKEN_TTL_S = 3600;
 
 /** The shortest lease idle timeout an owner may set (`idleTimeoutS`); 0 means the worker's default. */
 export const MIN_IDLE_TIMEOUT_S = 30;
+
+/** The shortest idle lifetime a sandbox may have (and the floor for both lifetime settings). */
+export const MIN_SANDBOX_LIFETIME_S = 3600;
 
 function positive(env: NodeJS.ProcessEnv, name: string, def: number): number {
   const v = env[name];
@@ -218,6 +229,23 @@ export function sandboxConfigFromEnv(
       `SH_SANDBOX_IDLE_CEILING_S must be at least ${MIN_IDLE_TIMEOUT_S}: the smallest idle timeout an owner may set`,
     );
   }
+  const lifetimeS = positive(env, 'SH_SANDBOX_LIFETIME_SECONDS', 7 * 86_400);
+  if (lifetimeS < MIN_SANDBOX_LIFETIME_S) {
+    throw new Error(
+      `SH_SANDBOX_LIFETIME_SECONDS must be at least ${MIN_SANDBOX_LIFETIME_S}: the shortest lifetime a sandbox may have`,
+    );
+  }
+  const maxLifetimeS = positive(env, 'SH_SANDBOX_MAX_LIFETIME_SECONDS', lifetimeS);
+  if (maxLifetimeS < MIN_SANDBOX_LIFETIME_S) {
+    throw new Error(
+      `SH_SANDBOX_MAX_LIFETIME_SECONDS must be at least ${MIN_SANDBOX_LIFETIME_S}: the shortest lifetime a sandbox may have`,
+    );
+  }
+  if (lifetimeS > maxLifetimeS) {
+    throw new Error(
+      'SH_SANDBOX_LIFETIME_SECONDS must be at most SH_SANDBOX_MAX_LIFETIME_SECONDS: the default is one of the lifetimes an owner may pick',
+    );
+  }
   const gateRecordSchema = env.SH_GATE_RECORD_SCHEMA || undefined;
   if (gateRecordSchema !== undefined && !SCHEMA_RE.test(gateRecordSchema)) {
     throw new Error(
@@ -229,7 +257,8 @@ export function sandboxConfigFromEnv(
   return {
     templates,
     allowedSubjects,
-    lifetimeS: positive(env, 'SH_SANDBOX_LIFETIME_SECONDS', 7 * 86_400),
+    lifetimeS,
+    maxLifetimeS,
     retentionS: positive(env, 'SH_SANDBOX_RETENTION_SECONDS', 14 * 86_400),
     tokenTtlS,
     maxPerSubject: positive(env, 'SH_SANDBOX_MAX_PER_SUBJECT', 3),
