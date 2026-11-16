@@ -255,13 +255,17 @@ the write when the extension would be under 60 s.
 
 ### 6.1 Settings
 
-| Control plane                     | `setup.sh`              | Default | Meaning                                   |
-| --------------------------------- | ----------------------- | ------- | ----------------------------------------- |
-| `SH_SANDBOX_LIFETIME_SECONDS`     | `SBX_LIFETIME_DAYS`     | 7 days  | the default idle lifetime (was: absolute) |
-| `SH_SANDBOX_MAX_LIFETIME_SECONDS` | `SBX_MAX_LIFETIME_DAYS` | 30 days | new: the most an owner may set at create  |
+| Control plane                     | `setup.sh`              | Default                                  | Meaning                                   |
+| --------------------------------- | ----------------------- | ---------------------------------------- | ----------------------------------------- |
+| `SH_SANDBOX_LIFETIME_SECONDS`     | `SBX_LIFETIME_DAYS`     | 7 days                                   | the default idle lifetime (was: absolute) |
+| `SH_SANDBOX_MAX_LIFETIME_SECONDS` | `SBX_MAX_LIFETIME_DAYS` | 30 days (`setup.sh`; unset: the default) | new: the most an owner may set at create  |
 
 - The control plane refuses to start when `SH_SANDBOX_LIFETIME_SECONDS > SH_SANDBOX_MAX_LIFETIME_SECONDS`,
   or when either is under 3600.
+- **Unset, `SH_SANDBOX_MAX_LIFETIME_SECONDS` is `SH_SANDBOX_LIFETIME_SECONDS`**, not 30 days: a
+  control plane upgraded before `setup.sh` writes the key still runs over workers whose
+  `SH_WORKSPACE_IDLE` covers only the old lifetime (216 h), so it must offer nothing longer. The
+  30 days are `setup.sh`'s default, written behind its `SBX_ACK_HOSTS` refusal (§6.3).
 - `setup.sh`: `SBX_MAX_LIFETIME_DAYS` is 1–30, default 30, and must be at least `SBX_LIFETIME_DAYS`.
 
 ### 6.2 The worker's idle reclaim
