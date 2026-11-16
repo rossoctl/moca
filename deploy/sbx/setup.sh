@@ -17,9 +17,14 @@
 #   SBX_TEMPLATES_FILE      required; JSON list [{id, worker, description, tools}], every worker in
 #                           SBX_WORKERS
 #   SBX_WORKSPACE_FS_GIB    required; the KVM host's workspace filesystem size, for the disk check
-#   SBX_LIFETIME_DAYS       optional; 1-30, default 7. A change alters every worker's
-#                           SH_WORKSPACE_IDLE, which running workers keep until install-host.sh is
-#                           re-run on their host: the run refuses unless SBX_ACK_HOSTS=1
+#   SBX_LIFETIME_DAYS       optional; 1-30, default 7: the default idle lifetime of a sandbox, at
+#                           most SBX_MAX_LIFETIME_DAYS
+#   SBX_MAX_LIFETIME_DAYS   optional; 1-30, default 30: the most an owner may pick for a sandbox's
+#                           idle lifetime. Writing it (SH_SANDBOX_MAX_LIFETIME_SECONDS) turns idle
+#                           lifetimes on in the control plane. Each worker's idle reclaim
+#                           (SH_WORKSPACE_IDLE) is set to it plus two days; a change means
+#                           reinstalling every host's workers (install-host.sh), and the run
+#                           refuses unless SBX_ACK_HOSTS=1
 #   SBX_TOKEN_TTL_MINUTES   optional; 5-60, default 15: the sandbox token's lifetime
 #   SBX_RETENTION_DAYS      optional; 1-90, default 14: how long a terminated sandbox stays listed
 #   SBX_MAX_PER_SUBJECT, SBX_MAX_TOTAL   optional; live-sandbox quotas, default 3 and 40
@@ -170,10 +175,12 @@ validate() {
   [[ -z "${SBX_ADMIN_SUBJECTS:-}" || "$SBX_ADMIN_SUBJECTS" =~ $SUBJECTS_RE ]] ||
     die 'SBX_ADMIN_SUBJECTS must be comma-separated github:<numeric id>, no spaces'
 
-  : "${SBX_LIFETIME_DAYS:=7}" "${SBX_MAX_PER_SUBJECT:=3}" "${SBX_MAX_TOTAL:=40}" "${SBX_MAX_INFLIGHT:=2}"
+  : "${SBX_LIFETIME_DAYS:=7}" "${SBX_MAX_LIFETIME_DAYS:=30}" "${SBX_MAX_PER_SUBJECT:=3}" "${SBX_MAX_TOTAL:=40}" "${SBX_MAX_INFLIGHT:=2}"
   : "${SBX_WORKSPACE_IMAGE_MB:=2048}" "${SBX_TOKEN_TTL_MINUTES:=15}" "${SBX_RETENTION_DAYS:=14}"
   : "${SBX_MODES_ALLOWED:=per-exec}" "${SBX_IDLE_CEILING_S:=1800}"
   [[ "$SBX_LIFETIME_DAYS" =~ ^([1-9]|[12][0-9]|30)$ ]] || die 'SBX_LIFETIME_DAYS must be a whole number of days, 1-30'
+  [[ "$SBX_MAX_LIFETIME_DAYS" =~ ^([1-9]|[12][0-9]|30)$ ]] || die 'SBX_MAX_LIFETIME_DAYS must be a whole number of days, 1-30'
+  ((SBX_LIFETIME_DAYS <= SBX_MAX_LIFETIME_DAYS)) || die 'SBX_LIFETIME_DAYS must not exceed SBX_MAX_LIFETIME_DAYS'
   [[ "$SBX_TOKEN_TTL_MINUTES" =~ ^([5-9]|[1-5][0-9]|60)$ ]] || die 'SBX_TOKEN_TTL_MINUTES must be a whole number of minutes, 5-60'
   [[ "$SBX_RETENTION_DAYS" =~ ^([1-9]|[1-8][0-9]|90)$ ]] || die 'SBX_RETENTION_DAYS must be a whole number of days, 1-90'
   TOKEN_TTL_S=$((SBX_TOKEN_TTL_MINUTES * 60))
@@ -221,8 +228,9 @@ validate() {
     die "SBX_MAX_TOTAL ($SBX_MAX_TOTAL) x SBX_WORKSPACE_IMAGE_MB ($SBX_WORKSPACE_IMAGE_MB) exceeds 80% of SBX_WORKSPACE_FS_GIB ($SBX_WORKSPACE_FS_GIB GiB)"
   # SBX0 §5.4: the worker's idle reclaim outlasts the sandbox, so it never reclaims a live one.
   LIFETIME_S=$((SBX_LIFETIME_DAYS * 86400))
-  WORKSPACE_IDLE_H=$((SBX_LIFETIME_DAYS * 24 + 48))
-  ((WORKSPACE_IDLE_H * 3600 > LIFETIME_S)) || die 'SH_WORKSPACE_IDLE must exceed SH_SANDBOX_LIFETIME_SECONDS'
+  MAX_LIFETIME_S=$((SBX_MAX_LIFETIME_DAYS * 86400))
+  WORKSPACE_IDLE_H=$((SBX_MAX_LIFETIME_DAYS * 24 + 48))
+  ((WORKSPACE_IDLE_H * 3600 > MAX_LIFETIME_S)) || die 'SH_WORKSPACE_IDLE must exceed SH_SANDBOX_MAX_LIFETIME_SECONDS'
   check_host_idle
   check_host_ceiling
 
@@ -358,9 +366,9 @@ egress_key() { printf 'SH_EGRESS_TOKEN_%s' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_
 # hostTokenEnvName (kvm-a -> SH_HOST_TOKEN_KVM_A), read from $CREDENTIALS_DIRECTORY/<NAME>.
 host_key() { printf 'SH_HOST_TOKEN_%s' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')"; }
 
-# The control plane rolls with a new lifetime at once, but a running worker keeps the
+# The control plane rolls with a new maximum lifetime at once, but a running worker keeps the
 # SH_WORKSPACE_IDLE it was installed with until install-host.sh is re-run on its host. Raising the
-# lifetime past that idle would let a worker reclaim a live sandbox's workspace (SBX0 §5.4), so a
+# maximum past that idle would let a worker reclaim a live sandbox's workspace (SBX0 §5.4), so a
 # change against the bundles last written (the proxy for what the hosts run) is refused, before
 # anything is applied, unless the operator acknowledges it with SBX_ACK_HOSTS=1.
 check_host_idle() {
@@ -377,7 +385,7 @@ check_host_idle() {
   [[ -n "$changed" ]] || return 0
   HOSTS_TO_REINSTALL="${changed# }"
   REINSTALL_SETTINGS=SH_WORKSPACE_IDLE
-  local cause='SBX_LIFETIME_DAYS changed'
+  local cause="SBX_MAX_LIFETIME_DAYS changed, or this deployment's idle now follows it"
   [[ " $olds " != *" unset "* ]] || cause='a bundle from before increment 1b carries none'
   if [[ "${SBX_ACK_HOSTS:-}" != 1 ]]; then
     die "SH_WORKSPACE_IDLE changes from${olds} to ${WORKSPACE_IDLE_H}h for worker(s) ${HOSTS_TO_REINSTALL} (${cause}), and a running worker keeps its old value until deploy/sbx/install-host.sh is re-run on its host. Re-run install-host.sh on every host first, or set SBX_ACK_HOSTS=1 to apply now and re-run install-host.sh with the new bundles on every host right after"
@@ -789,7 +797,8 @@ ensure_settings() {
     'SH_SANDBOX_TIERS=' 'SH_SANDBOX_DEFAULT_TIER=' 'SH_MODEL_CATALOG_HOSTS=' 'SH_TEST_USERS=0')
   sbx=("SH_ALLOWED_SUBJECTS=$SBX_ALLOWED_SUBJECTS" "SH_SANDBOX_TEMPLATES=$TEMPLATES_JSON"
     "SH_SANDBOX_EXEC_ENDPOINT=$SBX_EXEC_HOST:443" 'SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane'
-    "SH_SANDBOX_LIFETIME_SECONDS=$LIFETIME_S" "SH_SANDBOX_TOKEN_TTL_SECONDS=$TOKEN_TTL_S"
+    "SH_SANDBOX_LIFETIME_SECONDS=$LIFETIME_S" "SH_SANDBOX_MAX_LIFETIME_SECONDS=$MAX_LIFETIME_S"
+    "SH_SANDBOX_TOKEN_TTL_SECONDS=$TOKEN_TTL_S"
     "SH_SANDBOX_RETENTION_SECONDS=$RETENTION_S" "SH_SANDBOX_MAX_PER_SUBJECT=$SBX_MAX_PER_SUBJECT"
     "SH_SANDBOX_MAX_TOTAL=$SBX_MAX_TOTAL" "SH_SANDBOX_MAX_INFLIGHT=$SBX_MAX_INFLIGHT"
     "SH_SANDBOX_MODES_ALLOWED=$SBX_MODES_ALLOWED" "SH_SANDBOX_IDLE_CEILING_S=$SBX_IDLE_CEILING_S")
@@ -1001,7 +1010,7 @@ write_bundles() {
       tok="$(json_value "$json" "$id")"
       [[ -n "$tok" ]] || die "moca-relay-sandbox-tokens has no token for worker $id: re-run setup.sh"
       mkdir -p "$d"
-      # SH_WORKSPACE_IDLE: the lifetime plus two days (SBX0 §5.4); install-host.sh takes it from here.
+      # SH_WORKSPACE_IDLE: the maximum lifetime plus two days (idle-lifetime spec §6.2); install-host.sh takes it from here.
       # SH_LEASE_IDLE_CEILING_S: the control plane's SH_SANDBOX_IDLE_CEILING_S, so both clamp alike.
       printf 'RELAY_ADDR=%s:443\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\nSH_WORKSPACE_IDLE=%sh\nSH_WORKSPACE_IMAGE_MB=%s\nSH_LEASE_IDLE_CEILING_S=%s\n' \
         "$SBX_ATTACH_HOST" "$id" "$tok" "$WORKSPACE_IDLE_H" "$SBX_WORKSPACE_IMAGE_MB" "$SBX_IDLE_CEILING_S" >"$d/worker.env"
