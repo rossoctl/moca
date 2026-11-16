@@ -43,6 +43,10 @@ export function isIdentityProviderNearMiss(name: string): boolean {
       }
     }
   }
+  // startsWith reserves the whole SH_IDENTITY_PROVIDER* namespace, as tenancy.ts does MOCA_TENAN*:
+  // a leftover such as SH_IDENTITY_PROVIDER_OLD refuses to boot. A new knob under that prefix
+  // (SH_IDENTITY_PROVIDER_TIMEOUT_S, say) must therefore be exempted here, by name, in the same
+  // change that adds it, or every deployment that sets it will fail to boot.
   return led && (rest.startsWith(CORE) || editDistanceAtMostOne(rest, CORE));
 }
 
