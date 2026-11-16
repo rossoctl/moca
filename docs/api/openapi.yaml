@@ -4320,6 +4320,7 @@ paths:
                     false: mint without counting as activity (the deadline does not move); for
                     mints that run no command, e.g. a lease keepalive
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '200':
           description: a sandbox token, and where to send Exec with it
           content:
@@ -4522,6 +4523,7 @@ paths:
                     false: mint without counting as activity (the deadline does not move); for
                     mints that run no command, e.g. a lease keepalive
       responses:
+        '400': { $ref: '#/components/responses/BadRequest' }
         '200':
           description: a set-mode token
           content:

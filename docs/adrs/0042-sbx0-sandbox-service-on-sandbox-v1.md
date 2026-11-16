@@ -149,7 +149,7 @@ for an abandoned sandbox and wrong for one in use.
   `activity: false` (`mocactl` does for mints that run no command). The deadline never moves
   backwards, and an ended sandbox is never revived. Expiry stays computed, never scheduled.
 - The owner chooses `idleLifetimeS` at create, from 1 hour to `SH_SANDBOX_MAX_LIFETIME_SECONDS`
-  (30 days by default); the default is `SH_SANDBOX_LIFETIME_SECONDS` (7 days), which no longer means
+  (unset, the default lifetime; `deploy/sbx/setup.sh` sets 30 days); the default is `SH_SANDBOX_LIFETIME_SECONDS` (7 days), which no longer means
   an absolute lifetime.
 - **No hard maximum age.** It would bring back the loss this revision removes, and it is not needed
   for the no-silent-reset invariant: the worker's idle reclaim is itself an idle clock, reset by

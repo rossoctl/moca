@@ -53,7 +53,7 @@ retention`) and the name key's `PXAT` (same instant, in ms).
 - A sandbox with no activity for its lifetime reads `terminated / expired` and refuses to mint, as
   today.
 - The owner can choose a sandbox's lifetime at create, from 1 hour up to the deployment maximum
-  (30 days by default); without a choice it is the deployment default (7 days).
+  (unset, the deployment default; `deploy/sbx/setup.sh` sets 30 days); without a choice it is the deployment default (7 days).
 - `expiresAt` on every route reflects the extended deadline.
 - The Redis extension is one atomic script, and it refuses an expired or deleted sandbox: an ended
   sandbox is never revived.
@@ -74,7 +74,7 @@ retention`) and the name key's `PXAT` (same instant, in ms).
   loss this design removes, and it is not needed for safety (§6). Disk stays bounded by the live
   quotas (SBX0 §5.3) and by idle expiry.
 - **The owner chooses the lifetime at create**: `idleLifetimeS`, 3600 s to
-  `SH_SANDBOX_MAX_LIFETIME_SECONDS` (default 30 days), default `SH_SANDBOX_LIFETIME_SECONDS` (7
+  `SH_SANDBOX_MAX_LIFETIME_SECONDS` (unset: the default lifetime; `setup.sh` sets 30 days), default `SH_SANDBOX_LIFETIME_SECONDS` (7
   days). Create only; it cannot be changed later.
 - **The worker's idle reclaim follows the maximum**, not the default: `SH_WORKSPACE_IDLE` =
   max + 48 h (768 h for 30 days).

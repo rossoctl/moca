@@ -382,7 +382,7 @@ else `null`.
   can say why a sandbox is gone. Then they are deleted.
 - **Lifetime is idle time** (since 2026-11-16, [the idle-lifetime design](2026-11-16-sbx-idle-lifetime-design.md)): a sandbox expires after its
   `idleLifetimeS` with no activity mint, default `SH_SANDBOX_LIFETIME_SECONDS` (7 days), at most
-  `SH_SANDBOX_MAX_LIFETIME_SECONDS` (30 days). Each activity mint moves `expiresAt` forward, never
+  `SH_SANDBOX_MAX_LIFETIME_SECONDS` (unset, the default lifetime; `deploy/sbx/setup.sh` sets 30 days). Each activity mint moves `expiresAt` forward, never
   back. SBX0 as first built had an absolute lifetime with no extension.
 
 ### 5.3 Quotas
