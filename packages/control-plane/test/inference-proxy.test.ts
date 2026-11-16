@@ -202,8 +202,18 @@ describe('the inference listener (MI1 §6.3, §8.6; decision D1)', () => {
     expect(up.seen).toHaveLength(0);
   });
 
-  it('refuses a literal .. in the path, so nothing climbs out of the endpoint prefix', async () => {
-    expect(await rawPost(px.url, '/v1/../../admin', `Bearer ${mint(d).inferenceGrant}`)).toBe(400);
+  it('refuses every spelling of a climb out of the endpoint prefix, encoded included', async () => {
+    await seedCredential(d, 'github:1234', 'my-anthropic', {
+      endpoint: `${up.url}/anthropic`,
+      destination: { hosts: ['127.0.0.1'] },
+    });
+    // All three resolve off the `/anthropic` prefix the grant is good for, and only the first holds
+    // a literal '..': the parser `fetch` uses treats `%2e` as a dot when it resolves dot segments,
+    // so a check on the undecoded `req.url` would pass the other two straight through -- with the
+    // real credential attached.
+    for (const path of ['/v1/../../admin', '/%2e%2e/admin', '/.%2E/admin']) {
+      expect(await rawPost(px.url, path, `Bearer ${mint(d).inferenceGrant}`)).toBe(400);
+    }
     expect(up.seen).toHaveLength(0);
   });
 

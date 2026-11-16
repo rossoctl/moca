@@ -70,16 +70,39 @@ async function forward(req: IncomingMessage, res: ServerResponse, deps: CpDeps):
   }
 
   const path = req.url ?? '/';
-  // The target is the credential endpoint CONCATENATED with the incoming path, so an endpoint
-  // carrying a prefix (`https://gw/anthropic`) keeps it -- `new URL(path, endpoint)` would discard
-  // the prefix and aim the secret at the gateway's root. That makes a `..` a way to climb out of the
-  // prefix, so refuse one; no legitimate client sends it.
-  if (!path.startsWith('/') || path.includes('..')) {
-    throw new CpError('invalid_request', 'the inference path must be absolute and contain no ..');
+  if (!path.startsWith('/')) {
+    throw new CpError('invalid_request', 'the inference path must be absolute');
   }
 
   const cred = await redeemInferenceGrant(grant, deps);
+  // The target is the credential endpoint CONCATENATED with the incoming path, so an endpoint
+  // carrying a prefix (`https://gw/anthropic`) keeps it -- `new URL(path, endpoint)` would discard
+  // the prefix and aim the secret at the gateway's root. Concatenation makes a dot segment a way to
+  // climb out of the prefix, and what gets checked is the RESOLVED url rather than the string that
+  // arrived: Node hands `req.url` over undecoded, while the parser `fetch` uses resolves `%2e%2e`,
+  // `.%2E` and `%2e.` as `..` as well, so a check for a literal '..' misses every encoded spelling.
   const target = `${cred.baseUrl.replace(/\/+$/, '')}${path}`;
+  // An endpoint that does not parse is this CREDENTIAL being unusable rather than the request being
+  // wrong, so it keeps the 503 the unreachable case below gives (`refuseMisdirectedSecret` tolerates
+  // one, so it can get this far) instead of surfacing as an unhandled 500.
+  const base = URL.parse(cred.baseUrl);
+  const resolved = base ? URL.parse(target) : null;
+  if (!base) {
+    throw new CpError('credential_unavailable', 'the inference endpoint is not a valid url');
+  }
+  if (!resolved) {
+    throw new CpError('invalid_request', 'the inference path is not a valid url path');
+  }
+  const prefix = base.pathname.replace(/\/+$/, '');
+  // The origin as well as the prefix: the prefix test alone would pass a path that somehow moved the
+  // request to another host, which is the one outcome that must never happen -- the secret is
+  // attached below.
+  if (resolved.origin !== base.origin || !resolved.pathname.startsWith(`${prefix}/`)) {
+    throw new CpError(
+      'invalid_request',
+      'the inference path must stay under the credential endpoint',
+    );
+  }
 
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(req.headers)) {
