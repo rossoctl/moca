@@ -422,6 +422,15 @@ func (pc *proxyConn) emit(e Event, terminal bool) {
 	pc.p.cfg.Audit.Emit(pc.event(e))
 }
 
+// wasAborted reports whether Unregister aborted the conn. abort sets it before
+// it cancels the conn's context, so a request that failed because of that
+// cancel always sees it set.
+func (pc *proxyConn) wasAborted() bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return pc.aborted
+}
+
 // setTarget records the request being served, for an aborted event.
 func (pc *proxyConn) setTarget(method, host string) {
 	pc.mu.Lock()
