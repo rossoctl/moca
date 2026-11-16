@@ -1,6 +1,6 @@
 # ADR-0043: A separate `moca-provisioner` is the only MOCA component that creates workload sandboxes
 
-- **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-10-27; implemented by #560, #588, #600, #615) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-10-16
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-10-16-workload-sandboxes-design.md`](../specs/2026-10-16-workload-sandboxes-design.md)

@@ -20,6 +20,7 @@ info:
     therefore split across the two files.
     `/internal/credentials` is the data-plane-only credential exchange and is not part of the
     public surface; it is documented here because it is part of the contract between the tiers.
+    What changed in each version: docs/api/CHANGELOG.md.
 servers:
   - url: http://sh-control-plane.default.svc:8080
     description: in-cluster
@@ -1898,9 +1899,10 @@ paths:
                 caps:
                   type: object
                   description: |
-                    per-turn budget ceilings, recorded on the turn record and enforced by the worker
-                    that runs it (ADR-0047 §5.1); a cap above the deployment's own limit does not
-                    raise it.
+                    per-turn budget ceilings, recorded on the turn record for the worker that runs it
+                    (ADR-0047 §5.1); a cap above the deployment's own limit does not raise it. Not
+                    enforced yet: no worker reads them, so a turn runs to the deployment's limits
+                    whatever it names (#391).
                   properties:
                     tokens: { type: integer }
                     costUsd: { type: number }
@@ -4771,9 +4773,9 @@ paths:
                   caps:
                     type: object
                     description: |
-                      the per-turn budget ceilings recorded at submission, returned so the worker
-                      that enforces them does not have to re-read the record. Empty when the
-                      submission named none.
+                      the per-turn budget ceilings recorded at submission, returned so a worker can
+                      enforce them without re-reading the record. No worker enforces them yet
+                      (#391). Empty when the submission named none.
                     properties:
                       tokens: { type: integer }
                       costUsd: { type: number }

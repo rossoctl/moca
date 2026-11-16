@@ -1,6 +1,6 @@
 # ADR-0031: Promoted memory travels read-only; discoveries return in the leaf result
 
-- **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-09-05; implemented by #214, #225) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-09-02
 - **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-09-02-claude-code-workflow-promotion-design.md`](../specs/2026-09-02-claude-code-workflow-promotion-design.md) §5

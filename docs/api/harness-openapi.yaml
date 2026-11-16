@@ -7,9 +7,10 @@
 # Scope, mirroring the control-plane document's own boundary note: only the client-facing
 # surface. The handler also serves the workload lifecycle (/workloads — off unless the operator
 # enables it, see docs/context-service.md) and the pre-/v1 wire paths (/turn, /runs,
-# /run-leaf*) — all listed in src/routes.ts as surface: 'internal' and deliberately not described
-# here. /runs/status has no /v1 form; it is
-# the canonical path.
+# /run-leaf*) — all listed in src/routes.ts as surface: 'internal' and not described here.
+# /turn and /runs are nonetheless SUPPORTED, frozen aliases of /v1/turn and /v1/runs
+# (docs/reference/change-policy.md, decision 3); moving them to the client surface and describing
+# them here is #507. /runs/status has no /v1 form; it is the canonical path.
 openapi: 3.1.0
 info:
   title: MOCA harness (data plane)
@@ -36,6 +37,9 @@ info:
     connection, which a client re-attaches to (GET /v1/turn) and cancels (POST
     /v1/turn/cancel). With it off, both of those routes answer 404 turn_not_found and POST
     /v1/turn ignores `detachable`.
+
+    What changed in each version: docs/api/CHANGELOG.md (each data-plane version is noted in the
+    control-plane section that shipped it).
 
 security:
   - sessionToken: []

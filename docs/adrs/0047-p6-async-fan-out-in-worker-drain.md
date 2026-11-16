@@ -1,6 +1,6 @@
 # ADR-0047: P6 async fan-out is a drain loop inside the turn worker, sharing its admission budget
 
-- **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-11-12; M1 and M3 implemented by #704, #713, #717, #765; M2, which lifts the single-tenancy gate, owed) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-11-05
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-11-05-p6-async-fan-out-design.md`](../specs/2026-11-05-p6-async-fan-out-design.md)

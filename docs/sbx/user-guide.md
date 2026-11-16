@@ -19,7 +19,9 @@ is untouched** until you take the agent's work back as a patch and apply it
 Why this is safer than letting the agent run on your laptop:
 
 - no process survives a call, so nothing the agent starts keeps running;
-- the VM has no network, so nothing can be downloaded or sent out;
+- the VM has no network device: a template without egress reaches nothing, and one with egress
+  reaches only the hosts your operator allowlisted, through a proxy on the host
+  ([Credentials](#6-credentials)), so nothing can be downloaded from or sent to anywhere else;
 - the VM holds no secrets: no credentials, no tokens, none of your laptop's files except the ones
   you pushed.
 
@@ -368,9 +370,9 @@ interactively and choose a trust level.`). Prefer choosing the level in `bob cha
 `--trust` blind.
 
 **Toolchains.** The sandbox templates carry the Pi toolchain — `bash`, `git`, Python 3, `ripgrep`,
-`curl` — and the VM has no network, so nothing more can be fetched into it. Reading, grepping and
-editing work; compiling does not, for a language the template does not carry. Check
-`mocactl sbx templates` before asking Bob for a build or a test run, and expect it to report a
+`curl` — and the VM reaches only the hosts on the egress allowlist, and none on a template without
+egress, so a toolchain the template lacks can be fetched only from an allowlisted host. Reading,
+grepping and editing work; compiling does not, for a language the template does not carry. Check `mocactl sbx templates` before asking Bob for a build or a test run, and expect it to report a
 missing compiler rather than produce one. (If it silently succeeds instead, check the tool names: it
 may have used your laptop's.)
 
@@ -533,8 +535,12 @@ that is not bound here.
 - **Each call is a fresh VM.** Files under `/workspace` persist from one call to the next; nothing
   else does. No process survives a call: a server, a watcher or a background job started in one
   call is gone in the next. Chain the steps into one command instead (`make build && make test`).
-- **No network.** Packages cannot be installed from the internet. The templates carry the
-  toolchains: `mocactl sbx templates` lists them, with their tools.
+- **No network of its own.** A template with egress reaches only the hosts your operator
+  allowlisted, through a proxy (anything else answers `403 destination_denied`); one without
+  egress reaches nothing. A package installs only from a registry on the allowlist: the default
+  one carries the common registries (PyPI, npm, crates.io, the Go module proxy), but your operator
+  may have changed it. The templates carry the toolchains: `mocactl sbx templates` lists them, with
+  their tools, and `mocactl sbx policy` lists each profile's egress.
 - **One command at a time per sandbox.** The sandbox runs one call at a time, so batch the work:
   read several files in one call, run the whole test suite in one call. The agent's tools refuse a
   call that would wait more than 30 s behind another one with `sandbox busy: … retry later`, and
@@ -868,8 +874,8 @@ Other messages:
 - **Bob says a folder `is not a trusted folder`**: choose a trust level in `bob chat`, or pass
   `--trust`. Prefer the former: `--trust` takes the default grant without showing you what it is.
 - **Bob reports a missing compiler** (`go: command not found` and the like): the templates carry
-  only the Pi toolchain and the VM has no network, so nothing more can be installed. See
-  `mocactl sbx templates`, and [IBM Bob](#ibm-bob) above.
+  only the Pi toolchain, and anything more installs only on a template with egress, from a host on
+  the allowlist. See `mocactl sbx templates`, and [IBM Bob](#ibm-bob) above.
 - **Codex edits files on your laptop instead of in the sandbox**: check you started it with
   `mocactl sbx codex` (or the `-c mcp_servers.sandbox=…` line), and that `/mcp` in the TUI lists
   the `sandbox` tools. Note `mocactl sbx doctor`'s `agent config` check covers Claude Code,

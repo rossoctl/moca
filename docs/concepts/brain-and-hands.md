@@ -66,4 +66,5 @@ Be clear about what is and is not enforced today:
 - There is **no credentialed-egress proxy** for P6 sandboxes yet. Network reach depends on the tier
   (see [Sandboxes and tiers](sandboxes-and-tiers.md)): on Kubernetes, container sandboxes reach the
   internet but not private ranges; on the single VM and in Compose they can reach anything the host can
-  route to (on the VM, except the host itself); and microVM guests have no network at all.
+  route to (on the VM, except the host itself); and microVM guests have no network device, reaching
+  only `moca-egress`'s allowlist through the host's proxy, without credentials.

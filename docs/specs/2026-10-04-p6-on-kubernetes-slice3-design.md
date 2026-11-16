@@ -86,7 +86,7 @@ mocactl change; the deployment paths only set configuration.
    plane read the same `moca-settings` keys) and `compose.test.sh`. On the VM, `setup-microvm.sh`
    writes ONE env file loaded by both units.
 5. **`SH_SANDBOX_DEFAULT_TIER` is a sticky `setup.sh` input (§7).**
-6. **A relay restart is not graceful today (§5).** Records are not cleared and no detach marks are written (#453); workers reattach within 1.8–4.7 s, so the intended behaviour (records disappear, 503 in the gap) will arrive with the SIGTERM handler.
+6. **A relay restart is graceful (§5), since #462.** On SIGTERM the relay removes each parked worker's record before ending its stream, within a 10 s deadline. A hard kill still leaves the records, and a turn in the gap still gets an in-turn tool error rather than a 503 (#453).
 
 ## 1. Scope
 

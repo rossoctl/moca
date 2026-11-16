@@ -630,7 +630,8 @@ in a per-run directory. It passes only if:
 - the control plane's audit shows the intended credential was spent.
 
 Run it on the VM, as root, on a host with container sandboxes. It refuses to run while a microVM
-worker is in the pool, because that tier has no network (#277).
+worker is in the pool, because that tier reaches only `moca-egress`'s allowlist, without credentials
+([P4-ON-P6.md](../microvm/P4-ON-P6.md), "Guest egress").
 
 ```bash
 # The user's own credential, from a root-only file holding exactly one line, the key alone (an

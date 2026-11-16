@@ -1,7 +1,17 @@
-# Control-plane API changelog
+# API changelog
 
-The version is `info.version` in [openapi.yaml](openapi.yaml): the minor is bumped for additive
+The version is `info.version` in [openapi.yaml](openapi.yaml) for the control plane and in
+[harness-openapi.yaml](harness-openapi.yaml) for the data plane: the minor is bumped for additive
 changes, the major only with a `/v2` ([change policy](../reference/change-policy.md), decision 5).
+Each section below is a control-plane version. A data-plane version is described in the section
+that shipped it ("The data plane's twin … goes to"):
+
+| `harness-openapi.yaml` | Shipped with                   |
+| ---------------------- | ------------------------------ |
+| 1.3.0                  | [1.17.0](#1170)                |
+| 1.2.0                  | [1.16.0](#1160)                |
+| 1.1.0                  | [1.15.0](#1150)                |
+| 1.0.0                  | the first document, 2026-10-09 |
 
 ## 1.23.0
 

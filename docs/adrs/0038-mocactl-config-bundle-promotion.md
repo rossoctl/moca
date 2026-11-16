@@ -1,6 +1,6 @@
 # ADR-0038: Promote config bundles through the control plane, not a direct Redis tunnel
 
-- **Status:** Proposed, amended 2026-10-06 (see Amendments below) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-10-08; implemented by #458), amended 2026-10-06 (see Amendments below) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-10-06
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-10-06-mocactl-config-bundle-promotion-design.md`](../specs/2026-10-06-mocactl-config-bundle-promotion-design.md)

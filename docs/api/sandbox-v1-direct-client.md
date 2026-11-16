@@ -40,7 +40,8 @@ ExecRequest { sandbox_id, exec: Exec { req_id, command, stdin, timeout_s, stream
   Execs ([Lease mode](#lease-mode)).
 - **Files under `/workspace` persist** between calls, for the sandbox's lifetime. Nothing else does:
   no process, and no file outside `/workspace`, survives the call.
-- **There is no network** in the VM.
+- **There is no network device** in the VM. A template with egress reaches only the hosts the
+  operator allowlisted, through a proxy on the host; any other host answers `403 destination_denied`.
 - **There is no file RPC.** Files are commands: write with `cat > path` and the bytes on `stdin`,
   read with `cat -- path`.
 

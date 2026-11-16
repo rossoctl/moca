@@ -1,6 +1,6 @@
 # ADR-0036: `mocactl` is a standalone HTTP client of MU1, not a harness/control-plane feature
 
-- **Status:** Proposed <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-09-28; implemented by #347) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-09-25
 - **Deciders:** Serverless Harness team
 - **Spec:** [`../specs/2026-09-25-mocactl-control-plane-client-design.md`](../specs/2026-09-25-mocactl-control-plane-client-design.md)
