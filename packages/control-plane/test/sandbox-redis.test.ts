@@ -192,6 +192,33 @@ describe('RedisSandboxStore touch (idle lifetime, spec §5.2)', () => {
     await done();
   });
 
+  it('a touch never lowers an egress index score that is already higher', async () => {
+    const { prefix, store, egress, done } = isolated();
+    const ep = `${prefix}egress:`;
+    const now = Math.floor(Date.now() / 1000);
+    await store.create(rec('sbx-hi', now), lim, now);
+    await egress.append(
+      'host-1',
+      'c1',
+      [
+        {
+          sandboxId: 'sbx-hi',
+          lines: [EVENT],
+          proxyDropped: 0,
+          invalid: 1,
+          expireAtS: now + 600 + 3600,
+        },
+      ],
+      0,
+      0,
+    );
+    const high = now + 90_000;
+    await client.zAdd(`${ep}expiry`, { score: high, value: 'sbx-hi' });
+    await store.touch('sbx-hi', now, 5000, 3600);
+    expect(await client.zScore(`${ep}expiry`, 'sbx-hi')).toBe(high);
+    await done();
+  });
+
   it('a touch that would not move the deadline writes nothing', async () => {
     const { prefix, store, egress, done } = isolated();
     const ep = `${prefix}egress:`;
