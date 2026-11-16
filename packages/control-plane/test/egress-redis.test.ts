@@ -319,6 +319,35 @@ describe.each([
       await done();
     });
 
+    it('an append only extends the log expiry: a stale post never pulls a moved one back', async () => {
+      const { store, prefix, done } = isolated();
+      const e1 = Math.floor(Date.now() / 1000) + 1800;
+      const e2 = e1 + 7200;
+      // The first append sets the TTL on a stream and meta that had none.
+      await store.append('host-1', 'c1', [{ ...group('sbx-m', 1, e1), proxyDropped: 1 }], 0, 0);
+      const keys = [`${prefix}sbx-m`, `${prefix}sbx-m:meta`];
+      for (const k of keys) expect(await client.expireTime(k)).toBe(e1);
+      expect(await client.zScore(`${prefix}expiry`, 'sbx-m')).toBe(e1);
+      // A mint moves the deadline, and so the log's expiry, later.
+      for (const k of keys) await client.expireAt(k, e2);
+      await client.zAdd(`${prefix}expiry`, { score: e2, value: 'sbx-m' });
+      // A host post computed from the record as it was before the move arrives.
+      await store.append('host-1', 'c2', [{ ...group('sbx-m', 1, e1, 10), proxyDropped: 1 }], 0, 0);
+      for (const k of keys) expect(await client.expireTime(k)).toBe(e2);
+      expect(await client.zScore(`${prefix}expiry`, 'sbx-m')).toBe(e2);
+      // A later expiry still extends.
+      await store.append(
+        'host-1',
+        'c3',
+        [{ ...group('sbx-m', 1, e2 + 60, 20), proxyDropped: 1 }],
+        0,
+        0,
+      );
+      for (const k of keys) expect(await client.expireTime(k)).toBe(e2 + 60);
+      expect(await client.zScore(`${prefix}expiry`, 'sbx-m')).toBe(e2 + 60);
+      await done();
+    });
+
     it(`stops at ${EGRESS_LOG_CAP} entries and counts the rest as cap drops`, async () => {
       expect([EGRESS_LOG_BYTES, EGRESS_TOTAL_BYTES]).toEqual([4 * 1024 * 1024, 64 * 1024 * 1024]);
       const { store, prefix, done } = isolated();
