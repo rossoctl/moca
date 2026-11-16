@@ -253,6 +253,20 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     );
   });
 
+  it('names the control plane for a failure that is not an API error: a 200 that is not JSON', async () => {
+    // A captive portal or a proxy's page answering 200: res.json() throws, no ApiError is made,
+    // and before the review fix this one printed `sbx: <message>` with no control plane named.
+    const { home, env, io } = setup({ loggedIn: false });
+    const fetchImpl = (async () =>
+      new Response('<html>Sign in to the network</html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      })) as typeof fetch;
+    expect(await sbxMain(['login'], env, io, { home, fetchImpl })).toBe(1);
+    expect(io.errs.at(-1)).toMatch(/^sbx: login failed: /);
+    expect(io.errs.at(-1)).toContain(`(from the control plane at ${URL_})`);
+  });
+
   it('names the control plane and the network error when it cannot be reached (exit 4)', async () => {
     const { home, env, io } = setup({ loggedIn: false });
     const cause = Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' });

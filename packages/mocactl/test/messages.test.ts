@@ -78,6 +78,15 @@ describe('describeLoginError', () => {
       `the control plane at ${URL_} closed the connection (a proxy idle timeout?): fetch failed (ECONNRESET)`,
     ],
     [
+      // No message in the body: the code is not repeated beside itself (review nit).
+      new ApiError('control-plane', 404, 'not_found'),
+      `the control plane at ${URL_} refused the login (HTTP 404 not_found)`,
+    ],
+    [
+      new ApiError('control-plane', 404, 'http_404'),
+      `the control plane at ${URL_} refused the login (HTTP 404, not an API answer: a proxy?)`,
+    ],
+    [
       new SyntaxError('Unexpected token < in JSON'),
       `Unexpected token < in JSON (from the control plane at ${URL_})`,
     ],

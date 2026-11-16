@@ -183,10 +183,13 @@ export async function cmdLogin(
     const end = deviceLoginEnd(c.io, err, { prefix: 'sbx', again: 'mocactl sbx login' });
     if (end !== undefined) return end;
     // A refusal `fail` words for itself (not enrolled, a token code) keeps its words; any other
-    // failure names the control plane tried and what came back (#700), at `fail`'s exit codes.
-    if (err instanceof ApiError && err.code !== 'not_enrolled' && !TOKEN_CODES.has(err.code)) {
+    // failure, an API error or not (a proxy's 200 page that is not JSON), names the control plane
+    // tried and what came back (#700), at `fail`'s exit codes.
+    const ownWords =
+      err instanceof ApiError && (err.code === 'not_enrolled' || TOKEN_CODES.has(err.code));
+    if (!ownWords) {
       c.io.err(`sbx: login failed: ${describeLoginError(err, c.url)}`);
-      return err.status === 0 ? SBX_EXIT.unreachable : SBX_EXIT.failed;
+      return err instanceof ApiError && err.status === 0 ? SBX_EXIT.unreachable : SBX_EXIT.failed;
     }
     return failed(c, err);
   }

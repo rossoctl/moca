@@ -43,6 +43,9 @@ export function describeLoginError(err: unknown, controlPlaneUrl: string): strin
   const cause = httpCause(err, text);
   if (classify(err).kind === 'unavailable')
     return sanitizeRemote(`${cp} is unavailable (${cause}) — try again shortly`);
+  // A body with no message of its own leaves the code as the "message" (ApiError's fallback), and
+  // repeating it beside its cause reads `not_found (... HTTP 404 not_found)`: say what happened.
+  if (err.message === err.code) return sanitizeRemote(`${cp} refused the login (${cause})`);
   // Most sentences name the control plane now; the server's own message ('show') does not.
   return sanitizeRemote(text.includes(cp) ? `${text} (${cause})` : `${text} (${cp}: ${cause})`);
 }
