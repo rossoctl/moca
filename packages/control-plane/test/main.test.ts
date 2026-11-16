@@ -61,6 +61,16 @@ describe('configFromEnv', () => {
     ).not.toThrow();
   });
 
+  it('refuses to boot on a misspelled SH_IDENTITY_PROVIDER rather than serving github (#723)', () => {
+    // Before: the misspelled name left the switch unset, and configFromEnv returned a github
+    // deployment although the operator asked for oidc.
+    expect(() =>
+      configFromEnv({ ...baseEnv, SH_IDENTITY_PROVDER: 'oidc' } as NodeJS.ProcessEnv),
+    ).toThrow(
+      /unrecognised variable 'SH_IDENTITY_PROVDER': the identity switch is SH_IDENTITY_PROVIDER/,
+    );
+  });
+
   it('uses the spec`s defaults', () => {
     const c = configFromEnv(baseEnv);
     expect(c.apiTokenTtlSeconds).toBe(900); // B14: 15 minutes bounds revocation latency

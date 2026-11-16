@@ -313,6 +313,8 @@ function parseActivity(raw: unknown): boolean {
  */
 async function extend(deps: CpDeps, rec: SandboxRecord, now: number): Promise<SandboxRecord> {
   const { cfg, store } = service(deps);
+  // Sliding is off until the maximum is configured: only then are the workers sized for it (spec §6.1).
+  if (!cfg.slideOnActivity) return rec;
   const moved = await store.touch(rec.id, now, lifetimeOf(cfg, rec), cfg.retentionS);
   if (!moved) return refuseGone(store, rec.id, now);
   return moved;
@@ -396,6 +398,37 @@ async function sandboxCreated(
       expiresAt: rec.expiresAt,
     },
   });
+}
+
+/**
+ * Undoes a create whose start record could not be appended (createSandbox, #806): the record is
+ * marked deleted with no retention, which frees its quota slot and its name at once (the store's
+ * delete, atomic as create is) and drops the record itself (Redis: EXPIRE 0; memory: the next
+ * purge), so GET /v1/sandboxes no longer lists it. Nothing else of a create needs undoing: create
+ * does no worker I/O and mints no token, and its egress log is empty. A lease the create's first
+ * use took (requireActive) is kept: it has its own `activate` record, a retry uses it, and it ends
+ * by its own expiry. The `sandbox_created` audit line already written is answered by
+ * `sandbox_create_rolled_back`, so the audit stream shows the record's whole life.
+ *
+ * Best effort: a delete that fails too (the store down) is logged with the id, and the sandbox
+ * stays, as before this rollback, until its owner deletes it or it expires.
+ */
+async function rollBackCreate(
+  deps: CpDeps,
+  store: SandboxStore,
+  rec: SandboxRecord,
+  subject: string,
+): Promise<void> {
+  try {
+    // 'already' (it expired, or its owner deleted it after listing it) leaves nothing to undo.
+    if ((await store.markDeleted(rec.id, seconds(deps), 0)) === 'deleted')
+      await audit(deps, subject, rec.id, 'sandbox_create_rolled_back');
+  } catch (err) {
+    console.error(
+      `[control-plane] rolling back sandbox ${rec.id} after its start record failed: ` +
+        `${(err as Error).message} -- it stays until deleted or expired`,
+    );
+  }
 }
 
 /**
@@ -2875,7 +2908,15 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     await audit(deps, p.sub, id, 'sandbox_created');
     // Its lease (§7.1): the caller's live lease on the build, by the activate record that granted it.
     const lease = liveLeases(template.build, now).find((l) => l.subject === p.sub);
-    await sandboxCreated(deps, rec, p.sub, lease?.record ?? null);
+    // Every sandbox has its start record (§7.1): one whose record could not be written is undone
+    // before the error answers (500, as a failed append answers on every route), so the client,
+    // which never learned the id, is left nothing to clean up and may simply retry (#806).
+    try {
+      await sandboxCreated(deps, rec, p.sub, lease?.record ?? null);
+    } catch (err) {
+      await rollBackCreate(deps, store, rec, p.sub);
+      throw err;
+    }
     return { status: 201, body: sandboxBody(viewOf(rec, now), cfg) };
   },
 

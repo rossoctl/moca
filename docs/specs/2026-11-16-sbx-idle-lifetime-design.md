@@ -266,6 +266,12 @@ the write when the extension would be under 60 s.
   control plane upgraded before `setup.sh` writes the key still runs over workers whose
   `SH_WORKSPACE_IDLE` covers only the old lifetime (216 h), so it must offer nothing longer. The
   30 days are `setup.sh`'s default, written behind its `SBX_ACK_HOSTS` refusal (§6.3).
+  **Unset also means no extension**: activity mints do not slide the deadline, which stays the
+  absolute lifetime of SBX0 as first built. An older `mocactl sbx mcp` keepalive mints as activity
+  every ~14 minutes without the worker counting it as use, so sliding over workers still at 216 h
+  would let the control plane's deadline outrun the worker's reclaim and reset the workspace
+  silently. `setup.sh` writes the key together with `SH_WORKSPACE_IDLE` = maximum + 48 h, so the
+  key's presence is the signal that the workers were sized for sliding.
 - `setup.sh`: `SBX_MAX_LIFETIME_DAYS` is 1–30, default 30, and must be at least `SBX_LIFETIME_DAYS`.
 
 ### 6.2 The worker's idle reclaim
@@ -295,6 +301,9 @@ Raising the maximum from 7 to 30 days changes `SH_WORKSPACE_IDLE` from 216 h to 
 worker. `setup.sh` refuses that change before applying anything, as it does today, so the operator
 runs it with `SBX_ACK_HOSTS=1` and then re-runs `install-host.sh` with the new bundles on every host
 right after (the deploy README's existing procedure).
+
+Extension on activity is off until `SH_SANDBOX_MAX_LIFETIME_SECONDS` is set (§6.1), so deploying
+the control plane alone changes no deadline; sliding starts with the `setup.sh` run above.
 
 Between the two steps the control plane already accepts a 30-day lifetime while the hosts' workers
 still reclaim after 216 h idle. That window is harmless as long as it is short: a sandbox created in

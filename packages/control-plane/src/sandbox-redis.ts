@@ -147,7 +147,8 @@ end
 if redis.call('HGET', KEYS[5], 'sealed') ~= '1' then
   redis.call('EXPIREAT', KEYS[4], new + ret)
   redis.call('EXPIREAT', KEYS[5], new + ret)
-  redis.call('ZADD', KEYS[6], 'XX', new + ret, ARGV[4])
+  local cur = redis.call('ZSCORE', KEYS[6], ARGV[4])
+  if cur and tonumber(cur) < new + ret then redis.call('ZADD', KEYS[6], new + ret, ARGV[4]) end
 end
 return redis.call('HGETALL', KEYS[1])
 `;

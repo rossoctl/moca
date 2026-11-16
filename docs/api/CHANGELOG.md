@@ -24,10 +24,12 @@ wire.
 - Activity mints slide `expiresAt`: POST /v1/sandboxes/{id}/token, POST
   /v1/sandboxes/{id}/mode-token and PUT /v1/sandboxes/{id}/mode move it to at least now plus the
   sandbox's `idleLifetimeS` (clamped to the maximum as it is now), never backwards. Reads and lists
-  do not.
+  do not. The move applies only when SH_SANDBOX_MAX_LIFETIME_SECONDS is configured; unset, the
+  deadline stays fixed at creation as before.
 - POST /v1/sandboxes/{id}/token and /mode-token accept an optional body `{ "activity": false }`: a
   mint that runs no command (a lease keepalive) leaves the deadline where it is. A non-boolean
-  `activity` is `400 invalid_request`.
+  `activity` is `400 invalid_request`; body validation precedes state, so that answer also holds
+  on a terminated sandbox (not `409 sandbox_terminated`).
 - POST /v1/sandboxes/{id}/token returns `sandboxExpiresAt`, the sandbox's `expiresAt` after the
   mint; it moves, so track it. The token's `exp` is capped at it.
 - PUT /v1/sandboxes/{id}/mode refuses a body naming `activity` (`400 invalid_request`): a mode

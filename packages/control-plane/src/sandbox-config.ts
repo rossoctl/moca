@@ -39,6 +39,13 @@ export interface SandboxConfig {
    * Unset means `lifetimeS`: nothing longer than the default is offered.
    */
   maxLifetimeS: number;
+  /**
+   * True iff `SH_SANDBOX_MAX_LIFETIME_SECONDS` is set (non-empty): activity mints slide the
+   * deadline. Unset keeps the absolute lifetime of SBX0 as first built (no extension), because only
+   * a configured maximum says the workers' SH_WORKSPACE_IDLE follows it (idle-lifetime spec §6.1,
+   * §6.3).
+   */
+  slideOnActivity: boolean;
   /** `SH_SANDBOX_RETENTION_SECONDS`: a terminated record is kept this long. */
   retentionS: number;
   /** `SH_SANDBOX_TOKEN_TTL_SECONDS`: the sandbox token's lifetime (spec §4.3). */
@@ -259,6 +266,7 @@ export function sandboxConfigFromEnv(
     allowedSubjects,
     lifetimeS,
     maxLifetimeS,
+    slideOnActivity: (env.SH_SANDBOX_MAX_LIFETIME_SECONDS ?? '') !== '',
     retentionS: positive(env, 'SH_SANDBOX_RETENTION_SECONDS', 14 * 86_400),
     tokenTtlS,
     maxPerSubject: positive(env, 'SH_SANDBOX_MAX_PER_SUBJECT', 3),

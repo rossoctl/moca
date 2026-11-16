@@ -22,14 +22,21 @@ spec:
             - --key
             - /tls/tls.key
             - --disable-authentication
+            # The readiness probe's own port (#724): /_metrics answers while ghostunnel runs and dials
+            # nothing, where a tcpSocket probe of the TLS port logged a handshake error every 5 s and
+            # /_status would open a connection to the target on every probe. Default-deny ingress
+            # keeps it off the pod network; the kubelet's probes reach it as they reach the TLS port.
+            - --status
+            - http://0.0.0.0:8453
           ports:
             - { name: https, containerPort: 8443 }
+            - { name: status, containerPort: 8453 }
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities: { drop: [ALL] }
           readinessProbe:
-            tcpSocket: { port: https }
+            httpGet: { path: /_metrics, port: status }
             periodSeconds: 5
           resources:
             requests: { cpu: 10m, memory: 32Mi }

@@ -46,6 +46,8 @@ describe.skipIf(NO_KUBECTL)('overlays/ocp-single/routes (README §12.5)', () => 
       '--key',
       '/tls/tls.key',
       '--disable-authentication',
+      '--status',
+      'http://0.0.0.0:8453',
     ]);
     expect(tls.securityContext).toMatchObject({
       allowPrivilegeEscalation: false,
@@ -53,7 +55,12 @@ describe.skipIf(NO_KUBECTL)('overlays/ocp-single/routes (README §12.5)', () => 
       capabilities: { drop: ['ALL'] },
     });
     expect(tls.securityContext.runAsUser).toBeUndefined();
-    expect(tls.readinessProbe.tcpSocket).toEqual({ port: 'https' });
+    // #724: probed on its own status port, never on the TLS port (a handshake error every 5 s).
+    expect(tls.readinessProbe).toEqual({
+      httpGet: { path: '/_metrics', port: 'status' },
+      periodSeconds: 5,
+    });
+    expect(tls.ports).toContainEqual({ name: 'status', containerPort: 8453 });
     const vol = podSpec(supervisor()).volumes.find((v: { name: string }) => v.name === 'tls');
     expect(vol.secret).toEqual({ secretName: 'moca-supervisor-tls', defaultMode: 288 });
     // The supervisor's own container is untouched.

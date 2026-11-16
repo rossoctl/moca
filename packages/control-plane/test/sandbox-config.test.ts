@@ -119,6 +119,16 @@ describe('the sandbox profile config (SBX0 §4.1, §5)', () => {
     expect(c.maxLifetimeS).toBe(1_209_600);
   });
 
+  it('slides the deadline on activity only when SH_SANDBOX_MAX_LIFETIME_SECONDS is set', () => {
+    expect(configFromEnv(env()).sandbox!.slideOnActivity).toBe(false);
+    expect(
+      configFromEnv(env({ SH_SANDBOX_MAX_LIFETIME_SECONDS: '' })).sandbox!.slideOnActivity,
+    ).toBe(false);
+    expect(
+      configFromEnv(env({ SH_SANDBOX_MAX_LIFETIME_SECONDS: '1209600' })).sandbox!.slideOnActivity,
+    ).toBe(true);
+  });
+
   it('refuses a default above the maximum', () => {
     expect(() =>
       configFromEnv(

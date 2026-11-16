@@ -21,6 +21,25 @@ type CallerIdentity interface {
 type boundConn struct {
 	net.Conn
 	caller Caller
+	// release, when set, frees the per-VM connection slot this conn holds. It
+	// is set once, before the conn's handler starts, and must be idempotent:
+	// every path that ends the conn closes it, some more than once.
+	release func()
+}
+
+// Close frees the conn's slot before it closes the socket (#783). A guest that
+// has seen its conn closed may connect again at once, and a cap of one must
+// then admit it: freeing the slot after the close, as a deferred step of the
+// handler, left a window in which the guest's next conn met conn_cap. Every
+// wrapper the handlers put around the conn (the TLS session, the idle clock)
+// closes through this method. One wrapper speaks first: the intercepting
+// path's tls.Conn sends close_notify before it closes this conn, so that path
+// releases the slot itself before closing the TLS session (intercept.go).
+func (b *boundConn) Close() error {
+	if b.release != nil {
+		b.release()
+	}
+	return b.Conn.Close()
 }
 
 // CloseWrite half-closes the underlying connection when it supports that.

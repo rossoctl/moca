@@ -24,9 +24,14 @@ spec:
             # grpc clients refuse a TLS handshake whose server selects no ALPN protocol.
             - --alpn
             - h2
+            # The readiness probe's own port, as ../../ocp/p4-relay's `tls` sidecar (#724).
+            - --status
+            - http://0.0.0.0:8455
           ports:
             - name: https-exec
               containerPort: 8445
+            - name: status-exec
+              containerPort: 8455
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -34,8 +39,9 @@ spec:
               drop:
                 - ALL
           readinessProbe:
-            tcpSocket:
-              port: https-exec
+            httpGet:
+              path: /_metrics
+              port: status-exec
             periodSeconds: 5
           resources:
             requests:
