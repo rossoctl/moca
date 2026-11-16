@@ -26,7 +26,7 @@ const positiveInt = (v: unknown): v is number => Number.isInteger(v) && (v as nu
 /**
  * The largest context window kept (R9). `Number.isInteger(1e300)` passes, and a bogus window from
  * a user-chosen gateway silently disables proactive compaction; nothing real is near 10M. The data
- * plane refuses the same bound (knative-server turn-auth.ts `isSessionModel`).
+ * plane refuses the same bound (server turn-auth.ts `isSessionModel`).
  */
 export const MAX_CONTEXT_WINDOW = 10_000_000;
 

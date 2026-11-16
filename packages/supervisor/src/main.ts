@@ -17,11 +17,11 @@ export interface Supervisor {
 
 /**
  * The worker entry point, resolved through the pnpm workspace layout rather than a package
- * export: spec §9 keeps `@moca/knative-server`'s public surface at `startServer` only, and the
+ * export: spec §9 keeps `@moca/server`'s public surface at `startServer` only, and the
  * supervisor forks this file as a process, so it needs a path and not an import.
  */
 export const DEFAULT_WORKER_ENTRY = fileURLToPath(
-  new URL('../../knative-server/src/worker.ts', import.meta.url),
+  new URL('../../server/src/worker.ts', import.meta.url),
 );
 
 /**

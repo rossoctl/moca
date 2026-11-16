@@ -202,3 +202,11 @@ they are stated once rather than three times.
 Nothing here changes this record's accepted costs. Scale-to-zero and queue-depth-driven capacity stay
 gone: fan-out width is one leaf per worker process, sized ahead of the load, and queue depth is an
 operational metric (`async_queue_depth`, `async_oldest_age_ms`) rather than a scaling input.
+
+### 2026-11-12 — the package renamed
+
+`packages/knative-server` is now `packages/server` (`@moca/server`), closing the rename decision
+this record left owed above. The rename is naming only: the same code stays P6-load-bearing, and the
+supervisor's worker entry, the Dockerfile, the deploy scripts and current docs now name the new
+path. Earlier revisions keep the old name deliberately — they record what the package was called
+then.

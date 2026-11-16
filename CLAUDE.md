@@ -15,7 +15,7 @@ moca/
 ├── harness/              # Core harness runtime (@moca/harness)
 ├── packages/
 │   ├── k8s-sandbox/      # Sandbox transports over the gRPC relay (@moca/k8s-sandbox; name historical)
-│   ├── knative-server/   # HTTP server + P6 worker entrypoints (@moca/knative-server; name historical — P6-load-bearing)
+│   ├── server/           # HTTP server + P6 worker entrypoints (@moca/server)
 │   ├── session-backend/  # Redis session storage (@moca/session-backend)
 │   ├── sandbox-relay/    # gRPC relay between control plane and remote-worker sandboxes (@moca/sandbox-relay)
 │   ├── supervisor/       # P6 VM process manager / socket-handoff supervisor (@moca/supervisor)
@@ -76,7 +76,7 @@ pre-commit install
 ## Testing
 
 - vitest 2.x for all test suites
-- Redis required for session-backend and knative-server workload tests
+- Redis required for session-backend and `@moca/server` workload tests
 - Live smoke tests gated by env vars (M3_LIVE_SMOKE, etc.)
 
 ## Context Budget

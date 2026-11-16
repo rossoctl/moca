@@ -5,7 +5,7 @@ import { parseAllDocuments } from 'yaml';
 
 // Manifest tests for deploy/k8s (P6.1). They live in this package because `make test` is
 // `pnpm -r test` and there is no root vitest config; @moca/supervisor owns the P6 runtime, and
-// packages/knative-server/test/relay-deployment.test.ts is the precedent for testing manifests
+// packages/server/test/relay-deployment.test.ts is the precedent for testing manifests
 // from a package.
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
 export const K8S_DIR = resolve(REPO_ROOT, 'deploy/k8s');

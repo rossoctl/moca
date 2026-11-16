@@ -6,7 +6,7 @@
 
 - Node.js 22+
 - pnpm 9+
-- Redis (for the session-backend and knative-server workload tests)
+- Redis (for the session-backend and `@moca/server` workload tests)
 - Docker (for container builds, and for the hadolint pre-commit hook)
 - [pre-commit](https://pre-commit.com/#install) (git hooks)
 
@@ -45,7 +45,7 @@ moca/
 ├── harness/              # Core harness (@moca/harness)
 ├── packages/
 │   ├── k8s-sandbox/      # Sandbox transports over the gRPC relay (@moca/k8s-sandbox)
-│   ├── knative-server/   # HTTP server + P6 worker entrypoints (@moca/knative-server; name historical)
+│   ├── server/           # HTTP server + P6 worker entrypoints (@moca/server)
 │   └── session-backend/  # Redis session backend (@moca/session-backend)
 ├── deploy/               # Deployment: vm, k8s, compose, microvm, claude (experiment drivers moved
 │                         # to rossoctl/moca-experiments, 2026-09-25)
@@ -67,8 +67,8 @@ moca/
 
 All PRs must pass:
 
-- **Typecheck**: `tsc --noEmit` across harness, k8s-sandbox, knative-server
-- **Tests**: `pnpm -r test` (requires Redis for session-backend and knative-server)
+- **Typecheck**: `tsc --noEmit` across harness, k8s-sandbox, server
+- **Tests**: `pnpm -r test` (requires Redis for session-backend and `@moca/server`)
 - **Lint**: `make lint` -- every pre-commit hook over all files (Prettier, shellcheck,
   hadolint, gitleaks, YAML and whitespace checks)
 - **DCO**: All commits must be signed off

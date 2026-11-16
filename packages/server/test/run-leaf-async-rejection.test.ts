@@ -1,4 +1,4 @@
-// packages/knative-server/test/run-leaf-async-rejection.test.ts
+// packages/server/test/run-leaf-async-rejection.test.ts
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // Keep the result store hermetic — no live Redis in unit tests.
