@@ -229,6 +229,16 @@ queued behind it in the stream could never be read — and that abort is what wo
 queue. Deadlock. So the queue is bounded (64) and overflow replies
 `ExecError{"busy: queue full"}` immediately instead of blocking.
 
+**A burst of refusals is delivered, not a reason to drop the connection (#705).** The recv
+loop's terminal frames (refusals, cache replays) use a reserve of outbound capacity that the
+chunk stream cannot reach. A burst larger than that reserve (many sessions ending at once, a
+mass cancel past `capacity_max` + 64 queued) no longer ends the connection: the overflow waits
+in arrival order and is fed into the reserve as the sender drains it, so no terminal frame
+overtakes another. The connection is given up as wedged only when the sender is not draining
+at all: one `Send` blocked for 30 s (two heartbeats) while terminal frames wait, or 4096 of
+them waiting at once. Each refusal is counted, and logged at most once a second with the
+number folded in; the microVM worker's diagnostic `/stats` reports the counts under `session`.
+
 **The cache is consulted in the recv loop, before enqueue — but the in-flight map is
 checked first.** A redelivery must not consume a queue slot or a pool goroutine, so a
 fingerprint hit re-emits the cached terminal frame inline and never reaches the pool. The

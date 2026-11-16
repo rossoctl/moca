@@ -101,6 +101,14 @@ describe('classify', () => {
     expect(networkError('harness', new TypeError('fetch failed')).code).toBe('network_error');
   });
 
+  it("folds in the cause's message when the cause has no code (#700)", () => {
+    const err = networkError(
+      'control-plane',
+      new TypeError('fetch failed', { cause: new Error('unknown scheme') }),
+    );
+    expect(err.message).toBe('fetch failed: unknown scheme');
+  });
+
   it('classifies identity_provider_misconfigured as the operator\'s fix, not as "unavailable"', () => {
     // A 502, so without its own branch it would fall into the >= 500 "try again shortly" (#405).
     expect(

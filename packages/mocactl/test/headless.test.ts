@@ -17,7 +17,7 @@ import {
   type Io,
 } from '../src/headless.js';
 import type { Runtime } from '../src/runtime.js';
-import { ApiError } from '../src/api/errors.js';
+import { ApiError, errorFromResponse, networkError } from '../src/api/errors.js';
 import type { ControlPlaneApi } from '../src/api/types.js';
 import { toolSummary } from '../src/render/tools.js';
 import { testRuntime } from './helpers/runtime.js';
@@ -667,6 +667,47 @@ describe('cmdLogin', () => {
     });
     expect(await cmdLogin(rt, o)).toBe(1);
     expect(o.stderr.at(-1)).toContain('run `mocactl login` again');
+  });
+
+  // #700: a failed login names the control plane it tried and what came back, not only "the
+  // control plane is unavailable".
+  it('names the control plane and the API error when the device flow answers a 5xx', async () => {
+    const o = io();
+    const rt = runtime({
+      auth: null,
+      cp: fakeControlPlane({
+        startDeviceAuth: async () => {
+          throw await errorFromResponse(
+            'control-plane',
+            new Response(JSON.stringify({ error: 'redis_unavailable', message: 'redis is down' }), {
+              status: 503,
+            }),
+          );
+        },
+      }),
+    });
+    expect(await cmdLogin(rt, o)).toBe(1);
+    expect(o.stderr.at(-1)).toBe(
+      'login failed: the control plane at http://cp is unavailable ' +
+        '(HTTP 503 redis_unavailable: redis is down) — try again shortly',
+    );
+  });
+
+  it('names the control plane and the network error when it cannot be reached', async () => {
+    const o = io();
+    const refused = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' });
+    const rt = runtime({
+      auth: null,
+      cp: fakeControlPlane({
+        pollDeviceAuth: async () => {
+          throw networkError('control-plane', new TypeError('fetch failed', { cause: refused }));
+        },
+      }),
+    });
+    expect(await cmdLogin(rt, o)).toBe(1);
+    expect(o.stderr.at(-1)).toBe(
+      'login failed: cannot reach the control plane at http://cp: fetch failed (ECONNREFUSED)',
+    );
   });
 
   it('exits 2 without a control-plane URL', async () => {

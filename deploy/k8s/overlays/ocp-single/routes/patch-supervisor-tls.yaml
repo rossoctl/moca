@@ -25,17 +25,23 @@ spec:
             - --key
             - /tls/tls.key
             - --disable-authentication
+            # The readiness probe's own port, as overlays/ocp's sidecar (#724).
+            - --status
+            - http://0.0.0.0:8453
           ports:
             - name: https
               containerPort: 8443
+            - name: status
+              containerPort: 8453
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: [ALL]
           readinessProbe:
-            tcpSocket:
-              port: https
+            httpGet:
+              path: /_metrics
+              port: status
             periodSeconds: 5
           resources:
             requests:

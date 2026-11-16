@@ -27,6 +27,10 @@ func (pc *proxyConn) tunnel(up net.Conn, br *bufio.Reader, ev Event) {
 	if _, err := io.WriteString(pc.c, connectEstablished); err == nil {
 		splice(pc.c, br, up, k, &bytesUp, &bytesDown)
 	}
+	// The slot goes back before the event, so the event is proof that it is
+	// free (#783). After a splice the guest conn's close has released it
+	// already; this covers a tunnel whose 200 could not be written.
+	pc.release()
 	ev.Status, ev.Decision = 200, DecisionTunnel
 	ev.BytesUp, ev.BytesDown = bytesUp.Load(), bytesDown.Load()
 	pc.emit(ev, true) // suppressed if Unregister aborted the conn

@@ -1,5 +1,5 @@
-import { mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdtempSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AMBIENT_KEY_SENTINEL } from '@moca/harness/ambient-sentinel';
 import { credentialValue } from '@moca/control-plane';
@@ -40,6 +40,16 @@ export function scrubAmbientCredentials(env: NodeJS.ProcessEnv): void {
 }
 
 /**
+ * The file pi-ai's `hasVertexAdcCredentials` falls back to when GOOGLE_APPLICATION_CREDENTIALS is
+ * unset -- which, under multi, the scrub above guarantees (pi-ai `env-api-keys.ts`). pi joins it to
+ * `os.homedir()`, which on POSIX is `$HOME` when set; `env.HOME` is read first so a test can point it
+ * at a directory of its own, and in production `env` is `process.env`, so the two agree.
+ */
+export function vertexAdcFile(env: NodeJS.ProcessEnv): string {
+  return join(env.HOME || homedir(), '.config', 'gcloud', 'application_default_credentials.json');
+}
+
+/**
  * Boot-time preparation shared by every server entry point — `startServer()` and the P6 worker —
  * so none can run unprepared (MI1 §5 R2, P6 §3.6). Throws on an
  * inconsistent configuration; callers turn that into a boot failure.
@@ -60,7 +70,28 @@ export function prepareServerProcess(env: NodeJS.ProcessEnv = process.env): {
     if (env.SH_REQUIRE_AUTH !== 'true') {
       throw new Error('MOCA_TENANCY=multi requires SH_REQUIRE_AUTH=true');
     }
+    // SH_MODEL_HEADERS is sent on the custom openai-completions path, so it reaches every caller's
+    // model request, and its `${VAR}` interpolation reads the process environment. An inline secret,
+    // or a variable named outside PROVIDER_CREDENTIAL's shapes (`${GATEWAY_KEY}`), survives the
+    // scrub and would spend one operator's credential for every tenant -- the cross-principal spend
+    // R2 forbids. Nothing can tell a secret header from a harmless one, so it is refused outright.
+    if (env.SH_MODEL_HEADERS) {
+      throw new Error(
+        "MOCA_TENANCY=multi refuses SH_MODEL_HEADERS: its values (inline or ${VAR}-interpolated from the environment) would be sent on every tenant's model requests",
+      );
+    }
     scrubAmbientCredentials(env);
+    // An env scrub cannot remove a file. With GOOGLE_APPLICATION_CREDENTIALS gone, pi still finds
+    // Vertex application-default credentials at the well-known gcloud path, and since
+    // GOOGLE_CLOUD_PROJECT/LOCATION are kept (they authenticate nothing on their own), a `/runs`
+    // envelope naming `google-vertex` would run on that shared credential. Checked after the scrub so
+    // the path tested is the one pi will read.
+    const adc = vertexAdcFile(env);
+    if (existsSync(adc)) {
+      throw new Error(
+        `MOCA_TENANCY=multi refuses a Vertex application-default credentials file (${adc}): GOOGLE_APPLICATION_CREDENTIALS is scrubbed, but pi falls back to this file, an ambient credential every tenant could spend. Remove it or run under a HOME without it`,
+      );
+    }
   }
   // Pi reads SYSTEM.md, extensions/, skills/, auth.json and models.json from the agent directory. A
   // server never uses a shared one — not $HOME/.pi/agent, not an inherited value (MI1 §5 R4).

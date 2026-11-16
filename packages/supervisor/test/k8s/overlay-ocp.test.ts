@@ -18,8 +18,16 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s overlays/ocp', () => {
       '--key',
       '/tls/tls.key',
       '--disable-authentication',
+      '--status',
+      'http://0.0.0.0:8453',
     ]);
     expect(tls.image).toMatch(/^docker\.io\/ghostunnel\/ghostunnel(:[^@]+)?@sha256:[0-9a-f]{64}$/);
+    // #724: probed on its own status port, never on the TLS port (a handshake error every 5 s).
+    expect(tls.readinessProbe).toEqual({
+      httpGet: { path: '/_metrics', port: 'status' },
+      periodSeconds: 5,
+    });
+    expect(tls.ports).toContainEqual({ name: 'status', containerPort: 8453 });
     const vol = podSpec(dep()).volumes.find((v: { name: string }) => v.name === 'tls');
     expect(vol.secret.secretName).toBe('moca-supervisor-tls');
   });

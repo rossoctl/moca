@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
 import { ProvenanceStore, recordDigest, verifyExport } from '../src/provenance.js';
+import { isLive } from '../src/sandbox-store.js';
 import { publicKeyFromBase64 } from '../src/token.js';
 import { verifySandboxToken, verifySetModeToken } from '../src/sandbox-token.js';
 import { admin, alice, bob, codeOf, ctx, makeDeps, NOW_MS, type TestDeps } from './helpers/deps.js';
@@ -1087,5 +1088,57 @@ describe('every link of a sandbox is a record digest (template lifecycle §7.1)'
     await create(d);
     expect(readdirSync(join(dir, 'records'))).toHaveLength(1);
     expect(readdirSync(join(dir, 'heads'))).toHaveLength(1);
+  });
+
+  it('rolls a create back when its start record cannot be written, so a retry succeeds (#806)', async () => {
+    const nowMs = NOW_MS;
+    const dir = mkdtempSync(join(tmpdir(), 'cp-sbx-provenance-'));
+    const provenance = new ProvenanceStore({ dir, now: () => nowMs });
+    const append = provenance.append.bind(provenance);
+    let failing = true;
+    provenance.append = async (input) => {
+      if (failing) throw new Error('ENOSPC: no space left on device');
+      return append(input);
+    };
+    // One live sandbox per user: a sandbox left behind would refuse the retry by the quota, and
+    // its name by name_conflict.
+    const d = sbxDeps({
+      provenance,
+      now: () => nowMs,
+      config: { sandbox: { ...makeDeps().config.sandbox!, maxPerSubject: 1 } },
+    });
+    const body = { template: 'default', name: 'web' };
+    const listed = async () =>
+      (
+        (await HANDLERS.listSandboxes!(ctx({ principal: alice }), d)).body as {
+          sandboxes: { id: string }[];
+        }
+      ).sandboxes.map((s) => s.id);
+    // The live-sandbox count, as getQuota and the store's per-user quota count it.
+    const used = async () =>
+      (await d.sandboxes!.listByOwner(alice.sub, NOW)).filter((r) => isLive(r, NOW)).length;
+    expect(await used()).toBe(0);
+
+    // The append's own error, not a CpError: the server answers it as a bare 500 internal_error.
+    const err = await create(d, alice, body).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/ENOSPC/);
+    expect(await listed()).toEqual([]);
+    expect(await used()).toBe(0);
+    // The audit stream shows the record's whole life: created, then rolled back.
+    const rows = [...d.streams.values()].flat();
+    expect(rows.map((r) => r.decision)).toEqual(['sandbox_created', 'sandbox_create_rolled_back']);
+    expect(new Set(rows.map((r) => r.sandboxId)).size).toBe(1);
+    expect(await provenance.chain('template/default')).toEqual([]);
+
+    failing = false;
+    const again = await HANDLERS.createSandbox!(ctx({ principal: alice, body }), d);
+    expect(again.status).toBe(201);
+    const id = (again.body as { id: string }).id;
+    expect(await listed()).toEqual([id]);
+    expect(await used()).toBe(1);
+    expect(
+      (await provenance.chain('template/default')).map((r) => [r.body.sandboxId, r.body.state]),
+    ).toEqual([[id, 'created']]);
   });
 });
