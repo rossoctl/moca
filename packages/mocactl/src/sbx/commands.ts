@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { q } from '@moca/sandbox-client';
 import { ApiError, TOKEN_CODES } from '../api/errors.js';
 import { deviceLogin, toCachedAuth } from '../core/auth.js';
-import { describeError } from '../core/messages.js';
+import { describeError, describeLoginError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
 import { sameControlPlane, saveConfig, storedLoginUrl } from '../config.js';
 import { deviceLoginEnd, devicePrompt, type Io, type LoginHelpers } from '../headless.js';
@@ -182,6 +182,12 @@ export async function cmdLogin(
   } catch (err) {
     const end = deviceLoginEnd(c.io, err, { prefix: 'sbx', again: 'mocactl sbx login' });
     if (end !== undefined) return end;
+    // A refusal `fail` words for itself (not enrolled, a token code) keeps its words; any other
+    // failure names the control plane tried and what came back (#700), at `fail`'s exit codes.
+    if (err instanceof ApiError && err.code !== 'not_enrolled' && !TOKEN_CODES.has(err.code)) {
+      c.io.err(`sbx: login failed: ${describeLoginError(err, c.url)}`);
+      return err.status === 0 ? SBX_EXIT.unreachable : SBX_EXIT.failed;
+    }
     return failed(c, err);
   }
 }

@@ -5,6 +5,9 @@ import { LoginOverlay } from '../src/views/overlays/Login.js';
 import { fakeControlPlane } from './helpers/fakes.js';
 import { KEY, inputReady, tick, waitFor, withTheme } from './helpers/ink.js';
 
+// The overlay's text wraps inside its border: one line of words to look for a sentence in.
+const flat = (frame: string | undefined) => (frame ?? '').replace(/[│\s]+/g, ' ');
+
 const waitForAbort = (_ms: number, signal?: AbortSignal) =>
   new Promise<void>((r) => signal?.addEventListener('abort', () => r(), { once: true }));
 
@@ -185,15 +188,36 @@ describe('LoginOverlay', () => {
     );
     await waitFor(
       () =>
-        (lastFrame() ?? '').includes('cannot reach the control plane: ECONNREFUSED') &&
+        (lastFrame() ?? '').includes('cannot reach the control plane at http://cp: ECONNREFUSED') &&
         inputReady(stdin),
       1000,
       lastFrame,
     );
-    expect(lastFrame()).toContain('cannot reach the control plane: ECONNREFUSED');
+    expect(lastFrame()).toContain('cannot reach the control plane at http://cp: ECONNREFUSED');
     stdin.write('r');
     await waitFor(() => starts >= 2, 1000, lastFrame);
     expect(starts).toBe(2);
+  });
+
+  it('names the control plane and the API error when the device flow fails (#700)', async () => {
+    const cp = fakeControlPlane({
+      startDeviceAuth: async () => {
+        throw new ApiError('control-plane', 500, 'internal_error', 'boom');
+      },
+    });
+    const { lastFrame } = render(
+      withTheme(
+        <LoginOverlay
+          deps={{ cp, now: () => 0, sleep: waitForAbort }}
+          controlPlaneUrl="http://cp"
+          onLoggedIn={vi.fn()}
+          onCancel={vi.fn()}
+        />,
+      ),
+    );
+    const want = 'the control plane at http://cp is unavailable (HTTP 500 internal_error: boom)';
+    await waitFor(() => flat(lastFrame()).includes(want), 1000, lastFrame);
+    expect(flat(lastFrame())).toContain(want);
   });
 
   it('cancels on Esc', async () => {

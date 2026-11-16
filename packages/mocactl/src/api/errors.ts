@@ -99,8 +99,13 @@ export function networkError(source: ErrorSource, err: unknown): ApiError {
       ? (cause as { code: string }).code
       : undefined;
   // undici's top-level message is just "fetch failed"; fold the cause code in so the
-  // operator can tell why.
-  const detail = causeCode ? `${message} (${causeCode})` : message;
+  // operator can tell why, or the cause's own message when it has no code (#700).
+  const causeMessage = cause instanceof Error && cause.message ? cause.message : undefined;
+  const detail = causeCode
+    ? `${message} (${causeCode})`
+    : causeMessage
+      ? `${message}: ${causeMessage}`
+      : message;
   const closed = causeCode !== undefined && CLOSED_CAUSES.has(causeCode);
   return new ApiError(
     source,

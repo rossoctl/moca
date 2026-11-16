@@ -20,7 +20,7 @@ import {
   secretFromStdin,
 } from './core/credential-checks.js';
 import { formatDiagnostics, runDiagnostics } from './core/diagnostics.js';
-import { describeError } from './core/messages.js';
+import { describeError, describeLoginError } from './core/messages.js';
 import { PromoteError, promoteDirectory, type PromoteSummary } from './core/promote.js';
 import { sanitizeRemote } from './core/sanitize.js';
 import { SessionManager, type ActiveSession } from './core/session-manager.js';
@@ -215,7 +215,7 @@ export async function cmdLoginTestUser(
       );
       return 1;
     }
-    io.err(`login failed: ${describeError(err)}`);
+    io.err(`login failed: ${describeLoginError(err, rt.endpoints.controlPlaneUrl!)}`);
     return 1;
   }
 }
@@ -239,7 +239,7 @@ export async function cmdLogin(
   } catch (err) {
     const end = deviceLoginEnd(io, err, { prefix: 'login failed', again: 'mocactl login' });
     if (end !== undefined) return end;
-    io.err(`login failed: ${describeError(err)}`);
+    io.err(`login failed: ${describeLoginError(err, rt.endpoints.controlPlaneUrl!)}`);
     return 1;
   }
 }
