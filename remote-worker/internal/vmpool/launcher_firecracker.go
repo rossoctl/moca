@@ -921,6 +921,7 @@ const (
 
 // apiSocketWait bounds Restore's wait for Firecracker's API socket. A variable so tests whose
 // fake jailer never binds one can wait on the jailer itself rather than race this bound.
+// Those tests overwrite it unsynchronized, so a test that runs Restore must not use t.Parallel.
 var apiSocketWait = 5 * time.Second
 
 // socketProbe is how waitForUnixSocket asks whether anything answers. A variable so a test can
