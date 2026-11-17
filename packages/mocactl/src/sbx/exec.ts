@@ -135,7 +135,10 @@ export function sandboxTokenFn(
   let curActivity = true;
   let pending: { p: Promise<SbxToken>; activity: boolean } | undefined;
   const mint = (activity: boolean, signal?: AbortSignal) =>
-    untilAborted(mintShared(activity, signal), signal);
+    // An ask already cancelled starts nothing: no mint, and no promise left to reject unobserved.
+    signal?.aborted
+      ? Promise.reject<SbxToken>(signal.reason)
+      : untilAborted(mintShared(activity, signal), signal);
   const mintShared = async (activity: boolean, signal?: AbortSignal): Promise<SbxToken> => {
     // A no-activity mint in flight is not joined by an activity ask: wait it out, then mint.
     while (pending && activity && !pending.activity) await pending.p.catch(() => undefined);
@@ -193,7 +196,10 @@ export function sandboxTokenFn(
  */
 function untilAborted<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return p;
-  if (signal.aborted) return Promise.reject(signal.reason);
+  if (signal.aborted) {
+    p.catch(() => undefined); // never leave `p`'s own rejection unobserved
+    return Promise.reject(signal.reason);
+  }
   return new Promise<T>((resolve, reject) => {
     const onAbort = () => reject(signal.reason);
     signal.addEventListener('abort', onAbort, { once: true });

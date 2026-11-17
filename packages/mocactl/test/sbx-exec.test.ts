@@ -843,6 +843,44 @@ describe('the sandbox token source (SBX0 §6.5)', () => {
     expect(cp.calls).toHaveLength(4);
   });
 
+  describe('an ask whose signal is already aborted (#770)', () => {
+    const run = async (
+      call: (t: ReturnType<typeof sandboxTokenFn>, s: AbortSignal) => Promise<unknown>,
+    ) => {
+      const seen: unknown[] = [];
+      const on = (e: unknown) => seen.push(e);
+      process.on('unhandledRejection', on);
+      try {
+        const calls: unknown[] = [];
+        const api = {
+          mintSandboxToken: async (...a: unknown[]) => {
+            calls.push(a);
+            return TOKEN;
+          },
+        } as unknown as SandboxApiClient;
+        const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
+        const reason = new Error('cancelled');
+        const ac = new AbortController();
+        ac.abort(reason);
+        await expect(call(t, ac.signal)).rejects.toBe(reason);
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+        expect(calls).toHaveLength(0);
+        expect(seen).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', on);
+      }
+    };
+
+    it('force rejects with the reason, starts no mint, leaks no rejection', async () => {
+      await run((t, s) => t.force(s));
+    });
+
+    it('first rejects with the reason, starts no mint, leaks no rejection', async () => {
+      await run((t, s) => t.first(s));
+    });
+  });
+
   describe('the activity hint', () => {
     const fakeApi = (answer: (n: number) => Promise<SbxToken> | SbxToken = () => TOKEN) => {
       const calls: (boolean | undefined)[] = [];
