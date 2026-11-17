@@ -135,7 +135,9 @@ rule 5).
   keys by the router's address: the deployment as a whole gets 20. Users behind one NAT address share one bucket;
   raise the bound with `SH_OIDC_MAX_PENDING_PER_SOURCE` (sticky, `0` turns it off). GitHub logins are unchanged.
   Outside `deploy/k8s`, if you enable oidc behind a proxy that appends to `X-Forwarded-For`, set
-  `SH_TRUSTED_PROXY_HOPS` to the number of such proxies.
+  `SH_TRUSTED_PROXY_HOPS` to the number of such proxies. A request whose header holds fewer entries than that keys
+  by its socket peer. A custom `PendingAuthStore` needs no change: its `put` may still answer `true`/`false` (parked,
+  or the total cap's refusal); it enforces the per-source bound only once it answers `'source_full'`.
 
 ## Rolling back
 

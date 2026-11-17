@@ -85,6 +85,10 @@ export type PendingOidcPatch = Partial<Omit<PendingOidcAuth, 'state' | 'expiresA
 /**
  * A put's outcome. Both refusals answer the client the same way (429 quota_exceeded); they are
  * told apart only so the message can say which bound was hit.
+ *
+ * Before #716 `put` answered a boolean (true parked, false refused). The store is an extension
+ * point, so the provider still accepts that from an out-of-tree store: `true` reads as `parked`
+ * and `false` as `full` (see PendingAuthStore.put). In-tree stores answer the outcome.
  */
 export type PendingPutOutcome = 'parked' | 'full' | 'source_full';
 
@@ -107,8 +111,12 @@ export type PendingPutOutcome = 'parked' | 'full' | 'source_full';
  * already succeeded past the provider (see settleProviderDenial).
  */
 export interface PendingAuthStore {
-  /** Anything but `parked` means a bound was hit; the caller refuses the login start. */
-  put(entry: PendingOidcAuth): Promise<PendingPutOutcome>;
+  /**
+   * Anything but `parked` means a bound was hit; the caller refuses the login start. A boolean is
+   * the pre-#716 contract, still accepted so a store written against it keeps starting logins
+   * after an upgrade (`true` is `parked`, `false` is `full`); a new store answers the outcome.
+   */
+  put(entry: PendingOidcAuth): Promise<PendingPutOutcome | boolean>;
   get(state: string): Promise<PendingOidcAuth | undefined>;
   /** Record the callback's outcome; false when no live entry holds that state, or it is settled. */
   settle(state: string, patch: PendingOidcPatch): Promise<boolean>;
@@ -356,12 +364,16 @@ export class OidcProvider implements IdentityProvider {
     // The terminal's half of the binding: short, human-typable, and NEVER in the authorize URL --
     // the URL is the piece a victim can be handed, the code is not.
     const confirmCode = mintConfirmCode();
-    const parked = await this.store.put({
+    const answered = await this.store.put({
       state,
       confirmCode,
       expiresAtMs: this.now() + this.stateTtlS * 1000,
       ...(source !== undefined ? { source } : {}),
     });
+    // A store written against the boolean contract (see PendingAuthStore.put) must not 429 every
+    // start after an upgrade: its true is a parked entry, its false the total cap's refusal.
+    const parked: PendingPutOutcome =
+      answered === true ? 'parked' : answered === false ? 'full' : answered;
     if (parked === 'source_full') {
       // The same refusal as the total cap's, scoped to the one address: its other users wait out
       // their own abandoned starts, and everyone else's logins still start (#716).

@@ -24,8 +24,13 @@ Additive.
   answered since it shipped (the 10,000-state total cap) and which now has a second cause: one
   client address holding `SH_OIDC_MAX_PENDING_PER_SOURCE` (default 20) live login states. The
   message tells the two apart ("...from this address"); the code and the status are the same. The
-  address is the socket peer, or the X-Forwarded-For entry `SH_TRUSTED_PROXY_HOPS` names. The
-  GitHub provider is unchanged.
+  address is the socket peer, or the X-Forwarded-For entry `SH_TRUSTED_PROXY_HOPS` names (the
+  socket peer when the header holds fewer entries than that). The GitHub provider is unchanged.
+- For a deployment with its own `PendingAuthStore` (the control plane's extension point for a
+  shared pending-login store): `put` now answers which bound refused the entry (`'parked'`,
+  `'full'` or `'source_full'`) instead of a boolean. A store still answering the boolean keeps
+  working: `true` reads as parked and `false` as the total cap's refusal. To enforce the
+  per-source bound, a store answers `'source_full'`.
 
 ## 1.28.0
 
