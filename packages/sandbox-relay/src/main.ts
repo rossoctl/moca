@@ -279,8 +279,8 @@ function keepaliveMs(env: NodeJS.ProcessEnv, name: string, fallback: number): nu
 
 /**
  * MOCA_RELAY_KEEPALIVE_TIME_MS and MOCA_RELAY_KEEPALIVE_TIMEOUT_MS: unset or empty is the default
- * (RELAY_KEEPALIVE), anything else must be an integer of milliseconds from MIN_KEEPALIVE_MS up, or
- * the relay does not boot. Keepalive
+ * (RELAY_KEEPALIVE), anything else must be an integer of milliseconds from MIN_KEEPALIVE_MS up to
+ * below MAX_TIMER_MS (which grpc-js reads as keepalive off), or the relay does not boot. Keepalive
  * cannot be turned off here: both reasons above hold on every deployment.
  */
 export function relayKeepalive(env: NodeJS.ProcessEnv): Keepalive {
