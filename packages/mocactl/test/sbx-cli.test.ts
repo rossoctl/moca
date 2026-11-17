@@ -116,6 +116,90 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(loadAuth(sbxPaths(paths), URL_)?.apiToken).toBe('api-new');
     expect(existsSync(paths.authFile)).toBe(false); // MOCA's auth.json is not touched
     expect(loadConfig(paths).config.sbxControlPlaneUrl).toBe(URL_);
+    // Nothing was configured before, so there is no change to announce.
+    expect(io.errs.join('\n')).not.toMatch(/is changing from/);
+  });
+
+  describe('sbx login --control-plane-url remembers the URL even when the login fails', () => {
+    const NEW = 'https://sbx-new.example.com';
+    const OLD = 'https://sbx-old.example.com';
+    const configured = () => {
+      const s = setup({ loggedIn: false });
+      saveConfig(s.paths, { ...DEFAULT_CONFIG, sbxControlPlaneUrl: OLD });
+      return s;
+    };
+
+    it('not enrolled: saves the new URL, says it changed, and later commands use it', async () => {
+      const { home, paths, io } = configured();
+      const cp = fakeCp({
+        'GET /v1/discovery': () => ({ status: 200, body: SBX_DISCOVERY }),
+        'POST /v1/auth/device': () => ({ status: 200, body: DEVICE }),
+        'POST /v1/auth/device/token': () => ({
+          status: 403,
+          body: { error: 'not_enrolled', message: 'github:7 is not enrolled' },
+        }),
+      });
+      expect(
+        await sbxMain(['login', '--control-plane-url', NEW], { HOME: home }, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+        }),
+      ).toBe(1);
+      expect(io.errs.join('\n')).toContain(
+        `sbx: mocactl's sandbox control plane URL is changing from ${OLD} to ${NEW}`,
+      );
+      expect(loadConfig(paths).config.sbxControlPlaneUrl).toBe(NEW);
+      // The next command targets the new URL (and asks for a login there).
+      const next = setup({ loggedIn: false }).io;
+      expect(await sbxMain(['ls'], { HOME: home }, next, { home, fetchImpl: cp.fetchImpl })).toBe(
+        3,
+      );
+    });
+
+    it('unreachable: saves the new URL so `sbx doctor` checks it', async () => {
+      const { home, paths, io } = configured();
+      const cp = fakeCp({ 'GET /v1/discovery': () => new TypeError('fetch failed') });
+      expect(
+        await sbxMain(['login', '--control-plane-url', NEW], { HOME: home }, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+        }),
+      ).toBe(4);
+      expect(io.errs.join('\n')).toMatch(/is changing from/);
+      expect(loadConfig(paths).config.sbxControlPlaneUrl).toBe(NEW);
+    });
+
+    it('not a sandbox service: keeps the old URL', async () => {
+      const { home, paths, io } = configured();
+      const cp = fakeCp({
+        'GET /v1/discovery': () => ({
+          status: 200,
+          body: { profile: 'harness', harnessUrl: 'https://h', sandboxTiers: [], version: '1' },
+        }),
+      });
+      expect(
+        await sbxMain(['login', '--control-plane-url', NEW], { HOME: home }, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+        }),
+      ).toBe(2);
+      expect(io.errs.join('\n')).not.toMatch(/is changing from/);
+      expect(loadConfig(paths).config.sbxControlPlaneUrl).toBe(OLD);
+    });
+
+    // The same control plane as loadAuth means it (sameControlPlane): spelling alone is no change.
+    it.each([`${OLD}/`, 'HTTPS://SBX-OLD.example.com:443'])(
+      'the same control plane again (%s): no change announced',
+      async (again) => {
+        const { home, io } = configured();
+        const cp = fakeCp({ 'GET /v1/discovery': () => new TypeError('fetch failed') });
+        await sbxMain(['login', '--control-plane-url', again], { HOME: home }, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+        });
+        expect(io.errs.join('\n')).not.toMatch(/is changing from/);
+      },
+    );
   });
 
   it.each([
@@ -324,6 +408,17 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     const cp = fakeCp({ 'POST /v1/auth/token': () => new TypeError('fetch failed') });
     expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(4);
     expect(io.errs.join('\n')).toMatch(/cannot reach the sandbox control plane/);
+  });
+
+  it('names the control plane tried and suggests `sbx doctor` when a call cannot reach it', async () => {
+    const { home, env, io } = setup();
+    const cause = Object.assign(new Error('connect timeout'), { code: 'UND_ERR_CONNECT_TIMEOUT' });
+    const cp = fakeCp({ 'GET /v1/sandboxes': () => new TypeError('fetch failed', { cause }) });
+    expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(4);
+    expect(io.errs.at(-1)).toBe(
+      `sbx: cannot reach the sandbox control plane at ${URL_}: fetch failed ` +
+        '(UND_ERR_CONNECT_TIMEOUT); run `mocactl sbx doctor` to diagnose',
+    );
   });
 
   it('lists templates, as a table and as JSON', async () => {

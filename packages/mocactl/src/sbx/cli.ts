@@ -473,7 +473,7 @@ export async function openSbx(
     io.err(`sbx: not logged in to the sandbox service${where}: run \`${login}\`${other}`);
     return SBX_EXIT.loginRequired;
   }
-  if (auth.kind === 'unreachable') return failRefresh(io, auth.error);
+  if (auth.kind === 'unreachable') return failRefresh(io, auth.error, url);
   return opened;
 }
 
