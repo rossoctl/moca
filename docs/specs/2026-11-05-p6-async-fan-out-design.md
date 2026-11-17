@@ -1182,7 +1182,7 @@ it adds is the schedule. Its design should cite this document for both.
   every claim), defer it again, and never reach the entries behind it. Per-owner streams, where a
   claim can skip an owner without touching their entries, are the upgrade — the queue-shape
   question this section's per-class-caps item below also waits on.
-- **Per-turn cost attribution.** #391's other half, split out: it wants the per-model price table
+- **Per-turn cost attribution (#859).** #391's other half, split out: it wants the per-model price table
   §4.3's amendment says does not exist (#359), which is the same reason `caps.costUsd` is refused
   at submission rather than enforced.
 - ~~Result retention beyond 24 h, and richer artifacts than the current patch/text/summary.~~

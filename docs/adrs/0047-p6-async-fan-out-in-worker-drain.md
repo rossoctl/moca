@@ -286,8 +286,8 @@ never-submitted and reaped-as-lost.
   cancelling a running leaf and per-subject fairness in #391 — the latter as a claim-time check that
   reads the entry's owner and hands a capped owner's entry back unrun and unpenalised, since the
   queue is one FIFO stream and a claim reveals the owner only after it is taken; spec §12 records the
-  90 s latency that buys): per-turn cost attribution (#391's split-out half, which wants the price
-  table #391 established does not exist); per-class concurrency caps, for which
+  90 s latency that buys): per-turn cost attribution (#859, #391's split-out half, which wants the
+  price table #391 established does not exist); per-class concurrency caps, for which
   `async_claim_denied_full` against
   interactive `429`s is the measurement that would justify them; `/v1/batches` (#537) once a working
   fan-out exists to measure against; the documentation updates in #690 (ADR-0041's "Still owed" note,
