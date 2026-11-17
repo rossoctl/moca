@@ -83,7 +83,8 @@ period is only an outer bound. Practically:
   otherwise stamps its own. A Redis that refuses writes still has an existing stamp checked; on an absent key the
   refused write is logged once and retried, and the process runs on. The credential envelope is versioned too (`v1.`).
 - **Config-bundle format.** A bundle carries its format version (`format.json`). The control plane refuses to store a
-  format newer than it knows, and the harness refuses to apply one, so a client upgraded first fails loudly. Because
+  format newer than it knows (`400 invalid_request`), and the harness refuses to apply one (a turn answers
+  `422 config_bundle_unsupported`), so a client upgraded first fails loudly, with the reason in the response. Because
   the marker is bundle content, a workflow promoted again with the first release that writes it gets a new digest;
   bundles already stored keep theirs, and sessions naming them keep working.
 - No wire-version negotiation exists. `GET /v1/discovery` returns the control plane's `version`.

@@ -8,11 +8,29 @@ that shipped it ("The data plane's twin … goes to"):
 
 | `harness-openapi.yaml` | Shipped with                   |
 | ---------------------- | ------------------------------ |
+| 1.5.0                  | [1.29.0](#1290)                |
 | 1.4.0                  | [1.26.0](#1260)                |
 | 1.3.0                  | [1.17.0](#1170)                |
 | 1.2.0                  | [1.16.0](#1160)                |
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
+
+## 1.29.0
+
+A config bundle's format version, checked where a bundle is stored and where it is applied
+([#510](https://github.com/rossoctl/moca/issues/510)), per the
+[change policy](../reference/change-policy.md#version-markers) (decision 7). Additive on the wire.
+
+- POST /v1/config-bundles refuses a bundle whose `format.json` names a format newer than this
+  release reads, or is not a format version, with `400 invalid_request` and the reason in
+  `message`. A bundle without `format.json` is format 1, so every bundle stored before it existed
+  keeps its digest and stays usable.
+
+The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.5.0: POST /v1/turn
+answers `422 config_bundle_unsupported` when the session's bundle is stored and intact but in a
+format the harness does not read, with the reason and what to upgrade in `message`, on the sync
+path and before the first SSE frame alike; after it, the terminal `error` frame carries the same
+reason.
 
 ## 1.26.0
 
