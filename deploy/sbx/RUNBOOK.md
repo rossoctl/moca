@@ -225,7 +225,10 @@ SBX_LOWER_WORKSPACE_IDLE=1 SBX_ACK_HOSTS=1 deploy/sbx/setup.sh --env-file <env f
 
 writes the shorter idle into the bundles; the hosts take it when `install-host.sh` is next run on
 them. Never set `SBX_LOWER_WORKSPACE_IDLE=1` before the old maximum has passed: a routine reinstall
-would then give the hosts the shorter idle early.
+would then give the hosts the shorter idle early. Pass it on the command line for that one run; do
+not keep it in the env file: the env file is sourced with `set -a`, so kept there it makes a later
+lowering skip the "kept" step and, with `SBX_ACK_HOSTS=1` also in the file, write the shorter idle
+at once.
 
 `status.sh` prints `worker idle <id>: ...` for each host and a WARNING when a worker's idle does
 not exceed the maximum.
