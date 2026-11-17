@@ -331,6 +331,34 @@ func TestTTLClamped(t *testing.T) {
 	}
 }
 
+// The server's TTL counts from when it answered, which is after the request
+// left; the cache must count from the request's start, not from when the
+// slow answer arrived, or an entry outlives the server's word by the call's
+// duration (up to the timeout). The fake clock moves on inside the handler to
+// stand in for a slow call.
+func TestTTLMeasuredFromRequestStart(t *testing.T) {
+	clk := &clock{t: time.Unix(1000, 0)}
+	slow := func(w http.ResponseWriter, r *http.Request) {
+		clk.add(2 * time.Second)
+		okBody(10, gh)(w, r)
+	}
+	f := newCPFake(t, slow)
+	c := f.client(t, clk)
+	if _, err := c.Lookup(context.Background(), cl1, "x.example"); err != nil {
+		t.Fatal(err)
+	}
+	// 11s after the request started, 9s after the answer arrived: past the
+	// server's 10s, so the entry must have lapsed.
+	clk.add(9 * time.Second)
+	f.set(okBody(10, gh)) // the refetch is not slow
+	if _, err := c.Lookup(context.Background(), cl1, "x.example"); err != nil {
+		t.Fatal(err)
+	}
+	if n := f.calls.Load(); n != 2 {
+		t.Fatalf("calls = %d, want 2: the entry outlived the server's TTL by the call's duration", n)
+	}
+}
+
 func TestTTLClampedToExpiresAt(t *testing.T) {
 	clk := &clock{t: time.Unix(1000, 0)}
 	exp := clk.now().Add(10 * time.Second).UTC().Format(time.RFC3339)
