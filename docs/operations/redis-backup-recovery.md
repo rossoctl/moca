@@ -8,14 +8,15 @@
 A single-replica StatefulSet running `valkey/valkey:9-alpine` (pinned by digest; the RESP-compatible
 BSD-3 fork of Redis — the resources keep `redis` names) on a `ReadWriteOnce` volume of **1Gi**
 using the cluster's default StorageClass. `setup.sh` warns if there is no default class; without one `redis-0`
-stays Pending. The generated configuration is exactly `requirepass`, `appendonly yes` and `dir /data`.
+stays Pending. The generated configuration is exactly `requirepass`, `appendonly yes` and `dir /data`, plus,
+with workload sandboxes on, one ACL user for `moca-provisioner` that may only `GET` workload records (`sh:wl:*`).
 
 - **No `appendfsync`, `save`, `maxmemory` or eviction policy is set**, so Valkey 9 defaults apply. With AOF that
   usually means about one second of writes can be lost on a hard crash (a Redis default, not a repository
   guarantee). Nothing evicts.
 - The container limit is **256Mi of memory**, which the data set can outgrow before it fills the 1Gi volume; an OOM
   kill would follow. No relationship between the two is documented.
-- Only the supervisor, relay and control plane can reach port 6379. The root filesystem is read-only; only `/data` is
+- Only the supervisor, relay and control plane can reach port 6379, and `moca-provisioner` when workload sandboxes are on. The root filesystem is read-only; only `/data` is
   writable.
 - The smoke test deletes `redis-0` and checks that a session survives the AOF reload.
 
@@ -60,16 +61,18 @@ behaviour is not verified.
 
 ## Secrets to back up separately
 
-`setup.sh` creates the first four rows once and never rotates them; the per-user Secrets in `moca-credentials` are
-created by the control plane at runtime. On OpenShift and with P4 hosts it also creates `moca-relay-sandbox-tokens`
+`setup.sh` creates every Secret in the table except the `moca-credentials` ones (`moca-redis-provisioner` only with
+workload sandboxes on), once, and never rotates them; the per-user Secrets in `moca-credentials` are created by the
+control plane at runtime. On OpenShift and with P4 hosts it also creates `moca-relay-sandbox-tokens`
 and `moca-relay-tls`, which belong in the same backup.
 
-| Secret                               | Contents                                                                                                  | If lost                                                                                                                                                                                                                              |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `moca-mu1`                           | `SH_SESSION_TOKEN_PRIVATE_KEY`, `SH_SESSION_TOKEN_PUBLIC_KEYS`, `SH_CREDENTIAL_KEK`, `SH_EXCHANGE_TOKEN`  | **Losing the KEK makes every stored credential unreadable**, with no way back without the old key. Losing the signing key invalidates every outstanding access and session token; clients that refresh should recover (not verified) |
-| `moca-credentials` namespace Secrets | One encrypted Secret per user                                                                             | Users must re-add their credentials                                                                                                                                                                                                  |
-| `moca-redis`                         | `REDIS_PASSWORD` (kept once generated), plus `REDIS_URL` and `redis.conf` re-derived from it on every run | Re-run `setup.sh`; restart Redis and its consumers                                                                                                                                                                                   |
-| `moca-relay`, `moca-relay-attach`    | Relay tokens                                                                                              | Restart the relay, supervisor and sandboxes after a change                                                                                                                                                                           |
+| Secret                               | Contents                                                                                                                    | If lost                                                                                                                                                                                                                              |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `moca-mu1`                           | `SH_SESSION_TOKEN_PRIVATE_KEY`, `SH_SESSION_TOKEN_PUBLIC_KEYS`, `SH_CREDENTIAL_KEK`, `SH_EXCHANGE_TOKEN`                    | **Losing the KEK makes every stored credential unreadable**, with no way back without the old key. Losing the signing key invalidates every outstanding access and session token; clients that refresh should recover (not verified) |
+| `moca-credentials` namespace Secrets | One encrypted Secret per user                                                                                               | Users must re-add their credentials                                                                                                                                                                                                  |
+| `moca-redis`                         | `REDIS_PASSWORD` (kept once generated), plus `REDIS_URL` and `redis.conf` re-derived from it on every run                   | Re-run `setup.sh`; restart Redis and its consumers                                                                                                                                                                                   |
+| `moca-redis-provisioner`             | `REDIS_PASSWORD` of `moca-provisioner`'s Redis user (kept once generated) and its `REDIS_URL`; only with workload sandboxes | Re-run `setup.sh` (it re-derives `redis.conf` and rolls Redis); restart `moca-provisioner`                                                                                                                                           |
+| `moca-relay`, `moca-relay-attach`    | Relay tokens                                                                                                                | Restart the relay, supervisor and sandboxes after a change                                                                                                                                                                           |
 
 ### Rotating keys
 

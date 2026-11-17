@@ -1682,8 +1682,10 @@ reset_state
 ! grep -qE 'workload-sandboxes|moca-provisioner|ResourceQuota|PodTemplate' "$MOCK_STATE/applied-kustomization.yaml" ||
   fail 'the generated overlay names a workload-sandboxes object with the feature off'
 [[ ! -f "$MOCK_STATE/moca__Secret__moca-provisioner.json" ]] || fail 'a moca-provisioner Secret was made with the feature off'
+[[ ! -f "$MOCK_STATE/moca__Secret__moca-redis-provisioner.json" ]] || fail 'a moca-redis-provisioner Secret was made with the feature off'
+! sv moca moca-redis redis.conf | grep -q '^user ' || fail 'redis.conf defines an ACL user with the feature off'
 ! grep -qE 'get (--raw|endpointslices|statefulsets)|delete .*provisioner' "$MOCK_LOG" || fail 'the feature off read or deleted its objects'
-pass 'off by default: no component, quota, provisioner Secret or provisioner reads'
+pass 'off by default: no component, quota, provisioner Secret, provisioner Redis user or provisioner reads'
 
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=1; expect_ok --target kind --skip-build)
@@ -1694,11 +1696,33 @@ grep -q '^  - ../../base/workload-sandboxes$' "$MOCK_STATE/applied-kustomization
 [[ "$(sv moca moca-provisioner MOCA_ATTACH_PUBLIC_KEYS)" != "$(sv moca moca-mu1 SH_SESSION_TOKEN_PUBLIC_KEYS)" ]] ||
   fail 'the attach key is the session-token key'
 grep -q 'rollout status deployment/moca-provisioner' "$MOCK_LOG" || fail 'the provisioner rollout is not awaited'
+# #626: the provisioner's own Redis user, GET on workload records only, in a Secret of its own; the
+# read-write password stays moca-redis's. redis.conf holds the user's password as its SHA-256 only.
+sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1; }
+[[ -f "$MOCK_STATE/moca__Secret__moca-redis-provisioner.json" ]] || fail 'no moca-redis-provisioner Secret with the feature on'
+ppw="$(sv moca moca-redis-provisioner REDIS_PASSWORD)"
+pw="$(sv moca moca-redis REDIS_PASSWORD)"
+[[ "$ppw" =~ ^[0-9a-f]{64}$ && "$ppw" != "$pw" ]] || fail "moca-provisioner's Redis password is not its own 32-byte hex value"
+[[ "$(sv moca moca-redis-provisioner REDIS_URL)" == "redis://moca-provisioner:$ppw@redis.moca.svc:6379" ]] ||
+  fail "the provisioner's REDIS_URL does not name its own user and password"
+[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__Secret__moca-redis-provisioner.json")" == '["REDIS_PASSWORD","REDIS_URL"]' ]] ||
+  fail 'moca-redis-provisioner must carry REDIS_PASSWORD and REDIS_URL only'
+acl_line="user moca-provisioner reset on #$(printf '%s' "$ppw" | sha) ~sh:wl:* resetchannels +get"
+[[ "$(sv moca moca-redis redis.conf)" == "$(printf 'requirepass %s\nappendonly yes\ndir /data\n%s' "$pw" "$acl_line")" ]] ||
+  fail "redis.conf is not requirepass, AOF and the provisioner's GET-only user: $(sv moca moca-redis redis.conf | grep -v requirepass)"
+! sv moca moca-redis redis.conf | grep -qF -- "$ppw" || fail "redis.conf holds the provisioner's Redis password in clear"
+grep -qF "{ op: add, path: /spec/template/metadata/annotations, value: { moca.dev/redis-acl-hash: \"$(printf '%s' "$acl_line" | sha)\" } }" \
+  "$MOCK_STATE/applied-kustomization.yaml" || fail "Redis's pod template does not carry the provisioner user's hash (it would never load the user)"
+assert_no_secret_in_argv
+pass "SH_WORKLOAD_SANDBOXES=1 gives the provisioner its own GET-only Redis user and Secret, and rolls Redis on it (#626)"
+acl_conf="$(sv moca moca-redis redis.conf)"
 attach_key="$(sv moca moca-provisioner MOCA_ATTACH_PRIVATE_KEY)"
 : >"$MOCK_LOG"
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
 grep -q '^  - ../../base/workload-sandboxes$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'SH_WORKLOAD_SANDBOXES is not sticky'
 [[ "$(sv moca moca-provisioner MOCA_ATTACH_PRIVATE_KEY)" == "$attach_key" ]] || fail 'a re-run rotated the attach key'
+[[ "$(sv moca moca-redis-provisioner REDIS_PASSWORD)" == "$ppw" && "$(sv moca moca-redis redis.conf)" == "$acl_conf" ]] ||
+  fail "a re-run rotated the provisioner's Redis password or changed redis.conf"
 ! grep -q 'run moca-genkeys' "$MOCK_LOG" || fail 'a re-run regenerated keys it already had'
 grep -qF '{ op: replace, path: /spec/egress, value: [{"to":[{"ipBlock":{"cidr":"10.96.0.1/32"}}],"ports":[{"protocol":"TCP","port":443}]},{"to":[{"ipBlock":{"cidr":"172.18.0.2/32"}}],"ports":[{"protocol":"TCP","port":6443}]}] }' "$MOCK_STATE/applied-kustomization.yaml" ||
   fail "the provisioner's egress is not the API server's ClusterIP and endpoint"
@@ -1715,6 +1739,9 @@ grep -q 'networkpolicy/moca-provisioner-redis networkpolicy/allow-openshift-dns-
   fail "turning it off left the provisioner's Redis and DNS policies"
 grep -q 'delete validatingadmissionpolicybinding/moca-provisioner' "$MOCK_LOG" || fail 'turning it off left the admission policy'
 ! grep -q 'images:' "$MOCK_STATE/applied-kustomization.yaml" || fail 'the off render on kind is not the pre-feature one'
+! sv moca moca-redis redis.conf | grep -q '^user ' || fail "turning it off left the provisioner's Redis user in redis.conf"
+! grep -q 'redis-acl-hash' "$MOCK_STATE/applied-kustomization.yaml" || fail 'turning it off left the hash that rolls Redis on'
+[[ "$(sv moca moca-redis-provisioner REDIS_PASSWORD)" == "$ppw" ]] || fail 'turning it off changed moca-redis-provisioner (it stays, unreferenced)'
 pass 'SH_WORKLOAD_SANDBOXES=1 adds the component and makes the provisioner Secret once; sticky; empty turns it off and removes the provisioner'
 
 reset_state

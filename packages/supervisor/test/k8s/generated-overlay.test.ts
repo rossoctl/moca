@@ -108,6 +108,12 @@ describe.skipIf(NO_KUBECTL)('the generated OCP overlay (setup.sh write_overlay)'
     expect([...p.spec.egress[1].to[0].ipBlock.except].sort()).toEqual([...BUILTIN_EXCEPT].sort());
   });
 
+  it("leaves Redis's pod template unannotated without workload sandboxes (no provisioner user, #626)", () => {
+    expect(
+      find(objs, 'StatefulSet', 'redis', 'moca').spec.template.metadata.annotations,
+    ).toBeUndefined();
+  });
+
   it('renders nothing of P4 with no P4 IDs, so the relay matches slice 1', () => {
     const names = objs.map((o) => `${o.kind}/${o.metadata.name}`);
     expect(names).not.toContain('Route/moca-relay');
