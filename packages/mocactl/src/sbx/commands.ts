@@ -7,7 +7,7 @@ import { ApiError, TOKEN_CODES } from '../api/errors.js';
 import { deviceLogin, toCachedAuth } from '../core/auth.js';
 import { describeError, describeLoginError, displayUrl } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
-import { normalizeUrl, sameControlPlane, saveConfig, storedLoginUrl } from '../config.js';
+import { sameControlPlane, saveConfig, storedLoginUrl } from '../config.js';
 import { deviceLoginEnd, devicePrompt, type Io, type LoginHelpers } from '../headless.js';
 import { setAuth, type RefreshFailure, type Runtime } from '../runtime.js';
 import type {
@@ -171,14 +171,15 @@ export const failed = (c: SbxCtx, err: unknown): number =>
 
 /**
  * `sbx login --control-plane-url URL`'s URL, saved to config.json for the commands after it, and,
- * when it replaces another, the change said out loud. Saved even when the login then fails (not
- * enrolled, unreachable, abandoned): the user named this control plane, so `sbx doctor` and the
+ * when it replaces another, the change said out loud. Saved even when discovery fails for any
+ * reason, or the login after it fails (not enrolled, abandoned): the user named this control plane, so `sbx doctor` and the
  * next `sbx login` should look at it, not the old one. Its old login in sbx-auth.json stays but
  * does not match the new URL, so no command uses it against the new control plane.
  */
 function rememberUrl(c: SbxCtx): void {
   const old = c.rt.config.sbxControlPlaneUrl || storedLoginUrl(c.rt.paths.authFile);
-  const same = old !== undefined && normalizeUrl(old) === normalizeUrl(c.url);
+  // "The same" as loadAuth means it (sameControlPlane), not only up to a trailing slash.
+  const same = old !== undefined && sameControlPlane(old, c.url);
   if (same && c.rt.config.sbxControlPlaneUrl) return;
   if (old && !same) {
     c.io.err(
@@ -228,8 +229,9 @@ export async function cmdLogin(
     );
     return SBX_EXIT.ok;
   } catch (err) {
-    // Not reached, say (discovery failed): still the control plane the user asked for, so the
-    // next `sbx doctor` checks it. Only one that answered "not a sandbox service" is not kept.
+    // Discovery failed for any reason (unreachable, a 5xx, a page that is not JSON), or the login
+    // after it did: still the control plane the user asked for, so the next `sbx doctor` checks
+    // it. Only one whose discovery answered "not a sandbox service" is not kept.
     rememberOnce();
     const end = deviceLoginEnd(c.io, err, { prefix: 'sbx', again: 'mocactl sbx login' });
     if (end !== undefined) return end;

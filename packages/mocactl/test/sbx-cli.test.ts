@@ -187,15 +187,19 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       expect(loadConfig(paths).config.sbxControlPlaneUrl).toBe(OLD);
     });
 
-    it('the same URL again: no change announced', async () => {
-      const { home, io } = configured();
-      const cp = fakeCp({ 'GET /v1/discovery': () => new TypeError('fetch failed') });
-      await sbxMain(['login', '--control-plane-url', `${OLD}/`], { HOME: home }, io, {
-        home,
-        fetchImpl: cp.fetchImpl,
-      });
-      expect(io.errs.join('\n')).not.toMatch(/is changing from/);
-    });
+    // The same control plane as loadAuth means it (sameControlPlane): spelling alone is no change.
+    it.each([`${OLD}/`, 'HTTPS://SBX-OLD.example.com:443'])(
+      'the same control plane again (%s): no change announced',
+      async (again) => {
+        const { home, io } = configured();
+        const cp = fakeCp({ 'GET /v1/discovery': () => new TypeError('fetch failed') });
+        await sbxMain(['login', '--control-plane-url', again], { HOME: home }, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+        });
+        expect(io.errs.join('\n')).not.toMatch(/is changing from/);
+      },
+    );
   });
 
   it.each([
