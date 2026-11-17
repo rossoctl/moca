@@ -234,9 +234,11 @@ function execCaller(md: Metadata, auth: ExecAuth): ExecCaller {
  *   relay, which then refuses the host's reconnect as a duplicate sandbox id and keeps its presence
  *   record, until the router's idle timeout (5 m on the passthrough Route) closes the tunnel. A PING
  *   the peer never acks destroys the connection within timeMs + timeoutMs instead, and the stream's
- *   teardown removes presence. The pings are HTTP/2 frames inside the TLS stream, so the passthrough
- *   router and the ghostunnel sidecar, byte-for-byte TCP proxies, carry them end to end: a dead host
- *   behind them goes unanswered exactly as a direct one would.
+ *   teardown removes presence. The proxies in front of the relay do not change this: the
+ *   passthrough router forwards the TLS bytes untouched, and the ghostunnel sidecar is an L4 TLS
+ *   proxy that terminates TLS and forwards the plaintext bytes to the relay without parsing HTTP/2.
+ *   Neither answers a PING itself, so the relay's PINGs reach the worker and only the worker acks
+ *   them: a dead host behind them goes unanswered exactly as a direct one would.
  *
  * These are the two keepalive options grpc-js 1.14's server reads; it pings whether or not a call is
  * open. It has no server-side ping policy: it never reads grpc.http2.min_ping_interval_without_data_ms,
@@ -252,22 +254,33 @@ export const RELAY_KEEPALIVE = { timeMs: 20_000, timeoutMs: 10_000 } as const;
 
 /** The largest delay a Node timer holds; grpc-js also reads this keepalive time as "off". */
 const MAX_TIMER_MS = 2 ** 31 - 1;
+/**
+ * The env floor, so a value meant as seconds (`20`) is refused rather than pinging every 20 ms. The
+ * explicit `keepalive` option of startRelay is not bound by it, which is how tests use smaller values.
+ */
+export const MIN_KEEPALIVE_MS = 1_000;
 
 function keepaliveMs(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
   const raw = env[name];
   if (raw === undefined || raw.trim() === '') return fallback;
   const v = raw.trim();
   const n = Number(v);
+  // Boot errors name variables, not values, everywhere here.
   if (!/^[1-9][0-9]*$/.test(v) || !Number.isSafeInteger(n) || n >= MAX_TIMER_MS) {
-    // Boot errors name variables, not values, everywhere here.
     throw new Error(`${name} must be a positive integer of milliseconds below ${MAX_TIMER_MS}`);
+  }
+  if (n < MIN_KEEPALIVE_MS) {
+    throw new Error(
+      `${name} is in milliseconds and must be at least ${MIN_KEEPALIVE_MS} (1 s); a value meant as seconds is refused`,
+    );
   }
   return n;
 }
 
 /**
  * MOCA_RELAY_KEEPALIVE_TIME_MS and MOCA_RELAY_KEEPALIVE_TIMEOUT_MS: unset or empty is the default
- * (RELAY_KEEPALIVE), anything else must be a positive integer, or the relay does not boot. Keepalive
+ * (RELAY_KEEPALIVE), anything else must be an integer of milliseconds from MIN_KEEPALIVE_MS up, or
+ * the relay does not boot. Keepalive
  * cannot be turned off here: both reasons above hold on every deployment.
  */
 export function relayKeepalive(env: NodeJS.ProcessEnv): Keepalive {

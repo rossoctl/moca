@@ -17,7 +17,13 @@ import {
   type WorkerFrame,
 } from '@moca/k8s-sandbox';
 import type { RecordStore } from '@moca/harness';
-import { RELAY_KEEPALIVE, relayKeepalive, relayServerOptions, startRelay } from '../src/main.js';
+import {
+  MIN_KEEPALIVE_MS,
+  RELAY_KEEPALIVE,
+  relayKeepalive,
+  relayServerOptions,
+  startRelay,
+} from '../src/main.js';
 
 // SBX0 §3.4: some load balancers in front of a cluster router close a TCP connection after a short
 // idle period (one measured at 50 s), so an Exec whose command prints nothing would die. The relay's
@@ -192,6 +198,20 @@ describe('relay keepalive (SBX0 §3.4)', () => {
     }
   }
 
+  for (const name of ['MOCA_RELAY_KEEPALIVE_TIME_MS', 'MOCA_RELAY_KEEPALIVE_TIMEOUT_MS']) {
+    for (const low of ['1', '20', '999']) {
+      it(`refuses ${name}=${low} as below the 1 s floor, naming the variable and the unit`, () => {
+        expect(() => relayKeepalive({ [name]: low })).toThrow(
+          new RegExp(`^${name} is in milliseconds and must be at least 1000`),
+        );
+      });
+    }
+    it(`accepts ${name} at the floor`, () => {
+      const k = relayKeepalive({ [name]: String(MIN_KEEPALIVE_MS) });
+      expect(name.endsWith('TIMEOUT_MS') ? k.timeoutMs : k.timeMs).toBe(MIN_KEEPALIVE_MS);
+    });
+  }
+
   it('a bad keepalive value refuses the boot before anything binds or touches Redis', async () => {
     await expect(
       startRelay({ port: 0, env: { MOCA_RELAY_KEEPALIVE_TIME_MS: 'off' }, deps }),
@@ -199,18 +219,18 @@ describe('relay keepalive (SBX0 §3.4)', () => {
   });
 
   it('startRelay takes the keepalive from the env when no override is passed', async () => {
-    // Only the env sets keepalive here: with it unread, the relay would keep the 20 s default and
-    // the silent window would carry no ping.
+    // Only the env sets keepalive here, at the 1 s floor: with it unread, the relay would keep the
+    // 20 s default and the window would carry no ping.
     const relay = await startRelay({
       port: 0,
       deps,
-      env: { MOCA_RELAY_KEEPALIVE_TIME_MS: '250', MOCA_RELAY_KEEPALIVE_TIMEOUT_MS: '2000' },
+      env: { MOCA_RELAY_KEEPALIVE_TIME_MS: '1000', MOCA_RELAY_KEEPALIVE_TIMEOUT_MS: '2000' },
     });
     closers.push(relay.shutdown);
     const attachProxy = await countingProxy(relay.port);
-    await attachSilentWorker(`127.0.0.1:${attachProxy.port}`, 'sbx_keepalive_env', 2_000);
+    await attachSilentWorker(`127.0.0.1:${attachProxy.port}`, 'sbx_keepalive_env', 5_000);
     const started = Date.now();
-    await new Promise((r) => setTimeout(r, 1_500));
+    await new Promise((r) => setTimeout(r, 2_500));
     expect(attachProxy.downstream.filter((t) => t > started).length).toBeGreaterThan(0);
   }, 15_000);
 

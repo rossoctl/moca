@@ -73,7 +73,7 @@ async function freezableProxy(targetPort: number) {
   return {
     port: (server.address() as { port: number }).port,
     freeze: () => void (frozen = true),
-    /** Client->relay writes seen so far: with the call idle, those are the client's PINGs. */
+    /** Client->relay writes seen so far: with the call idle and the relay not pinging, PINGs. */
     upChunks: () => upChunks,
   };
 }
@@ -165,12 +165,14 @@ describe('relay keepalive detects a dead peer (#439)', () => {
     // The Go worker pings every 30 s while its Attach stream is open (remote-worker/internal/session/
     // dial.go). grpc-js's server polices no client ping rate, so it never answers a ping with GOAWAY
     // ENHANCE_YOUR_CALM; this pins that with a client pinging 300 times faster, so a grpc-js upgrade
-    // that starts enforcing a minimum interval fails here instead of in the field.
+    // that starts enforcing a minimum interval fails here instead of in the field. The relay's own
+    // keepalive is off here, so it sends no PING the client would ack: every client->relay write in
+    // the idle window is the client's own PING.
     const s = store();
     const relay = await startRelay({
       port: 0,
       deps: { records: s.records, validateToken: () => true, validateExecToken: () => false },
-      keepalive: KEEPALIVE,
+      keepalive: KEEPALIVE_OFF,
     });
     closers.push(relay.shutdown);
     const proxy = await freezableProxy(relay.port);
@@ -195,7 +197,7 @@ describe('relay keepalive detects a dead peer (#439)', () => {
     const before = proxy.upChunks();
     await new Promise((r) => setTimeout(r, 2_000));
     watching = false;
-    // The client did ping: the Attach stream carries nothing else in this window.
+    // The client did ping, about 20 times: with the relay silent, nothing else writes in this window.
     expect(proxy.upChunks() - before).toBeGreaterThanOrEqual(5);
     // A GOAWAY would move the channel off READY and end the Attach stream with an error.
     expect(states).toEqual([]);
