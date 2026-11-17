@@ -404,10 +404,15 @@ describe('sandbox Execs: no Exec outlives its token (SBX0 §3.6)', () => {
   it('clears the timer when the Exec ends first: no late Abort reaches the worker', async () => {
     const r = await relay({}, { sandboxLeewayS: 0 });
     const w = await worker(r.attach, 'sbx_default');
-    expect((await exec(r.exec, { token: token({ ttlSeconds: 1 }), reqId: 23 }).done).code).toBe(
+    // ttlSeconds: 2, not 1, and the whole point is that the Exec must finish BEFORE exp. `exp` is
+    // `Math.floor(Date.now() / 1000) + ttlSeconds`, so a ttl of 1 leaves anywhere from 1 ms to 1 s
+    // of real budget depending on where in the second the token is minted -- with leeway 0 that
+    // failed in CI as DEADLINE_EXCEEDED. Two seconds guarantees at least one.
+    expect((await exec(r.exec, { token: token({ ttlSeconds: 2 }), reqId: 23 }).done).code).toBe(
       status.OK,
     );
-    await sleep(2_000);
+    // Past exp either way: at most 2 s of it was left when the Exec ended.
+    await sleep(2_500);
     expect(w.aborts).toHaveLength(0);
   });
 
