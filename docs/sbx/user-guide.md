@@ -806,7 +806,9 @@ prints, for the bound sandbox, `export` lines for a client: `SBX_ADDR`, `SBX_TLS
 `SBX_SANDBOX_ID`, `SBX_WORKSPACE_KEY`, `SBX_TOKEN_CMD` and, when the endpoint's certificate is
 self-issued, `SBX_CA_FILE`. `mocactl sbx token` prints a fresh token; `mocactl sbx token
 --renew-every 600` prints a new one every 600 seconds, one line each, until stopped, for a
-long-lived client that reads its next token from a pipe. Each token printed counts as use of the
+long-lived client that reads its next token from a pipe. With `--json`, each line is an object
+with the `token`, its `expiresAt` and the sandbox's `sandboxExpiresAt` (epoch seconds, as the
+control plane returns them; a control plane from before `sandboxExpiresAt` leaves it out). Each token printed counts as use of the
 sandbox, so a `--renew-every` pump keeps it alive whether or not its client runs commands. See
 [the direct-client guide](../api/sandbox-v1-direct-client.md) for what a client sends.
 
