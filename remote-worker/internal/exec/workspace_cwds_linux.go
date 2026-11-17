@@ -103,15 +103,27 @@ func scanCwds(proc string, readlink func(string) (string, error),
 			continue // outside the worker's cgroup subtree: no session command
 		}
 		if selfCgroup == "/" {
-			return nil, fmt.Errorf("process %s of this worker's uid %d has an unreadable cwd (%v); "+
-				"the worker's cgroup is the root of its cgroup namespace, so every process counts "+
-				"as in its subtree", e.Name(), uid, err)
+			return nil, &hiddenCwdError{pid: e.Name(), msg: fmt.Sprintf(
+				"process %s of this worker's uid %d has an unreadable cwd (%v); "+
+					"the worker's cgroup is the root of its cgroup namespace, so every process counts "+
+					"as in its subtree", e.Name(), uid, err)}
 		}
-		return nil, fmt.Errorf("process %s of this worker's uid %d, in its cgroup subtree %s, "+
-			"has an unreadable cwd (%v)", e.Name(), uid, selfCgroup, err)
+		return nil, &hiddenCwdError{pid: e.Name(), msg: fmt.Sprintf(
+			"process %s of this worker's uid %d, in its cgroup subtree %s, has an unreadable cwd (%v)",
+			e.Name(), uid, selfCgroup, err)}
 	}
 	return cwds, nil
 }
+
+// hiddenCwdError is the scan failing on purpose: a process that could be a session's
+// (the worker's uid, in its cgroup subtree) hides its cwd. A type of its own so the
+// real-/proc tests can tell an environment that has such a process from a broken scan.
+type hiddenCwdError struct {
+	pid string
+	msg string
+}
+
+func (e *hiddenCwdError) Error() string { return e.msg }
 
 func exited(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ESRCH)

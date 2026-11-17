@@ -18,6 +18,7 @@ import (
 // The Linux scan sees a real background child's cwd, which is what keeps an empty
 // workspace in place while a server or a delayed write still runs there.
 func TestProcCwdsSeesABackgroundChild(t *testing.T) {
+	SkipIfAProcessHidesItsCwd(t)
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -157,6 +158,15 @@ func TestScanCwdsNamesTheNamespaceRootCase(t *testing.T) {
 	_, err := scanCwds(proc, readlink, readFile, ourUID)
 	if err == nil || !strings.Contains(err.Error(), "root of its cgroup namespace") {
 		t.Fatalf("err = %v; want it to name the cgroup namespace root", err)
+	}
+	// Typed, so SkipIfAProcessHidesItsCwd can tell it from a broken scan, which is not.
+	var hidden *hiddenCwdError
+	if !errors.As(err, &hidden) || hidden.pid != "11" {
+		t.Fatalf("err = %#v; want a hiddenCwdError for pid 11", err)
+	}
+	proc, readlink, readFile = fakeProc(t, syscall.EACCES, statusWithUID(ourUID, ourUID), procFile{err: syscall.EACCES}, v2("/"))
+	if _, err := scanCwds(proc, readlink, readFile, ourUID); err == nil || errors.As(err, &hidden) {
+		t.Fatalf("unreadable cgroup: err = %v; want an error that is not a hiddenCwdError", err)
 	}
 }
 

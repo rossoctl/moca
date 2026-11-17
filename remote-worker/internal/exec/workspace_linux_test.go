@@ -17,6 +17,7 @@ import (
 // (#551): an Exec backgrounds a child in a still-empty workspace and returns. Past EmptyIdle the directory stays while the
 // child runs, and goes once it has exited.
 func TestSweepKeepsAnEmptyWorkspaceWithABackgroundChild(t *testing.T) {
+	wexec.SkipIfAProcessHidesItsCwd(t)
 	w, clock := newWorkspaceRunner(t, wexec.BashRunner{})
 	pid, err := strconv.Atoi(runIn(t, w, "bg", "nohup sleep 60 >/dev/null 2>&1 & echo $!"))
 	if err != nil {
