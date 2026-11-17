@@ -132,7 +132,11 @@ The longest single command is therefore one token lifetime. Split longer work in
 
 A mint also moves the sandbox's deadline: to at least now plus the sandbox's idle lifetime
 (`idleLifetimeS`), never backwards. Send `{"activity": false}` as the body for a mint that runs no
-command, such as a keepalive, so that it does not count. The token response's `sandboxExpiresAt` is
+command, such as a keepalive, so that it does not count. A client that mints without running
+commands should always send it. Each `mocactl sbx token` and each `--renew-every` mint counts as
+use: a token pump keeps the sandbox alive whether or not its client runs commands, and at a
+30-day lifetime the margin before the host reclaims an unreachable workspace is 2 days (spec §7).
+The token response's `sandboxExpiresAt` is
 the deadline after the mint; track it, since it moves.
 
 **Delete and de-enrollment are not immediate.** A token already issued keeps working until its

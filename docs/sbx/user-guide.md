@@ -697,9 +697,10 @@ supported. Two of your credentials cannot hold the identical destination (`409 d
   keeps the original tree, so pull often.
 - **Commands that keep failing for days.** If commands keep failing while the sandbox is still
   used (the relay unreachable for days), the host may reclaim the workspace before the sandbox
-  reads expired: about 25 days at the default lifetime, 2 days at 30 days. A sandbox created with
-  a longer `--lifetime` but driven by an older `mocactl sbx mcp` (whose lease keepalive counts as
-  use) has only about 2 days of that margin at 30 days: upgrade `mocactl` everywhere before using
+  reads expired: about 25 days at the default lifetime, 2 days at 30 days.
+- **Older `mocactl sbx mcp` with a long lifetime.** An older `mocactl sbx mcp` counts its lease
+  keepalive as use, so a sandbox it drives never ends from disuse. At a 30-day `--lifetime`
+  that leaves only about 2 days of the margin above. Upgrade `mocactl` everywhere before using
   `--lifetime` above the default.
 
 ## 8. Your own templates
@@ -805,7 +806,8 @@ prints, for the bound sandbox, `export` lines for a client: `SBX_ADDR`, `SBX_TLS
 `SBX_SANDBOX_ID`, `SBX_WORKSPACE_KEY`, `SBX_TOKEN_CMD` and, when the endpoint's certificate is
 self-issued, `SBX_CA_FILE`. `mocactl sbx token` prints a fresh token; `mocactl sbx token
 --renew-every 600` prints a new one every 600 seconds, one line each, until stopped, for a
-long-lived client that reads its next token from a pipe. See
+long-lived client that reads its next token from a pipe. Each token printed counts as use of the
+sandbox, so a `--renew-every` pump keeps it alive whether or not its client runs commands. See
 [the direct-client guide](../api/sandbox-v1-direct-client.md) for what a client sends.
 
 ## 10. Troubleshooting

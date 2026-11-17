@@ -340,9 +340,9 @@ export interface ExecConnOptions {
   /**
    * The sandbox's own `expiresAt` (epoch s) at open, if known; each grant's `sandboxExpiresAt` then
    * replaces it, since the deadline slides with activity (idle-lifetime spec §4.2). The control
-   * plane caps every token's `exp` at it, so a token ending there is short because the sandbox is ending, not because the
-   * deployment's lifetime is: it is run with a cut timeout, and refused as "the sandbox expires in
-   * N s" (kind `expiring`) only when nothing can run (final review M1).
+   * plane caps every token's `exp` at it, so a token ending there is short because the sandbox is
+   * ending, not because the deployment's lifetime is: it is run with a cut timeout, and refused as
+   * "the sandbox expires in N s" (kind `expiring`) only when nothing can run (final review M1).
    */
   sandboxExpiresAt?: number;
   /** The clock, in epoch milliseconds (tests). */
