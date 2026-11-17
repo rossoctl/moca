@@ -1,6 +1,8 @@
 package vmpool
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -619,4 +621,60 @@ func TestSweepOrphansReportsACgroupWhoseProcessOutlivesTheWaitAsStuck(t *testing
 		t.Fatal("the stand-in process exited, so this test staged nothing stuck")
 	default:
 	}
+}
+
+func TestReadMemoryCurrent(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+		want          int64
+		wantErr       bool
+	}{
+		{"kernel format", "12345\n", 12345, false},
+		{"surrounding whitespace", " \t12345 \n\n", 12345, false},
+		{"zero", "0\n", 0, false},
+		{"empty", "", 0, true},
+		{"newline only", "\n", 0, true},
+		{"max", "max\n", 0, true},
+		{"two numbers", "12 34\n", 0, true},
+		{"unit suffix", "12345K\n", 0, true},
+		{"overflow", "9223372036854775808\n", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "memory.current"), []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := readMemoryCurrent(dir)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("readMemoryCurrent(%q) = %d, want an error", tc.content, got)
+				}
+				if !strings.Contains(err.Error(), "memory.current") {
+					t.Errorf("error %q does not name the file", err)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("readMemoryCurrent(%q) = %d, %v; want %d", tc.content, got, err, tc.want)
+			}
+		})
+	}
+
+	t.Run("missing file", func(t *testing.T) {
+		dir := t.TempDir()
+		_, err := readMemoryCurrent(dir)
+		if !errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), filepath.Join(dir, "memory.current")) {
+			t.Fatalf("err = %v, want a not-exist error naming the path", err)
+		}
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		// A directory where the file should be: ReadFile fails for root too, unlike chmod 000.
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, "memory.current"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := readMemoryCurrent(dir); err == nil {
+			t.Fatalf("readMemoryCurrent on a directory = %d, want an error", got)
+		}
+	})
 }
