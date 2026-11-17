@@ -630,6 +630,31 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     );
   });
 
+  it('create --lifetime against a control plane that ignores it says so, exit 0 (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({ 'POST /v1/sandboxes': () => ({ status: 201, body: sandbox() }) });
+    expect(
+      await sbxMain(['create', '--lifetime', '14d'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(0);
+    expect(io.errs.join('\n')).toContain(
+      `sbx: ${SBX} ends after the deployment's default lifetime without use: the control plane did not take --lifetime`,
+    );
+    // One that answers a different lifetime names it.
+    const t = setup();
+    const cp2 = fakeCp({
+      'POST /v1/sandboxes': () => ({ status: 201, body: sandbox({ idleLifetimeS: 604_800 }) }),
+    });
+    expect(
+      await sbxMain(['create', '--lifetime', '14d'], t.env, t.io, {
+        home: t.home,
+        fetchImpl: cp2.fetchImpl,
+      }),
+    ).toBe(0);
+    expect(t.io.errs.join('\n')).toContain(
+      `sbx: ${SBX} ends after 7 d without use: the control plane did not take --lifetime`,
+    );
+  });
+
   it('create --lifetime with a malformed value is a usage error and sends nothing (#770)', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({ 'POST /v1/sandboxes': () => ({ status: 201, body: sandbox() }) });

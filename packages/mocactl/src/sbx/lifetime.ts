@@ -27,3 +27,20 @@ export function afterText(s: { idleLifetimeS?: number }): string {
     ? `, after ${lifetimeText(s.idleLifetimeS)} without use`
     : '';
 }
+
+/**
+ * The line for a `--lifetime` the control plane did not take (it answered another lifetime, or
+ * none: a control plane from before idle lifetimes), or undefined when it did.
+ */
+export function lifetimeNotTakenText(
+  id: string,
+  asked: number | undefined,
+  s: { idleLifetimeS?: number },
+): string | undefined {
+  if (asked === undefined || s.idleLifetimeS === asked) return undefined;
+  const ends =
+    s.idleLifetimeS !== undefined
+      ? lifetimeText(s.idleLifetimeS)
+      : "the deployment's default lifetime";
+  return `sbx: ${id} ends after ${ends} without use: the control plane did not take --lifetime`;
+}

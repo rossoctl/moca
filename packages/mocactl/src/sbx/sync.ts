@@ -27,7 +27,7 @@ import {
   type ExecFactory,
   type OpenedExec,
 } from './exec.js';
-import { afterText, lifetimeText } from './lifetime.js';
+import { afterText, lifetimeNotTakenText, lifetimeText } from './lifetime.js';
 import { noticingExec } from './notices.js';
 import {
   PushError,
@@ -307,6 +307,8 @@ async function findOrCreate(
       ...(f.idleLifetimeS !== undefined ? { idleLifetimeS: f.idleLifetimeS } : {}),
     });
     c.io.err(`created ${sanitizeRemote(s.id)} (${sanitizeRemote(s.template)})`);
+    const notTaken = lifetimeNotTakenText(sanitizeRemote(s.id), f.idleLifetimeS, s);
+    if (notTaken) c.io.err(notTaken);
     return { sandbox: s, reused: false };
   } catch (err) {
     return failed(c, err);

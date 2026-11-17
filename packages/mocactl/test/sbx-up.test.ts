@@ -102,6 +102,18 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
     expect(h.err()).toContain(`, after 14 d without use; bound in .sbx/sandbox.json`);
   });
 
+  it('up --lifetime against a control plane from before lifetimes says it was not taken (#770)', async () => {
+    const h = harness({ noLifetimes: true });
+    expect(await h.run(['up', '--lifetime', '14d'])).toBe(0);
+    expect(h.err()).toContain(
+      `sbx: ${NEW} ends after the deployment's default lifetime without use: the control plane did not take --lifetime`,
+    );
+    // Without --lifetime nothing is said.
+    const g = harness({ noLifetimes: true });
+    expect(await g.run(['up'])).toBe(0);
+    expect(g.err()).not.toContain('did not take --lifetime');
+  });
+
   it('up --lifetime on a bound sandbox warns, creates nothing and still pushes (#770)', async () => {
     const h = harness({ boxes: [sandbox({ id: SBX, idleLifetimeS: 604_800 })] });
     mkdirSync(join(h.r, '.sbx'));

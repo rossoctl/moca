@@ -26,7 +26,7 @@ import {
   setModeFailureText,
   type SetModeOutcome,
 } from './mode.js';
-import { afterText, lifetimeText } from './lifetime.js';
+import { afterText, lifetimeNotTakenText, lifetimeText } from './lifetime.js';
 import { forgetNotices } from './notices.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
@@ -391,6 +391,8 @@ export async function cmdCreate(
         `sbx: ${id} is ${s.mode}, not ${body.mode}: the control plane did not take the mode`,
       );
     }
+    const notTaken = lifetimeNotTakenText(id, body.idleLifetimeS, s);
+    if (notTaken) c.io.err(notTaken);
     let setMode: { outcome: 'applied' } | { outcome: 'pending'; code: string } | undefined;
     if (modeRank(s.mode) > 0) {
       const r = await sendCreatedMode(c, s.id, o.factory).catch((err: unknown) => ({
