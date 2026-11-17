@@ -894,6 +894,29 @@ describe('the sandbox token source (SBX0 §6.5)', () => {
       expect((await busy).token).toBe('busy');
     });
 
+    it('an activity ask aborted while it waits out a no-activity mint starts no mint', async () => {
+      const gates: ((t: SbxToken) => void)[] = [];
+      const { api, calls } = fakeApi(() => new Promise<SbxToken>((r) => gates.push(r)));
+      const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
+      const quiet = t.first(undefined, false);
+      const ac = new AbortController();
+      const busy = t.force(ac.signal);
+      const settled = expect(busy).rejects.toBe('stop');
+      await Promise.resolve();
+      ac.abort('stop');
+      await settled;
+      gates[0]!({ ...TOKEN, token: 'quiet' });
+      await quiet;
+      // Let the abandoned waiter run on, if it is going to.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(calls).toEqual([false]);
+      // An unrelated ask mints normally.
+      const next = t.force();
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      gates[1]!({ ...TOKEN, token: 'next' });
+      expect((await next).token).toBe('next');
+    });
+
     it('passes sandboxExpiresAt through to the grant', async () => {
       const a = fakeApi(() => ({ ...TOKEN, sandboxExpiresAt: 123 }));
       const g = await sandboxTokenFn(a.api, SBX, () => at(TOKEN_IAT)).token(ask(true));

@@ -115,7 +115,8 @@ export function grantOf(t: SbxToken): SandboxTokenGrant {
  * The sandbox token for one sandbox, minted through the control plane (with the user's login) and
  * kept while it has `max(60, minValidS)` seconds left (SBX0 §6.4: the MCP server refreshes in
  * process; §6.5: an Exec's token covers its timeout plus 60 s). `force` re-mints, for the exec
- * client's one retry after a refusal. Concurrent asks share one mint.
+ * client's one retry after a refusal. Concurrent asks share one mint, except that an activity ask
+ * never shares a no-activity mint: it waits that one out and mints its own.
  */
 export function sandboxTokenFn(
   api: SandboxApiClient,
@@ -138,6 +139,8 @@ export function sandboxTokenFn(
   const mintShared = async (activity: boolean, signal?: AbortSignal): Promise<SbxToken> => {
     // A no-activity mint in flight is not joined by an activity ask: wait it out, then mint.
     while (pending && activity && !pending.activity) await pending.p.catch(() => undefined);
+    // An ask aborted during that wait starts nothing, and publishes no mint for others to join.
+    signal?.throwIfAborted();
     if (pending) return pending.p;
     const entry = {
       activity,
