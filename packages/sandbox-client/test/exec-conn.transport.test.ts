@@ -700,6 +700,9 @@ describe('SandboxExecConn token freshness (SBX0 §6.5)', () => {
     asks.length = 0;
     await c.leaseControl('reset');
     expect(asks.map((a) => a.activity)).toEqual([true]);
+    asks.length = 0;
+    await c.leaseControl('reset', undefined, { activity: false });
+    expect(asks.map((a) => a.activity)).toEqual([false]);
   });
 
   it("runs past the sandbox's original end when each grant moves it", async () => {

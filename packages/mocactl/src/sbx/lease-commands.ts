@@ -244,7 +244,7 @@ export async function cmdGet(c: SbxCtx, id: string, factory?: ExecFactory): Prom
             const { setModeToken } = await c.api.mintSandboxModeToken(id, {
               activity: false,
             });
-            const r = await sendSetMode(x, c.api, id, setModeToken, c.signal);
+            const r = await sendSetMode(x, c.api, id, setModeToken, c.signal, false);
             if (r.outcome === 'applied') {
               c.io.err(`re-sent mode ${s.mode}: applied`);
               v = r.status;

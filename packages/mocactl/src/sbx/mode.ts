@@ -37,10 +37,15 @@ export async function sendSetMode(
   id: string,
   token: string,
   signal?: AbortSignal,
+  /** False: the set_mode and its `denied` re-mint do not count as use (`sbx get`). */
+  activity = true,
 ): Promise<SetModeOutcome> {
   const send = async (t: string): Promise<SetModeOutcome> => {
     try {
-      const status = await conn.leaseControl('set_mode', t, signal ? { signal } : {});
+      const status = await conn.leaseControl('set_mode', t, {
+        ...(signal ? { signal } : {}),
+        activity,
+      });
       return { outcome: 'applied', status };
     } catch (err) {
       if (
@@ -55,7 +60,7 @@ export async function sendSetMode(
     return await send(token);
   } catch (err) {
     if (!(err instanceof LeaseControlError && err.code === 'denied')) throw err;
-    return send((await cp.mintSandboxModeToken(id)).setModeToken);
+    return send((await cp.mintSandboxModeToken(id, { activity })).setModeToken);
   }
 }
 

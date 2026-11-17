@@ -305,7 +305,8 @@ export interface TokenRequest {
   minValidS: number;
   /**
    * False: the mint must not count as the owner's activity (idle-lifetime spec §3.1): a keepalive
-   * or a lease status. Every other ask is activity -- an Exec, a lease end or mode change.
+   * or a lease status. Every other ask is activity -- an Exec, or a lease reset, set_mode or
+   * sandbox_deleted.
    */
   activity: boolean;
 }
@@ -338,8 +339,8 @@ export interface ExecConnOptions {
   backstopMarginS?: number;
   /**
    * The sandbox's own `expiresAt` (epoch s) at open, if known; each grant's `sandboxExpiresAt` then
-   * replaces it, since the deadline slides with activity (idle-lifetime spec §4.2). The control plane caps every token's `exp`
-   * at it, so a token ending there is short because the sandbox is ending, not because the
+   * replaces it, since the deadline slides with activity (idle-lifetime spec §4.2). The control
+   * plane caps every token's `exp` at it, so a token ending there is short because the sandbox is ending, not because the
    * deployment's lifetime is: it is run with a cut timeout, and refused as "the sandbox expires in
    * N s" (kind `expiring`) only when nothing can run (final review M1).
    */
@@ -633,11 +634,12 @@ export class SandboxExecConn {
    * token-refusal retry (see the top of the file); a token source failure propagates unchanged.
    * An abort of `signal` cancels the call (a set_mode or reset may wait up to 31 min): it rejects
    * with a LeaseControlError `cancelled`, and one already aborted sends nothing (P4-R12).
+   * `opts.activity` (default: every op but `status`) says whether the token ask counts as use.
    */
   leaseControl = async (
     op: LeaseOpName,
     setModeToken?: string,
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; activity?: boolean } = {},
   ): Promise<LeaseStatusView> => {
     const req = LeaseControlRequest.fromPartial({
       sandboxId: this.o.sandboxId,
@@ -647,7 +649,7 @@ export class SandboxExecConn {
     const backstopMs = op === 'status' ? LEASE_STATUS_BACKSTOP_MS : LEASE_MUTATE_BACKSTOP_MS;
     const { signal } = opts;
     const res = await this.leaseCall(
-      op !== 'status',
+      opts.activity ?? op !== 'status',
       (md) =>
         new Promise<LeaseControlResponse>((resolve, reject) => {
           if (signal?.aborted) {

@@ -24,7 +24,7 @@ import { failed, type SbxCtx } from './commands.js';
 export type LeaseControlFn = (
   op: LeaseOpName,
   setModeToken?: string,
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; activity?: boolean },
 ) => Promise<LeaseStatusView>;
 
 /**
