@@ -132,10 +132,22 @@ func TestDeferredReapOpensTheGateAtTheBarrierNotAfterTheReap(t *testing.T) {
 		_, err := p.Exec(context.Background(), "run-a", Exec{ReqID: 2, Command: "two", TimeoutS: 5}, discardingSink{})
 		done <- err
 	}()
+	// done READY DOES NOT MEAN Run was skipped. The fake Run sends on entered (buffered) and
+	// returns at once, so the second Exec can finish and fill done before this goroutine reaches
+	// the select; with both cases ready Go picks one at random (#805). Run's send happens before
+	// Exec returns, so a done with nothing on entered is the only real "returned without
+	// entering Run" -- check entered without blocking before calling it that.
+	var secondErr error
+	secondDone := false
 	select {
 	case <-entered:
 	case err := <-done:
-		t.Fatalf("second Exec returned without entering Run: %v", err)
+		select {
+		case <-entered:
+			secondErr, secondDone = err, true
+		default:
+			t.Fatalf("second Exec returned without entering Run: %v", err)
+		}
 	case <-time.After(3 * time.Second):
 		barriers, reaps, _ := lc.counts()
 		t.Fatalf("second Exec never reached Run while a reap was outstanding: the gate is "+
@@ -149,8 +161,11 @@ func TestDeferredReapOpensTheGateAtTheBarrierNotAfterTheReap(t *testing.T) {
 			"passed and the reap still outstanding, so this asserts the gate opened AT the barrier",
 			barriers, reaps)
 	}
-	if err := <-done; err != nil {
-		t.Fatalf("second Exec: %v", err)
+	if !secondDone {
+		secondErr = <-done
+	}
+	if secondErr != nil {
+		t.Fatalf("second Exec: %v", secondErr)
 	}
 }
 
