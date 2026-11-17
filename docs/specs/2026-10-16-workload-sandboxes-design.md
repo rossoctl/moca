@@ -171,8 +171,9 @@ holds its workload's token; §9 records what that is worth to it.
 **Why a signed token and not a store lookup.** The proposal was a trusted
 `sandboxId → {workload, owner}` store. In this deployment the only shared store is Redis, and the
 workers can write it, so a binding there is no more trusted than a `Hello` label. A Redis ACL that
-gives the provisioner a write-only prefix would work, but it needs ACL users the deployment does not
-have, and the relay would still do a lookup on every attach. A signed token carries the binding
+gives the provisioner a write-only prefix would work, but it needs a provisioner user that can write
+(the deployment gives it only a read-only one, §6.2), and the relay would still do a lookup on every
+attach. A signed token carries the binding
 itself, adds no store, and keeps the relay's attach path synchronous.
 
 **One token per workload, not per sandbox.** A StatefulSet's pods share one template, so they
@@ -506,8 +507,9 @@ Each step tolerates "already gone", so a retried delete finishes what a failed o
 
 A loop in the provisioner, every `MOCA_PROVISIONER_RECONCILE_S` (default 300). It lists the
 workload StatefulSets, Services and PVCs in `moca-sandbox` and reads each one's record key
-from its annotation, reading Redis with the deployment's one credential (there are no ACL users,
-§3.1). It deletes the objects when the record is missing, `deleted`, `deleting`, or of another
+from its annotation, reading Redis as an ACL user of its own that may run `GET` on `sh:wl:*` and
+nothing else (#626; on Kubernetes `setup.sh` defines it in `redis.conf` and puts its `REDIS_URL` in
+the Secret `moca-redis-provisioner`; the other callers keep the read-write password). It deletes the objects when the record is missing, `deleted`, `deleting`, or of another
 generation, and every object of the workload is older than a grace
 (`MOCA_PROVISIONER_ORPHAN_GRACE_S`, default 600, 10 minutes), except that **a missing record never
 deletes a workload's storage**: on `missing` it deletes the StatefulSet, Secret and Service and
@@ -653,12 +655,12 @@ on this path for phase 2 workloads.
   `moca-sandbox`.
 - **A compromised provisioner, within its policy.** It cannot read a Secret or mount another one,
   but it can mint attach tokens for any `wl` it likes (it holds the key) and so register sandboxes
-  under any workload label, delete any workload's objects, and fill the namespace's pod quota. It
-  also holds the deployment's read-write Redis credential (`REDIS_URL`, for the reconciler, §6.2;
-  there are no ACL users, §3.1): its code only reads workload records, but the credential could
-  write any key, `sh:sandbox:records` included, and whoever writes that chooses the executor for
-  every turn. That is the same reach as a compromised worker, and the provisioner's seed port is
-  reachable from model code, so this is a real widening of who holds it.
+  under any workload label, delete any workload's objects, and fill the namespace's pod quota. Its
+  Redis credential (`REDIS_URL`, for the reconciler, §6.2) is its own ACL user's, `GET` on
+  `sh:wl:*` only (#626): it can read workload records and write no key, so it cannot reach
+  `sh:sandbox:records`, which chooses the executor for every turn. That matters because the
+  provisioner's seed port is reachable from model code: the read-write password stays with the
+  supervisor, relay and control plane.
 - **Egress.** Workload sandboxes keep the shared pool's public internet egress (MI1 R8 until S5),
   so model code can still send out what it can read: its own owner's data.
 - **Operators and namespace admins.** Anyone who can exec into `moca-sandbox` pods or mount its

@@ -28,9 +28,10 @@ import { startSeedServer, startServer, type ServerDeps } from './server.js';
  * moca-provisioner (ADR-0043): the only MOCA component with Kubernetes permissions in the sandbox
  * namespace. Secrets are files under CREDENTIALS_DIRECTORY (credentialValue), as the control
  * plane's are: MOCA_ATTACH_PRIVATE_KEY (its own Ed25519 key, PKCS#8 base64 or PEM),
- * MOCA_PROVISIONER_TOKEN (the workers' service token) and REDIS_URL (the deployment's one Redis
- * credential, read-write like every caller's (spec §9), used by the orphan sweep only, for GETs;
- * unset, there is no sweep).
+ * MOCA_PROVISIONER_TOKEN (the workers' service token) and REDIS_URL (used by the orphan sweep only,
+ * for GETs; unset, there is no sweep). On Kubernetes REDIS_URL names the provisioner's own Redis
+ * ACL user, which may GET sh:wl:* and nothing else (#626, spec §9; deploy/k8s/setup.sh's
+ * REDIS_PROVISIONER_ACL), so this process never holds the deployment's read-write password.
  */
 
 function required(value: string | undefined, name: string): string {
@@ -65,8 +66,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv): ProvisionerConfig {
 }
 
 /**
- * The workload records the orphan sweep reads (spec §6.2): this code only GETs, though the
- * credential could write. No offline queue, so a read while Redis is down fails at once (that
+ * The workload records the orphan sweep reads (spec §6.2): this code only GETs, and on Kubernetes
+ * its ACL user can do nothing else (#626). No offline queue, so a read while Redis is down fails at once (that
  * workload is skipped this pass) instead of waiting for a reconnect; the sweep runs only while the
  * client is ready anyway (orphanSweeper). A read on a socket that stops answering while the client
  * still looks ready is bounded by the sweep itself (MOCA_PROVISIONER_REDIS_TIMEOUT_MS).

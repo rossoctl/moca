@@ -359,6 +359,15 @@ describe('POST /turn with a session config bundle', () => {
     err.name = 'BundleNotFoundError';
     return err;
   };
+  // run-turn is mocked above, so the error is built by name, as BundleFormatError names itself.
+  const bundleTooNew = () => {
+    const err = new Error(
+      'config bundle format version 2 is newer than the 1 this release reads; ' +
+        'upgrade the harness and the control plane before the client that built it',
+    );
+    err.name = 'BundleFormatError';
+    return err;
+  };
 
   for (const [label, headers] of [
     ['sync', auth],
@@ -388,6 +397,17 @@ describe('POST /turn with a session config bundle', () => {
       expect(res.status).toBe(410);
       expect(res.text.startsWith('event:')).toBe(false);
       expect(JSON.parse(res.text)).toMatchObject({ error: 'config_bundle_not_found' });
+    });
+
+    it(`${label}: 422s config_bundle_unsupported, with the reason, for a newer bundle format`, async () => {
+      cpReply.body = { ...(cpReply.body as object), configRef: digest };
+      vi.mocked(executeTurn).mockRejectedValueOnce(bundleTooNew());
+      const res = await postRaw('/turn', { sessionId: 'sid-1', prompt: 'hi' }, headers);
+      expect(res.status).toBe(422);
+      expect(res.text.startsWith('event:')).toBe(false);
+      const body = JSON.parse(res.text);
+      expect(body).toMatchObject({ error: 'config_bundle_unsupported', sessionId: 'sid-1' });
+      expect(body.message).toContain('upgrade the harness and the control plane');
     });
   }
 });

@@ -1,6 +1,7 @@
 import {
   assertValidDigest,
   BundleDigestMismatchError,
+  BundleFormatError,
   bundleKey,
   DEFAULT_BUNDLE_TTL_SECONDS,
   MAX_BUNDLE_BYTES,
@@ -508,6 +509,10 @@ async function storeConfigBundle(
   } catch (err) {
     if (err instanceof CpError) throw err;
     if (err instanceof BundleDigestMismatchError) throw new CpError('digest_mismatch', err.message);
+    // A format this release cannot read (#510): refused here, where the client that built it hears
+    // why, instead of stored for every turn that names it to fail on. No new error code: the
+    // request is one this control plane cannot accept, and the message says what to upgrade.
+    if (err instanceof BundleFormatError) throw new CpError('invalid_request', err.message);
     console.error(
       `[control-plane] putConfigBundle configRef=${digest}: ${(err as Error)?.message ?? String(err)}`,
     );

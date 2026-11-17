@@ -15,7 +15,7 @@
 openapi: 3.1.0
 info:
   title: MOCA harness (data plane)
-  version: 1.4.0
+  version: 1.5.0
   description: |
     The agent execution tier: HTTP server and P6 workers that run turns and jobs against sandboxed
     workspaces. It is a separate deployable from the control plane, and a client that knows only
@@ -196,6 +196,15 @@ paths:
               schema: { $ref: '#/components/schemas/TurnConflict' }
         '410':
           description: config_bundle_not_found — the session's promoted bundle digest is gone
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: |
+            config_bundle_unsupported — the session's promoted bundle is stored and intact, but its
+            format (format.json) is newer than this harness reads, or its marker is not a format
+            version. The message says which, and what to upgrade. Not retryable as-is: the turn
+            succeeds once the harness is upgraded to a release that reads that format.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -444,6 +453,7 @@ paths:
         '404': { $ref: '#/paths/~1v1~1turn/post/responses/404' }
         '409': { $ref: '#/paths/~1v1~1turn/post/responses/409' }
         '410': { $ref: '#/paths/~1v1~1turn/post/responses/410' }
+        '422': { $ref: '#/paths/~1v1~1turn/post/responses/422' }
         '429': { $ref: '#/paths/~1v1~1turn/post/responses/429' }
         '503': { $ref: '#/paths/~1v1~1turn/post/responses/503' }
         '500': { $ref: '#/paths/~1v1~1turn/post/responses/500' }

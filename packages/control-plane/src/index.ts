@@ -245,6 +245,18 @@ export {
 export { asyncCounters, countAsync, resetAsyncCounters, type AsyncCounter } from './counters.js';
 export { buildHandler, startControlPlane } from './server.js';
 export {
+  SCHEMA_VERSION,
+  SCHEMA_VERSION_KEY,
+  SchemaVersionError,
+  checkSchemaVersion,
+  guardSchemaVersion,
+  type SchemaGuardOptions,
+  type SchemaVersionClient,
+  type SchemaVersionOutcome,
+  type SchemaVersionRedisLike,
+  type SchemaVersionResult,
+} from './schema-version.js';
+export {
   CREDENTIAL_STORES,
   configFromEnv,
   credentialStoreFromEnv,

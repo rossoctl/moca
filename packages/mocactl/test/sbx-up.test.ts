@@ -348,7 +348,9 @@ describe('mocactl sbx push and pull (SBX0 §6.2, §10.3)', () => {
     expect(readFileSync(join(ws, 'src/app.py'), 'utf8')).toBe('print("agent")\n');
     expect(await h.run(['push', '--force'])).toBe(0);
     expect(readFileSync(join(ws, 'src/app.py'), 'utf8')).toBe('print(1)\n');
-    // The 7 files `up` pushed, and the 7 agent-configuration files it wrote after its push.
+    // The 7 files `up` pushed, and the 7 agent-configuration files it wrote after its push: this
+    // fixture ignores none of them, so all are pushed. A repository that ignores them (this one
+    // does) pushes fewer (ADR-0049, pinned in the agent-configuration tests below).
     expect(h.err()).toMatch(new RegExp(`pushed 14 files \\(0\\.0 MiB\\) to ${NEW}`));
   });
 
@@ -504,6 +506,39 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     expect(await h.run(['up'])).toBe(0);
     expect(h.err()).not.toContain('configured Claude Code');
   });
+
+  // ADR-0049 (#683): the push has no rule of its own for these files. Once `up` has written them,
+  // the next push carries each one exactly when git would list it -- tracked, or untracked and not
+  // ignored -- and `.sbx/` never. Either test fails if that flips, in either direction.
+  const inSandbox = (h: ReturnType<typeof harness>) =>
+    [...CFG, '.sbx/sandbox.json', '.sbx/agent-config.json'].filter((f) =>
+      existsSync(join(h.ws.get(NEW).ws, f)),
+    );
+
+  it('the next push carries the agent configuration a repository does not ignore, never .sbx/ (ADR-0049)', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    expect(inSandbox(h)).toEqual([]); // written after the first push
+    expect(await h.run(['up'])).toBe(0);
+    expect(inSandbox(h)).toEqual(CFG);
+  }, 30_000);
+
+  it("the next push leaves out what the repository's .gitignore ignores, unless it is tracked (ADR-0049)", async () => {
+    const h = harness();
+    // This repository's own lines (#677): CLAUDE.md and .claude/settings.json are not among them.
+    writeFileSync(
+      join(h.r, '.gitignore'),
+      'build/\n/.bob/\n/.mcp.json\n/opencode.json\n/opencode.jsonc\n/AGENTS.md\n/.sbx/\n',
+    );
+    git(h.r, 'commit', '-qam', 'ignore the agent wiring');
+    expect(await h.run(['up'])).toBe(0);
+    expect(await h.run(['up'])).toBe(0);
+    expect(inSandbox(h)).toEqual(['.claude/settings.json', 'CLAUDE.md']);
+    // A tracked file is pushed even where the ignore rules match it: a committed AGENTS.md arrives.
+    git(h.r, 'add', '-f', 'AGENTS.md');
+    expect(await h.run(['push'])).toBe(0);
+    expect(inSandbox(h)).toEqual(['.claude/settings.json', 'CLAUDE.md', 'AGENTS.md']);
+  }, 30_000);
 
   // #577: enabledMcpjsonServers does not suppress Claude Code's prompt, whose default declines
   // and leaves the agent with no tools. `up`'s output is the only place that is said in time.

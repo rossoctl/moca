@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.28.0
+  version: 1.29.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -2220,7 +2220,10 @@ paths:
       description: |
         Content-addressed: the server re-hashes the tar and refuses a mismatch. Idempotent; a digest
         that already exists only has its TTL refreshed. The decoded tar may be at most 8 MiB. New
-        digests count against a per-subject and a deployment-wide byte budget (429 when full).
+        digests count against a per-subject and a deployment-wide byte budget (429 when full). A
+        bundle whose `format.json` names a format newer than this release reads, or is not a format
+        version, is refused `400 invalid_request`, with the reason in `message`; a bundle without it
+        is format 1.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true

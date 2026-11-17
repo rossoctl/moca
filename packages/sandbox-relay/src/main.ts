@@ -35,6 +35,7 @@ import {
   ATTACH_CLOCK_LEEWAY_S,
   CpError,
   SANDBOX_CLOCK_LEEWAY_S,
+  guardSchemaVersion,
   verifyAttachToken,
   type SandboxTokenClaims,
 } from '@moca/control-plane';
@@ -225,17 +226,70 @@ function execCaller(md: Metadata, auth: ExecAuth): ExecCaller {
 }
 
 /**
- * Server-side keepalive (SBX0 §3.4). Some load balancers in front of a cluster router close a TCP
- * connection after a short idle period -- one was measured at 50 s -- so an Exec whose command prints
- * nothing would die mid-command. The relay pings every connection instead. These are the two
- * keepalive options grpc-js 1.14's server reads; it does not police client ping rates, so a client's
- * own pings are never refused.
+ * Server-side keepalive, for two reasons.
+ *
+ * - SBX0 §3.4: some load balancers in front of a cluster router close a TCP connection after a short
+ *   idle period -- one was measured at 50 s -- so an Exec whose command prints nothing would die
+ *   mid-command. The relay pings every connection instead.
+ * - #439: a P4 host whose network drops without a TCP close leaves its Attach stream open on the
+ *   relay, which then refuses the host's reconnect as a duplicate sandbox id and keeps its presence
+ *   record, until the router's idle timeout (5 m on the passthrough Route) closes the tunnel. A PING
+ *   the peer never acks destroys the connection within timeMs + timeoutMs instead, and the stream's
+ *   teardown removes presence. The proxies in front of the relay do not change this: the
+ *   passthrough router forwards the TLS bytes untouched, and the ghostunnel sidecar is an L4 TLS
+ *   proxy that terminates TLS and forwards the plaintext bytes to the relay without parsing HTTP/2.
+ *   Neither answers a PING itself, so the relay's PINGs reach the worker and only the worker acks
+ *   them: a dead host behind them goes unanswered exactly as a direct one would.
+ *
+ * These are the two keepalive options grpc-js 1.14's server reads; it pings whether or not a call is
+ * open. It has no server-side ping policy: it never reads grpc.http2.min_ping_interval_without_data_ms,
+ * and reads grpc.keepalive_permit_without_calls only on a client, so setting either here would do
+ * nothing. The workers' own 30 s client pings (remote-worker/internal/session/dial.go) are therefore
+ * never answered with GOAWAY too_many_pings; keepalive-dead-peer.transport.test.ts pins that.
  */
 export interface Keepalive {
   timeMs: number;
   timeoutMs: number;
 }
 export const RELAY_KEEPALIVE = { timeMs: 20_000, timeoutMs: 10_000 } as const;
+
+/** The largest delay a Node timer holds; grpc-js also reads this keepalive time as "off". */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+/**
+ * The env floor, so a value meant as seconds (`20`) is refused rather than pinging every 20 ms. The
+ * explicit `keepalive` option of startRelay is not bound by it, which is how tests use smaller values.
+ */
+export const MIN_KEEPALIVE_MS = 1_000;
+
+function keepaliveMs(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const v = raw.trim();
+  const n = Number(v);
+  // Boot errors name variables, not values, everywhere here.
+  if (!/^[1-9][0-9]*$/.test(v) || !Number.isSafeInteger(n) || n >= MAX_TIMER_MS) {
+    throw new Error(`${name} must be a positive integer of milliseconds below ${MAX_TIMER_MS}`);
+  }
+  if (n < MIN_KEEPALIVE_MS) {
+    throw new Error(
+      `${name} is in milliseconds and must be at least ${MIN_KEEPALIVE_MS} (1 s); a value meant as seconds is refused`,
+    );
+  }
+  return n;
+}
+
+/**
+ * MOCA_RELAY_KEEPALIVE_TIME_MS and MOCA_RELAY_KEEPALIVE_TIMEOUT_MS: unset or empty is the default
+ * (RELAY_KEEPALIVE), anything else must be an integer of milliseconds from MIN_KEEPALIVE_MS up to
+ * below MAX_TIMER_MS (which grpc-js reads as keepalive off), or the relay does not boot. Keepalive
+ * cannot be turned off here: both reasons above hold on every deployment.
+ */
+export function relayKeepalive(env: NodeJS.ProcessEnv): Keepalive {
+  return {
+    timeMs: keepaliveMs(env, 'MOCA_RELAY_KEEPALIVE_TIME_MS', RELAY_KEEPALIVE.timeMs),
+    timeoutMs: keepaliveMs(env, 'MOCA_RELAY_KEEPALIVE_TIMEOUT_MS', RELAY_KEEPALIVE.timeoutMs),
+  };
+}
 
 export function relayServerOptions(keepalive: Keepalive = RELAY_KEEPALIVE): ChannelOptions {
   return {
@@ -608,6 +662,8 @@ export async function startRelay(
   } = {},
 ): Promise<{ port: number; execPort?: number; shutdown: () => Promise<void> }> {
   const env = opts.env ?? process.env;
+  // Before anything else, so a malformed value is a boot error.
+  const keepalive = opts.keepalive ?? relayKeepalive(env);
   // The store startRelay built itself, and so closes on shutdown; injected deps belong to the caller.
   let ownedRecords: RedisRecordStore | undefined;
   // The exec auth first: it throws on a missing credential before anything touches Redis.
@@ -631,11 +687,11 @@ export async function startRelay(
   const attachAddr = `0.0.0.0:${opts.port ?? Number(env.SH_RELAY_PORT ?? 8443)}`;
   const execAddr = opts.execAddr ?? env.MOCA_RELAY_EXEC_ADDR;
   if (!execAddr) {
-    const { server, relay } = buildServer(deps, opts.keepalive);
+    const { server, relay } = buildServer(deps, keepalive);
     const port = await bind(server, attachAddr);
     return { port, shutdown: () => stopGracefully([server], relay, close) };
   }
-  const { attachServer, execServer, relay } = buildServers(deps, opts.keepalive);
+  const { attachServer, execServer, relay } = buildServers(deps, keepalive);
   const port = await bind(attachServer, attachAddr);
   const execPort = await bind(execServer, execAddr);
   return {
@@ -700,6 +756,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   startRelay().then(
     ({ port, execPort, shutdown }) => {
       installShutdownSignals(shutdown);
+      // The Redis schema version (#509): written if absent, and the relay exits on a newer one once
+      // Redis answers. Its records store reads the same REDIS_URL (RedisRecordStore's default).
+      void guardSchemaVersion({
+        component: 'sandbox-relay',
+        url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379',
+      });
       console.log(
         `sandbox-relay attach :${port}${execPort ? `, exec :${execPort}` : ' (exec on the same listener)'}`,
       );

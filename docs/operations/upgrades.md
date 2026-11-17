@@ -73,8 +73,22 @@ period is only an outer bound. Practically:
   first (see below). Do not split the image to get this ordering.
 - **Tier lists must match.** `SH_SANDBOX_TIERS` and `SH_SANDBOX_DEFAULT_TIER` are read by both from the same
   ConfigMap.
-- **No schema version.** There is no schema-version key or migration tool for Redis. New fields are handled by
-  tolerant reads. The only versioned artefact at rest is the credential envelope (`v1.`).
+- **Redis schema version.** Redis holds `sh:schema-version`, written by the first control plane, worker or relay to
+  start. The check runs in the background once the process is serving: it retries until Redis answers, and a process
+  that finds a version newer than it knows then exits with the reason in its log. A rollback past a schema change is
+  not supported: the older release exits once Redis answers only if the newer one raised the stored version, which
+  each release that bumps it decides ([change policy](../reference/change-policy.md#version-markers)).
+  There is no migration tool: new fields are handled by tolerant reads, and every release so far writes version 1.
+  An absent key, with any `sh:` data, means version 1. The key has no TTL: keep Redis on a `noeviction` or
+  `volatile-*` eviction policy (an `allkeys-*` policy can evict it), and after a `FLUSHALL` or a restore that lost
+  it, re-stamp it with the data's version (`SET sh:schema-version 1` today), since the next process to start
+  otherwise stamps its own. A Redis that refuses writes still has an existing stamp checked; on an absent key the
+  refused write is logged once and retried, and the process runs on. The credential envelope is versioned too (`v1.`).
+- **Config-bundle format.** A bundle carries its format version (`format.json`). The control plane refuses to store a
+  format newer than it knows (`400 invalid_request`), and the harness refuses to apply one (a turn answers
+  `422 config_bundle_unsupported`), so a client upgraded first fails loudly, with the reason in the response. Because
+  the marker is bundle content, a workflow promoted again with the first release that writes it gets a new digest;
+  bundles already stored keep theirs, and sessions naming them keep working.
 - No wire-version negotiation exists. `GET /v1/discovery` returns the control plane's `version`.
 
 ### Rolling the harness before the control plane
@@ -126,8 +140,10 @@ rule 5).
 ## Rolling back
 
 No procedure is documented. Mechanically, re-running `setup.sh` with an older `--image` rolls the Deployments back,
-and plain `kubectl rollout undo` also works. Redis data is not versioned, so a rollback across a data-format change
-is untested.
+and plain `kubectl rollout undo` also works. Redis data carries a schema version (above): a rollback
+between releases that share it needs no step, and one past a schema change is not supported (and is refused once
+a release raises the stamp). Rollback is otherwise
+untested.
 
 ## Availability during a node drain
 

@@ -16,7 +16,9 @@
 #
 # Needs the Secret moca-provisioner in moca (setup.sh generates it): MOCA_ATTACH_PRIVATE_KEY and
 # MOCA_PROVISIONER_TOKEN for the provisioner, MOCA_ATTACH_PUBLIC_KEYS for the relay, and
-# MOCA_PROVISIONER_TOKEN again for the supervisor's workers.
+# MOCA_PROVISIONER_TOKEN again for the supervisor's workers. And the Secret moca-redis-provisioner
+# (setup.sh generates it too): REDIS_URL, the provisioner's own Redis user, which moca-redis's
+# redis.conf defines.
 apiVersion: kustomize.config.k8s.io/v1alpha1
 kind: Component
 resources:

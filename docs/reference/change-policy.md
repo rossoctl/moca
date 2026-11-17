@@ -22,8 +22,8 @@ notes. A **Legacy** surface does not change except for security and breakage fix
 
 - **HTTP routes.** The route table in `packages/server/src/routes.ts` marks each route's `surface` as
   `client` or `internal`, and a contract test keeps the OpenAPI document and that table in step. Only `client` routes
-  are described in the OpenAPI files. The control-plane document (`docs/api/openapi.yaml`) says `version: 1.28.0` (per-session model
-  selection, then the sandbox service's routes, then the async turn routes, then the template store and self-serve create, then sandbox modes, then the grant lifecycle, then template tags, edits and owner transfer, then subject trust for gate records, then the template host agents, then activation leases, then memory-aware placement, then cold-start pacing, then per-sandbox egress records, then sandbox templates for sessions, then the combined control plane, then a session's seed, patch and records, then template retire, then retired build removal, then enrollment and the admin role, then admin quotas and build reject, then pinned sessions as build use, then build reuse only while a host holds the snapshot, then grants at dequeue under multi tenancy, then idle-counted sandbox lifetimes, then per-turn artifacts and a bounded status read, then the base URL's page, then the login start's per-source bound, added to it); the harness document (`docs/api/harness-openapi.yaml`) says `version: 1.4.0`. The `/v1`
+  are described in the OpenAPI files. The control-plane document (`docs/api/openapi.yaml`) says `version: 1.29.0` (per-session model
+  selection, then the sandbox service's routes, then the async turn routes, then the template store and self-serve create, then sandbox modes, then the grant lifecycle, then template tags, edits and owner transfer, then subject trust for gate records, then the template host agents, then activation leases, then memory-aware placement, then cold-start pacing, then per-sandbox egress records, then sandbox templates for sessions, then the combined control plane, then a session's seed, patch and records, then template retire, then retired build removal, then enrollment and the admin role, then admin quotas and build reject, then pinned sessions as build use, then build reuse only while a host holds the snapshot, then grants at dequeue under multi tenancy, then idle-counted sandbox lifetimes, then per-turn artifacts and a bounded status read, then the base URL's page, then the config bundle's format version on upload and on a turn, then the login start's per-source bound, added to it); the harness document (`docs/api/harness-openapi.yaml`) says `version: 1.5.0`. The `/v1`
   prefix is the only version marker on the wire.
 - **Aliases.** `/turn` and `/runs` are unprefixed aliases of `/v1/turn` and `/v1/runs`: client routes, served by the
   same handler with the same auth, body and responses, and described in the harness document as aliases of the `/v1`
@@ -35,10 +35,16 @@ notes. A **Legacy** surface does not change except for security and breakage fix
 - **Configuration.** Variables keep historical prefixes (`SH_*`, `KAGENTI_*`, `MOCA_*`). Parsing is strict in some
   places and lenient in others ([Configuration](configuration.md#conventions)).
 - **Wire contract.** `sandbox/v1` has been extended additively (for example the `workspace_key` field on `Exec`).
-- **Stored data.** There is no schema-version key for Redis; new fields are handled by tolerant reads. The credential
-  envelope is versioned (`v1.` prefix). Token claims are read by the data plane from the control plane's tokens.
-- **Config bundles.** `BUNDLE_FORMAT_VERSION` is 1 and is written into the local `lockfile.json`, but the stored bundle
-  drops the lockfile and nothing reads the version.
+- **Stored data.** Redis holds a schema-version key, `sh:schema-version` (`SCHEMA_VERSION`, 1, in
+  `packages/control-plane/src/schema-version.ts`). The control plane, each worker and the relay write it when it is
+  absent and check it once Redis answers: a version newer than the process knows, or a value that is not a version,
+  makes the process log the reason and exit. An older version is accepted and left as it is, because a release must
+  read what the previous one wrote. New fields are still handled by tolerant reads. The credential envelope is
+  versioned (`v1.` prefix). Token claims are read by the data plane from the control plane's tokens.
+- **Config bundles.** `BUNDLE_FORMAT_VERSION` is 1. A bundle carries it as a content entry, `format.json`, which the
+  digest covers and the store keeps (the stored bundle still drops `lockfile.json`, which records the digest). The
+  control plane refuses to store a bundle in a newer format (`400 invalid_request`, naming the version), and the
+  harness refuses to apply one (a turn answers `422 config_bundle_unsupported`, naming it). A bundle without `format.json`, built before it existed, reads as version 1.
 - **Releases.** Tags are `v0.x.y`, so by semantic-versioning convention anything may change between minor releases.
 
 ## What counts as breaking
@@ -89,6 +95,25 @@ response fields and tolerate unknown error codes.** Text output meant for people
 | Stored data                           | New keys and new fields that older code ignores                             | A change the previous release cannot read. Stored data must be readable by the previous release                           |
 | Config bundles                        | None without a format version that survives upload                          | A format change the previous release cannot read; readers fail loudly on a version they do not understand                 |
 
+### Version markers
+
+Two markers guard stored formats, and each is bumped only by a change the previous release cannot read, which is a
+breaking change under rule 2 and decision 8:
+
+- **`SCHEMA_VERSION`** (Redis). Absent, it is written; equal or older, the process runs; newer, it exits. A release
+  that bumps it decides whether its processes raise the stored value (and so lock the previous release out) and how
+  existing keys are read; that is one branch of `checkSchemaVersion`. Until then, a rollback across releases that share
+  a version needs no step, and a rollback past a bump is not supported. Absent, with any `sh:` data, means version 1:
+  every release before the key existed wrote version-1 data. The check reads first and writes only an absent key, so
+  a Redis that refuses writes (full under `noeviction`, a read-only replica, an ACL without `SET`) still has its
+  stamp checked; a refused write on an absent key is logged once and retried, and the process runs on. The key has no
+  TTL, so it needs a `noeviction` or `volatile-*` eviction policy: under `allkeys-*` it can be evicted, and after a
+  `FLUSHALL` or a restore that lost it the next process stamps its own version, which after a bump could put an old
+  version over newer data. Re-stamp it after such a restore (`SET sh:schema-version <version>`).
+- **`BUNDLE_FORMAT_VERSION`** (config bundles). Readers accept their own version and every older one, and refuse a
+  newer one. Upgrade the harness and the control plane before the clients that build bundles (`mocactl`, the
+  promote tooling).
+
 ## Release notes
 
 Every release states: breaking changes, deprecations and their removal release, new required configuration, upgrade
@@ -97,16 +122,16 @@ supported runtime also satisfies the first Stable criterion for the deployment p
 
 ## Decisions (accepted 2026-10-13)
 
-| #   | Question                                                             | Decision                                                                                                                                    | Follow-up                                           |
-| --- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| 1   | Unit of notice                                                       | The longer of one minor release and the period in rule 2 (releases have come about two weeks apart, so releases alone are too short)        |                                                     |
-| 2   | Deprecation period                                                   | 90 days for the HTTP API and the sandbox wire contract; 30 days for the CLI, configuration and anything else                                |                                                     |
-| 3   | The `/turn` and `/runs` aliases                                      | Keep them indefinitely as supported, frozen aliases of `/v1`; only `/run-leaf` and `/run-leaf/status` (already deprecated) are removed      | [#507](https://github.com/rossoctl/moca/issues/507) |
-| 4   | `GET /runs/status`                                                   | Add `GET /v1/runs/status` and keep `/runs/status` as an alias                                                                               | [#508](https://github.com/rossoctl/moca/issues/508) |
-| 5   | `version` in the OpenAPI files (control plane 1.28.0, harness 1.4.0) | The version of the `/v1` contract: bump the minor for additive changes and the major only with a `/v2`; add a changelog                     | Done: [CHANGELOG.md](../api/CHANGELOG.md)           |
-| 6   | Stored-data compatibility                                            | Readable by the previous release, no migrations yet; add a schema-version key in Redis before the first change that needs one               | [#509](https://github.com/rossoctl/moca/issues/509) |
-| 7   | Config bundle format                                                 | Carry a format version into the stored bundle, have the harness check it and fail loudly, and require the previous version to stay readable | [#510](https://github.com/rossoctl/moca/issues/510) |
-| 8   | Who approves a breaking change                                       | A breaking change to a Stable surface needs an ADR and sign-off from the owner in `CODEOWNERS` for the affected area                        |                                                     |
+| #   | Question                                                             | Decision                                                                                                                                    | Follow-up                                                 |
+| --- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| 1   | Unit of notice                                                       | The longer of one minor release and the period in rule 2 (releases have come about two weeks apart, so releases alone are too short)        |                                                           |
+| 2   | Deprecation period                                                   | 90 days for the HTTP API and the sandbox wire contract; 30 days for the CLI, configuration and anything else                                |                                                           |
+| 3   | The `/turn` and `/runs` aliases                                      | Keep them indefinitely as supported, frozen aliases of `/v1`; only `/run-leaf` and `/run-leaf/status` (already deprecated) are removed      | [#507](https://github.com/rossoctl/moca/issues/507)       |
+| 4   | `GET /runs/status`                                                   | Add `GET /v1/runs/status` and keep `/runs/status` as an alias                                                                               | [#508](https://github.com/rossoctl/moca/issues/508)       |
+| 5   | `version` in the OpenAPI files (control plane 1.29.0, harness 1.5.0) | The version of the `/v1` contract: bump the minor for additive changes and the major only with a `/v2`; add a changelog                     | Done: [CHANGELOG.md](../api/CHANGELOG.md)                 |
+| 6   | Stored-data compatibility                                            | Readable by the previous release, no migrations yet; add a schema-version key in Redis before the first change that needs one               | Done: [#509](https://github.com/rossoctl/moca/issues/509) |
+| 7   | Config bundle format                                                 | Carry a format version into the stored bundle, have the harness check it and fail loudly, and require the previous version to stay readable | Done: [#510](https://github.com/rossoctl/moca/issues/510) |
+| 8   | Who approves a breaking change                                       | A breaking change to a Stable surface needs an ADR and sign-off from the owner in `CODEOWNERS` for the affected area                        |                                                           |
 
 Related, from the upgrade-order discussion: the control plane should not hand a `configRef` to a harness that cannot
 apply it. Every harness since v0.5.0 applies it, so this is closed in favour of decision 7's format-version check

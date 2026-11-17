@@ -359,6 +359,12 @@ const memberBytes = (path: string, size: number) =>
  * The push (SBX0 §6.2): `git ls-files --cached --others --exclude-standard`, so tracked files (even
  * under an ignored directory) and untracked ones that are not ignored. Refused, before anything is
  * sent: a file over MAX_FILE (by name), a tree over `maxPush` (with its largest directories).
+ *
+ * The agent configuration `sbx up` writes (`.mcp.json`, `.claude/settings.json`, `opencode.json`,
+ * `.bob/`, `CLAUDE.md`, `AGENTS.md`) has no rule of its own here, by decision (ADR-0049, #683): a
+ * repository that ignores those files keeps them on the laptop, one that does not pushes them like
+ * any other file. Only `.sbx/` is always left out. A rule for them -- skip, or re-include past the
+ * ignore files -- would change that decision; the tests in sbx-up.test.ts that name ADR-0049 pin it.
  */
 export async function planPush(
   root: string,

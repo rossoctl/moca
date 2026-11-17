@@ -1,6 +1,7 @@
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createClient } from 'redis';
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { makeSigner, workloadKeyFor, workloadRecordKey } from '@moca/control-plane';
 import { orphanSweeper, redisRecords } from '../src/main.js';
 import {
@@ -719,6 +720,100 @@ describe('the orphan sweep against a real Redis (redisRecords)', () => {
       expect(left(gone)).toMatchObject({ sts: false, svc: false, secret: false });
     } finally {
       store.close();
+    }
+  });
+});
+
+// #626: on Kubernetes the provisioner reads Redis as its own ACL user, made by deploy/k8s/setup.sh
+// from REDIS_PROVISIONER_ACL. The rules are read from the script itself, so what is held to a real
+// Valkey here is exactly what a deployment gets: enough for node-redis's connect and the sweep's
+// GETs, and nothing that writes -- sh:sandbox:records least of all, which picks every turn's executor.
+describe("the orphan sweep as setup.sh's provisioner Redis user (#626)", () => {
+  const SETUP_SH = new URL('../../../deploy/k8s/setup.sh', import.meta.url);
+  const rules = /^REDIS_PROVISIONER_ACL='([^']*)'$/m.exec(readFileSync(SETUP_SH, 'utf8'))?.[1];
+  const url = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
+  const admin = createClient({ url });
+  // A user of this run's own: a shared Redis may hold others'. The password is a throwaway.
+  const user = `moca-provisioner-test-${randomUUID()}`;
+  const password = `placeholder-${randomUUID()}`;
+  const asUser = (() => {
+    const u = new URL(url);
+    u.username = user;
+    u.password = password;
+    return u.toString();
+  })();
+  const keys: string[] = [];
+  beforeAll(async () => {
+    if (rules === undefined) return; // the first test says why
+    await admin.connect();
+    // The line setup.sh writes to redis.conf, with the password in clear instead of its #<sha256>.
+    await admin.sendCommand([
+      'ACL',
+      'SETUSER',
+      user,
+      'reset',
+      'on',
+      `>${password}`,
+      ...rules.split(' '),
+    ]);
+  });
+  afterAll(async () => {
+    if (!admin.isOpen) return;
+    if (keys.length) await admin.del(keys);
+    await admin.sendCommand(['ACL', 'DELUSER', user]);
+    await admin.quit();
+  });
+
+  it('is defined in setup.sh as GET on workload records only', () => {
+    expect(rules, `no REDIS_PROVISIONER_ACL='...' line in ${SETUP_SH.pathname}`).toBeDefined();
+    expect(rules!.split(' ')).toEqual(['~sh:wl:*', 'resetchannels', '+get']);
+  });
+
+  it('connects, and the sweep reads records with it', async () => {
+    expect(rules, 'no REDIS_PROVISIONER_ACL in setup.sh').toBeDefined();
+    const store = redisRecords(asUser);
+    try {
+      await vi.waitFor(() => expect(store.ready()).toBe(true));
+      const d = { ...deps, records: store };
+      const owner = `github:acl-${randomUUID()}`;
+      const live = ref(owner, 'live');
+      const gone = ref(owner, 'gone');
+      await putWorkload(d, live, { count: 1, tier: 'container' });
+      await putWorkload(d, gone, { count: 1, tier: 'container' });
+      for (const [r, status] of [
+        [live, 'ready'],
+        [gone, 'deleted'],
+      ] as const) {
+        const key = workloadRecordKey(r.owner, r.name);
+        keys.push(key);
+        await admin.set(key, JSON.stringify({ ...r, status, contextType: 'workspace' }));
+      }
+      now += GRACE;
+      expect(await sweepOrphans(d, GRACE)).toEqual({ swept: 1, skipped: 0, failed: 0, kept: 0 });
+      expect(left(live)).toMatchObject({ sts: true, svc: true, secret: true });
+      expect(left(gone)).toMatchObject({ sts: false, svc: false, secret: false });
+    } finally {
+      store.close();
+    }
+  });
+
+  it('can write nothing, and read nothing but workload records', async () => {
+    expect(rules, 'no REDIS_PROVISIONER_ACL in setup.sh').toBeDefined();
+    const client = createClient({ url: asUser });
+    client.on('error', () => {});
+    await client.connect();
+    try {
+      const record = `sh:wl:${'0'.repeat(32)}:acl-${randomUUID().slice(0, 8)}`;
+      keys.push(record);
+      await expect(client.set(record, '{}')).rejects.toThrow(/NOPERM/);
+      await expect(client.del(record)).rejects.toThrow(/NOPERM/);
+      await expect(client.hSet('sh:sandbox:records', 'x', '{}')).rejects.toThrow(/NOPERM/);
+      await expect(client.get('sh:sandbox:records')).rejects.toThrow(/NOPERM/);
+      await expect(client.keys('sh:*')).rejects.toThrow(/NOPERM/);
+      await expect(client.publish('sh:events', 'x')).rejects.toThrow(/NOPERM/);
+      expect(await admin.exists(record)).toBe(0);
+    } finally {
+      client.destroy();
     }
   });
 });
