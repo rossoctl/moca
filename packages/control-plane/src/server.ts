@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import { CpError, writeError } from './errors.js';
 import type { EgressHost } from './egress-config.js';
 import { checkExchangeAuth, checkStaticBearer } from './exchange.js';
@@ -49,6 +50,36 @@ const bearer = (req: IncomingMessage): string | undefined => {
   const value = rest.join(' ').trim();
   return value.length > 0 ? value : undefined;
 };
+
+/** `::ffff:192.0.2.1` and `192.0.2.1` are one client: a dual-stack socket reports the former. */
+const unmapped = (addr: string): string =>
+  addr.toLowerCase().startsWith('::ffff:') && isIP(addr.slice(7)) === 4 ? addr.slice(7) : addr;
+
+/**
+ * The client's address, for bounds on unauthenticated work (RequestCtx.source). With no trusted
+ * proxy it is the socket peer. Behind `hops` reverse proxies that each APPEND the address they saw
+ * to X-Forwarded-For (an OpenShift Route's default), the last `hops` entries were written by those
+ * proxies and everything left of them by the client, so the entry `hops` from the right is the
+ * one the outermost trusted proxy saw -- the express `trust proxy = <count>` rule. Fewer entries
+ * than hops means the request skipped a proxy, and the leftmost entry stands.
+ *
+ * The count is a deployment setting because a caller that reaches the control plane AROUND the
+ * proxies writes the trusted entry itself: it can then pick its own bucket, or fill another
+ * address's, for the state TTL (the total cap still holds). Through the proxies it cannot, since
+ * they append after whatever it wrote. An entry that is not an IP address falls back to the socket
+ * peer, which also keeps a header-sized string from becoming a map key.
+ */
+export function clientSource(req: IncomingMessage, hops: number): string | undefined {
+  const peer = req.socket.remoteAddress;
+  const fallback = peer === undefined ? undefined : unmapped(peer);
+  if (hops <= 0) return fallback;
+  const raw = req.headers['x-forwarded-for'];
+  const header = Array.isArray(raw) ? raw.join(',') : raw;
+  if (!header) return fallback;
+  const entries = header.split(',').map((e) => e.trim());
+  const picked = entries[Math.max(0, entries.length - hops)]!;
+  return isIP(picked) !== 0 ? unmapped(picked) : fallback;
+}
 
 /**
  * Authenticate per the ROUTE's declared kind, not per handler. The router is the only layer that sees
@@ -166,7 +197,13 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
         return;
       }
       const url = new URL(req.url ?? '/', 'http://localhost');
-      const ctx: RequestCtx = { params: matched.params, query: url.searchParams, body: undefined };
+      const source = clientSource(req, deps.config.trustedProxyHops ?? 0);
+      const ctx: RequestCtx = {
+        params: matched.params,
+        query: url.searchParams,
+        body: undefined,
+        ...(source !== undefined ? { source } : {}),
+      };
 
       // AUTHENTICATION FIRST, then the body. `authorize` reads only headers, so the order is free --
       // and with it reversed an unauthenticated `PUT /v1/credentials/x` carrying malformed JSON got

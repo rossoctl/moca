@@ -50,6 +50,13 @@ spec:
           env:
             - { name: HOME, value: /tmp }
             - { name: SH_CONTROL_PLANE_PORT, value: '8080' }
+            # The client address for the per-source bound on login starts (#716): on OpenShift the
+            # Route's router APPENDS the address it saw to X-Forwarded-For, so the last entry is
+            # the client's. Without this every login would key by the router's address and share
+            # one bucket. A request with no header (kind, a port-forward) keys by the socket peer.
+            # Trusting the entry is safe because only the router and the supervisor may reach the
+            # pod (the NetworkPolicy below), and a port-forward is the operator's own.
+            - { name: SH_TRUSTED_PROXY_HOPS, value: '1' }
             - name: REDIS_URL
               valueFrom: { secretKeyRef: { name: moca-redis, key: REDIS_URL } }
             - { name: SH_CREDENTIAL_STORE, value: kubernetes }

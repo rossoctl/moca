@@ -112,6 +112,11 @@ export interface CpConfig {
   routeProfile?: RouteProfile;
   /** The template hosts (SH_TEMPLATE_HOSTS, template lifecycle spec §6.1); absent or empty: none. */
   templateHosts?: TemplateHost[];
+  /**
+   * How many reverse proxies in front of the control plane append to X-Forwarded-For
+   * (`SH_TRUSTED_PROXY_HOPS`); absent or 0 means none, and the socket peer is the source.
+   */
+  trustedProxyHops?: number;
   apiTokenTtlSeconds: number;
   sessionTokenTtlSeconds: number;
   /** A refresh family dies this long after its last use (`SH_REFRESH_IDLE_TTL_SECONDS`, B14). */
@@ -321,6 +326,12 @@ export interface RequestCtx {
   egressHost?: EgressHost;
   /** Set by the router for `auth: 'host'` routes: the template host whose token was presented. */
   host?: string;
+  /**
+   * The client's address, as server.ts's clientSource derives it (the socket peer, or the
+   * X-Forwarded-For entry SH_TRUSTED_PROXY_HOPS trusts). A bound on unauthenticated work keys by
+   * it (the oidc login start, #716); it is not an identity, so nothing authorizes by it.
+   */
+  source?: string;
 }
 
 export type Handler = (
@@ -785,9 +796,9 @@ export const HANDLERS: Record<string, Handler> = {
     };
   },
 
-  startDeviceAuth: async (_ctx, deps) => ({
+  startDeviceAuth: async (ctx, deps) => ({
     status: 200,
-    body: await deps.identity.startDeviceAuth(),
+    body: await deps.identity.startDeviceAuth(ctx.source),
   }),
 
   completeDeviceAuth: async (ctx, deps) => {

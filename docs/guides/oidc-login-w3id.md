@@ -79,10 +79,16 @@ control plane's memory, so a callback that load-balances to a different pod than
 issued the state will not find it. Run one replica, or contribute a Redis-backed
 `PendingAuthStore` (see `packages/control-plane/src/oidc.ts`) before scaling out.
 
-The pending store is also **capped, not fair**: 10,000 live states bound the control plane's
-memory, and the login-start route is unauthenticated, so one client looping starts can fill the
-cap and every real user then gets 429 for up to the state TTL (15 minutes). A per-source bound
-on outstanding starts is the follow-up.
+The pending store is **capped twice**: 10,000 live states bound the control plane's memory, and
+because the login-start route is unauthenticated, each client address may hold at most 20 of them
+(`SH_OIDC_MAX_PENDING_PER_SOURCE`). A client looping starts then gets 429 from its own share while
+everyone else's logins still start; an abandoned start holds its slot for the state TTL (15
+minutes). The address is the socket peer, or, behind a proxy that appends to `X-Forwarded-For`,
+the entry `SH_TRUSTED_PROXY_HOPS` names: `deploy/k8s` sets it to 1 for the OpenShift Route. Set it
+wherever the control plane sits behind a proxy, or every login shares the proxy's address and the
+per-source bound caps the whole deployment; where every client arrives from one address anyway
+(an SSH tunnel), set `SH_OIDC_MAX_PENDING_PER_SOURCE=0`. A client with many addresses (an IPv6
+prefix, a botnet) can still fill the total cap.
 
 ## Logging in
 
