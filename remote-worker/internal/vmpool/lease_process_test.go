@@ -548,7 +548,7 @@ func TestProcessKindRefusedOnASameEpochDowngradeWithALiveLease(t *testing.T) {
 	vm := vmID(leaseAlive(t, p, "during the first Exec").vm)
 	setMode := make(chan error, 1)
 	go func() { setMode <- setModeErr(p, "k", ModePerExec, 1) }() // stored at once, then waits for the gate
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2)
 
 	_, err := p.Exec(t.Context(), "k", processExec(ExecKindProcessList, ProcessArgs{}, 1), &capturingSink{})
 	if got := wire(err); !strings.HasPrefix(got, "processes_not_enabled: ") || !strings.Contains(got, "per-exec") {
@@ -639,7 +639,7 @@ func TestProcessKindFloorCountsFromRun(t *testing.T) {
 	long := execAsync(p, "k", Exec{Command: "long", TimeoutS: 600, Mode: ModeLeaseProcesses, ModeEpoch: 1})
 	recvWithin(t, entered, "the long Exec's Run")
 	stop := execAsync(p, "k", processExec(ExecKindProcessStop, ProcessArgs{Name: "web"}, 1))
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2)
 	clk.Advance(25 * time.Second) // the stop's 30 s budget is nearly spent at the gate
 	close(release)
 	if err := recvWithin(t, long, "the long Exec"); err != nil {
@@ -1052,7 +1052,7 @@ func TestDowngradeWaitsForInFlightExec(t *testing.T) {
 		stopped, err := p.SetMode("k", ModeLease, 2)
 		setc <- setResult{stopped, err}
 	}()
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 }) // the Exec's pin and the downgrade's
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2) // the Exec's pin and the downgrade's
 	time.Sleep(50 * time.Millisecond)
 	select {
 	case r := <-setc:
@@ -1112,7 +1112,7 @@ func TestDowngradeStopsALeaseStartedAtLevel2WhileItWaited(t *testing.T) {
 		stopped, err := p.SetMode("k", ModeLease, 2)
 		setc <- setResult{stopped, err}
 	}()
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2)
 	close(resume)
 	if err := recvWithin(t, errc, "the starting Exec"); err != nil {
 		t.Fatalf("the starting Exec: %v", err)
@@ -1170,7 +1170,7 @@ func TestDowngradeGraceDoesNotCutAfterAnExecStopped(t *testing.T) {
 	errA := execAsync(p, "k", Exec{Command: "a", TimeoutS: MaxExecTimeoutS, Mode: ModeLeaseProcesses, ModeEpoch: 1})
 	recvWithin(t, enteredA, "A's Run")
 	errB := execAsync(p, "k", Exec{Command: "b", TimeoutS: MaxExecTimeoutS, Mode: ModeLease, ModeEpoch: 2})
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 }) // B queued on the gate
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2) // B queued on the gate
 	type setResult struct {
 		stopped []TrackedProcess
 		err     error
@@ -1181,7 +1181,7 @@ func TestDowngradeGraceDoesNotCutAfterAnExecStopped(t *testing.T) {
 		stopped, err := p.SetMode("k", ModeLease, 2)
 		setc <- setResult{stopped, err}
 	}()
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 3 && timerArmed(clk, deadline) })
+	waitFor(t, `pinnedCount(p, "k") == 3 && timerArmed(clk, deadline)`, func() bool { return pinnedCount(p, "k") == 3 && timerArmed(clk, deadline) })
 
 	close(releaseA)
 	if err := recvWithin(t, errA, "A"); err != nil {
@@ -1249,7 +1249,7 @@ func TestDowngradeStopIsBoundedByTheGraceLimit(t *testing.T) {
 		stopped, err := p.SetMode("k", ModeLease, 2)
 		setc <- setResult{stopped, err}
 	}()
-	waitFor(t, func() bool { return timerArmed(clk, deadline) })
+	waitFor(t, `timerArmed(clk, deadline)`, func() bool { return timerArmed(clk, deadline) })
 	clk.Advance(p.cfg.LeaseGraceLimit)
 
 	var le *LeaseEndedError
@@ -1549,8 +1549,9 @@ func TestCloseSyncsLeasesConcurrentlyUnderOneBound(t *testing.T) {
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if el := time.Since(start); el > 3*time.Second {
-		t.Fatalf("Close took %s with one wedged guest, want about the %s bound", el, p.closeSyncBound)
+	// A Close that ignored closeSyncBound would wait out LeaseCloseSyncTimeout at least.
+	if el := time.Since(start); el >= LeaseCloseSyncTimeout {
+		t.Fatalf("Close took %s with one wedged guest: it waited out a default bound, not the %s closeSyncBound", el, p.closeSyncBound)
 	}
 	synced, destroyed, ok := syncedBeforeDestroyed(lc.eventLog())
 	if synced != len(keys) || destroyed != len(keys) || !ok {
@@ -1586,7 +1587,7 @@ func TestSweptLeasesSyncInParallel(t *testing.T) {
 	// The keys whose VMs are gone have their gates back (and the sweep's pin dropped) while
 	// the wedged one still holds its own: a fresh lease starts at once on them.
 	var free string
-	waitFor(t, func() bool {
+	waitFor(t, "every victim synced, all but the wedged one destroyed and unpinned", func() bool {
 		var released []string
 		for _, k := range keys {
 			if pinnedCount(p, k) == 0 {
@@ -1605,7 +1606,7 @@ func TestSweptLeasesSyncInParallel(t *testing.T) {
 		t.Fatalf("Exec on %s: %v", free, err)
 	}
 	release()
-	waitFor(t, func() bool { return lc.liveCount() == 1 }) // the wedged one, destroyed; free's new lease
+	waitForValue(t, `lc.liveCount()`, func() int { return lc.liveCount() }, 1) // the wedged one, destroyed; free's new lease
 }
 
 // PR #814 follow-up review: a sweep batch already queued when Close starts shares Close's
@@ -1620,13 +1621,14 @@ func TestCloseBoundsAQueuedSweepBatchsSync(t *testing.T) {
 	})
 	p.closeSyncBound = 300 * time.Millisecond
 	clk.Advance(p.cfg.LeaseIdleDefault) // the lease is idle: its victim is queued for the reclaim goroutine
-	waitFor(t, func() bool { return len(lc.syncCommands()) == 1 })
+	waitForValue(t, `len(lc.syncCommands())`, func() int { return len(lc.syncCommands()) }, 1)
 	start := time.Now()
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if el := time.Since(start); el > 3*time.Second {
-		t.Fatalf("Close took %s with a wedged queued batch, want about the %s bound", el, p.closeSyncBound)
+	// Unbounded by Close, the batch's sync would run its own LeaseEndSyncTimeout, which is longer.
+	if el := time.Since(start); el >= LeaseCloseSyncTimeout {
+		t.Fatalf("Close took %s with a wedged queued batch: it waited out a default bound, not the %s closeSyncBound", el, p.closeSyncBound)
 	}
 	if lc.liveCount() != 0 {
 		t.Fatalf("live VMs after Close = %d, want 0", lc.liveCount())

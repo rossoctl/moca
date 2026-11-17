@@ -134,7 +134,7 @@ func TestSweepOrphansSparesTheWorkersOwnCgroupAndStillKillsAVMOrphan(t *testing.
 	// orphan's real process is dead and its directory is gone.
 	select {
 	case <-vmReaped:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("the VM-shaped orphan (vm-9) survived the sweep — the fail-closed filter has narrowed to nothing, which is the orphan leak spec §6 lists as its first practical failure mode")
 	}
 	if _, err := os.Stat(filepath.Join(root, "vm-9")); !os.IsNotExist(err) {
@@ -355,7 +355,7 @@ func TestSweepOrphansActuallyKillsALiveProcess(t *testing.T) {
 	case <-waitDone:
 		// Good: the kernel actually reaped the process, i.e. SweepOrphans really
 		// signalled it — not merely removed a cgroup directory around it.
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("real child process was still running well after SweepOrphans returned — the kill was not actually delivered")
 	}
 }
