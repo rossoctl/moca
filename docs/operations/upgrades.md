@@ -74,8 +74,10 @@ period is only an outer bound. Practically:
 - **Tier lists must match.** `SH_SANDBOX_TIERS` and `SH_SANDBOX_DEFAULT_TIER` are read by both from the same
   ConfigMap.
 - **Redis schema version.** Redis holds `sh:schema-version`, written by the first control plane, worker or relay to
-  start. A process that finds a version newer than it knows exits with the reason in its log, so a release rolled back
-  past a schema change fails at start instead of misreading data ([change policy](../reference/change-policy.md#version-markers)).
+  start. The check runs in the background once the process is serving: it retries until Redis answers, and a process
+  that finds a version newer than it knows then exits with the reason in its log. A rollback past a schema change is
+  not supported: the older release exits once Redis answers only if the newer one raised the stored version, which
+  each release that bumps it decides ([change policy](../reference/change-policy.md#version-markers)).
   There is no migration tool: new fields are handled by tolerant reads, and every release so far writes version 1.
   An absent key, with any `sh:` data, means version 1. The key has no TTL: keep Redis on a `noeviction` or
   `volatile-*` eviction policy (an `allkeys-*` policy can evict it), and after a `FLUSHALL` or a restore that lost
@@ -122,7 +124,8 @@ that use a promoted bundle.
 
 No procedure is documented. Mechanically, re-running `setup.sh` with an older `--image` rolls the Deployments back,
 and plain `kubectl rollout undo` also works. Redis data carries a schema version (above): a rollback
-between releases that share it needs no step, and one past a schema change is refused at start. Rollback is otherwise
+between releases that share it needs no step, and one past a schema change is not supported (and is refused once
+a release raises the stamp). Rollback is otherwise
 untested.
 
 ## Availability during a node drain
