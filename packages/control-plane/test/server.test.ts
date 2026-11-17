@@ -437,8 +437,15 @@ describe('the client source (#716)', () => {
     );
     // Repeated headers count as one list, in order.
     expect(clientSource(req('10.0.0.2', ['203.0.113.9', '198.51.100.1']), 1)).toBe('198.51.100.1');
-    // Fewer entries than hops: the request skipped a proxy, and the leftmost stands.
-    expect(clientSource(req('10.0.0.2', '198.51.100.1'), 2)).toBe('198.51.100.1');
+    // Exactly hops entries: the hops-th from the right is the leftmost, a trusted proxy's.
+    expect(clientSource(req('10.0.0.2', '198.51.100.1, 10.0.0.3'), 2)).toBe('198.51.100.1');
+  });
+
+  it('is the socket peer when the header holds fewer entries than hops', () => {
+    // The request skipped a proxy, so the one entry may be the client's own: it never stands,
+    // or a client reaching around the proxies could pick its bucket, or fill a victim's.
+    expect(clientSource(req('10.0.0.2', '198.51.100.1'), 2)).toBe('10.0.0.2');
+    expect(clientSource(req('10.0.0.2', '203.0.113.9, 198.51.100.1'), 3)).toBe('10.0.0.2');
   });
 
   it('falls back to the socket peer when the header is absent or its entry is not an address', () => {

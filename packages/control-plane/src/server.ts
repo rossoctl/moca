@@ -73,7 +73,8 @@ function canonicalAddress(addr: string): string {
  * to X-Forwarded-For (an OpenShift Route's default), the last `hops` entries were written by those
  * proxies and everything left of them by the client, so the entry `hops` from the right is the
  * one the outermost trusted proxy saw -- the express `trust proxy = <count>` rule. Fewer entries
- * than hops means the request skipped a proxy, and the leftmost entry stands.
+ * than hops means the request skipped a proxy, so no entry is known to be a trusted proxy's: every
+ * one may be the client's own, and the socket peer stands instead (as express answers).
  *
  * The count is a deployment setting because a caller that reaches the control plane AROUND the
  * proxies writes the trusted entry itself: it can then pick its own bucket, or fill another
@@ -89,7 +90,8 @@ export function clientSource(req: IncomingMessage, hops: number): string | undef
   const header = Array.isArray(raw) ? raw.join(',') : raw;
   if (!header) return fallback;
   const entries = header.split(',').map((e) => e.trim());
-  const picked = entries[Math.max(0, entries.length - hops)]!;
+  if (entries.length < hops) return fallback;
+  const picked = entries[entries.length - hops]!;
   return isIP(picked) !== 0 ? canonicalAddress(picked) : fallback;
 }
 
