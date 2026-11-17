@@ -1102,6 +1102,10 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       `export SBX_TOKEN_CMD='mocactl sbx token --control-plane-url '\\''${URL_}'\\'' ${SBX}'`,
     );
     expect(out).not.toContain(TOKEN.token); // never the token itself: it lives 15 minutes
+    // env runs no command and prints no token: its mint is not the owner's use (#770).
+    expect(
+      cp.calls.filter((c) => c.path === `/v1/sandboxes/${SBX}/token`).map((c) => c.body),
+    ).toEqual([{ activity: false }]);
     const ca = join(paths.stateDir, 'sbx', `${SBX}-exec-ca.crt`);
     expect(isAbsolute(ca)).toBe(true);
     expect(out).toContain(`export SBX_CA_FILE='${ca}'`);

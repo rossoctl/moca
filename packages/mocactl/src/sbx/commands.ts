@@ -770,7 +770,8 @@ export function tokenCmd(explicitUrl: string | undefined, id: string): string {
  */
 export async function cmdEnv(c: SbxCtx, id: string): Promise<number> {
   try {
-    const t = await c.api.mintSandboxToken(id);
+    // No command runs on this token and it is never printed: not the owner's use (#770).
+    const t = await c.api.mintSandboxToken(id, { activity: false });
     const lines: Array<[string, string]> = [
       ['SBX_ADDR', sanitizeRemote(t.execEndpoint)],
       ['SBX_TLS', '1'],
