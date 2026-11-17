@@ -711,7 +711,7 @@ func (l *leaseLauncher) setDestroyHook(f func(id string)) {
 	l.rec.Unlock()
 }
 
-// recvWithin receives from c, failing the test after 5 s rather than hanging it.
+// recvWithin receives from c, failing the test after testWaitBound rather than hanging it.
 func recvWithin[T any](t *testing.T, c <-chan T, what string) T {
 	t.Helper()
 	select {
