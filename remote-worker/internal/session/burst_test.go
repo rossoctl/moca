@@ -133,9 +133,13 @@ func TestRefusalBurstBeyondTheReserveKeepsTheConnection(t *testing.T) {
 		}
 	}
 	waitFor(t, "the deferred queue to empty", func() bool { return s.Stats().DeferredNow == 0 })
-	if !s.Idle() {
-		t.Error("Idle() = false after every frame was delivered: the unsent accounting leaked")
-	}
+	// A wait, not a bare assert: neither condition above proves the accounting has caught up, and
+	// on a loaded runner this flaked. A frame on the wire is one the fake stream recorded INSIDE
+	// Send, while unsent drops only after Send returns; the pool goroutine likewise drops inflight
+	// only after runOne returns, which is the same lag `settle` exists for. deferredNow is no
+	// help -- drainDeferred drops it the moment the frame is handed to outbound. A real leak still
+	// fails here, as a timeout.
+	waitFor(t, "Idle() once every delivered frame is accounted for (the accounting leaked)", s.Idle)
 }
 
 // The backstop: DeferredCap frames waiting at once means the sender is not keeping up at all,
