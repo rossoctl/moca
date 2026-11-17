@@ -137,7 +137,8 @@ commands should always send it. Each `mocactl sbx token` and each `--renew-every
 use: a token pump keeps the sandbox alive whether or not its client runs commands, and at a
 30-day lifetime the margin before the host reclaims an unreachable workspace is 2 days (spec §7).
 The token response's `sandboxExpiresAt` is
-the deadline after the mint; track it, since it moves.
+the deadline after the mint; track it, since it moves. `mocactl sbx token --json` prints it beside
+the token and its `expiresAt`.
 
 **Delete and de-enrollment are not immediate.** A token already issued keeps working until its
 `exp`, plus the relay's 30 s leeway: up to one token lifetime plus 30 s (15.5 minutes by default)

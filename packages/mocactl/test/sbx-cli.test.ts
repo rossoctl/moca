@@ -1085,6 +1085,39 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(io.outs.join('')).toBe(`${TOKEN.token}\n`);
   });
 
+  it("token --json: the token's expiresAt and the sandbox's sandboxExpiresAt, as sent", async () => {
+    const { home, env, io } = setup();
+    // The sandbox ends before its token does: the line must say so, not just the token's exp.
+    // As the control plane mints them: the token is capped at the sandbox's deadline, so the
+    // sandbox ends at or after the token (a 900 s token on a sandbox with an hour left).
+    const sandboxExpiresAt = TOKEN.expiresAt + 2700;
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({
+        status: 200,
+        body: { ...TOKEN, sandboxExpiresAt },
+      }),
+    });
+    const d = { home, fetchImpl: cp.fetchImpl };
+    expect(await sbxMain(['token', SBX, '--json'], env, io, d)).toBe(0);
+    expect(JSON.parse(io.outs.join(''))).toEqual({
+      token: TOKEN.token,
+      expiresAt: TOKEN.expiresAt,
+      sandboxExpiresAt,
+    });
+  });
+
+  it('token --json from a control plane before sandboxExpiresAt: the field is left out', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+    });
+    const d = { home, fetchImpl: cp.fetchImpl };
+    expect(await sbxMain(['token', SBX, '--json'], env, io, d)).toBe(0);
+    const line = JSON.parse(io.outs.join('')) as Record<string, unknown>;
+    expect(line).toEqual({ token: TOKEN.token, expiresAt: TOKEN.expiresAt });
+    expect('sandboxExpiresAt' in line).toBe(false);
+  });
+
   it('token --renew-every: a fresh token per period, one line each, until stopped', async () => {
     const { home, env, io } = setup();
     let n = 0;

@@ -724,14 +724,24 @@ function sealedText(sealed: boolean | undefined): string {
  * `sbx token`: a fresh sandbox token on stdout. With `renewEveryS`, a new one every S seconds, one
  * line each, until stopped (the signal; exit 0), so a long-lived client can read its next token
  * from a pipe rather than run mocactl again.
+ *
+ * `--json` adds the token's own `expiresAt` and the sandbox's `sandboxExpiresAt`, as the control
+ * plane sent them. The sandbox's deadline slides with activity, and each mint counts as activity,
+ * so a client holding a token learns from every line when the sandbox itself will end, which the
+ * token's own short expiry doesn't show (the token never outlives it: it is capped at the
+ * sandbox's deadline when minted). A control plane from before the field sends none, and the line
+ * then has none either: absent, never a made-up value.
  */
 export async function cmdToken(c: SbxCtx, id: string, renewEveryS?: number): Promise<number> {
   try {
     for (;;) {
       const t = await c.api.mintSandboxToken(id);
-      c.io.out(
-        (c.json ? JSON.stringify({ token: t.token, expiresAt: t.expiresAt }) : t.token) + '\n',
-      );
+      const json = {
+        token: t.token,
+        expiresAt: t.expiresAt,
+        ...(t.sandboxExpiresAt !== undefined ? { sandboxExpiresAt: t.sandboxExpiresAt } : {}),
+      };
+      c.io.out((c.json ? JSON.stringify(json) : t.token) + '\n');
       if (renewEveryS === undefined) return SBX_EXIT.ok;
       await (c.sleep ?? c.rt.sleep)(renewEveryS * 1000, c.signal);
       if (c.signal?.aborted) return SBX_EXIT.ok;
