@@ -697,7 +697,8 @@ supported. Two of your credentials cannot hold the identical destination (`409 d
   - new files under a directory your own `.gitignore` ignores are not protected: they may not come
     back, and a `push` can replace them. The same holds for an ignored file: in a repository that
     ignores `AGENTS.md`, a hand-written one is not pushed, and one the agent writes may not come
-    back. Commit it (`git add -f AGENTS.md`) to have it pushed and pulled (§4); a pulled `AGENTS.md` comes back with a warning.
+    back. Commit it (`git add -f AGENTS.md`) to have it pushed and pulled (§4); a pulled `AGENTS.md`
+    comes back with a warning if it changed outside the `sbx` block.
 - **Pull --apply needs a recent git.** When your files have moved on since the push, the patch is
   merged 3-way; that uses `git apply --3way --cached`, which git accepts from version 2.32
   ([git 2.32 release notes](https://github.com/git/git/blob/master/Documentation/RelNotes/2.32.0.adoc)).
