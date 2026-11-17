@@ -900,6 +900,23 @@ grep -q '^egress credential' "$EM" && ! grep -q "egress credential $DROPIN" "$EM
 bash "$INSTALL" "$(bundle sbx_cr)" --snapshot default >"$TMP/out" 2>&1 || fail 'no check once the drop-in is gone'
 pass '--uninstall-egress removes the drop-in, token and api CA, keeps the CA, restarts moca-egress'
 
+# The manifest is a file under SBX_ENV_DIR, not proof that a path is ours: an `egress credential` line
+# naming a file outside the credential directory (an edited or corrupted manifest) never deletes it.
+# The check is on the path itself, so it holds for every way out (a sibling, a deeper path, a `..`).
+mkdir -p "$CD/sub" "$TMP/cred-outside"
+for f in "$TMP/cred-outside/precious" "$CD/sub/precious" "$CD/../precious"; do
+  echo keep >"$f"
+  echo "egress credential $f" >>"$EM"
+done
+bash "$INSTALL" --uninstall-egress >"$TMP/out" 2>&1 || fail '--uninstall-egress with foreign credential lines'
+for f in "$TMP/cred-outside/precious" "$CD/sub/precious" "$CD/../precious"; do
+  [[ "$(cat "$f" 2>/dev/null)" == keep ]] || fail "--uninstall-egress deleted $f, which is not a file of $CD"
+  grep -qF "kept $f (not a credential file of this script)" "$TMP/out" || fail "--uninstall-egress did not say it kept $f"
+  sed -i.bak "\\#^egress credential $f\$#d" "$EM"; rm -f "$EM.bak" "$f"
+done
+rmdir "$CD/sub" "$TMP/cred-outside"
+pass '--uninstall-egress deletes only files of the credential directory and the drop-in, whatever the manifest says'
+
 # The last worker's uninstall removes the credential files the same way.
 bash "$INSTALL" --egress "$(ebundle api)" >"$TMP/out" 2>&1 || fail '--egress before the last uninstall'
 # --keep-shared (the host agent's removal): the last worker's own files go, nothing shared does; a
