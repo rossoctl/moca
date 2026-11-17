@@ -134,6 +134,8 @@ rule 5).
   trust relies on both. An image changed any other way leaves the key unset, which means 0, and every login then
   keys by the router's address: the deployment as a whole gets 20. Users behind one NAT address share one bucket;
   raise the bound with `SH_OIDC_MAX_PENDING_PER_SOURCE` (sticky, `0` turns it off). GitHub logins are unchanged.
+  On `deploy/vm` behind its SSH tunnel every client arrives from `127.0.0.1`, so the default caps the whole VM at
+  20: set `SH_OIDC_MAX_PENDING_PER_SOURCE=0` in `control-plane.env` there (the env example shows the line).
   Outside `deploy/k8s`, if you enable oidc behind a proxy that appends to `X-Forwarded-For`, set
   `SH_TRUSTED_PROXY_HOPS` to the number of such proxies. A request whose header holds fewer entries than that keys
   by its socket peer. A custom `PendingAuthStore` needs no change: its `put` may still answer `true`/`false` (parked,
