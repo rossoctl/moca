@@ -35,6 +35,7 @@ import {
   ATTACH_CLOCK_LEEWAY_S,
   CpError,
   SANDBOX_CLOCK_LEEWAY_S,
+  guardSchemaVersion,
   verifyAttachToken,
   type SandboxTokenClaims,
 } from '@moca/control-plane';
@@ -755,6 +756,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   startRelay().then(
     ({ port, execPort, shutdown }) => {
       installShutdownSignals(shutdown);
+      // The Redis schema version (#509): written if absent, and the relay exits on a newer one once
+      // Redis answers. Its records store reads the same REDIS_URL (RedisRecordStore's default).
+      void guardSchemaVersion({
+        component: 'sandbox-relay',
+        url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379',
+      });
       console.log(
         `sandbox-relay attach :${port}${execPort ? `, exec :${execPort}` : ' (exec on the same listener)'}`,
       );

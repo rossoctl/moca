@@ -62,8 +62,9 @@ export { SandboxPoolSaturatedError, SandboxPoolEmptyError, SandboxAffinityPendin
 // and whose host then refused the work mid-turn (#452). Same 503 + Retry-After outcome,
 // which is why it belongs in this export list rather than only in k8s-sandbox's.
 export { SandboxCapacityRefusedError };
-// Same reason: a promoted session's turn can fail with it, and server.ts maps it to 410.
-export { BundleNotFoundError } from '@moca/config-bundle';
+// Same reason: a promoted session's turn can fail with these, and server.ts maps them to 410 and
+// 422 (a bundle in a format newer than this harness reads, #510).
+export { BundleNotFoundError, BundleFormatError } from '@moca/config-bundle';
 
 /**
  * One session store per process, not per turn.

@@ -7,6 +7,8 @@ import { describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   buildBundle,
   bundleKey,
+  canonicalTar,
+  contentDigest,
   DEFAULT_BUNDLE_TTL_SECONDS,
   MAX_BUNDLE_BYTES,
 } from '@moca/config-bundle';
@@ -73,6 +75,23 @@ describe('POST /v1/config-bundles', () => {
     expect(
       await codeOf(() => HANDLERS.putConfigBundle!(ctx({ principal: alice, body }), makeDeps())),
     ).toBe('digest_mismatch');
+  });
+
+  it('refuses a bundle in a newer format as invalid_request, naming it, and stores nothing (#510)', async () => {
+    const entries = [
+      { path: 'skills/hello/SKILL.md', content: Buffer.from('---\nname: hello\n---\nb\n') },
+      // A literal marker, so this fails by assertion on a control plane without the check.
+      { path: 'format.json', content: Buffer.from('{"formatVersion":2}\n') },
+    ];
+    const digest = contentDigest(entries);
+    const body = { digest, tar: canonicalTar(entries).toString('base64') };
+    const d = makeDeps();
+    const err = await HANDLERS.putConfigBundle!(ctx({ principal: alice, body }), d).catch(
+      (e: unknown) => e as { code?: string; message?: string },
+    );
+    expect(err).toMatchObject({ code: 'invalid_request' });
+    expect((err as Error).message).toContain('format version 2 is newer');
+    expect(await d.bundles.exists(bundleKey(digest))).toBe(0);
   });
 
   it(
