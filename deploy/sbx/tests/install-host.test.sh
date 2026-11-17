@@ -675,6 +675,19 @@ bash "$COPY/install-host.sh" "$(bundle sbx_fb3)" --snapshot default --no-egress 
   fail 'install from a script copy with --no-egress'
 ! grep -q 'falling back to the GitHub hosts' "$TMP/out" || fail 'warned although --no-egress was given'
 for id in sbx_fb2 sbx_fb3; do bash "$INSTALL" --uninstall "$id" >"$TMP/out" 2>&1 || fail "uninstall $id"; done
+# An install that fails part-way leaves no temp file behind: here the unit's source is missing, so
+# writing the unit text fails after its temp file exists.
+# mktemp is shimmed to create its files in one directory: macOS's ignores TMPDIR without a template.
+rm "$COPY/../microvm/moca-egress.service"
+mkdir -p "$TMP/mt" "$TMP/mtbin"
+printf '#!/usr/bin/env bash\nexec %q "%s/mt/tmp.XXXXXX"\n' "$(command -v mktemp)" "$TMP" >"$TMP/mtbin/mktemp"
+chmod +x "$TMP/mtbin/mktemp"
+! PATH="$TMP/mtbin:$PATH" bash "$COPY/install-host.sh" "$(bundle sbx_fb4)" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'installed with no moca-egress.service source beside the script'
+[[ -z "$(ls -A "$TMP/mt")" ]] || fail "a failed egress install left its temp file: $(ls -A "$TMP/mt")"
+grep -qF 'cannot read the moca-egress unit source' "$TMP/out" || fail 'the failure does not name the missing unit source'
+rm -rf "$TMP/mtbin"; rmdir "$TMP/mt"
+pass 'an egress install that fails part-way names the cause and leaves no temp file'
 rm -rf "$TMP/scriptcopy"
 pass 'seeds the GitHub hosts (with a warning) when egress-allow.env is missing beside the script, and stays quiet when the default is not used'
 

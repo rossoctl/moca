@@ -284,10 +284,13 @@ install_egress() {
   fi
   install -d -m 0755 "$SBX_UNIT_DIR"
   install -d -m 0700 "$SBX_ENV_DIR"
+  # Every exit after the mktemp removes the file: under `set -e` a bare failing step would end the
+  # script with the temp file left behind.
   tmp="$(mktemp)"
-  egress_unit_text >"$tmp"
+  egress_unit_text >"$tmp" ||
+    { rm -f "$tmp"; die "cannot read the moca-egress unit source $SCRIPT_DIR/../microvm/moca-egress.service: install-host.sh runs from a full checkout"; }
   if ! cmp -s "$tmp" "$unit" 2>/dev/null; then
-    install -m 0644 "$tmp" "$unit"
+    install -m 0644 "$tmp" "$unit" || { rm -f "$tmp"; die "cannot install $unit"; }
     changed=1
   fi
   rm -f "$tmp"
@@ -328,7 +331,7 @@ ca_fingerprint() {
   local der
   der="$(mktemp)"
   openssl x509 -in "$1" -outform DER >"$der" || { rm -f "$der"; die "cannot read the certificate $1"; }
-  sha256_of "$der"
+  sha256_of "$der" || { rm -f "$der"; die "cannot hash the certificate $1"; }
   rm -f "$der"
 }
 
