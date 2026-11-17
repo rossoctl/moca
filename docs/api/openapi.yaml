@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.26.0
+  version: 1.28.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -1208,6 +1208,17 @@ paths:
                   interval: { type: integer }
                   expiresIn: { type: integer }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '429':
+          description: |
+            `quota_exceeded` (oidc only): too many sign-ins are waiting. The route is
+            unauthenticated, so the control plane bounds the live login states it parks, in two
+            ways: 10,000 in total, and `SH_OIDC_MAX_PENDING_PER_SOURCE` (default 20) per client
+            address; the message says which ("...from this address" for the second). A state lives
+            until its login is collected or its `expiresIn` runs out, so back off and retry, rather
+            than looping.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '502':
           description: |
             identity_provider_misconfigured -- GitHub refused the control plane's OAuth app: device

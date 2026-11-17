@@ -14,6 +14,18 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
+## 1.28.0
+
+A per-source bound on login starts ([#716](https://github.com/rossoctl/moca/issues/716)).
+Additive.
+
+- `POST /v1/auth/device` now documents its `429 quota_exceeded`, which the oidc provider has
+  answered since it shipped (the 10,000-state total cap) and which now has a second cause: one
+  client address holding `SH_OIDC_MAX_PENDING_PER_SOURCE` (default 20) live login states. The
+  message tells the two apart ("...from this address"); the code and the status are the same. The
+  address is the socket peer, or the X-Forwarded-For entry `SH_TRUSTED_PROXY_HOPS` names. The
+  GitHub provider is unchanged.
+
 ## 1.26.0
 
 Per-turn artifacts and a bounded status read
