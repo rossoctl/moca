@@ -11,9 +11,20 @@
 #                           required; three distinct DNS names (one Route, one certificate each)
 #   SBX_IMAGE               required; the relay and control-plane image
 #   SBX_WORKERS             required; the template worker ids, whitespace-separated
-#   SBX_GITHUB_CLIENT_ID    required; the deployment's own GitHub OAuth app (device-flow login)
-#   SBX_ALLOWED_SUBJECTS    required; comma-separated github:<numeric id>, who may log in
-#   SBX_ADMIN_SUBJECTS      optional; comma-separated github:<numeric id>
+#   SBX_GITHUB_CLIENT_ID    required with SBX_IDENTITY_PROVIDER=github (the default); the
+#                           deployment's own GitHub OAuth app (device-flow login)
+#   SBX_IDENTITY_PROVIDER   optional; github (the default) or oidc. With oidc, SBX_GITHUB_CLIENT_ID
+#                           is not required, SBX_OIDC_ISSUER, SBX_OIDC_CLIENT_ID and
+#                           SBX_OIDC_REDIRECT_URI are (SBX_OIDC_SCOPE optional), all written to
+#                           moca-settings, which the base's env wiring reads; and the client secret
+#                           must already sit in a Secret named moca-oidc, key SH_OIDC_CLIENT_SECRET
+#                           -- setup.sh never touches it (docs/guides/oidc-login-w3id.md). Subjects
+#                           in SBX_ALLOWED_SUBJECTS and SBX_ADMIN_SUBJECTS are then oidc:<provider
+#                           sub> entries, per the control plane's subject grammar; a mixed list is
+#                           accepted, so a GitHub enrollment survives the switch
+#   SBX_ALLOWED_SUBJECTS    required; comma-separated github:<numeric id> or oidc:<provider sub>,
+#                           who may log in
+#   SBX_ADMIN_SUBJECTS      optional; comma-separated github:<numeric id> or oidc:<provider sub>
 #   SBX_TEMPLATES_FILE      required; JSON list [{id, worker, description, tools}], every worker in
 #                           SBX_WORKERS
 #   SBX_WORKSPACE_FS_GIB    required; the KVM host's workspace filesystem size, for the disk check
@@ -142,7 +153,13 @@ USAGE='setup.sh [--env-file FILE]'
 # shellcheck source=deploy/sbx/lib.sh
 . "$SBX_DIR/lib.sh"
 
-SUBJECTS_RE='^github:[0-9]+(,github:[0-9]+)*$'
+# The control plane's MEMBER_SUBJECT_RE (packages/control-plane/src/identity.ts): github:<numeric
+# id> or oidc:<provider sub>, the sub per OIDC_SUB_PATTERN. A comma list of either form, no spaces.
+# Locale-proof classes, not [0-9]/[A-Za-z0-9] ranges: the same UTF-8-collation bug class as the
+# [!-~] fix below (a range can misbehave where a POSIX class cannot).
+GITHUB_SUBJECT='github:[[:digit:]]+'
+OIDC_SUBJECT='oidc:[[:alnum:]][[:alnum:]._@+-]{0,127}'
+SUBJECTS_RE="^($GITHUB_SUBJECT|$OIDC_SUBJECT)(,($GITHUB_SUBJECT|$OIDC_SUBJECT))*$"
 # Positive whole numbers. The disk check multiplies SBX_MAX_TOTAL x SBX_WORKSPACE_IMAGE_MB x 10 and
 # SBX_WORKSPACE_FS_GIB x 1024 x 8 in 64-bit shell arithmetic: six digits for the factors of the first
 # (< 10^13) and nine for the filesystem size (< 10^13) keep both far from wrapping.
@@ -185,12 +202,24 @@ validate() {
   [[ "${SBX_API_HOST:-}" =~ $HOST_RE ]] || die 'SBX_API_HOST is required and must be a DNS name'
   [[ "$SBX_API_HOST" != "$SBX_ATTACH_HOST" && "$SBX_API_HOST" != "$SBX_EXEC_HOST" ]] ||
     die 'SBX_API_HOST must differ from the attach and exec hosts'
-  [[ "${SBX_GITHUB_CLIENT_ID:-}" =~ ^[A-Za-z0-9._-]+$ ]] ||
-    die 'SBX_GITHUB_CLIENT_ID is required (the GitHub OAuth app for device-flow login)'
+  SBX_IDENTITY_PROVIDER="${SBX_IDENTITY_PROVIDER:-github}"
+  [[ "$SBX_IDENTITY_PROVIDER" == github || "$SBX_IDENTITY_PROVIDER" == oidc ]] ||
+    die "SBX_IDENTITY_PROVIDER must be exactly 'github' or 'oidc' (got '$SBX_IDENTITY_PROVIDER')"
+  if [[ "$SBX_IDENTITY_PROVIDER" == github ]]; then
+    [[ "${SBX_GITHUB_CLIENT_ID:-}" =~ ^[A-Za-z0-9._-]+$ ]] ||
+      die 'SBX_GITHUB_CLIENT_ID is required with SBX_IDENTITY_PROVIDER=github (the GitHub OAuth app for device-flow login)'
+  else
+    # The base's env wiring reads all four from moca-settings; the client secret never does (it is
+    # a file under CREDENTIALS_DIRECTORY, projected from the moca-oidc Secret the operator creates).
+    local ov
+    for ov in SBX_OIDC_ISSUER SBX_OIDC_CLIENT_ID SBX_OIDC_REDIRECT_URI; do
+      [[ -n "${!ov:-}" ]] || die "$ov is required with SBX_IDENTITY_PROVIDER=oidc"
+    done
+  fi
   [[ "${SBX_ALLOWED_SUBJECTS:-}" =~ $SUBJECTS_RE ]] ||
-    die 'SBX_ALLOWED_SUBJECTS is required: comma-separated github:<numeric id>, no spaces'
+    die 'SBX_ALLOWED_SUBJECTS is required: comma-separated github:<numeric id> or oidc:<provider sub>, no spaces'
   [[ -z "${SBX_ADMIN_SUBJECTS:-}" || "$SBX_ADMIN_SUBJECTS" =~ $SUBJECTS_RE ]] ||
-    die 'SBX_ADMIN_SUBJECTS must be comma-separated github:<numeric id>, no spaces'
+    die 'SBX_ADMIN_SUBJECTS must be comma-separated github:<numeric id> or oidc:<provider sub>, no spaces'
 
   : "${SBX_LIFETIME_DAYS:=7}" "${SBX_MAX_LIFETIME_DAYS:=30}" "${SBX_MAX_PER_SUBJECT:=3}" "${SBX_MAX_TOTAL:=40}" "${SBX_MAX_INFLIGHT:=2}"
   : "${SBX_WORKSPACE_IMAGE_MB:=2048}" "${SBX_TOKEN_TTL_MINUTES:=15}" "${SBX_RETENTION_DAYS:=14}"
@@ -786,7 +815,7 @@ ensure_signing_key() {
     jtok="$(rand_hex)"
   fi
   # The control plane refuses one under 32 characters; it travels in an HTTP header file, so no space.
-  [[ "$jtok" =~ ^[!-~]{32,}$ ]] ||
+  [[ "$jtok" =~ ^[[:graph:]]{32,}$ ]] ||
     die 'moca-mu1 SH_JANITOR_TOKEN is not 32+ printable characters: delete the key and re-run (this rotates it)'
   dir="$(mktemp -d)"
   (
@@ -932,8 +961,24 @@ ensure_settings() {
   local ca='' moca sbx relay keys attach_crt exec_crt moca_crt egress hosts
   [[ ! -f "$GEN/exec-ca.crt" ]] || ca="$(cat "$GEN/exec-ca.crt")"
   # The TTLs are '' (the control plane's defaults); the base reads both keys, so both must exist.
-  moca=("SH_GITHUB_CLIENT_ID=$SBX_GITHUB_CLIENT_ID" "SH_ADMIN_SUBJECTS=${SBX_ADMIN_SUBJECTS:-}"
-    'SH_API_TOKEN_TTL_SECONDS=' 'SH_SESSION_TOKEN_TTL_SECONDS=')
+  # The identity block follows the provider: github writes only the client id (an empty
+  # SH_IDENTITY_PROVIDER is the control plane's github default, exactly as the base renders a
+  # GitHub stack), oidc writes the four keys the base's env wiring reads (the client secret is a
+  # file under CREDENTIALS_DIRECTORY, from the operator's moca-oidc Secret, never a setting).
+  # The github array is byte-identical to the pre-oidc one, so a GitHub deployment's settings hash
+  # does not move.
+  if [[ "$SBX_IDENTITY_PROVIDER" == github ]]; then
+    moca=("SH_GITHUB_CLIENT_ID=$SBX_GITHUB_CLIENT_ID" "SH_ADMIN_SUBJECTS=${SBX_ADMIN_SUBJECTS:-}"
+      'SH_API_TOKEN_TTL_SECONDS=' 'SH_SESSION_TOKEN_TTL_SECONDS=')
+  else
+    # SH_GITHUB_CLIENT_ID stays, empty: the base's env ref for it is not optional, so the key must
+    # exist, and the control plane ignores it on an oidc deployment (it refuses a VALUE only when
+    # the provider is github).
+    moca=("SH_GITHUB_CLIENT_ID=" "SH_ADMIN_SUBJECTS=${SBX_ADMIN_SUBJECTS:-}" 'SH_API_TOKEN_TTL_SECONDS='
+      'SH_SESSION_TOKEN_TTL_SECONDS=' "SH_IDENTITY_PROVIDER=oidc" "SH_OIDC_ISSUER=$SBX_OIDC_ISSUER"
+      "SH_OIDC_CLIENT_ID=$SBX_OIDC_CLIENT_ID" "SH_OIDC_REDIRECT_URI=$SBX_OIDC_REDIRECT_URI")
+    [[ -z "${SBX_OIDC_SCOPE:-}" ]] || moca+=("SH_OIDC_SCOPE=$SBX_OIDC_SCOPE")
+  fi
   # Combined: the keys the base's control plane reads beside these (base/control-plane.yaml), with
   # the harness's public URL the supervisor Route serves; no operator key fallback, no tiers.
   [[ -z "$COMBINED" ]] || moca+=("SH_PUBLIC_HARNESS_URL=https://$SBX_MOCA_HOST" 'SH_ALLOW_OPERATOR_FALLBACK=false'

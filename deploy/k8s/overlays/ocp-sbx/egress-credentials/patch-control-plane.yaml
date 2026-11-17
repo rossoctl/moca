@@ -40,4 +40,11 @@ spec:
                   items:
                     - { key: SH_SESSION_TOKEN_PRIVATE_KEY, path: SH_SESSION_TOKEN_PRIVATE_KEY }
                     - { key: SH_JANITOR_TOKEN, path: SH_JANITOR_TOKEN }
+              # The oidc client secret, optional: a GitHub stack has no moca-oidc Secret and the
+              # source is skipped (patch-control-plane.yaml, the base).
+              - secret:
+                  name: moca-oidc
+                  optional: true
+                  items:
+                    - { key: SH_OIDC_CLIENT_SECRET, path: SH_OIDC_CLIENT_SECRET }
               - secret: { name: sbx-egress }

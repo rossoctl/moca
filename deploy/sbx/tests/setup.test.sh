@@ -191,9 +191,16 @@ refusals=(
   'export SBX_API_HOST=$SBX_EXEC_HOST => SBX_API_HOST must differ'
   'export SBX_API_HOST=$SBX_ATTACH_HOST => SBX_API_HOST must differ'
   'unset SBX_GITHUB_CLIENT_ID => SBX_GITHUB_CLIENT_ID is required'
+  'export SBX_IDENTITY_PROVIDER=saml => SBX_IDENTITY_PROVIDER must be exactly'
+  'export SBX_IDENTITY_PROVIDER=oidc => SBX_OIDC_ISSUER is required with SBX_IDENTITY_PROVIDER=oidc'
+  'export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid => SBX_OIDC_CLIENT_ID is required with SBX_IDENTITY_PROVIDER=oidc'
+  'export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid SBX_OIDC_CLIENT_ID=abc => SBX_OIDC_REDIRECT_URI is required with SBX_IDENTITY_PROVIDER=oidc'
   'unset SBX_ALLOWED_SUBJECTS => SBX_ALLOWED_SUBJECTS is required'
   'export SBX_ALLOWED_SUBJECTS=alice => SBX_ALLOWED_SUBJECTS is required'
   'export SBX_ALLOWED_SUBJECTS="github:1, github:2" => SBX_ALLOWED_SUBJECTS is required'
+  'export SBX_ALLOWED_SUBJECTS="oidc:bad sub" => SBX_ALLOWED_SUBJECTS is required'
+  'export SBX_ALLOWED_SUBJECTS=oidc: => SBX_ALLOWED_SUBJECTS is required'
+  'export SBX_ADMIN_SUBJECTS=oidc:ok+but,bad:form => SBX_ADMIN_SUBJECTS must be'
   'export SBX_ADMIN_SUBJECTS=github:x => SBX_ADMIN_SUBJECTS must be'
   'unset SBX_WORKSPACE_FS_GIB => SBX_WORKSPACE_FS_GIB must be a positive whole number'
   'export SBX_WORKSPACE_FS_GIB=10 => exceeds 80% of SBX_WORKSPACE_FS_GIB'
@@ -981,6 +988,41 @@ reset_state() { rm -rf "$MOCK_STATE" "$GEN"; mkdir -p "$MOCK_STATE"; : >"$MOCK_L
 raw_val() { jq -r --arg k "$2" '.data[$k] // empty' "$MOCK_STATE/secret-$1.json" | base64 --decode; }
 # The set of Secret names ever applied, and the ConfigMap keys: what "the applied object set" means here.
 applied_names() { awk '{print $1, $2}' "$MOCK_STATE/applies.log" | sort -u | tr '\n' ';'; }
+
+# 13b. The oidc identity provider (docs/guides/oidc-login-w3id.md): the settings the base's env
+# wiring reads, the oidc: subject grammar, no GitHub client id required, and the settings hash
+# stamped (the pod rolls). The client secret never appears: it is the operator's moca-oidc Secret,
+# untouched.
+reset_state
+( base_env; unset SBX_GITHUB_CLIENT_ID
+  export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid/oidc/endpoint/default \
+    SBX_OIDC_CLIENT_ID=0123456789abcdef SBX_OIDC_REDIRECT_URI=https://sbx-api.apps.example.invalid/v1/auth/oidc/callback \
+    SBX_OIDC_SCOPE='openid email profile' SBX_ALLOWED_SUBJECTS='oidc:ghe@us.ibm.com,github:1' \
+    SBX_ADMIN_SUBJECTS=oidc:ghe@us.ibm.com
+  bash "$SETUP" ) >"$TMP/out" 2>&1 || { cat "$TMP/out" >&2; fail 'the oidc run failed (with SBX_GITHUB_CLIENT_ID unset)'; }
+[[ "$(cm moca-settings SH_IDENTITY_PROVIDER)" == oidc ]] || fail 'oidc provider not written'
+[[ "$(cm moca-settings SH_OIDC_ISSUER)" == https://idp.example.invalid/oidc/endpoint/default ]] || fail 'oidc issuer not written'
+[[ "$(cm moca-settings SH_OIDC_CLIENT_ID)" == 0123456789abcdef ]] || fail 'oidc client id not written'
+[[ "$(cm moca-settings SH_OIDC_REDIRECT_URI)" == https://sbx-api.apps.example.invalid/v1/auth/oidc/callback ]] || fail 'oidc redirect URI not written'
+[[ "$(cm moca-settings SH_OIDC_SCOPE)" == 'openid email profile' ]] || fail 'oidc scope not written'
+jq -e '.data | has("SH_GITHUB_CLIENT_ID") and (.SH_GITHUB_CLIENT_ID == "")' "$MOCK_STATE/configmap-moca-settings.json" >/dev/null ||
+  fail 'an oidc deployment must write an empty SH_GITHUB_CLIENT_ID (the base reads the key unconditionally)'
+[[ "$(cm sbx-settings SH_ALLOWED_SUBJECTS)" == 'oidc:ghe@us.ibm.com,github:1' ]] || fail 'oidc allowed subjects not written'
+[[ "$(cm moca-settings SH_ADMIN_SUBJECTS)" == oidc:ghe@us.ibm.com ]] || fail 'oidc admin subject not written'
+render
+oidc_cp_hash="$(pod_hash moca-control-plane)"
+[[ "$oidc_cp_hash" =~ ^[0-9a-f]{16}$ ]] || fail 'the oidc run stamps no settings hash'
+# Every non-optional configMapKeyRef the rendered control plane reads must exist in what setup.sh
+# wrote (review #851: the empty SH_GITHUB_CLIENT_ID bug was exactly a key the base reads
+# unconditionally that the oidc path did not write; this would have caught it).
+KUBECONFIG=/dev/null "$REAL_KUBECTL" label --local -f "$TMP/render.yaml" sbx-render- -o json 2>/dev/null | jq -s . >"$TMP/render.json"
+for ref in $(jq -r '.[] | select(.kind == "Deployment" and .metadata.name == "moca-control-plane")
+    | .spec.template.spec.containers[].env[]?.valueFrom.configMapKeyRef // empty
+    | select((.optional // false) | not) | "\(.name)/\(.key)"' "$TMP/render.json" | sort -u); do
+  jq -e --arg k "${ref#*/}" '.data | has($k)' "$MOCK_STATE/configmap-${ref%/*}.json" >/dev/null ||
+    fail "the control plane reads $ref non-optionally, but setup.sh wrote no such key"
+done
+pass 'an oidc deployment writes the identity settings, oidc: subjects and no GitHub client id'
 
 # 14a. Off is byte-identical: the generated kustomization.yaml, both ConfigMaps, the applied object
 # set and both hashes are today's, written out here as the golden copy (each recomputed from today's
