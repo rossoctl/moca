@@ -37,7 +37,7 @@ import {
   type WorkspaceReset,
 } from './select-sandbox.js';
 import { checkpointExtension } from './checkpoint-extension.js';
-import { budgetVoterExtension, branchSpend } from './budget-voter.js';
+import { budgetVoterExtension, branchSpend, resolveBudgetLimit } from './budget-voter.js';
 import { AMBIENT_KEY_SENTINEL } from './ambient-sentinel.js';
 import { toolChoiceExtension } from './tool-choice-extension.js';
 import { promptCacheExtension } from './prompt-cache-extension.js';
@@ -703,8 +703,9 @@ export interface TurnConfig {
   sessionModel?: SessionModelSpec;
   /**
    * This turn's token cap -- an async turn's `caps.tokens`, carried through the dequeue exchange
-   * (#391). Takes precedence over SH_BUDGET_TOKENS: that is a deployment default, this is what the
-   * submitter asked for. Absent ⇒ the env var, as before.
+   * (#391). A CEILING, not an override: `resolveBudgetLimit` takes the tighter of this and
+   * SH_BUDGET_TOKENS, so a submitter can narrow the deployment's limit and never raise it. Absent ⇒
+   * the env var alone, as before.
    */
   budgetTokens?: number;
 }
@@ -1405,9 +1406,9 @@ async function executeTurnCore(
   // Opened by executeTurn ahead of the pool acquire, so a missing session 404s before any lease work.
   const { store, backend, sessionManager } = opened;
 
-  // The TURN's own cap first (#391): `config.budgetTokens` is what this turn's submitter asked for,
-  // SH_BUDGET_TOKENS the deployment's default for turns that asked for nothing.
-  const budgetLimit = config?.budgetTokens ?? Number(process.env.SH_BUDGET_TOKENS);
+  // The tighter of this turn's own `caps.tokens` and the deployment's SH_BUDGET_TOKENS (#391);
+  // undefined when neither is set.
+  const budgetLimit = resolveBudgetLimit(config?.budgetTokens);
   const budgetMargin = Number(process.env.SH_BUDGET_MARGIN);
   let budgetExceeded = false;
   // acquireTurnSandbox (called by executeTurn, which owns the lease lifecycle) hands back exactly
@@ -1437,7 +1438,7 @@ async function executeTurnCore(
     // value throws out of the turn; with both unset it registers nothing.
     promptCacheExtension(),
   ];
-  if (Number.isFinite(budgetLimit) && budgetLimit > 0) {
+  if (budgetLimit !== undefined) {
     // session_start is not emitted in the headless path, so compute the pre-turn baseline
     // (cumulative spend already on the loaded branch) here and inject it into the voter.
     const budgetBaseline = branchSpend(sessionManager) ?? 0;

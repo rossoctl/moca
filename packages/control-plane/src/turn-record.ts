@@ -216,8 +216,11 @@ const KEY_RE = /^[\x21-\x7e]{1,128}$/;
 
 function cap(raw: unknown, field: string): number | undefined {
   if (raw === undefined) return undefined;
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) {
-    throw new CpError('invalid_request', `caps.${field} must be a positive number`);
+  // A positive SAFE INTEGER, which is what the contract advertises (`type: integer`). Half a token
+  // and half a second are not quantities either enforcer can act on, and 1e300 survives the record
+  // round trip only to arrive as a cap nothing can compare against meaningfully.
+  if (typeof raw !== 'number' || !Number.isSafeInteger(raw) || raw <= 0) {
+    throw new CpError('invalid_request', `caps.${field} must be a positive integer`);
   }
   return raw;
 }

@@ -109,21 +109,28 @@ return removed
 `;
 
 /**
- * The heartbeat's idle reset, CONDITIONAL on still owning the entry. A bare `XCLAIM ... 0 JUSTID`
- * transfers ownership whatever the current state is, because min-idle 0 matches everything — so a
- * worker that stalled past `minIdleMs`, had its entry legitimately reclaimed by another worker, and
- * then woke up would STEAL IT BACK on its next beat. Both workers would then be running the same
- * turn, both would write a result, and the loser's ack would retire an entry the winner still
- * believed it owned. Checking the owner first and claiming in the same script closes that.
+ * `XCLAIM ... 0 JUSTID`, CONDITIONAL on still owning the entry, with an optional RETRYCOUNT
+ * (ARGV[4], absent for the heartbeat's plain idle reset). A bare claim transfers ownership whatever
+ * the current state is, because min-idle 0 matches everything — so a worker that stalled past
+ * `minIdleMs`, had its entry legitimately reclaimed by another worker, and then woke up would STEAL
+ * IT BACK on its next beat. Both workers would then be running the same turn, both would write a
+ * result, and the loser's ack would retire an entry the winner still believed it owned. Checking the
+ * owner first and claiming in the same script closes that, for the beat and for the hand-back alike:
+ * `defer` runs after a claim the owner may already have lost, and its RETRYCOUNT would otherwise
+ * rewrite the delivery counter of a turn somebody else is now running.
  *
  * XPENDING's per-entry reply is a flat four-element array (id, consumer, idle, deliveries); only
  * the consumer is read here. 0 entries means the entry is gone from the PEL — acked, or trimmed —
  * which is the other case where touching would be a lie.
  */
-const TOUCH_IF_OWNED_LUA = `
+const CLAIM_IF_OWNED_LUA = `
 local p = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1)
 if #p == 0 or p[1][2] ~= ARGV[2] then return 0 end
-redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'JUSTID')
+if ARGV[4] then
+  redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'JUSTID', 'RETRYCOUNT', ARGV[4])
+else
+  redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'JUSTID')
+end
 return 1
 `;
 
@@ -222,16 +229,19 @@ export class RedisWorkQueue implements WorkQueue {
   }
 
   async defer(entryId: string, consumerId: string, retryCount: number): Promise<void> {
-    // Claiming to the consumer that already holds it, with min-idle 0 so the state it is in cannot
-    // make this fail. JUSTID keeps Redis from counting a delivery of an entry nobody read, and
-    // RETRYCOUNT then puts the counter back where the caller says it belongs.
-    await this.client.xClaimJustId(this.stream, this.group, consumerId, 0, [entryId], {
-      RETRYCOUNT: Math.max(0, retryCount),
+    // Claiming to the consumer that already holds it: JUSTID keeps Redis from counting a delivery of
+    // an entry nobody read, and RETRYCOUNT then puts the counter back where the caller says it
+    // belongs. OWNER-CHECKED (see the script), because min-idle 0 matches everything -- including an
+    // entry this worker no longer holds, which it would otherwise steal back while handing it over.
+    // A lost entry needs no hand-back: its new owner is already running it.
+    await this.client.eval(CLAIM_IF_OWNED_LUA, {
+      keys: [this.stream],
+      arguments: [this.group, consumerId, entryId, String(Math.max(0, retryCount))],
     });
   }
 
   async touch(entryId: string, consumerId: string): Promise<boolean> {
-    const held = await this.client.eval(TOUCH_IF_OWNED_LUA, {
+    const held = await this.client.eval(CLAIM_IF_OWNED_LUA, {
       keys: [this.stream],
       arguments: [this.group, consumerId, entryId],
     });

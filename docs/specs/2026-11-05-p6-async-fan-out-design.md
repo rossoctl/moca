@@ -1168,20 +1168,28 @@ it adds is the schedule. Its design should cite this document for both.
   holding it — new control-plane-to-worker machinery.~~ **Done in #391**: the two sides already
   share a Redis keyspace, so the `DELETE` writes a `cancelRequested` flag the worker's 2 s watchdog
   reads and the leaf aborts — no transport. §4.5's amendment has the shape and the M2 caveat.
-- ~~**Per-subject fairness on the async drain.**~~ **Done in #391**, as claim-time filtering: the
-  queue is still one FIFO stream, so the worker reads the claimed entry's `owner` (one `HGET`) and,
-  when that owner already holds `SH_TURNS_PER_SUBJECT` of this worker's slots, hands the entry back
-  **unrun and unpenalised** — `XCLAIM … JUSTID RETRYCOUNT <before>`, so a defer is invisible to
-  `maxAttempts` — and backs off as it does on an empty queue. The check runs _before_ the claim
-  handshake, so a turn that may not run yet mints no credential and writes no audit entry, and it
-  shares the sync route's one `SubjectCounter` instance, so async leaves and interactive turns of
-  one subject count against one number. `async_deferred_subject` (§7) counts it.
-  **Known limit:** the defer resets the entry's idle timer, so a deferred turn waits up to one
-  `minIdleMs` (90 s) before any worker may reclaim it, even if a slot frees sooner. Leaving IDLE
-  high instead would have this worker's own next claim reclaim the same entry (XAUTOCLAIM leads
-  every claim), defer it again, and never reach the entries behind it. Per-owner streams, where a
-  claim can skip an owner without touching their entries, are the upgrade — the queue-shape
-  question this section's per-class-caps item below also waits on.
+- **Per-subject fairness on the async drain.** **Partly addressed in #391, and still owed.** What
+  ships is claim-time filtering against the SYNC cap: the queue is still one FIFO stream, so the
+  worker reads the claimed entry's `owner` (one `HGET`) and, when that owner already holds
+  `SH_TURNS_PER_SUBJECT` of this worker's slots, hands the entry back **unrun and unpenalised** —
+  `XCLAIM … JUSTID RETRYCOUNT <before>`, so a defer is invisible to `maxAttempts` — and backs off as
+  it does on an empty queue. The check runs _before_ the claim handshake, so a turn that may not run
+  yet mints no credential and writes no audit entry, and it shares the sync route's one
+  `SubjectCounter` instance, so async leaves and interactive turns of one subject count against one
+  number. `async_deferred_subject` (§7) counts it. That is a real guarantee for MIXED load: an
+  owner whose fan-out is executing can no longer also fill the worker with interactive turns. A
+  deferred entry does wait up to one `minIdleMs` (90 s) before any worker may reclaim it, even if a
+  slot frees sooner: leaving IDLE high instead would have this worker's own next claim reclaim the
+  same entry (XAUTOCLAIM leads every claim), defer it again, and never reach the entries behind it.
+  **What it is NOT, and what #391 therefore leaves open.** It does not bound an owner's share of an
+  **async-only** drain. A worker runs one queued leaf at a time (§5.3), so an owner's async turns
+  reach a cap of `max(1, ⌊S/2⌋)` only when their sync turns are in flight too; with async alone the
+  count never reaches it, nothing is ever deferred, and the single FIFO stream then serves owner A's
+  thousand-entry backlog ahead of owner B's one turn. Binding that needs a count no worker holds —
+  per-owner streams, or a cluster-wide per-owner running count checked at the dequeue exchange
+  (where the control plane already owns the records and a per-owner open-turn set). That is the
+  queue-shape question this section's per-class-caps item below also waits on, and it is why #391's
+  fourth criterion ("one subject can't take every slot") stays open.
 - **Per-turn cost attribution (#859).** #391's other half, split out: it wants the per-model price table
   §4.3's amendment says does not exist (#359), which is the same reason `caps.costUsd` is refused
   at submission rather than enforced.

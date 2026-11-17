@@ -85,7 +85,10 @@ export function fakeControlPlane(
     deleteConfigBundle: async () => undefined,
     submitTurn: async (sessionId) => ({ sessionId, turnId: 't-fake' }),
     getTurn: async (_sessionId, turnId) => ({ turnId, state: 'done', attempts: 1 }),
-    cancelTurn: async () => undefined,
+    cancelTurn: async (_sessionId: string, turnId: string) => ({
+      turnId,
+      state: 'cancelled' as const,
+    }),
   };
   const merged = { ...defaults, ...over };
   const recorded = Object.fromEntries(

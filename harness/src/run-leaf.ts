@@ -5,7 +5,7 @@ import {
   type ExtensionFactory,
   type FileEntry,
 } from '@earendil-works/pi-coding-agent';
-import { branchSpend, budgetVoterExtension } from './budget-voter.js';
+import { branchSpend, budgetVoterExtension, resolveBudgetLimit } from './budget-voter.js';
 import { DEADLINE_ABORT } from './stop-reason.js';
 import { RedisSessionBackend } from '@moca/session-backend';
 import {
@@ -459,16 +459,16 @@ function stopFailure(signal?: AbortSignal, capture?: BudgetCapture): LeafResult 
 
 /**
  * The token-cap extension for a leaf that builds its own Pi stack (solve, verdict), or nothing when
- * no cap is in play (#391). The turn's own `caps.tokens` first, then the deployment's
- * SH_BUDGET_TOKENS -- the same precedence `executeTurnCore` applies for the prompt leaf and `/turn`.
+ * no cap is in play (#391). The tighter of the turn's own `caps.tokens` and the deployment's
+ * SH_BUDGET_TOKENS -- the same ceiling `executeTurnCore` applies for the prompt leaf and `/turn`.
  */
 function budgetVoters(
   sessionManager: SessionManager,
   config: TurnConfig | undefined,
   capture: BudgetCapture,
 ): ExtensionFactory[] {
-  const limit = config?.budgetTokens ?? Number(process.env.SH_BUDGET_TOKENS);
-  if (!Number.isFinite(limit) || limit <= 0) return [];
+  const limit = resolveBudgetLimit(config?.budgetTokens);
+  if (limit === undefined) return [];
   const margin = Number(process.env.SH_BUDGET_MARGIN);
   return [
     budgetVoterExtension(sessionManager, {
@@ -500,6 +500,12 @@ export async function runLeaf(
    */
   signal?: AbortSignal,
 ): Promise<LeafResult> {
+  // Stopped before anything ran: a reclaimed delivery whose deadline is already past (#391). Answered
+  // from the signal HERE, ahead of the dispatch, because every kind would otherwise lease a sandbox,
+  // resolve a promoted config and overlay context before reaching its first abort check -- real work,
+  // and a sandbox held for the length of it, for a leaf whose answer is already decided.
+  const preStopped = stopFailure(signal);
+  if (preStopped) return preStopped;
   if (env.kind === 'solve') return runSolveLeaf(env, config, deps, signal);
   if (env.kind === 'prompt') return runPromptLeaf(env, config, deps, signal);
   const noWorkload = nonPromptWorkloadFailure(env);

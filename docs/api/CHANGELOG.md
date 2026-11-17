@@ -40,8 +40,10 @@ because that is what Preview requires.
   async fan-out is executing can be refused an interactive turn it would previously have been given.
   Nothing new on the wire -- the same 429, the same code -- but the condition is wider. On the queue
   side there is no refusal at all: an entry claimed past its owner's cap is handed back unrun and
-  retried, with its attempt budget untouched, so a deep queue from one owner cannot crowd out
-  another's turn.
+  retried, with its attempt budget untouched. This bounds MIXED load only -- a worker runs one queued
+  leaf at a time, so an owner's async-only fan-out never reaches the cap, and the queue is still one
+  FIFO stream. A deep async backlog from one owner therefore still delays another owner's async turn;
+  bounding that needs a cluster-wide count and stays open on #391.
 - `DELETE /v1/sessions/{id}/turns/{turnId}` now cancels a **running** turn as well as a queued one.
   It answers `202` with `{turnId, state: "running", cancelRequested: true}`; the worker stops the
   leaf within a few seconds, releases its sandbox, and the turn reaches `cancelled`. `409`

@@ -139,7 +139,14 @@ export interface TurnStatus {
    */
   attempts: number;
   /**
-   * Absent until the leaf writes one. `status: 'aborted'` has no state of its own; it reads `failed`.
+   * A cancel is in flight (#391): the turn is still `running` and has been asked to stop. Present
+   * only while that is true -- it disappears with the terminal state, so a turn that finished before
+   * it noticed reads as the `done`/`failed` it is.
+   */
+  cancelRequested?: boolean;
+  /**
+   * Absent until the leaf writes one. `status: 'aborted'` has no state of its own; it reads
+   * `cancelled` (#391).
    *
    * BOUNDED (#390): the turn's output -- a patch, the assistant's text -- is NOT here, because this
    * route is polled. `summary` describes it in one clipped line, `artifacts` says what
@@ -242,12 +249,25 @@ export interface ControlPlaneApi {
   /** An async turn's state, and its result once written. */
   getTurn(sessionId: string, turnId: string): Promise<TurnStatus>;
   /**
-   * Cancel a QUEUED async turn. Throws ApiError `turn_not_cancellable` for a running or finished
-   * one. Distinct from `HarnessApi.cancelTurn` below: that one interrupts a streaming turn over its
-   * own connection; this one removes a queued async turn from the queue. Neither can do the other's
-   * job, which is exactly why DELETE answers 409 for a running async turn.
+   * Cancel a QUEUED or RUNNING async turn (#391). A queued turn answers `state: 'cancelled'` and
+   * never starts; a running one answers `state: 'running'` with `cancelRequested`, and the worker
+   * holding the leaf stops it and finalizes `cancelled` -- so the caller polls `getTurn` either way,
+   * and a leaf that finished first stays finished. Throws ApiError `turn_not_cancellable` only for a
+   * turn that is already terminal.
+   *
+   * Distinct from `HarnessApi.cancelTurn` below: that one interrupts a streaming turn over its own
+   * connection; this one stops an async turn through its record. Neither can do the other's job.
    */
-  cancelTurn(sessionId: string, turnId: string): Promise<void>;
+  cancelTurn(sessionId: string, turnId: string): Promise<CancelledTurn>;
+}
+
+/** DELETE's 202 body (#391): what cancelling actually achieved, which the caller shows the user. */
+export interface CancelledTurn {
+  turnId: string;
+  /** `cancelled` for a queued turn; `running` for one that was only ASKED to stop. */
+  state: AsyncTurnState;
+  /** Present and true exactly when the stop was requested rather than done. */
+  cancelRequested?: boolean;
 }
 
 /** One of the caller's stored config bundles (rossoctl/moca#559). */

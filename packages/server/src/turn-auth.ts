@@ -45,8 +45,9 @@ export interface TurnAuth {
   model?: SessionModelSpec;
   /**
    * An async turn's token cap, `caps.tokens` from the dequeue exchange (async fan-out §4.3, #391);
-   * absent ⇒ SH_BUDGET_TOKENS, the deployment default. Only the async claim sets it: a sync `/turn`
-   * carries no caps, and its session token names no budget.
+   * absent ⇒ SH_BUDGET_TOKENS alone. Present, it is the tighter of the two that applies, never the
+   * larger (`resolveBudgetLimit`). Only the async claim sets it: a sync `/turn` carries no caps, and
+   * its session token names no budget.
    */
   budgetTokens?: number;
 }

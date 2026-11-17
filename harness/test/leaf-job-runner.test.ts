@@ -424,16 +424,30 @@ describe('processOne', () => {
       expect(queue.acked).toEqual(['1-0']);
     });
 
-    it('aborts before the run when the record already carries the flag, and arms no watchdog', async () => {
+    // A record that already carries the flag is retired BEFORE the claim handshake: no credential is
+    // minted, no sandbox is leased, no timer is armed, and the owner's fairness slot is never taken.
+    it('finalizes a turn that already carries the flag without claiming or running it', async () => {
       queue.next = entry();
-      const runLeaf = vi.fn(async (_e: LeafEnvelope, _c: TurnConfig, signal: AbortSignal) => {
-        expect(signal.aborted).toBe(true);
-        expect(signal.reason).toBe('cancelled');
-        return { status: 'aborted' } as LeafResult;
-      });
-      await processOne(deps({ cancelRequested: async () => true, runLeaf }));
-      expect(runLeaf).toHaveBeenCalledTimes(1);
-      expect(heartbeats).toHaveLength(1); // already aborted: nothing left to watch for
+      const claimTurn = vi.fn(async () => ({
+        envelope: ENV,
+        sessionId: 'sess-1',
+        attempts: 1,
+        config: CONFIG,
+      }));
+      const runLeaf = vi.fn(async () => ({ status: 'done' }) as LeafResult);
+      const admitOwner = vi.fn(async () => () => {});
+      const out = await processOne(
+        deps({ cancelRequested: async () => true, claimTurn, runLeaf, admitOwner }),
+      );
+      expect(out).toEqual({ kind: 'refused', turnId: 't-1', reclaimed: false });
+      expect(claimTurn).not.toHaveBeenCalled();
+      expect(runLeaf).not.toHaveBeenCalled();
+      expect(admitOwner).not.toHaveBeenCalled();
+      expect(heartbeats).toHaveLength(0);
+      // `asyncFinalizeState` maps 'aborted' to `cancelled`, and the entry leaves the PEL for good.
+      expect(finalized).toEqual([['t-1', 'aborted']]);
+      expect(queue.acked).toEqual(['1-0']);
+      expect([...store.keys()]).toEqual([]);
     });
 
     it('keeps running when the cancel poll itself fails: a Redis blip must not cancel a turn', async () => {

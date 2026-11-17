@@ -392,20 +392,27 @@ export class TurnStore {
    * refuse exactly the crash-reclaimed entries recovery exists for.
    */
   async cancel(turnId: string, now: number): Promise<'cancelled' | 'cancelling' | 'conflict'> {
-    const rec = await this.get(turnId);
-    if (!rec) return 'conflict';
-    if (rec.state === 'running') {
-      // Already requested: idempotent, so a caller retrying a DELETE sees the same answer rather
-      // than a 409 for a cancel that is in flight.
-      const won = await this.cas(this.key(turnId), ['running'], { cancelRequested: '1' });
-      return won ? 'cancelling' : 'conflict';
+    // Read, then CAS on the state that read saw, and on a lost CAS read again -- twice at most.
+    // Without the retry, a claim landing between the read and the `['queued']` CAS answered
+    // `conflict`, which the handler reports as a 409 meaning "already terminal": the caller stops,
+    // so the "cancelled through the flag by the caller's next DELETE" this used to rely on never
+    // happens and a running turn is uncancellable for the rest of its life. Two passes are enough
+    // because only queued → running can defeat the first, and the running CAS that follows loses
+    // only to a finalize, which is a real conflict.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const rec = await this.get(turnId);
+      if (!rec) return 'conflict';
+      if (rec.state === 'running') {
+        // Already requested: idempotent, so a caller retrying a DELETE sees the same answer rather
+        // than a 409 for a cancel that is in flight.
+        if (await this.cas(this.key(turnId), ['running'], { cancelRequested: '1' }))
+          return 'cancelling';
+        continue;
+      }
+      if (rec.state !== 'queued') return 'conflict';
+      if ((await this.toTerminal(rec, 'cancelled', now, ['queued'])) === 'ok') return 'cancelled';
     }
-    if (rec.state !== 'queued') return 'conflict';
-    // `queued` ALONE in the CAS: a claim that won the race between the read above and this write
-    // made the record `running`, and that turn is cancelled through the flag above instead -- by
-    // the caller's next DELETE, which now has something to do.
-    const res = await this.toTerminal(rec, 'cancelled', now, ['queued']);
-    return res === 'ok' ? 'cancelled' : 'conflict';
+    return 'conflict';
   }
 
   /**

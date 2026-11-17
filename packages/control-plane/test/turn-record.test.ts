@@ -178,13 +178,21 @@ describe('parseTurnSubmission (spec §4.1)', () => {
     );
   });
 
-  it('refuses a non-positive or non-numeric cap rather than storing it', () => {
+  it('refuses a cap that is not a positive integer rather than storing it', () => {
     expect(codeOf(() => parseTurnSubmission({ item, async: true, caps: { tokens: 0 } }))).toBe(
       'invalid_request',
     );
     expect(
       codeOf(() => parseTurnSubmission({ item, async: true, caps: { wallClock: 'ten' } })),
     ).toBe('invalid_request');
+    // `type: integer` in the contract, so these two are refused at the edge rather than stored as a
+    // cap no enforcer can act on.
+    expect(codeOf(() => parseTurnSubmission({ item, async: true, caps: { wallClock: 0.5 } }))).toBe(
+      'invalid_request',
+    );
+    expect(codeOf(() => parseTurnSubmission({ item, async: true, caps: { tokens: 1e300 } }))).toBe(
+      'invalid_request',
+    );
   });
 
   it('refuses an idempotency key that is not a short printable string', () => {

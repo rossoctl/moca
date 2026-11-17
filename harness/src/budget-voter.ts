@@ -44,6 +44,25 @@ export function branchSpend(sm: { getBranch?: () => unknown[] } | undefined): nu
   return total;
 }
 
+/**
+ * The token limit in force for one turn, or undefined for no limit.
+ *
+ * Both inputs are CEILINGS, so the tighter one wins: a submitter's `caps.tokens` narrows the
+ * deployment's `SH_BUDGET_TOKENS` and can never raise it, which is what the API contract promises
+ * ("a cap above the deployment's own limit does not raise it"). The first cut read
+ * `caps.tokens ?? SH_BUDGET_TOKENS`, which let an async caller buy itself a bigger budget than the
+ * operator set — the one direction an unattended fan-out must not be able to go.
+ *
+ * Either side absent, non-numeric or <= 0 leaves the other in force; both absent means no cap.
+ */
+export function resolveBudgetLimit(turnCap: number | undefined): number | undefined {
+  const usable = (n: number): number | undefined => (Number.isFinite(n) && n > 0 ? n : undefined);
+  const deployment = usable(Number(process.env.SH_BUDGET_TOKENS));
+  const turn = turnCap === undefined ? undefined : usable(turnCap);
+  if (turn === undefined) return deployment;
+  return deployment === undefined ? turn : Math.min(turn, deployment);
+}
+
 /** Cumulative assistant token spend on the current branch, read from a tool_call ctx. */
 export function sessionSpendTotal(ctx: ExtensionContext): number | null {
   return branchSpend((ctx as { sessionManager?: { getBranch?: () => unknown[] } }).sessionManager);

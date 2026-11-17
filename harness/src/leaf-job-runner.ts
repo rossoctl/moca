@@ -110,9 +110,10 @@ export interface LeafJobDeps {
  * - `redelivered`: retryable. No result, no finalize, NO ack -- the entry stays pending and another
  *   worker reclaims it after `minIdleMs`.
  * - `dead_lettered`: past `maxAttempts` (or malformed). Acked without running.
- * - `refused`: the control plane would not mint. Acked, because an entry nobody may run would
- *   otherwise be re-read until it exhausts `maxAttempts` -- three wasted deliveries for a turn
- *   whose answer will not change.
+ * - `refused`: the turn must not run -- the control plane would not mint, or the record already
+ *   carried a cancel request and was finalized `cancelled` without running (#391). Acked, because an
+ *   entry nobody may run would otherwise be re-read until it exhausts `maxAttempts` -- three wasted
+ *   deliveries for a turn whose answer will not change.
  * - `lost`: a heartbeat found the entry owned by someone else, so this run's work is discarded --
  *   no result, no finalize, NO ack. The reclaiming worker owns the turn and ends it.
  * - `deferred`: the turn's owner is at their per-worker cap, so the entry was handed back UNRUN and
@@ -171,12 +172,32 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
     return { kind: 'dead_lettered', turnId: claimed.turnId, reclaimed: claimed.reclaimed };
   }
 
+  // The record can ALREADY carry the cancel flag (§4.5, #391): a cancel that landed while the
+  // previous worker was dying leaves the turn `running` with `cancelRequested` set, and this delivery
+  // is the reclaim. Honoured HERE, before the fairness slot and before `claimTurn`, so a turn that
+  // must not run never mints a credential, never writes an issuance to the audit log, never leases a
+  // sandbox, and never waits out another owner's cap first.
+  if (await deps.cancelRequested?.(claimed.turnId).catch(() => false)) {
+    // No result record, exactly as a cancel while `queued` leaves none. `finalize` maps `aborted` to
+    // `cancelled`, and the entry is acked because nothing will ever run it.
+    await deps.finalize(claimed.turnId, 'aborted');
+    await deps.queue.ack(claimed.entryId);
+    return { kind: 'refused', turnId: claimed.turnId, reclaimed: claimed.reclaimed };
+  }
+
   // FAIRNESS (#391). The queue is one FIFO stream, so an entry's owner is unknowable until it is
   // claimed -- which is why this is a check-and-hand-back rather than a filter on the read. One
   // owner's fan-out holds at most `SH_TURNS_PER_SUBJECT` of this worker's slots, the same cap an
-  // interactive `/turn` is held to, so another owner's single turn is never queued behind all of
-  // it. Before `claimTurn` deliberately: a turn that may not run yet must not have a credential
-  // minted for it, must not flip to `running`, and must not appear in the audit log as an issuance.
+  // interactive `/turn` is held to and counted against the same `SubjectCounter`, so an owner whose
+  // leaves are running cannot also fill the worker with interactive turns. Before `claimTurn`
+  // deliberately: a turn that may not run yet must not have a credential minted for it, must not
+  // flip to `running`, and must not appear in the audit log as an issuance.
+  //
+  // shortcut: this bounds an owner's MIXED load, not an async-only drain -- a worker runs one queued
+  // leaf at a time, so async alone never reaches a cap of max(1, S/2) and A's deep backlog is still
+  // served ahead of B's single turn. Upgrade when async-only fan-out from several owners is real:
+  // the count has to be cluster-wide (per-owner streams, or a per-owner running count checked at the
+  // dequeue exchange), which no in-process counter can provide. Open on #391; spec §12 has the shape.
   const releaseOwner = deps.admitOwner ? await deps.admitOwner(claimed.turnId) : noRelease;
   if (!releaseOwner) {
     // Handed back UNRUN and at no cost to its attempt budget; see `defer`'s own doc for why the
@@ -245,12 +266,9 @@ async function runClaimedEntry(deps: LeafJobDeps, claimed: ClaimedEntry): Promis
   // deadline; the REASON is what tells the two apart downstream -- `DEADLINE_ABORT` finalizes
   // `failed: budget`, anything else `cancelled`.
   const stop = new AbortController();
-  // The record can ALREADY carry the flag: a cancel that landed while the previous worker was dying
-  // leaves the turn `running` with `cancelRequested` set, and this delivery is the reclaim. Checked
-  // before the run so that turn never leases a sandbox at all.
-  if (await deps.cancelRequested?.(claimed.turnId).catch(() => false)) {
-    stop.abort('cancelled');
-  }
+  // A deadline already in the past is only knowable after the claim, which is what anchors it. The
+  // run short-circuits on it: `runLeaf` reads an already-aborted signal before it leases anything,
+  // so this finalizes `failed: budget` through the ordinary path without starting a leaf.
   const deadlineMs = turn.turnExp ? turn.turnExp * 1000 : undefined;
   if (deadlineMs !== undefined && deadlineMs <= Date.now()) stop.abort(DEADLINE_ABORT);
 

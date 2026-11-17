@@ -914,21 +914,43 @@ describe('runLeaf — stops on the signal and the token cap', () => {
     }
   });
 
+  // A signal already aborted when the leaf is entered answers from the signal and starts nothing:
+  // every kind would otherwise lease a sandbox and overlay context before its first abort check.
+  it('starts no work at all for a signal that is already aborted', async () => {
+    const produceVerdict = vi.fn(async () => {});
+    const produceSolve = vi.fn(async () => {});
+    const executeTurn = vi.fn(async () => ({
+      sessionId: 'run-1-i1',
+      response: '',
+      stopReason: 'end_turn',
+    }));
+    const signal = aborted('cancelled');
+    await runLeaf(converge, undefined, { produceVerdict }, signal);
+    await runLeaf(solve, undefined, { produceSolve }, signal);
+    await runLeaf(prompt, undefined, { executeTurn }, signal);
+    expect(produceVerdict).not.toHaveBeenCalled();
+    expect(produceSolve).not.toHaveBeenCalled();
+    expect(executeTurn).not.toHaveBeenCalled();
+  });
+
   // The converge leaf's stop is read BEFORE its verdict check: the other order blames the model
-  // (`no_verdict`) for a turn the worker cut short.
-  it('does not report no_verdict for a stopped converge leaf', async () => {
+  // (`no_verdict`) for a turn the worker cut short. Aborted mid-produce, which is the real shape --
+  // a signal aborted beforehand never reaches the verdict check at all.
+  it('does not report no_verdict for a converge leaf stopped mid-run', async () => {
+    const stop = new AbortController();
     const r = await runLeaf(
       converge,
       undefined,
-      { produceVerdict: async () => {} },
-      aborted('cancelled'),
+      { produceVerdict: async () => stop.abort('cancelled') },
+      stop.signal,
     );
     expect(r).toEqual({ status: 'aborted' });
   });
 
   // A solve leaf's whole output is the diff, and a worktree cut off mid-edit is a partial patch
   // with nothing on it saying so.
-  it('returns no patch from a stopped solve leaf', async () => {
+  it('returns no patch from a solve leaf stopped mid-run', async () => {
+    const stop = new AbortController();
     const r = await runLeaf(
       solve,
       undefined,
@@ -936,9 +958,10 @@ describe('runLeaf — stops on the signal and the token cap', () => {
         produceSolve: async (_e, _c, cap) => {
           cap.patch = 'HALF A PATCH';
           cap.baseline = 'c'.repeat(40);
+          stop.abort('cancelled');
         },
       },
-      aborted('cancelled'),
+      stop.signal,
     );
     expect(r).toEqual({ status: 'aborted' });
   });

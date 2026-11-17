@@ -773,11 +773,31 @@ describe('cancelTurn (spec §4.5)', () => {
     expect(status.cancelRequested).toBe(true);
   });
 
+  // The flag is never cleared, so only the state can retire it: a leaf that finished before it
+  // noticed the cancel must not read as "still stopping" for the rest of the record's TTL.
+  it('stops reporting cancelRequested once the turn is terminal', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    const { turnId } = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+    await d.turns.markRunning(turnId, 1);
+    await cancel(d, sid, turnId);
+    // The leaf won the race and completed normally.
+    await d.turns.finalize(turnId, 'done', NOW_MS);
+    expect(await d.turns.cancelRequested(turnId)).toBe(true);
+    const status = (
+      await HANDLERS.getTurn!(ctx({ principal: alice, params: { id: sid, turnId } }), d)
+    ).body as { state: string; cancelRequested?: boolean };
+    expect(status.state).toBe('done');
+    expect(status.cancelRequested).toBeUndefined();
+  });
+
   it('409s an already-terminal turn and 404s an unknown one', async () => {
     const d = turnDeps();
     const sid = await session(d);
     const { turnId } = (await submit(d, sid, { item, async: true })).body as { turnId: string };
     await d.turns.finalize(turnId, 'done', NOW_MS);
+    // The message names the state, which is the caller's reason to stop retrying.
+    await expect(cancel(d, sid, turnId)).rejects.toThrow(/'done'/);
     expect(await codeOf(() => cancel(d, sid, turnId))).toBe('turn_not_cancellable');
     expect(await codeOf(() => cancel(d, sid, 'nope'))).toBe('not_found');
   });

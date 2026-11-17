@@ -1,6 +1,6 @@
 # ADR-0047: P6 async fan-out is a drain loop inside the turn worker, sharing its admission budget
 
-- **Status:** Accepted (2026-11-17; all three milestones implemented — M1 by #704, #713, #717, M2 by #788, #807, #822 (`turn_exp`, grant-at-dequeue, the single-tenancy gate lifted), M3 by #765 — with per-turn budgets, running-turn cancel and per-subject fairness by #391) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-11-17; all three milestones implemented — M1 by #704, #713, #717, M2 by #788, #807, #822 (`turn_exp`, grant-at-dequeue, the single-tenancy gate lifted), M3 by #765 — with per-turn budgets, running-turn cancel and the per-worker half of per-subject fairness by #391) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-11-05
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-11-05-p6-async-fan-out-design.md`](../specs/2026-11-05-p6-async-fan-out-design.md)
@@ -283,10 +283,11 @@ never-submitted and reaped-as-lost.
   outright (MI1 §6.2's current rule, and what M2 should ship) or whether a provably-still-running
   leaf may extend once — the §6.2 heartbeat is what such an extension would key off, since it
   already proves liveness. Also owed (result retention and richer artifacts were done in #390,
-  cancelling a running leaf and per-subject fairness in #391 — the latter as a claim-time check that
-  reads the entry's owner and hands a capped owner's entry back unrun and unpenalised, since the
-  queue is one FIFO stream and a claim reveals the owner only after it is taken; spec §12 records the
-  90 s latency that buys): per-turn cost attribution (#859, #391's split-out half, which wants the
+  cancelling a running leaf in #391, and per-subject fairness PARTLY — a claim-time check that reads
+  the entry's owner and hands a capped owner's entry back unrun and unpenalised, since the queue is
+  one FIFO stream and a claim reveals the owner only after it is taken, which binds an owner's mixed
+  sync+async load but not an async-only backlog; spec §12 records both that limit and the 90 s
+  latency the defer buys): the cluster-wide half of per-subject fairness; per-turn cost attribution (#859, #391's split-out half, which wants the
   price table #391 established does not exist); per-class concurrency caps, for which
   `async_claim_denied_full` against
   interactive `429`s is the measurement that would justify them; `/v1/batches` (#537) once a working

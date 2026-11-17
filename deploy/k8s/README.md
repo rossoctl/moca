@@ -1340,7 +1340,10 @@ and as two top-level gauges:
 `async_deferred_subject` rising while slots sit idle is the per-owner cap pacing one submitter -- the
 fairness working, not a fault. Rising with no second owner submitting means `SH_TURNS_PER_SUBJECT` is
 too low for this deployment: a deferred entry waits out the 90 s reclaim window before any worker may
-take it again, so each deferral costs that turn up to 90 s.
+take it again, so each deferral costs that turn up to 90 s. A flat zero is not proof of fairness: the
+cap counts sync and async together and a worker runs one queued leaf at a time, so an async-only
+backlog never reaches it and is drained FIFO -- one owner's deep queue ahead of another's single turn
+(open on #391).
 
 The five counters are **one pod's**, not the deployment's: `/metrics` answers from whichever pod you
 reached, each worker counts in its own memory, and a worker that respawns starts its own count at

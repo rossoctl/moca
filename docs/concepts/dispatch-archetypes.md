@@ -66,8 +66,14 @@ which looks like a real answer. Poll the turn route, not this one.
 3. **Collect.** Poll `GET /v1/sessions/{id}/turns/{turnId}` for `state` and `attempts`, plus the
    result once the turn is terminal — the record's state is the source of truth, so a result written
    by a worker that then died is withheld until the reaper has ruled on it, rather than returned as
-   an answer. `DELETE` the same path cancels a turn that is still `queued`; a running leaf is
-   not interrupted (409 `turn_not_cancellable`). A result expires on `LEAF_RESULT_TTL_SECONDS` — the
+   an answer. `DELETE` the same path cancels a turn: a `queued` one answers `cancelled` and never
+   starts, a `running` one answers `202 {state: "running", cancelRequested: true}` and the worker
+   holding the leaf stops it within about ten seconds and finalizes `cancelled` (#391) — so poll for
+   the terminal state either way, and a leaf that finishes first stays finished. Only an
+   already-terminal turn is refused (409 `turn_not_cancellable`). A turn's own
+   `caps: {tokens, wallClock}` bound it: a turn that runs past either ends
+   `failed` with `result.reason: "budget"`, and `caps.tokens` can only narrow the deployment's
+   `SH_BUDGET_TOKENS`, never raise it. A result expires on `LEAF_RESULT_TTL_SECONDS` — the
    same variable the KEDA path used, now seven days by default, because nobody is waiting on an
    async turn and a Friday result must still be there on Monday — and a finished turn's record an
    hour after that, so the record outlives the result it points at.
