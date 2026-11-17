@@ -77,9 +77,15 @@ period is only an outer bound. Practically:
   start. A process that finds a version newer than it knows exits with the reason in its log, so a release rolled back
   past a schema change fails at start instead of misreading data ([change policy](../reference/change-policy.md#version-markers)).
   There is no migration tool: new fields are handled by tolerant reads, and every release so far writes version 1.
-  The credential envelope is versioned too (`v1.`).
+  An absent key, with any `sh:` data, means version 1. The key has no TTL: keep Redis on a `noeviction` or
+  `volatile-*` eviction policy (an `allkeys-*` policy can evict it), and after a `FLUSHALL` or a restore that lost
+  it, re-stamp it with the data's version (`SET sh:schema-version 1` today), since the next process to start
+  otherwise stamps its own. A Redis that refuses writes still has an existing stamp checked; on an absent key the
+  refused write is logged once and retried, and the process runs on. The credential envelope is versioned too (`v1.`).
 - **Config-bundle format.** A bundle carries its format version (`format.json`). The control plane refuses to store a
-  format newer than it knows, and the harness refuses to apply one, so a client upgraded first fails loudly.
+  format newer than it knows, and the harness refuses to apply one, so a client upgraded first fails loudly. Because
+  the marker is bundle content, a workflow promoted again with the first release that writes it gets a new digest;
+  bundles already stored keep theirs, and sessions naming them keep working.
 - No wire-version negotiation exists. `GET /v1/discovery` returns the control plane's `version`.
 
 ### Rolling the harness before the control plane

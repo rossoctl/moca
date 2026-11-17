@@ -101,7 +101,13 @@ breaking change under rule 2 and decision 8:
 - **`SCHEMA_VERSION`** (Redis). Absent, it is written; equal or older, the process runs; newer, it exits. A release
   that bumps it decides whether its processes raise the stored value (and so lock the previous release out) and how
   existing keys are read; that is one branch of `checkSchemaVersion`. Until then, a rollback across releases that share
-  a version needs no step, and a rollback past a bump is not supported.
+  a version needs no step, and a rollback past a bump is not supported. Absent, with any `sh:` data, means version 1:
+  every release before the key existed wrote version-1 data. The check reads first and writes only an absent key, so
+  a Redis that refuses writes (full under `noeviction`, a read-only replica, an ACL without `SET`) still has its
+  stamp checked; a refused write on an absent key is logged once and retried, and the process runs on. The key has no
+  TTL, so it needs a `noeviction` or `volatile-*` eviction policy: under `allkeys-*` it can be evicted, and after a
+  `FLUSHALL` or a restore that lost it the next process stamps its own version, which after a bump could put an old
+  version over newer data. Re-stamp it after such a restore (`SET sh:schema-version <version>`).
 - **`BUNDLE_FORMAT_VERSION`** (config bundles). Readers accept their own version and every older one, and refuse a
   newer one. Upgrade the harness and the control plane before the clients that build bundles (`mocactl`, the
   promote tooling).

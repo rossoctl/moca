@@ -1,4 +1,4 @@
-import { createClient } from 'redis';
+import { createClient, ErrorReply } from 'redis';
 
 /**
  * The Redis schema version (change policy decision 6, #509): one key that says which layout of
@@ -16,6 +16,14 @@ import { createClient } from 'redis';
  *
  *  - **Absent**: written with this code's version (`SET NX`, so concurrent first starts agree).
  *    Every component that runs the check may be the one to write it; none has to start first.
+ *    Absent means version 1 whether the Redis is fresh or holds `sh:` data from before this key
+ *    existed: every release before it wrote version-1 data. The key carries no TTL, so it relies
+ *    on a `noeviction` or `volatile-*` policy; after a FLUSHALL or a restore that lost it, the next
+ *    start stamps its own version, so re-stamp it by hand when that is not the data's version.
+ *  - **Read first, written only when absent**: a GET answers the check on a Redis that refuses
+ *    writes (full under `noeviction`, a read-only replica, an ACL without SET), so the stamp
+ *    already there is still checked. A refused write on an ABSENT key leaves the version unknown;
+ *    the guard says so once and keeps trying, without exiting.
  *  - **Equal**: nothing to do.
  *  - **Newer** than this code knows, or not a version at all: refused. The process must not run
  *    against data whose layout it cannot know (`SchemaVersionError`, and the guard below exits).
@@ -69,20 +77,29 @@ export class SchemaVersionError extends Error {
 }
 
 /**
- * Write the version when absent, then classify what is stored. Throws `SchemaVersionError` for a
- * newer or malformed version; any other throw is Redis itself (unreachable, refused), which the
- * caller retries.
+ * Classify what is stored, writing the version only when the key is absent. Throws
+ * `SchemaVersionError` for a newer or malformed version; any other throw is Redis itself -- an
+ * error reply (`ErrorReply`: a refused write, a missing ACL permission) or a lost connection --
+ * which the caller retries.
  */
 export async function checkSchemaVersion(
   redis: SchemaVersionRedisLike,
   known: number = SCHEMA_VERSION,
 ): Promise<SchemaVersionResult> {
-  if (Number(await redis.setNX(SCHEMA_VERSION_KEY, String(known))) === 1) {
-    return { outcome: 'written', stored: known, known };
+  let raw = await redis.get(SCHEMA_VERSION_KEY);
+  if (raw === null) {
+    if (Number(await redis.setNX(SCHEMA_VERSION_KEY, String(known))) === 1) {
+      return { outcome: 'written', stored: known, known };
+    }
+    // Lost the SET NX to a concurrent first start: classify what it wrote.
+    raw = await redis.get(SCHEMA_VERSION_KEY);
+    // Deleted again in between: nothing stored disagrees now, and the next start writes it.
+    if (raw === null) return { outcome: 'current', stored: known, known };
   }
-  const raw = await redis.get(SCHEMA_VERSION_KEY);
-  // Deleted between the two commands: the next start writes it; nothing stored disagrees now.
-  if (raw === null) return { outcome: 'current', stored: known, known };
+  return classify(raw, known);
+}
+
+function classify(raw: string, known: number): SchemaVersionResult {
   // Strict: a positive integer and nothing else. `Number(' 2')` and `parseInt('2x')` would both
   // read a value no release wrote as one it knows.
   if (!/^[1-9]\d*$/.test(raw)) throw new SchemaVersionError(raw, known);
@@ -104,8 +121,10 @@ export interface SchemaGuardOptions {
   component: string;
   url: string;
   known?: number;
-  /** Between attempts while Redis is unreachable. */
+  /** Between attempts while Redis is unreachable, and the first back-off after an error reply. */
   retryMs?: number;
+  /** The cap the back-off after error replies doubles up to. */
+  maxBackoffMs?: number;
   newClient?: (url: string) => SchemaVersionClient;
   exit?: (code: number) => void;
   log?: (line: string) => void;
@@ -121,6 +140,7 @@ function defaultClient(url: string): SchemaVersionClient {
 }
 
 const DEFAULT_SCHEMA_RETRY_MS = 2_000;
+const DEFAULT_SCHEMA_MAX_BACKOFF_MS = 60_000;
 
 /**
  * Run `checkSchemaVersion` once Redis answers, on a short-lived client of its own, and exit the
@@ -134,6 +154,13 @@ const DEFAULT_SCHEMA_RETRY_MS = 2_000;
  * own, rather than the component's long-lived one, so this needs no seam in any store and the
  * connection is closed once the answer is known.
  *
+ * Two kinds of failure, kept apart. Unreachable (the connect fails or the connection drops) retries
+ * every `retryMs`, as before. An error REPLY means Redis answered and refused a command: a full
+ * Redis under `noeviction`, a read-only replica or an ACL without SET refusing the write on an
+ * absent key, or an ACL without GET. The version is then unknown, not newer, so the process runs
+ * on; the guard says so once, naming the reply, and retries with a back-off doubling to
+ * `maxBackoffMs`, so the check lands once the refusal clears instead of never.
+ *
  * Never logs the URL or an error object: the URL carries the Redis password.
  */
 export async function guardSchemaVersion(opts: SchemaGuardOptions): Promise<void> {
@@ -142,11 +169,15 @@ export async function guardSchemaVersion(opts: SchemaGuardOptions): Promise<void
   const log = opts.log ?? ((line: string) => console.log(line));
   const error = opts.error ?? ((line: string) => console.error(line));
   const retryMs = opts.retryMs ?? DEFAULT_SCHEMA_RETRY_MS;
-  let reported = false;
+  const maxBackoffMs = opts.maxBackoffMs ?? DEFAULT_SCHEMA_MAX_BACKOFF_MS;
+  let reportedUnreachable = false;
+  let reportedRefused = false;
+  let backoffMs = retryMs;
   for (;;) {
     const client = newClient(opts.url);
     // Without a listener an 'error' event is an uncaught exception; the rejection is the signal.
     client.on('error', () => undefined);
+    let waitMs = retryMs;
     try {
       await client.connect();
       const r = await checkSchemaVersion(client, opts.known);
@@ -160,16 +191,26 @@ export async function guardSchemaVersion(opts: SchemaGuardOptions): Promise<void
         exit(1);
         return;
       }
-      // Once: the component's own clients already report the outage, every few seconds.
-      if (!reported) {
-        error(
-          `[${opts.component}] redis schema version not checked yet (${(err as Error)?.message ?? String(err)}); retrying`,
-        );
-        reported = true;
+      const message = (err as Error)?.message ?? String(err);
+      if (err instanceof ErrorReply) {
+        // Answered but refused: the check is not done, and nothing says the data is newer.
+        if (!reportedRefused) {
+          error(
+            `[${opts.component}] redis schema version unknown: Redis refused the check (${message}); ` +
+              'running on and retrying with back-off',
+          );
+          reportedRefused = true;
+        }
+        waitMs = backoffMs;
+        backoffMs = Math.min(backoffMs * 2, maxBackoffMs);
+      } else if (!reportedUnreachable) {
+        // Once: the component's own clients already report the outage, every few seconds.
+        error(`[${opts.component}] redis schema version not checked yet (${message}); retrying`);
+        reportedUnreachable = true;
       }
     } finally {
       if (client.isOpen) client.destroy();
     }
-    await new Promise((resolve) => setTimeout(resolve, retryMs));
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
 }
