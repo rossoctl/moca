@@ -26,7 +26,8 @@
 //   - via: the string "moca-egress" on every event;
 //   - vm_id, sid: the VM and session the conn's listener was registered with;
 //   - sub: the subject, present on credential_injected events (the lookup's
-//     subject, for the audit only) and absent or "" on every other;
+//     subject, for the audit only) and absent or "" on every other; this one
+//     is checked on every event a case reads, not only those it waits for;
 //   - host: the destination host as requested, normalised (lower case, no
 //     trailing dot); for conn_cap, which is decided before any request is
 //     read, it is not checked;
