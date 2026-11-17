@@ -855,6 +855,20 @@ bash "$INSTALL" --egress "$(ebundle)" >"$TMP/out" 2>&1 || fail '--egress re-run'
 [[ "$(fp_of "$CD/ca.crt")" == "$FP1" ]] || fail '--egress-ca-out regenerated the CA'
 pass 'the CA is generated once: the fingerprint survives a re-run; --egress-ca-out prints its path'
 
+# A re-run with a new token (setup.sh rotated it, or the host was re-listed) replaces the old one:
+# the file holds the new token alone, keeps its mode, and moca-egress is restarted to read it.
+TOKEN_FIRST="$TOKEN" TOKEN="$(printf 'cd%.0s' $(seq 32))"
+: >"$MOCK_LOG"
+bash "$INSTALL" --egress "$(ebundle)" >"$TMP/out" 2>&1 || fail '--egress re-run with a new token'
+[[ "$(cat "$CD/token")" == "$TOKEN" ]] || fail 'a re-run with a new token did not replace the token file'
+[[ "$(mode "$CD/token")" == 600 ]] || fail "the replaced token file is not 0600 ($(mode "$CD/token"))"
+[[ "$(grep -c "egress credential $CD/token" "$EM")" == 1 ]] || fail 'a re-run recorded the token file twice'
+grep -qx 'systemctl restart moca-egress.service' "$MOCK_LOG" || fail 'a re-run with a new token did not restart moca-egress'
+! grep -rq "$TOKEN" "$SBX_UNIT_DIR" "$TMP/out" "$MOCK_LOG" || fail 'the new token appears in a unit file, the output or a command line'
+[[ "$(fp_of "$CD/ca.crt")" == "$FP1" ]] || fail 'a re-run with a new token regenerated the CA'
+TOKEN="$TOKEN_FIRST"
+pass 'a re-run with a new token replaces the token file (0600, recorded once), restarts moca-egress, keeps the CA'
+
 # The fingerprint check: before any systemctl call, naming the rebuild command.
 for case in missing mismatch; do
   snap_with fpbad "$([[ $case == mismatch ]] && printf '%064d' 1)"
