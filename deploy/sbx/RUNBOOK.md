@@ -82,7 +82,7 @@ gitignored).
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | sh
-mocactl sbx --help    # the first line: usage (the sandbox service, SBX0):
+mocactl sbx --help    # what an sbx sandbox is, then: usage (the sandbox service, SBX0):
 ```
 
 A `mocactl` older than v0.7.0 has no `sbx`: its `mocactl sbx --help` prints the general
