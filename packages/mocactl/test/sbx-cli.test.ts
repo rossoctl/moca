@@ -736,6 +736,30 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(cp.calls.at(-1)!.path).toBe('/v1/sandboxes?all=1');
   });
 
+  it('ls --all aligns the owner column with and without the lifetime suffix (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/sandboxes': () => ({
+        status: 200,
+        body: {
+          sandboxes: [
+            sandbox({ owner: 'owner-a', idleLifetimeS: 604_800 }),
+            sandbox({ id: 'sbx-old', owner: 'owner-b' }),
+            sandbox({ id: 'sbx-odd', owner: 'owner-c', idleLifetimeS: 3601 }),
+          ],
+        },
+      }),
+    });
+    await sbxMain(['ls', '--all'], env, io, { home, fetchImpl: cp.fetchImpl });
+    const lines = io.outs.join('').trimEnd().split('\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain('(7 d)');
+    expect(lines[2]).toContain('(3601 s)');
+    const col = lines.map((l, i) => l.indexOf(`owner-${'abc'[i]}`));
+    expect(col[0]).toBeGreaterThan(0);
+    expect(new Set(col).size).toBe(1);
+  });
+
   it('ls appends the idle lifetime to the expiry only when the record carries one (#770)', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({

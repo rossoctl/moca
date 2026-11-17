@@ -487,14 +487,17 @@ export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
     for (const s of ss) {
       // Sanitized before padding, so stripped control characters cannot skew the columns.
       const cell = (v: string, width = 0) => sanitizeRemote(v).padEnd(width);
+      const expiry =
+        when(s.expiresAt) +
+        (s.idleLifetimeS !== undefined ? ` (${lifetimeText(s.idleLifetimeS)})` : '');
       const row = [
         cell(s.id, 30),
         cell(s.name ?? '-', 16),
         cell(s.template, 12),
         cell(s.mode, 15),
         cell(stateText(s), 22),
-        when(s.expiresAt) +
-          (s.idleLifetimeS !== undefined ? ` (${lifetimeText(s.idleLifetimeS)})` : ''),
+        // Padded (24-character date, 12 for the longest ` (2591999 s)`) only to align the owner.
+        all ? cell(expiry, 36) : expiry,
         ...(all ? [cell(s.owner)] : []),
       ].join(' ');
       c.io.out(row + '\n');
