@@ -65,7 +65,9 @@ which looks like a real answer. Poll the turn route, not this one.
    `async: true` answers `202 {sessionId, turnId}`. Over the fan-out quota it answers 429
    `async_quota_exhausted`. **N leaves are N sessions**, one async turn each — `idempotencyKey`
    defaults to the session id, so a second async turn on a session whose first is still running is
-   deduplicated onto it rather than queued behind it. There is no batch resource and none is coming
+   deduplicated onto it rather than queued behind it — unless you pass distinct `idempotencyKey`s,
+   which does queue several turns on one session and makes their ordering yours to manage, a
+   responsibility the queue does not take (spec §4.3). There is no batch resource and none is coming
    ([#537](https://github.com/rossoctl/moca/issues/537) decided that; the reasoning and the loop's
    limits are in the [design spec](../specs/2026-11-05-p6-async-fan-out-design.md) §4.4).
 3. **Collect.** Poll `GET /v1/sessions/{id}/turns/{turnId}` for `state` and `attempts`, plus the

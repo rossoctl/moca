@@ -270,9 +270,9 @@ never-submitted and reaped-as-lost.
   leaf may extend once — the §6.2 heartbeat is what such an extension would key off, since it
   already proves liveness. Also owed: cancelling a running leaf; result retention beyond 24 h and
   richer artifacts; per-class concurrency caps, for which `async_claim_denied_full` against
-  interactive `429`s is the measurement that would justify them; the documentation updates in #690 (ADR-0041's "Still owed" note,
-  the Archetype A row, the `async_removed` entry); and the wording amendment where MU1 §4.2 and MI1
-  §6.5/§10 still say "owned `/v1/runs`" against #279's resolution.
+  interactive `429`s is the measurement that would justify them; the documentation updates in #690
+  (ADR-0041's "Still owed" note, the Archetype A row, the `async_removed` entry); and the wording
+  amendment where MU1 §4.2 and MI1 §6.5/§10 still say "owned `/v1/runs`" against #279's resolution.
 
 ---
 

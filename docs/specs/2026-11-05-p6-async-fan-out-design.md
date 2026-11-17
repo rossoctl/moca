@@ -643,9 +643,8 @@ same line, with the same comment: "a queued run is a server turn too."
 Retention beyond 24 h and richer artifacts are out of scope here; §12 lists them as owed. (#390
 delivered both: seven-day retention, and a base commit plus a diffstat on every captured patch.)
 
-The caller polls the turn record for state, and the result store for the artifact. Whether N-way
-collection needs no `/v1/batches`: §4.4's closing amendment records #537's decision and what the
-loop costs.
+The caller polls the turn record for state, and the result store for the artifact. N-way collection
+needs no `/v1/batches`: §4.4's closing amendment records #537's decision and what the loop costs.
 
 **What this retires: #380's interim contract.** A synchronous `/runs` leaf keeps running after its
 client disconnects, and #380 pinned that accident as a tested interim contract explicitly "until
