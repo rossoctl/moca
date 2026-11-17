@@ -295,18 +295,27 @@ existing value, and fills in only a key that is missing. It reads each Secret wi
 Secret and replacing it. No value is ever put on a command line. Values travel through pipes and
 through the environment of the one `jq` that writes each Secret, and are applied on stdin.
 
-| Secret                | Namespace      | Keys                                                                                                     | Consumed by                                                                                                                                 |
-| --------------------- | -------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `moca-relay`          | `moca`         | `SH_RELAY_TOKEN`, `MOCA_RELAY_EXEC_TOKEN`                                                                | relay (both, env); supervisor (`MOCA_RELAY_EXEC_TOKEN` only, env)                                                                           |
-| `moca-redis`          | `moca`         | `REDIS_PASSWORD`, `REDIS_URL`, `redis.conf`                                                              | Redis (`redis.conf` as a file; `REDIS_PASSWORD` as `REDISCLI_AUTH` for probes); supervisor, relay, control plane, provisioner (`REDIS_URL`) |
-| `moca-mu1`            | `moca`         | `SH_SESSION_TOKEN_PRIVATE_KEY`, `SH_SESSION_TOKEN_PUBLIC_KEYS`, `SH_CREDENTIAL_KEK`, `SH_EXCHANGE_TOKEN` | control plane (private key, KEK, exchange token as files); supervisor (exchange token as a file, public keyset as env)                      |
-| `moca-test-users`     | `moca`         | `SH_TEST_USER_SECRET` (only while `SH_TEST_USERS` > 0; deleted when off)                                 | control plane (as a file, from an `optional` projected source; ADR-0045, §13)                                                               |
-| `moca-relay-attach`   | `moca-sandbox` | `SH_RELAY_TOKEN` (copied from `moca-relay`)                                                              | sandboxes                                                                                                                                   |
-| `moca-supervisor-tls` | `moca` (OCP)   | `tls.crt`, `tls.key`                                                                                     | ghostunnel sidecar                                                                                                                          |
+| Secret                   | Namespace      | Keys                                                                                                     | Consumed by                                                                                                                    |
+| ------------------------ | -------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `moca-relay`             | `moca`         | `SH_RELAY_TOKEN`, `MOCA_RELAY_EXEC_TOKEN`                                                                | relay (both, env); supervisor (`MOCA_RELAY_EXEC_TOKEN` only, env)                                                              |
+| `moca-redis`             | `moca`         | `REDIS_PASSWORD`, `REDIS_URL`, `redis.conf`                                                              | Redis (`redis.conf` as a file; `REDIS_PASSWORD` as `REDISCLI_AUTH` for probes); supervisor, relay, control plane (`REDIS_URL`) |
+| `moca-redis-provisioner` | `moca`         | `REDIS_PASSWORD`, `REDIS_URL` (only with `SH_WORKLOAD_SANDBOXES=1`; kept when off)                       | provisioner (`REDIS_URL`: its own Redis user, `GET` on `sh:wl:*` only)                                                         |
+| `moca-mu1`               | `moca`         | `SH_SESSION_TOKEN_PRIVATE_KEY`, `SH_SESSION_TOKEN_PUBLIC_KEYS`, `SH_CREDENTIAL_KEK`, `SH_EXCHANGE_TOKEN` | control plane (private key, KEK, exchange token as files); supervisor (exchange token as a file, public keyset as env)         |
+| `moca-test-users`        | `moca`         | `SH_TEST_USER_SECRET` (only while `SH_TEST_USERS` > 0; deleted when off)                                 | control plane (as a file, from an `optional` projected source; ADR-0045, §13)                                                  |
+| `moca-relay-attach`      | `moca-sandbox` | `SH_RELAY_TOKEN` (copied from `moca-relay`)                                                              | sandboxes                                                                                                                      |
+| `moca-supervisor-tls`    | `moca` (OCP)   | `tls.crt`, `tls.key`                                                                                     | ghostunnel sidecar                                                                                                             |
 
-- The tokens and the Redis password are `openssl rand -hex 32`.
+- The tokens and the Redis passwords are `openssl rand -hex 32`.
 - `REDIS_URL` and `redis.conf` are re-derived from `REDIS_PASSWORD` on every run, so the three never
   disagree.
+- With workload sandboxes on, `moca-provisioner` reads Redis as a user of its own, never with
+  `REDIS_PASSWORD` (#626). Its orphan sweep only reads workload records, so the user may run `GET` on
+  `sh:wl:*` and nothing else: no write, no other key, no Pub/Sub. `redis.conf` defines it beside
+  `requirepass`, holding the SHA-256 of its password, not the password itself. The password is in
+  `moca-redis-provisioner`, kept once made, and its `REDIS_URL` is
+  `redis://moca-provisioner:<password>@redis.<ns>.svc:6379`. Redis reads `redis.conf` only at
+  start, so `setup.sh` puts a hash of the user's line on Redis's pod template: adding the user,
+  changing its password or turning the feature off rolls `redis-0`.
 - The MU1 keys come from the control plane's own generator, run once in the harness image as the
   pod `moca-genkeys`. They are validated with `deploy/compose/install.sh`'s regexes before anything
   is written, so a garbled generator never leaves half a set. See Troubleshooting for where those
@@ -324,8 +333,9 @@ kubectl --context kind-moca -n moca rollout restart deployment/sandbox-relay dep
 kubectl --context kind-moca -n moca-sandbox rollout restart statefulset/moca-sandbox
 ```
 
-The consumers are in the table. For `moca-redis`, restart `redis` as well, and, when workload
-sandboxes are on, `deployment/moca-provisioner` (it reads `REDIS_URL` at start). For `moca-mu1`,
+The consumers are in the table. For `moca-redis`, restart `redis` as well. For
+`moca-redis-provisioner`, the re-run rolls `redis` itself; restart `deployment/moca-provisioner`
+(it reads `REDIS_URL` at start). For `moca-mu1`,
 restart the control plane and the supervisor.
 
 > **Rotating `moca-mu1` logs everyone out**: a new signing key invalidates every API and session

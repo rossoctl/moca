@@ -86,12 +86,13 @@ spec:
             - { name: MOCA_PROVISIONER_RECONCILE_S, value: '300' }
             # The orphan sweep (spec §6.2), on the same loop: a workload's objects whose Redis record
             # is missing, deleted, deleting or of another generation are deleted once all of them are
-            # older than this grace; a missing record never deletes the PVC. It reads Redis with the
-            # deployment's one read-write credential (no ACL users exist, spec §3.1, §9); its code only
-            # GETs, each bounded by MOCA_PROVISIONER_REDIS_TIMEOUT_MS (default 2000).
+            # older than this grace; a missing record never deletes the PVC. Its code only GETs, each
+            # bounded by MOCA_PROVISIONER_REDIS_TIMEOUT_MS (default 2000), and it reads Redis as its own
+            # ACL user, which can do nothing else (#626, spec §9): GET on sh:wl:* only, never the
+            # deployment's read-write password in moca-redis. setup.sh makes the user and its Secret.
             - { name: MOCA_PROVISIONER_ORPHAN_GRACE_S, value: '600' }
             - name: REDIS_URL
-              valueFrom: { secretKeyRef: { name: moca-redis, key: REDIS_URL } }
+              valueFrom: { secretKeyRef: { name: moca-redis-provisioner, key: REDIS_URL } }
             # A mounted workload's PVC (spec §5.1, §6.3): its largest size, and the StorageClasses it
             # may use as <class>:rwo|rwx (unset: the cluster's default class, ReadWriteOnce). The
             # admission policy holds the provisioner to the same allowlist.
