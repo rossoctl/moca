@@ -187,9 +187,9 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  lease ending after S idle seconds (default: the
                                                  worker's);
                                                  --lifetime: the sandbox ends after DURATION (36h,
-                                                 14d, 30m or seconds) without use (default: the
-                                                 deployment's, 7 d; at most its maximum, 30 d by
-                                                 default)
+                                                 14d, 90m or seconds; at least 1 h) without use
+                                                 (default: the deployment's, 7 d; at most its
+                                                 maximum, 30 d by default)
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
   mocactl sbx get [ID] [--json]                  a sandbox's mode, epoch and idle timeout, and its
                                                  lease's state (a lease mode the worker has not
@@ -286,9 +286,10 @@ export const SBX_USAGE = `usage (the sandbox service, SBX0):
                                                  instead of a deny list, so Claude Code loads the
                                                  project's CLAUDE.md; kept by later runs)
                                                  (--lifetime: a new sandbox ends after DURATION
-                                                 (36h, 14d, 30m or seconds) without use; default:
-                                                 the deployment's, 7 d; at most its maximum, 30 d
-                                                 by default; a reused sandbox keeps its own)
+                                                 (36h, 14d, 90m or seconds; at least 1 h) without
+                                                 use; default: the deployment's, 7 d; at most its
+                                                 maximum, 30 d by default; a reused sandbox keeps
+                                                 its own)
   mocactl sbx push [--force] [--include-secrets] [--max-push MiB]   push the working tree again
                                                  (refused while the sandbox has changes not yet
                                                  pulled, unless --force; .env*, *.pem, *.key and

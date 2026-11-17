@@ -88,9 +88,9 @@ and `mocactl sbx up --template <id>` picks one. Run `up` again at any time: it r
 repository's sandbox while it is live.
 
 A new sandbox ends after 7 days without use by default; `--lifetime DURATION` (`36h`, `14d`,
-`30m`, or whole seconds) picks another, up to the deployment's maximum (30 days by default). It
-applies only to a new sandbox: `up` on an existing one warns that the sandbox keeps its own
-lifetime, and goes on.
+`90m`, or whole seconds) picks another: at least 1 h, at most the deployment's maximum (30 days
+by default). It applies only to a new sandbox: `up` on an existing one warns that the sandbox
+keeps its own lifetime, and goes on.
 
 **Each worktree gets its own sandbox.** A sandbox belongs to one working tree: another clone, or
 another `git worktree` of the same repository, gets a sandbox of its own at its first `up`, so
