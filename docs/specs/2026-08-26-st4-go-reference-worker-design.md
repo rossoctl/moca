@@ -290,8 +290,9 @@ SHA-256 over `command` + `stdin`.
 and label matching to a later slice), and inventing an env encoding for a map before there
 is a consumer is speculative.
 
-Dial, then loop: `Serve` until the stream errors,
-then re-dial with exponential backoff 500 ms → 30 s cap with jitter, `Session` preserved.
+Dial, then loop: `Serve` until the stream errors or the session wedges (`ErrEgressWedged`),
+cancel that attempt's stream context, then re-dial with exponential backoff 500 ms → 30 s cap
+with jitter, `Session` preserved.
 SIGINT/SIGTERM cancels the root context and exits.
 
 ## 7. Testing

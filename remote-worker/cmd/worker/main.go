@@ -181,16 +181,18 @@ func attachOnce(
 	if tokenErr != nil {
 		return tokenErr, nil, 0
 	}
-	attachCtx := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+bearer)
+	// Serve gets attachCtx, the context the stream was created from (its precondition). The attempt's
+	// own cancel tears the stream down on return, before the re-dial, even when Serve ended it on its
+	// own (ErrEgressWedged): left open, the relay refuses the re-dial as a duplicate sandbox_id.
+	// SIGTERM reaches it through ctx.
+	attemptCtx, cancelAttempt := context.WithCancel(ctx)
+	defer cancelAttempt()
+	attachCtx := metadata.AppendToOutgoingContext(attemptCtx, "authorization", "Bearer "+bearer)
 	stream, err := attach(attachCtx)
 	if err != nil {
 		return nil, err, 0
 	}
 	log.Printf("worker: attached, serving execs")
-	// Serve gets attachCtx — the very context this stream was created from,
-	// which is its documented precondition: recvLoop blocks in Recv() and is
-	// unblocked only by the stream being torn down. attachCtx derives from
-	// the caller's ctx, which main cancels on SIGTERM.
 	start := time.Now()
 	err = serve(attachCtx, stream)
 	return nil, err, time.Since(start)

@@ -625,6 +625,29 @@ func verifyInstanceType(get func(string) string, manifestType string, detect fun
 		manifestType, host, instanceTypeCheckOverrideEnv)
 }
 
+// serveOnce is one pass of the reconnect loop: attach, then serve until the session ends. It
+// returns how long the session lasted (zero when the attach failed). The attempt's context is
+// cancelled on return, so the stream is torn down before the re-dial even when Serve ended it on
+// its own (ErrEgressWedged); left open, the relay refuses the re-dial as a duplicate sandbox_id.
+func serveOnce(
+	ctx context.Context,
+	token string,
+	attach func(context.Context) (pb.SandboxWorker_AttachClient, error),
+	serve func(context.Context, pb.SandboxWorker_AttachClient) error,
+) (time.Duration, error) {
+	attemptCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	attachCtx := metadata.AppendToOutgoingContext(attemptCtx, "authorization", "Bearer "+token)
+	stream, err := attach(attachCtx)
+	if err != nil {
+		return 0, err
+	}
+	log.Printf("microvm-worker: attached, serving execs")
+	start := time.Now()
+	err = serve(attachCtx, stream)
+	return time.Since(start), err
+}
+
 func nextBackoff(d time.Duration) time.Duration { return min(d*2, backoffMax) }
 
 func jitter(d time.Duration) time.Duration {
@@ -1020,15 +1043,11 @@ func main() {
 
 	backoff := backoffMin
 	for ctx.Err() == nil {
-		attachCtx := metadata.AppendToOutgoingContext(ctx, "authorization", "Bearer "+token)
-		stream, err := client.Attach(attachCtx)
-		if err == nil {
-			log.Printf("microvm-worker: attached, serving execs")
-			start := time.Now()
-			err = sess.Serve(attachCtx, stream)
-			if time.Since(start) > 30*time.Second {
-				backoff = backoffMin
-			}
+		lasted, err := serveOnce(ctx, token,
+			func(c context.Context) (pb.SandboxWorker_AttachClient, error) { return client.Attach(c) },
+			func(c context.Context, st pb.SandboxWorker_AttachClient) error { return sess.Serve(c, st) })
+		if lasted > 30*time.Second {
+			backoff = backoffMin
 		}
 		if ctx.Err() != nil {
 			break

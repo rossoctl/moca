@@ -413,6 +413,9 @@ func (g *lateGate) shut() {
 // Recv until the connection happens to die on its own, no matter what ctx it was
 // given. It compiles, it vets, and it passes every test that ends a session by
 // closing the stream instead of cancelling. Do not "clean that up".
+//
+// Serve does not tear the stream down when it returns on its own (ErrEgressWedged): the caller
+// cancels the stream's context before re-dialling, or the relay refuses the re-dial.
 func (s *Session) Serve(ctx context.Context, st Stream) error {
 	connCtx, cancelConn := context.WithCancel(ctx)
 	// Cancelling the connection context kills every in-flight child: their output
