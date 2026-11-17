@@ -10,6 +10,7 @@ import { sanitizeRemote } from '../core/sanitize.js';
 import { rulesFor } from './agent-config.js';
 import type { SbxSandbox } from './api.js';
 import { failed, SBX_EXIT, type SbxCtx } from './commands.js';
+import { lifetimeText, validLifetime } from './lifetime.js';
 import { jwtMode, openExec, sandboxFailureText, type ExecFactory } from './exec.js';
 import {
   modeRank,
@@ -229,7 +230,7 @@ export async function cmdGet(c: SbxCtx, id: string, factory?: ExecFactory): Prom
   if (modeRank(s.mode) > 0) {
     let x;
     try {
-      x = await openExec(c.api, id, factory);
+      x = await openExec(c.api, id, factory, { activity: false });
     } catch (err) {
       if (c.signal?.aborted) return SBX_EXIT.interrupted;
       lease = { error: errorCode(err) };
@@ -240,8 +241,10 @@ export async function cmdGet(c: SbxCtx, id: string, factory?: ExecFactory): Prom
         printNotices(c, id, [v.pending]);
         if (!v.epochKnown) {
           try {
-            const { setModeToken } = await c.api.mintSandboxModeToken(id);
-            const r = await sendSetMode(x, c.api, id, setModeToken, c.signal);
+            const { setModeToken } = await c.api.mintSandboxModeToken(id, {
+              activity: false,
+            });
+            const r = await sendSetMode(x, c.api, id, setModeToken, c.signal, false);
             if (r.outcome === 'applied') {
               c.io.err(`re-sent mode ${s.mode}: applied`);
               v = r.status;
@@ -280,6 +283,9 @@ export async function cmdGet(c: SbxCtx, id: string, factory?: ExecFactory): Prom
     ['mode', s.mode],
     ['epoch', String(s.modeEpoch)],
     ['idle timeout', s.idleTimeoutS > 0 ? `${s.idleTimeoutS} s` : 'worker default'],
+    ...(validLifetime(s.idleLifetimeS)
+      ? [['lifetime', `${lifetimeText(s.idleLifetimeS)} without use`] as [string, string]]
+      : []),
     ['lease', leaseText(lease)],
   ];
   // The tracked processes, exited ones included (P5-R16): at lease+processes, or whenever the

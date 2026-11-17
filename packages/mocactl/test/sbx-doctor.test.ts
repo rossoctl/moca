@@ -100,6 +100,17 @@ const byName = (cs: DoctorCheck[], name: string) => {
 };
 
 describe('mocactl sbx doctor (SBX0 §6.1)', () => {
+  it('names the idle lifetime in the ready line only when the record carries one (#770)', async () => {
+    const w = world({ box: { idleLifetimeS: 604_800 } });
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
+    expect(byName(cs, 'sandbox').detail).toMatch(/, in .+, after 7 d without use$/);
+    const o = world();
+    const os = await runDoctor(o.ctx(), o.r, SBX, fakeExec().factory, CURRENT);
+    const d = byName(os, 'sandbox').detail;
+    expect(d).not.toContain('without use');
+    expect(d).not.toContain('undefined');
+  });
+
   it('passes all six checks for a configured repository and a sandbox with days left', async () => {
     const w = world();
     const x = fakeExec();
@@ -125,6 +136,17 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     expect(x.conns[0]!.backstopMarginS).toBe(10);
   });
 
+  it('says any command extends the sandbox when the record carries an idle lifetime (#770)', async () => {
+    const w = world({ expiresInS: 2 * 3600, box: { idleLifetimeS: 604_800 } });
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
+    const s = byName(cs, 'sandbox');
+    expect(s.ok).toBe(false);
+    expect(s.fix).toContain('ends after 7 d without use');
+    expect(s.fix).toContain('any command extends it');
+    expect(s.fix).toContain('mocactl sbx pull --apply');
+    expect(s.fix).not.toContain('mocactl sbx rm');
+  });
+
   it('fails the sandbox check with less than 24 h left, naming the expiry and sbx up', async () => {
     const w = world({ expiresInS: 2 * 3600 });
     const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
@@ -132,7 +154,11 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     expect(s.ok).toBe(false);
     expect(s.detail).toContain(new Date((nowS() + 7200) * 1000).toISOString().slice(0, 13));
     expect(s.detail).toMatch(/less than 24 h left/);
-    expect(s.fix).toContain('mocactl sbx up');
+    // No idleLifetimeS on the record: a control plane from before idle lifetimes, where the
+    // lifetime is absolute and no command extends it.
+    expect(s.fix).not.toContain('any command extends it');
+    expect(s.fix).toContain('mocactl sbx pull --apply');
+    expect(s.fix).toContain('mocactl sbx rm');
     // A sandbox that expires soon still runs: the exec checks are made.
     expect(byName(cs, 'exec').ok).toBe(true);
   });

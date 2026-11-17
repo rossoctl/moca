@@ -27,6 +27,7 @@ import {
   type ExecFactory,
   type OpenedExec,
 } from './exec.js';
+import { afterText, lifetimeNotTakenText, lifetimeText, validLifetime } from './lifetime.js';
 import { noticingExec } from './notices.js';
 import {
   PushError,
@@ -234,11 +235,22 @@ export interface UpFlags extends PushFlags {
   /** `--template`, if given: a reused sandbox must have it. */
   template?: string;
   name?: string;
+  /** `--lifetime`, in seconds: sent when `up` creates; a reused sandbox keeps its own. */
+  idleLifetimeS?: number;
   noAgentConfig: boolean;
   /** `--cortex`: Cortex's moca-sandbox script blocks local tools, so none are denied. */
   cortex?: boolean;
   /** The id in `.sbx/sandbox.json`, if valid. */
   boundId?: string;
+}
+
+/** `--lifetime` on a sandbox `up` reuses: it applies only to a new one, so say so and go on. */
+function warnLifetimeIgnored(c: SbxCtx, s: SbxSandbox, f: UpFlags): void {
+  if (f.idleLifetimeS === undefined) return;
+  const its = validLifetime(s.idleLifetimeS) ? `${lifetimeText(s.idleLifetimeS)} ` : '';
+  c.io.err(
+    `sbx up: ${sanitizeRemote(s.id)} keeps its ${its}lifetime; --lifetime applies only to a new sandbox`,
+  );
 }
 
 function stateText(s: SbxSandbox): string {
@@ -272,6 +284,7 @@ async function findOrCreate(
         );
         return SBX_EXIT.failed;
       }
+      warnLifetimeIgnored(c, bound, f);
       return { sandbox: bound, reused: true };
     }
     if (bound) {
@@ -284,14 +297,18 @@ async function findOrCreate(
       .sort((a, b) => b.createdAt - a.createdAt);
     if (mine[0]) {
       c.io.err(`reusing ${sanitizeRemote(mine[0].id)}, this repository's sandbox`);
+      warnLifetimeIgnored(c, mine[0], f);
       return { sandbox: mine[0], reused: true };
     }
     const s = await createWaitingForActivation(c, {
       template: f.template ?? DEFAULT_TEMPLATE,
       ...(f.name ? { name: f.name } : {}),
       labels: { project: rid },
+      ...(f.idleLifetimeS !== undefined ? { idleLifetimeS: f.idleLifetimeS } : {}),
     });
     c.io.err(`created ${sanitizeRemote(s.id)} (${sanitizeRemote(s.template)})`);
+    const notTaken = lifetimeNotTakenText(sanitizeRemote(s.id), f.idleLifetimeS, s);
+    if (notTaken) c.io.err(notTaken);
     return { sandbox: s, reused: false };
   } catch (err) {
     return failed(c, err);
@@ -405,7 +422,7 @@ export async function cmdUp(
   }
   c.io.out(`${s.id}\n`);
   c.io.err(
-    `sandbox ${s.id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}; bound in .sbx/sandbox.json`,
+    `sandbox ${s.id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}${afterText(s)}; bound in .sbx/sandbox.json`,
   );
   return SBX_EXIT.ok;
 }

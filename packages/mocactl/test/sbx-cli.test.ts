@@ -613,6 +613,86 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     ).toBe(2);
   });
 
+  it('create --lifetime sends idleLifetimeS and prints the lifetime (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'POST /v1/sandboxes': () => ({
+        status: 201,
+        body: sandbox({ idleLifetimeS: 604_800 }),
+      }),
+    });
+    expect(
+      await sbxMain(['create', '--lifetime', '14d'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(0);
+    expect(cp.calls[0]!.body).toEqual({ template: 'default', idleLifetimeS: 1_209_600 });
+    expect(io.errs.join('\n')).toContain(
+      `created ${SBX} (node22), expires ${new Date(1_800_604_800 * 1000).toISOString()}, after 7 d without use`,
+    );
+  });
+
+  it('create --lifetime against a control plane that ignores it says so, exit 0 (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({ 'POST /v1/sandboxes': () => ({ status: 201, body: sandbox() }) });
+    expect(
+      await sbxMain(['create', '--lifetime', '14d'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(0);
+    expect(io.errs.join('\n')).toContain(
+      `sbx: ${SBX} ends after the deployment's default lifetime without use: the control plane did not take --lifetime`,
+    );
+    // One that answers a different lifetime names it.
+    const t = setup();
+    const cp2 = fakeCp({
+      'POST /v1/sandboxes': () => ({ status: 201, body: sandbox({ idleLifetimeS: 604_800 }) }),
+    });
+    expect(
+      await sbxMain(['create', '--lifetime', '14d'], t.env, t.io, {
+        home: t.home,
+        fetchImpl: cp2.fetchImpl,
+      }),
+    ).toBe(0);
+    expect(t.io.errs.join('\n')).toContain(
+      `sbx: ${SBX} ends after 7 d without use: the control plane did not take --lifetime`,
+    );
+  });
+
+  it('create --lifetime with a malformed value is a usage error and sends nothing (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({ 'POST /v1/sandboxes': () => ({ status: 201, body: sandbox() }) });
+    expect(
+      await sbxMain(['create', '--lifetime', 'soon'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(2);
+    expect(io.errs.join('\n')).toContain(
+      "sbx: --lifetime must be a duration such as 36h or 14d, or whole seconds (got 'soon')",
+    );
+    expect(cp.calls.length).toBe(0);
+  });
+
+  it("create --lifetime shows the control plane's 400 text (#770)", async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'POST /v1/sandboxes': () => ({
+        status: 400,
+        body: {
+          error: 'invalid_request',
+          message: 'idleLifetimeS must be an integer from 3600 to 2592000',
+        },
+      }),
+    });
+    expect(
+      await sbxMain(['create', '--lifetime', '30m'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(1);
+    expect(io.errs.join('\n')).toContain('idleLifetimeS must be an integer from 3600 to 2592000');
+  });
+
+  it('--lifetime is not a flag of ls (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({});
+    expect(
+      await sbxMain(['ls', '--lifetime', '7d'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(2);
+    expect(io.errs.join('\n')).toContain('--lifetime only applies to create and up');
+  });
+
   it('reports a refusal from the control plane with its code (exit 1)', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({
@@ -654,6 +734,63 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(out).toContain(new Date(1_800_604_800 * 1000).toISOString());
     await sbxMain(['ls', '--all'], env, io, { home, fetchImpl: cp.fetchImpl });
     expect(cp.calls.at(-1)!.path).toBe('/v1/sandboxes?all=1');
+  });
+
+  it('ls prints no lifetime for a malformed idleLifetimeS (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/sandboxes': () => ({
+        status: 200,
+        body: {
+          sandboxes: [
+            sandbox({ idleLifetimeS: 0 }),
+            sandbox({ id: 'sbx-b', idleLifetimeS: '604800' as unknown as number }),
+          ],
+        },
+      }),
+    });
+    await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl });
+    expect(io.outs.join('')).not.toMatch(/\(|undefined|NaN/);
+  });
+
+  it('ls --all aligns the owner column with and without the lifetime suffix (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/sandboxes': () => ({
+        status: 200,
+        body: {
+          sandboxes: [
+            sandbox({ owner: 'owner-a', idleLifetimeS: 604_800 }),
+            sandbox({ id: 'sbx-old', owner: 'owner-b' }),
+            sandbox({ id: 'sbx-odd', owner: 'owner-c', idleLifetimeS: 3601 }),
+          ],
+        },
+      }),
+    });
+    await sbxMain(['ls', '--all'], env, io, { home, fetchImpl: cp.fetchImpl });
+    const lines = io.outs.join('').trimEnd().split('\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain('(7 d)');
+    expect(lines[2]).toContain('(3601 s)');
+    const col = lines.map((l, i) => l.indexOf(`owner-${'abc'[i]}`));
+    expect(col[0]).toBeGreaterThan(0);
+    expect(new Set(col).size).toBe(1);
+  });
+
+  it('ls appends the idle lifetime to the expiry only when the record carries one (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/sandboxes': () => ({
+        status: 200,
+        body: { sandboxes: [sandbox({ idleLifetimeS: 604_800 }), sandbox({ id: 'sbx-old' })] },
+      }),
+    });
+    expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    const lines = io.outs.join('').trim().split('\n');
+    const iso = new Date(1_800_604_800 * 1000).toISOString();
+    expect(lines[0]!.endsWith(`${iso} (7 d)`)).toBe(true);
+    expect(lines[1]!.endsWith(iso)).toBe(true);
+    expect(lines[1]).not.toContain('undefined');
   });
 
   it('deletes a sandbox', async () => {
@@ -1006,6 +1143,10 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       `export SBX_TOKEN_CMD='mocactl sbx token --control-plane-url '\\''${URL_}'\\'' ${SBX}'`,
     );
     expect(out).not.toContain(TOKEN.token); // never the token itself: it lives 15 minutes
+    // env runs no command and prints no token: its mint is not the owner's use (#770).
+    expect(
+      cp.calls.filter((c) => c.path === `/v1/sandboxes/${SBX}/token`).map((c) => c.body),
+    ).toEqual([{ activity: false }]);
     const ca = join(paths.stateDir, 'sbx', `${SBX}-exec-ca.crt`);
     expect(isAbsolute(ca)).toBe(true);
     expect(out).toContain(`export SBX_CA_FILE='${ca}'`);

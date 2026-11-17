@@ -510,7 +510,7 @@ function leaseWorld(
     lease?: (
       op: LeaseOpName,
       token?: string,
-      opts?: { signal?: AbortSignal },
+      opts?: { signal?: AbortSignal; activity?: boolean },
     ) => LeaseStatusView | Error | Promise<LeaseStatusView>;
   } = {},
 ) {
@@ -553,7 +553,7 @@ function leaseWorld(
   const answer = o.lease ?? (() => ACTIVE);
   let opened = 0;
   let closed = 0;
-  const factory: ExecFactory = () => {
+  const factory: ExecFactory = (conn) => {
     opened++;
     return {
       exec: async () => {
@@ -561,6 +561,12 @@ function leaseWorld(
       },
       close: () => void closed++,
       leaseControl: async (op, token, opts) => {
+        // As the real connection does: the call's token ask carries its activity.
+        await conn.token({
+          force: false,
+          minValidS: 60,
+          activity: opts?.activity ?? op !== 'status',
+        });
         calls.push({ op, ...(token !== undefined ? { token } : {}), signal: !!opts?.signal });
         const a = await answer(op, token, opts);
         if (a instanceof Error) throw a;
@@ -889,6 +895,16 @@ describe('mocactl sbx reset (spec §8.3)', () => {
     expect(w.io.errs.filter((l) => l.startsWith('[sandbox]'))).toEqual([]);
   });
 
+  it('get shows the idle lifetime row only when the record carries one (#770)', async () => {
+    const w = leaseWorld({ lease: () => APPLIED, record: { idleLifetimeS: 604_800 } });
+    expect(await w.run(['get', SBX])).toBe(0);
+    expect(w.out()).toMatch(/^lifetime {6}7 d without use$/m);
+    const o = leaseWorld({ lease: () => APPLIED });
+    expect(await o.run(['get', SBX])).toBe(0);
+    expect(o.out()).not.toContain('lifetime');
+    expect(o.out()).not.toContain('undefined');
+  });
+
   it('reset with no lease', async () => {
     const w = leaseWorld({ lease: () => APPLIED });
     expect(await w.run(['reset', SBX])).toBe(0);
@@ -1011,6 +1027,40 @@ describe('mocactl sbx get (spec §5, §8.2)', () => {
     expect(await u.run(['get', SBX])).toBe(0);
     expect(u.out()).toContain('lease         unknown (unavailable)\n');
     expect(u.out()).not.toContain('processes    ');
+  });
+
+  it('get on a lease sandbox mints with activity: false, its set-mode re-send too', async () => {
+    const w = leaseWorld({
+      record: { mode: 'lease', modeEpoch: 1 },
+      lease: (op) => (op === 'status' ? { ...APPLIED, epochKnown: false } : ACTIVE),
+    });
+    expect(await w.run(['get', SBX])).toBe(0);
+    const mints = w.cp.calls.filter(
+      (c) =>
+        c.path === `/v1/sandboxes/${SBX}/token` || c.path === `/v1/sandboxes/${SBX}/mode-token`,
+    );
+    expect(mints.map((c) => c.path.split('/').pop())).toEqual(['token', 'mode-token']);
+    // On the wire: the body the control plane received.
+    expect(mints.map((c) => c.body)).toEqual([{ activity: false }, { activity: false }]);
+  });
+
+  it('get mints no activity anywhere, on the denied retry of its set_mode too', async () => {
+    let sent = 0;
+    const w = leaseWorld({
+      record: { mode: 'lease', modeEpoch: 1 },
+      lease: (op) => {
+        if (op === 'status') return { ...APPLIED, epochKnown: false };
+        return ++sent === 1 ? new LeaseControlError('denied', 'stale') : ACTIVE;
+      },
+    });
+    expect(await w.run(['get', SBX])).toBe(0);
+    expect(w.modeMints()).toBe(2);
+    const mints = w.cp.calls.filter(
+      (c) =>
+        c.path === `/v1/sandboxes/${SBX}/token` || c.path === `/v1/sandboxes/${SBX}/mode-token`,
+    );
+    expect(mints.length).toBeGreaterThanOrEqual(3);
+    for (const m of mints) expect(m.body).toEqual({ activity: false });
   });
 
   it('get re-sends set_mode on an unknown epoch', async () => {

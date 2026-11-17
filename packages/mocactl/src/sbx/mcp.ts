@@ -15,6 +15,7 @@ import { VERSION } from '../version.js';
 import type { SbxSandbox, SbxToken } from './api.js';
 import type { SbxCtx } from './commands.js';
 import { jwtMode, openExec, type ExecFactory, type OpenedExec } from './exec.js';
+import { afterText } from './lifetime.js';
 import { recordCall } from './recorder.js';
 
 /** The lease keepalive's cadence (spec §8.3), while the current sandbox token is a lease mode's. */
@@ -70,6 +71,8 @@ export async function serveSbxMcp(
   let leased = false;
   let beat: ReturnType<typeof setInterval> | undefined;
   let closed = false;
+  /** The sandbox's deadline: each grant moves it (the owner's use extends a lifetime). */
+  let deadline = s.expiresAt;
   let warned = false;
   const stopBeat = () => {
     clearInterval(beat);
@@ -96,6 +99,7 @@ export async function serveSbxMcp(
   /** Set once created: a mint happens only during a call, after the server exists. */
   let server: SandboxMcpServer | undefined;
   const onToken = (t: SbxToken) => {
+    deadline = t.sandboxExpiresAt ?? deadline;
     tokenMode = jwtMode(t.token);
     leased = tokenMode !== 'per-exec';
     if (!leased) stopBeat();
@@ -140,7 +144,7 @@ export async function serveSbxMcp(
     return {
       text:
         `Sandbox ${now.id}${now.name ? ` (${now.name})` : ''}: template ${now.template}, ${now.state}, expires ` +
-        `${new Date(now.expiresAt * 1000).toISOString()}. Files live under /workspace and persist; ${calls}; ` +
+        `${new Date(now.expiresAt * 1000).toISOString()}${afterText(now)}. Files live under /workspace and persist; ${calls}; ` +
         "there is no network beyond the operator's egress allowlist; calls run one at a time.",
       mode: current,
     };
@@ -155,7 +159,7 @@ export async function serveSbxMcp(
     mode,
     leaseMode: () => tokenMode,
     record: (r) => recordCall(c.rt.paths.stateDir, id, r),
-    expiresAt: s.expiresAt,
+    expiresAt: () => deadline,
     version: VERSION,
   });
   const served = server;

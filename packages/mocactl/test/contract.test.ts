@@ -97,16 +97,30 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     method: 'post',
     path: '/v1/sandboxes',
     // `create --seed` reads the build it was served (template lifecycle spec §9).
-    reads: ['id', 'template', 'expiresAt', 'buildId', 'mode', 'idleTimeoutS', 'modeEpoch'],
-    sends: ['template', 'name', 'labels', 'mode', 'idleTimeoutS'],
+    reads: [
+      'id',
+      'template',
+      'expiresAt',
+      'buildId',
+      'mode',
+      'idleTimeoutS',
+      'modeEpoch',
+      'idleLifetimeS',
+    ],
+    sends: ['template', 'name', 'labels', 'mode', 'idleTimeoutS', 'idleLifetimeS'],
   },
   { method: 'get', path: '/v1/sandboxes', reads: ['sandboxes'] },
-  { method: 'get', path: '/v1/sandboxes/{id}', reads: ['id', 'state', 'reason', 'expiresAt'] },
+  {
+    method: 'get',
+    path: '/v1/sandboxes/{id}',
+    reads: ['id', 'state', 'reason', 'expiresAt', 'idleLifetimeS'],
+  },
   { method: 'delete', path: '/v1/sandboxes/{id}', reads: ['id', 'state', 'reason'] },
   {
     method: 'post',
     path: '/v1/sandboxes/{id}/token',
-    reads: ['token', 'expiresAt', 'execEndpoint', 'wrk', 'wsk', 'execCa'],
+    reads: ['token', 'expiresAt', 'execEndpoint', 'wrk', 'wsk', 'execCa', 'sandboxExpiresAt'],
+    sends: ['activity'],
   },
   // `mocactl sbx egress`; its --ndjson reads the same route's NDJSON body.
   { method: 'get', path: '/v1/sandboxes/{id}/egress', reads: ['events', 'next', 'summary'] },
@@ -117,7 +131,12 @@ const SBX_USED: Array<{ method: string; path: string; reads?: string[]; sends?: 
     reads: ['sandbox', 'setModeToken'],
     sends: ['mode', 'idleTimeoutS'],
   },
-  { method: 'post', path: '/v1/sandboxes/{id}/mode-token', reads: ['setModeToken'] },
+  {
+    method: 'post',
+    path: '/v1/sandboxes/{id}/mode-token',
+    reads: ['setModeToken'],
+    sends: ['activity'],
+  },
   // `sbx templates show` and `create --seed` (template lifecycle spec §4).
   {
     method: 'get',

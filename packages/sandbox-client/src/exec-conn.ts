@@ -303,6 +303,12 @@ export interface TokenRequest {
    * gets a token minted for it. The connection's first ask is 60, to learn the lifetime.
    */
   minValidS: number;
+  /**
+   * False: the mint must not count as the owner's activity (idle-lifetime spec §3.1): a keepalive
+   * or a lease status. Every other ask is activity -- an Exec, or a lease reset, set_mode or
+   * sandbox_deleted.
+   */
+  activity: boolean;
 }
 
 export interface SandboxTokenGrant {
@@ -311,6 +317,8 @@ export interface SandboxTokenGrant {
   expiresAt: number;
   /** The token's `exp − iat` in seconds; 0 if it cannot be read. */
   lifetimeS: number;
+  /** The sandbox's deadline after this mint, when the control plane says (it moves). */
+  sandboxExpiresAt?: number;
 }
 
 export type TokenFn = (o: TokenRequest) => Promise<SandboxTokenGrant>;
@@ -330,10 +338,11 @@ export interface ExecConnOptions {
    */
   backstopMarginS?: number;
   /**
-   * The sandbox's own `expiresAt` (epoch s), if known. The control plane caps every token's `exp`
-   * at it, so a token ending there is short because the sandbox is ending, not because the
-   * deployment's lifetime is: it is run with a cut timeout, and refused as "the sandbox expires in
-   * N s" (kind `expiring`) only when nothing can run (final review M1).
+   * The sandbox's own `expiresAt` (epoch s) at open, if known; each grant's `sandboxExpiresAt` then
+   * replaces it, since the deadline slides with activity (idle-lifetime spec §4.2). The control
+   * plane caps every token's `exp` at it, so a token ending there is short because the sandbox is
+   * ending, not because the deployment's lifetime is: it is run with a cut timeout, and refused as
+   * "the sandbox expires in N s" (kind `expiring`) only when nothing can run (final review M1).
    */
   sandboxExpiresAt?: number;
   /** The clock, in epoch milliseconds (tests). */
@@ -469,8 +478,11 @@ export class SandboxExecConn {
   private readonly now: () => number;
   /** The last readable token lifetime, so later Execs ask for exactly the life they need. */
   private lifetimeS = 0;
+  /** The sandbox's current end (epoch s): the open-time value, then each grant's. */
+  private sandboxEnd: number | undefined;
 
   constructor(private readonly o: ExecConnOptions) {
+    this.sandboxEnd = o.sandboxExpiresAt;
     const creds = o.tls
       ? credentials.createSsl(o.caPem ? caBundle(o.caPem) : null)
       : credentials.createInsecure();
@@ -622,11 +634,12 @@ export class SandboxExecConn {
    * token-refusal retry (see the top of the file); a token source failure propagates unchanged.
    * An abort of `signal` cancels the call (a set_mode or reset may wait up to 31 min): it rejects
    * with a LeaseControlError `cancelled`, and one already aborted sends nothing (P4-R12).
+   * `opts.activity` (default: every op but `status`) says whether the token ask counts as use.
    */
   leaseControl = async (
     op: LeaseOpName,
     setModeToken?: string,
-    opts: { signal?: AbortSignal } = {},
+    opts: { signal?: AbortSignal; activity?: boolean } = {},
   ): Promise<LeaseStatusView> => {
     const req = LeaseControlRequest.fromPartial({
       sandboxId: this.o.sandboxId,
@@ -636,6 +649,7 @@ export class SandboxExecConn {
     const backstopMs = op === 'status' ? LEASE_STATUS_BACKSTOP_MS : LEASE_MUTATE_BACKSTOP_MS;
     const { signal } = opts;
     const res = await this.leaseCall(
+      opts.activity ?? op !== 'status',
       (md) =>
         new Promise<LeaseControlResponse>((resolve, reject) => {
           if (signal?.aborted) {
@@ -664,6 +678,7 @@ export class SandboxExecConn {
   leaseKeepalive = async (): Promise<void> => {
     const req = LeaseKeepaliveRequest.fromPartial({ sandboxId: this.o.sandboxId });
     await this.leaseCall(
+      false,
       (md) =>
         new Promise<void>((resolve, reject) =>
           this.client.leaseKeepalive(
@@ -682,9 +697,9 @@ export class SandboxExecConn {
    * token (P4-R7). The ask is an Exec's first: the token must have the 60 s margin left. The first
    * mint is outside the retry: only the relay's refusal is retried, never a token source failure.
    */
-  private async leaseCall<T>(send: (md: Metadata) => Promise<T>): Promise<T> {
+  private async leaseCall<T>(activity: boolean, send: (md: Metadata) => Promise<T>): Promise<T> {
     const bearer = async (force: boolean) => {
-      const { token } = await this.o.token({ force, minValidS: TOKEN_MARGIN_S });
+      const { token } = await this.o.token({ force, minValidS: TOKEN_MARGIN_S, activity });
       const md = new Metadata();
       md.set('authorization', `Bearer ${token}`);
       return md;
@@ -699,8 +714,11 @@ export class SandboxExecConn {
   }
 
   private learn(g: SandboxTokenGrant): void {
+    if (g.sandboxExpiresAt !== undefined && g.sandboxExpiresAt > 0) {
+      this.sandboxEnd = g.sandboxExpiresAt;
+    }
     if (g.lifetimeS <= 0) return;
-    const end = this.o.sandboxExpiresAt;
+    const end = this.sandboxEnd;
     if (end && end > 0 && g.expiresAt > 0 && g.expiresAt >= end) {
       // Cut short by the sandbox's own expiry: not the deployment's lifetime, so nothing is
       // learnt from it. `prepare` cuts the timeout to what is left, while a command can still run.
@@ -737,7 +755,7 @@ export class SandboxExecConn {
    */
   private async prepare(requested: number | undefined, force = false) {
     const ask = async (f: boolean, minValidS: number) => {
-      const g = await this.o.token({ force: f, minValidS });
+      const g = await this.o.token({ force: f, minValidS, activity: true });
       this.learn(g);
       return g;
     };

@@ -26,6 +26,7 @@ import {
   setModeFailureText,
   type SetModeOutcome,
 } from './mode.js';
+import { afterText, lifetimeNotTakenText, lifetimeText, validLifetime } from './lifetime.js';
 import { forgetNotices } from './notices.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
@@ -381,13 +382,17 @@ export async function cmdCreate(
   try {
     const s = await createWaitingForActivation(c, body);
     const id = sanitizeRemote(s.id);
-    c.io.err(`created ${id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}`);
+    c.io.err(
+      `created ${id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}${afterText(s)}`,
+    );
     // A control plane from before modes ignores the body's mode: say so, never a silent per-exec.
     if (body.mode !== undefined && s.mode !== body.mode) {
       c.io.err(
         `sbx: ${id} is ${s.mode}, not ${body.mode}: the control plane did not take the mode`,
       );
     }
+    const notTaken = lifetimeNotTakenText(id, body.idleLifetimeS, s);
+    if (notTaken) c.io.err(notTaken);
     let setMode: { outcome: 'applied' } | { outcome: 'pending'; code: string } | undefined;
     if (modeRank(s.mode) > 0) {
       const r = await sendCreatedMode(c, s.id, o.factory).catch((err: unknown) => ({
@@ -482,13 +487,17 @@ export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
     for (const s of ss) {
       // Sanitized before padding, so stripped control characters cannot skew the columns.
       const cell = (v: string, width = 0) => sanitizeRemote(v).padEnd(width);
+      const expiry =
+        when(s.expiresAt) +
+        (validLifetime(s.idleLifetimeS) ? ` (${lifetimeText(s.idleLifetimeS)})` : '');
       const row = [
         cell(s.id, 30),
         cell(s.name ?? '-', 16),
         cell(s.template, 12),
         cell(s.mode, 15),
         cell(stateText(s), 22),
-        when(s.expiresAt),
+        // Padded (24-character date, 12 for the longest ` (2591999 s)`) only to align the owner.
+        all ? cell(expiry, 36) : expiry,
         ...(all ? [cell(s.owner)] : []),
       ].join(' ');
       c.io.out(row + '\n');
@@ -764,7 +773,8 @@ export function tokenCmd(explicitUrl: string | undefined, id: string): string {
  */
 export async function cmdEnv(c: SbxCtx, id: string): Promise<number> {
   try {
-    const t = await c.api.mintSandboxToken(id);
+    // No command runs on this token and it is never printed: not the owner's use (#770).
+    const t = await c.api.mintSandboxToken(id, { activity: false });
     const lines: Array<[string, string]> = [
       ['SBX_ADDR', sanitizeRemote(t.execEndpoint)],
       ['SBX_TLS', '1'],

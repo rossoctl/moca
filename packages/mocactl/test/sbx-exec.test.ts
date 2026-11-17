@@ -28,7 +28,7 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../src/api/errors.js';
 import { DEFAULT_CONFIG, saveAuth, saveConfig } from '../src/config.js';
-import { SandboxApiClient } from '../src/sbx/api.js';
+import { SandboxApiClient, type SbxToken } from '../src/sbx/api.js';
 import { sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import { jwtMode, sandboxTokenFn, type ExecFactory } from '../src/sbx/exec.js';
 import { busyRetries } from '../src/sbx/run.js';
@@ -66,7 +66,7 @@ function fakeExec(answer: (command: string) => ExecResult | Error = () => res())
     opened.push(o);
     return {
       exec: async (command: string, x: { stdin?: Uint8Array; timeoutS?: number } = {}) => {
-        await o.token({ force: false, minValidS: 60 });
+        await o.token({ force: false, minValidS: 60, activity: true });
         sent.push({
           command,
           stdin: x.stdin ? Buffer.from(x.stdin).toString() : undefined,
@@ -825,22 +825,144 @@ describe('the sandbox token source (SBX0 §6.5)', () => {
     let now = at(TOKEN_IAT);
     const api = new SandboxApiClient(URL_, () => 'api-1', cp.fetchImpl);
     const t = sandboxTokenFn(api, SBX, () => now);
-    const g = await t.token({ force: false, minValidS: 60 });
+    const g = await t.token({ force: false, minValidS: 60, activity: true });
     expect(g).toEqual({ token: TOKEN.token, expiresAt: TOKEN.expiresAt, lifetimeS: 900 });
-    await t.token({ force: false, minValidS: 60 });
+    await t.token({ force: false, minValidS: 60, activity: true });
     // A token minted this instant has its whole lifetime left, so it covers a defaulted timeout.
-    await t.token({ force: false, minValidS: 900 });
+    await t.token({ force: false, minValidS: 900, activity: true });
     expect(cp.calls).toHaveLength(1);
     now = at(TOKEN_IAT + 500); // 400 s left
-    await t.token({ force: false, minValidS: 400 });
+    await t.token({ force: false, minValidS: 400, activity: true });
     expect(cp.calls).toHaveLength(1);
-    await t.token({ force: false, minValidS: 401 }); // a timeout the token cannot cover
+    await t.token({ force: false, minValidS: 401, activity: true }); // a timeout the token cannot cover
     expect(cp.calls).toHaveLength(2);
     now = at(TOKEN.expiresAt - 30); // within 60 s of exp
-    await t.token({ force: false, minValidS: 1 });
+    await t.token({ force: false, minValidS: 1, activity: true });
     expect(cp.calls).toHaveLength(3);
-    await t.token({ force: true, minValidS: 60 });
+    await t.token({ force: true, minValidS: 60, activity: true });
     expect(cp.calls).toHaveLength(4);
+  });
+
+  describe('an ask whose signal is already aborted (#770)', () => {
+    const run = async (
+      call: (t: ReturnType<typeof sandboxTokenFn>, s: AbortSignal) => Promise<unknown>,
+    ) => {
+      const seen: unknown[] = [];
+      const on = (e: unknown) => seen.push(e);
+      process.on('unhandledRejection', on);
+      try {
+        const calls: unknown[] = [];
+        const api = {
+          mintSandboxToken: async (...a: unknown[]) => {
+            calls.push(a);
+            return TOKEN;
+          },
+        } as unknown as SandboxApiClient;
+        const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
+        const reason = new Error('cancelled');
+        const ac = new AbortController();
+        ac.abort(reason);
+        await expect(call(t, ac.signal)).rejects.toBe(reason);
+        await new Promise((r) => setImmediate(r));
+        await new Promise((r) => setImmediate(r));
+        expect(calls).toHaveLength(0);
+        expect(seen).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', on);
+      }
+    };
+
+    it('force rejects with the reason, starts no mint, leaks no rejection', async () => {
+      await run((t, s) => t.force(s));
+    });
+
+    it('first rejects with the reason, starts no mint, leaks no rejection', async () => {
+      await run((t, s) => t.first(s));
+    });
+  });
+
+  describe('the activity hint', () => {
+    const fakeApi = (answer: (n: number) => Promise<SbxToken> | SbxToken = () => TOKEN) => {
+      const calls: (boolean | undefined)[] = [];
+      const api = {
+        mintSandboxToken: async (_id: string, o: { activity?: boolean } = {}) => {
+          calls.push(o.activity);
+          return answer(calls.length);
+        },
+      } as unknown as SandboxApiClient;
+      return { api, calls };
+    };
+    const ask = (activity: boolean) => ({ force: false, minValidS: 60, activity });
+
+    it('reuses a no-activity token for a no-activity ask, and re-mints for an activity ask', async () => {
+      const { api, calls } = fakeApi();
+      const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
+      await t.token(ask(false));
+      expect(calls).toEqual([false]);
+      await t.token(ask(false));
+      expect(calls).toHaveLength(1);
+      await t.token(ask(true));
+      expect(calls).toHaveLength(2);
+      expect(calls[1]).not.toBe(false);
+      await t.token(ask(true));
+      expect(calls).toHaveLength(2);
+    });
+
+    it('an activity token serves a no-activity ask', async () => {
+      const { api, calls } = fakeApi();
+      const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
+      await t.token(ask(true));
+      await t.token(ask(false));
+      expect(calls).toHaveLength(1);
+    });
+
+    it('an activity ask does not share a no-activity mint in flight', async () => {
+      const gates: ((t: SbxToken) => void)[] = [];
+      const { api, calls } = fakeApi(() => new Promise<SbxToken>((r) => gates.push(r)));
+      const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
+      const quiet = t.token(ask(false));
+      const busy = t.token(ask(true));
+      await Promise.resolve();
+      expect(calls).toEqual([false]);
+      gates[0]!({ ...TOKEN, token: 'quiet' });
+      expect((await quiet).token).toBe('quiet');
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      expect(calls[1]).not.toBe(false);
+      gates[1]!({ ...TOKEN, token: 'busy' });
+      expect((await busy).token).toBe('busy');
+    });
+
+    it('an activity ask aborted while it waits out a no-activity mint starts no mint', async () => {
+      const gates: ((t: SbxToken) => void)[] = [];
+      const { api, calls } = fakeApi(() => new Promise<SbxToken>((r) => gates.push(r)));
+      const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
+      const quiet = t.first(undefined, false);
+      const ac = new AbortController();
+      const busy = t.force(ac.signal);
+      const settled = expect(busy).rejects.toBe('stop');
+      await Promise.resolve();
+      ac.abort('stop');
+      await settled;
+      gates[0]!({ ...TOKEN, token: 'quiet' });
+      await quiet;
+      // Let the abandoned waiter run on, if it is going to.
+      await new Promise((r) => setTimeout(r, 10));
+      expect(calls).toEqual([false]);
+      // An unrelated ask mints normally.
+      const next = t.force();
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      gates[1]!({ ...TOKEN, token: 'next' });
+      expect((await next).token).toBe('next');
+    });
+
+    it('passes sandboxExpiresAt through to the grant', async () => {
+      const a = fakeApi(() => ({ ...TOKEN, sandboxExpiresAt: 123 }));
+      const g = await sandboxTokenFn(a.api, SBX, () => at(TOKEN_IAT)).token(ask(true));
+      expect(g.sandboxExpiresAt).toBe(123);
+      const b = fakeApi();
+      const h = await sandboxTokenFn(b.api, SBX, () => at(TOKEN_IAT)).token(ask(true));
+      expect('sandboxExpiresAt' in h).toBe(false);
+    });
   });
 
   it('first() is the held grant: the connection reuses it', async () => {
@@ -848,7 +970,7 @@ describe('the sandbox token source (SBX0 §6.5)', () => {
     const api = new SandboxApiClient(URL_, () => 'api-1', cp.fetchImpl);
     const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
     expect((await t.first()).execEndpoint).toBe(TOKEN.execEndpoint);
-    await t.token({ force: false, minValidS: 900 });
+    await t.token({ force: false, minValidS: 900, activity: true });
     expect(cp.calls).toHaveLength(1);
   });
 
@@ -861,7 +983,7 @@ describe('the sandbox token source (SBX0 §6.5)', () => {
     });
     const api = new SandboxApiClient(URL_, () => 'api-1', cp.fetchImpl);
     const t = sandboxTokenFn(api, SBX, () => at(TOKEN_IAT));
-    expect(await t.token({ force: false, minValidS: 60 })).toEqual({
+    expect(await t.token({ force: false, minValidS: 60, activity: true })).toEqual({
       token: 'opaque',
       expiresAt: TOKEN.expiresAt,
       lifetimeS: 0,
@@ -1064,6 +1186,12 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       reset?: (signal?: AbortSignal) => Promise<LeaseStatusView>;
       /** Wraps the control plane's fetch (a mint that hangs, say). */
       fetchWrap?: (f: typeof fetch) => typeof fetch;
+      /** The keepalive asks the token source for a token, as exec-conn's does (activity: false). */
+      keepaliveAsks?: boolean;
+      /** Extra fields on each minted token. */
+      token?: Record<string, unknown>;
+      /** Extra fields on the sandbox record. */
+      sandbox?: Record<string, unknown>;
     } = {},
   ) {
     const { home, env, io } = setup();
@@ -1071,11 +1199,15 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     const cp = fakeCp({
       [`POST /v1/sandboxes/${SBX}/token`]: () => ({
         status: 200,
-        body: { ...TOKEN, token: modeJwt(modes[Math.min(minted++, modes.length - 1)]!) },
+        body: {
+          ...TOKEN,
+          ...over.token,
+          token: modeJwt(modes[Math.min(minted++, modes.length - 1)]!),
+        },
       }),
       [`GET /v1/sandboxes/${SBX}`]: () => ({
         status: 200,
-        body: sandbox({ mode: over.record?.() ?? 'lease' }),
+        body: sandbox({ mode: over.record?.() ?? 'lease', ...over.sandbox }),
       }),
     });
     const flags: boolean[] = [];
@@ -1085,7 +1217,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     let keepalives = 0;
     const factory: ExecFactory = (o) => ({
       exec: async (command) => {
-        await o.token({ force: command === 'remint', minValidS: 60 });
+        await o.token({ force: command === 'remint', minValidS: 60, activity: true });
         flags.push(typeof o.keepalive === 'function' ? o.keepalive() : Boolean(o.keepalive));
         return res({ stderr: Buffer.alloc(0) });
       },
@@ -1099,10 +1231,11 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       },
       leaseKeepalive: async () => {
         keepalives++;
+        if (over.keepaliveAsks) await o.token({ force: false, minValidS: 60, activity: false });
         await over.keepalive?.();
       },
       process: (async (op: string) => {
-        await o.token({ force: false, minValidS: 60 });
+        await o.token({ force: false, minValidS: 60, activity: true });
         processOps.push(op);
         return { result: [], lease: [] };
       }) as never,
@@ -1130,6 +1263,8 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
       signals,
       keepalives: () => keepalives,
       mints: () => minted,
+      mintBodies: () =>
+        cp.calls.filter((c) => c.path === `/v1/sandboxes/${SBX}/token`).map((c) => c.body),
       connect: () => client.connect(clientSide),
     };
   }
@@ -1183,6 +1318,97 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('an idle MCP server on a lease sandbox keeps the lease alive with no-activity mints only', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    vi.setSystemTime(TOKEN_IAT * 1000);
+    try {
+      const m = leaseSession(['lease'], { keepaliveAsks: true });
+      await m.connect();
+      await m.bash('echo'); // the first mint: an activity mint
+      await vi.advanceTimersByTimeAsync(30 * 60_000);
+      expect(m.keepalives()).toBe(60);
+      const idle = m.mintBodies();
+      expect(idle.length).toBeGreaterThan(1); // the 15-minute token ran out and was re-minted
+      expect(idle[0]).toBeUndefined();
+      expect(idle.slice(1).every((b) => (b as { activity?: boolean })?.activity === false)).toBe(
+        true,
+      );
+      await m.bash('echo'); // a command never runs on a no-activity token
+      const all = m.mintBodies();
+      expect(all).toHaveLength(idle.length + 1);
+      expect(all[all.length - 1]).toBeUndefined();
+      await m.client.close();
+      await m.served;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the MCP server follows the moved deadline in its expired text and its info', async () => {
+    const T2 = sandbox().expiresAt + 7200;
+    const gone = new ApiError(
+      'control-plane',
+      409,
+      'sandbox_terminated',
+      'sandbox has gone',
+      undefined,
+      undefined,
+      'expired',
+    );
+    const run = async (sbx: Record<string, unknown>, token: Record<string, unknown>) => {
+      const m = leaseSession(['lease'], { token, sandbox: sbx });
+      await m.connect();
+      return m;
+    };
+    const m = await run({}, { sandboxExpiresAt: T2 });
+    await m.bash('echo'); // the first mint moves the deadline to T2
+    const info = (await m.client.callTool({ name: 'sandbox_info', arguments: {} })) as {
+      content: { text: string }[];
+    };
+    const rec = sandbox().expiresAt;
+    expect(info.content[0]!.text).toContain(`expires ${new Date(rec * 1000).toISOString()}.`);
+    expect(info.content[0]!.text).not.toContain('without use');
+    await m.client.close();
+    await m.served;
+
+    const w = await run({ idleLifetimeS: 604800 }, {});
+    await w.bash('echo');
+    const wi = (await w.client.callTool({ name: 'sandbox_info', arguments: {} })) as {
+      content: { text: string }[];
+    };
+    expect(wi.content[0]!.text).toContain(
+      `expires ${new Date(rec * 1000).toISOString()}, after 7 d without use.`,
+    );
+    await w.client.close();
+    await w.served;
+
+    // The refusal names the moved deadline.
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({
+        status: 200,
+        body: { ...TOKEN, sandboxExpiresAt: T2 },
+      }),
+      [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox() }),
+    });
+    const x = fakeExec(() => gone);
+    const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
+    const served = sbxMain(['mcp', '--sandbox', SBX], env, io, {
+      home,
+      fetchImpl: cp.fetchImpl,
+      execFactory: x.factory,
+      mcpTransport: serverSide,
+    });
+    const client = new Client({ name: 't', version: '0' });
+    await client.connect(clientSide);
+    const r = (await client.callTool({ name: 'bash', arguments: { command: 'ls' } })) as {
+      content: { text: string }[];
+    };
+    expect(r.content[0]!.text).toContain(`sandbox expired on ${new Date(T2 * 1000).toISOString()}`);
+    await client.close();
+    await served;
   });
 
   it("a lease sandbox gets the lease texts; reset and sandbox_info reach the connection's lease calls", async () => {

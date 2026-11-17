@@ -318,20 +318,32 @@ export const NEW = 'sbx-aaaaaaaaaaaaaaaaaaaaaaaaaa';
  * A control plane holding sandboxes: GET/list/create/token, every call recorded. `create` makes
  * NEW (then NEW2…); `tokens` counts mints per id.
  */
-export function controlPlane(initial: ReturnType<typeof sandbox>[] = []) {
+export function controlPlane(
+  initial: ReturnType<typeof sandbox>[] = [],
+  /** A control plane from before idle lifetimes: it ignores the body's and answers none. */
+  noLifetimes = false,
+) {
   const boxes = new Map<string, FakeSandbox>(initial.map((s) => [s.id, s]));
   let created = 0;
   const route = (key: string): Handler | undefined => {
     const [method, path] = key.split(' ') as [string, string];
     if (method === 'POST' && path === '/v1/sandboxes') {
       return (req) => {
-        const b = req.body as { template: string; name?: string; labels?: Record<string, string> };
+        const b = req.body as {
+          template: string;
+          name?: string;
+          labels?: Record<string, string>;
+          idleLifetimeS?: number;
+        };
         const id = created++ === 0 ? NEW : `${NEW.slice(0, -1)}${created}`;
         const s = sandbox({
           id,
           template: b.template,
           name: b.name ?? null,
           labels: b.labels ?? {},
+          ...(b.idleLifetimeS !== undefined && !noLifetimes
+            ? { idleLifetimeS: b.idleLifetimeS }
+            : {}),
         });
         boxes.set(id, s);
         return { status: 201, body: s };
@@ -399,10 +411,12 @@ export function harness(
     ws?: Parameters<typeof localWorkspace>[0];
     /** Cortex's agentop, for `up --cortex` and doctor in Cortex mode (default: none on PATH). */
     agentop?: AgentopExec;
+    /** A control plane from before idle lifetimes. */
+    noLifetimes?: boolean;
   } = {},
 ) {
   const s = setup();
-  const cp = controlPlane(o.boxes);
+  const cp = controlPlane(o.boxes, o.noLifetimes);
   const ws = workspaces(o.ws);
   const r = repo();
   const agentop: AgentopExec =

@@ -80,12 +80,17 @@ created sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a (default)
 pushed 214 files (3.2 MiB) to sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a
 configured Claude Code, OpenCode and IBM Bob: .mcp.json, .claude/settings.json, opencode.json, .bob/settings.json, .bob/mcp.json, CLAUDE.md, AGENTS.md
 sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a
-sandbox sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a (default), expires 2026-10-26T09:00:00.000Z; bound in .sbx/sandbox.json
+sandbox sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a (default), expires 2026-10-26T09:00:00.000Z, after 7 d without use; bound in .sbx/sandbox.json
 ```
 
 Without `--template`, `up` uses the `default` template; `mocactl sbx templates` lists the others,
 and `mocactl sbx up --template <id>` picks one. Run `up` again at any time: it reuses this
 repository's sandbox while it is live.
+
+A new sandbox ends after 7 days without use by default; `--lifetime DURATION` (`36h`, `14d`,
+`90m`, or whole seconds) picks another: at least 1 h, at most the deployment's maximum (30 days
+by default). It applies only to a new sandbox: `up` on an existing one warns that the sandbox
+keeps its own lifetime, and goes on.
 
 **Each worktree gets its own sandbox.** A sandbox belongs to one working tree: another clone, or
 another `git worktree` of the same repository, gets a sandbox of its own at its first `up`, so
@@ -653,11 +658,14 @@ supported. Two of your credentials cannot hold the identical destination (`409 d
 
 ## 7. Limits
 
-- **Sandboxes expire after 7 days** by default (your operator may set another lifetime). Then the
-  sandbox and its files are gone: pull before. `mocactl sbx ls` shows each sandbox's expiry, and
-  `mocactl sbx doctor` fails its sandbox check in the last 24 hours. A sandbox's lifetime cannot be
-  extended; for a fresh one, pull, `mocactl sbx rm`, then `mocactl sbx up` (an expired one is
-  removed with `mocactl sbx rm --force`, as its files can no longer be checked).
+- **A sandbox ends after 7 days without use** by default. Any command extends it from that
+  moment: `exec`, `run`, `push`, `pull`, `shell`, or an agent's tool call. `mocactl sbx ls`,
+  `mocactl sbx get` and an idle `mocactl sbx mcp` do not. Pick another lifetime with `--lifetime`
+  on `mocactl sbx create` or `up`, up to the deployment's maximum (30 days by default); it is set
+  at create only. When it ends, the sandbox and its files are gone: pull before. `mocactl sbx ls`
+  shows each sandbox's expiry and lifetime, and `mocactl sbx doctor` fails its sandbox check in the
+  last 24 hours. For a fresh sandbox, pull, `mocactl sbx rm`, then `mocactl sbx up` (an expired one
+  is removed with `mocactl sbx rm --force`, as its files can no longer be checked).
 - **3 sandboxes per person** by default, and a total for the whole service. Each worktree or clone
   you run `up` in uses one.
 - **Delete and de-enrollment take effect within one token lifetime plus 30 s** (15 minutes by
@@ -687,6 +695,13 @@ supported. Two of your credentials cannot hold the identical destination (`409 d
 - **One shared KVM host, best effort.** Every sandbox runs on one shared machine, supported in
   business hours. If it is lost, every sandbox on it ends and its files are gone. Your laptop
   keeps the original tree, so pull often.
+- **Commands that keep failing for days.** If commands keep failing while the sandbox is still
+  used (the relay unreachable for days), the host may reclaim the workspace before the sandbox
+  reads expired: about 25 days at the default lifetime, 2 days at 30 days.
+- **Older `mocactl sbx mcp` with a long lifetime.** An older `mocactl sbx mcp` counts its lease
+  keepalive as use, so a sandbox it drives never ends from disuse. At a 30-day `--lifetime`
+  that leaves only about 2 days of the margin above. Upgrade `mocactl` everywhere before using
+  `--lifetime` above the default.
 
 ## 8. Your own templates
 
@@ -791,7 +806,8 @@ prints, for the bound sandbox, `export` lines for a client: `SBX_ADDR`, `SBX_TLS
 `SBX_SANDBOX_ID`, `SBX_WORKSPACE_KEY`, `SBX_TOKEN_CMD` and, when the endpoint's certificate is
 self-issued, `SBX_CA_FILE`. `mocactl sbx token` prints a fresh token; `mocactl sbx token
 --renew-every 600` prints a new one every 600 seconds, one line each, until stopped, for a
-long-lived client that reads its next token from a pipe. See
+long-lived client that reads its next token from a pipe. Each token printed counts as use of the
+sandbox, so a `--renew-every` pump keeps it alive whether or not its client runs commands. See
 [the direct-client guide](../api/sandbox-v1-direct-client.md) for what a client sends.
 
 ## 10. Troubleshooting
@@ -804,7 +820,7 @@ mocactl sbx doctor
 
 ```
 ok - login: logged in to https://<api host> as <your GitHub login>
-ok - sandbox: sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a (default) is ready; expires 2026-10-26T09:00:00.000Z, in 6 d 23 h
+ok - sandbox: sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a (default) is ready; expires 2026-10-26T09:00:00.000Z, in 6 d 23 h, after 7 d without use
 ok - agent config: Claude Code, OpenCode and IBM Bob use the sandbox MCP server, with every local tool denied in this repository's project config except Bob's, which has no deny list, so its own tools stay available; user-level and managed settings are not checked
 ok - exec: one `true` in a fresh VM: 412 ms
 ok - changes: nothing to pull
