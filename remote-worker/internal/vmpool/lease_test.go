@@ -516,9 +516,11 @@ func TestLeaseVMNeverReturnsToStandbys(t *testing.T) {
 			p.mu.Lock()
 			ready := len(p.runs["k"].ready)
 			p.mu.Unlock()
-			if ready != 0 || lc.liveCount() != 0 {
-				t.Fatalf("after a lease end: ready = %d, live = %d; want 0, 0", ready, lc.liveCount())
+			if ready != 0 {
+				t.Fatalf("after a lease end: ready = %d, want 0", ready)
 			}
+			// The standbys shed at lease start are destroyed by the reclaim loop, not inline.
+			waitForValue(t, "lc.liveCount() once the shed standbys are reclaimed", lc.liveCount, 0)
 			if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Pending == nil || s.Pending.Reason != tc.reason {
 				t.Fatalf("pending = %+v, want %s", s.Pending, tc.reason)
 			}
