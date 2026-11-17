@@ -1839,6 +1839,14 @@ echo "not a cert" >"$EGT/junk.pem"
 out=$(TMPDIR="$EGT/tmp1" bash "$SCRIPT" --kernel /k --rootfs /r --agent /a --image t --egress-ca "$EGT/junk.pem" 2>&1); rc=$?
 check "an unparseable file is refused" "$([ "$rc" != 0 ] && echo yes || echo no)" "yes"
 check "nothing was staged for the junk" "$(find "$EGT/tmp1" -mindepth 1 | wc -l | tr -d ' ')" "0"
+# Without openssl on PATH a good certificate cannot be parsed either; the refusal must say the
+# tool is missing, not call the operator's certificate unparseable.
+mkdir -p "$EGT/no-openssl"
+ln -sf "$(command -v grep)" "$EGT/no-openssl/grep"
+out=$(PATH="$EGT/no-openssl" "$BASH" -c "$(fn_body validate_egress_ca); EGRESS_CA='$EGT/ca.crt'; validate_egress_ca" 2>&1); rc=$?
+check "no openssl: --egress-ca is refused" "$([ "$rc" != 0 ] && echo yes || echo no)" "yes"
+check "no openssl: the refusal names the missing tool" "$(printf '%s' "$out" | grep -c 'requires openssl')" "1"
+check "no openssl: the good certificate is not called unparseable" "$(printf '%s' "$out" | grep -c 'not a parseable')" "0"
 out=$(TMPDIR="$EGT/tmp1" bash "$SCRIPT" --kernel /k --rootfs /r --agent /a --image t --egress-ca "$EGT/ca.crt" 2>&1)
 case "$out" in *"must run as root"* | *"/dev/kvm is not present"*) ok=yes ;; *) ok=no ;; esac
 check "a good cert passes arg validation" "$ok" "yes"
