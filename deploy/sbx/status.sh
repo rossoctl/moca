@@ -124,8 +124,11 @@ host_worker_idle() {
     [[ -f "$f" ]] || continue
     id="$(basename "$f" .env)"
     idle="$(env_value SH_WORKSPACE_IDLE "$f")"
+    if ! grep -q '^SH_WORKSPACE_IDLE=' "$f" </dev/null; then
+      say "worker idle $id" "missing (no SH_WORKSPACE_IDLE in $f)"
+      continue
     # Whole hours without a leading zero, as install-host.sh writes them.
-    if [[ ! "$idle" =~ ^[1-9][0-9]{0,5}h$ ]]; then
+    elif [[ ! "$idle" =~ ^[1-9][0-9]{0,5}h$ ]]; then
       say "worker idle $id" "unreadable (SH_WORKSPACE_IDLE in $f is not whole hours)"
       continue
     fi
