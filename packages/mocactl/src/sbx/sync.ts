@@ -27,7 +27,7 @@ import {
   type ExecFactory,
   type OpenedExec,
 } from './exec.js';
-import { afterText, lifetimeNotTakenText, lifetimeText } from './lifetime.js';
+import { afterText, lifetimeNotTakenText, lifetimeText, validLifetime } from './lifetime.js';
 import { noticingExec } from './notices.js';
 import {
   PushError,
@@ -247,7 +247,7 @@ export interface UpFlags extends PushFlags {
 /** `--lifetime` on a sandbox `up` reuses: it applies only to a new one, so say so and go on. */
 function warnLifetimeIgnored(c: SbxCtx, s: SbxSandbox, f: UpFlags): void {
   if (f.idleLifetimeS === undefined) return;
-  const its = s.idleLifetimeS !== undefined ? `${lifetimeText(s.idleLifetimeS)} ` : '';
+  const its = validLifetime(s.idleLifetimeS) ? `${lifetimeText(s.idleLifetimeS)} ` : '';
   c.io.err(
     `sbx up: ${sanitizeRemote(s.id)} keeps its ${its}lifetime; --lifetime applies only to a new sandbox`,
   );

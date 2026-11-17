@@ -736,6 +736,23 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(cp.calls.at(-1)!.path).toBe('/v1/sandboxes?all=1');
   });
 
+  it('ls prints no lifetime for a malformed idleLifetimeS (#770)', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/sandboxes': () => ({
+        status: 200,
+        body: {
+          sandboxes: [
+            sandbox({ idleLifetimeS: 0 }),
+            sandbox({ id: 'sbx-b', idleLifetimeS: '604800' as unknown as number }),
+          ],
+        },
+      }),
+    });
+    await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl });
+    expect(io.outs.join('')).not.toMatch(/\(|undefined|NaN/);
+  });
+
   it('ls --all aligns the owner column with and without the lifetime suffix (#770)', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lifetimeText, parseLifetime } from '../src/sbx/lifetime.js';
+import { afterText, lifetimeText, parseLifetime } from '../src/sbx/lifetime.js';
 
 describe('parseLifetime (#770)', () => {
   it('reads minutes, hours, days and whole seconds', () => {
@@ -22,5 +22,15 @@ describe('lifetimeText (#770)', () => {
     expect(lifetimeText(129_600)).toBe('36 h');
     expect(lifetimeText(5400)).toBe('90 min');
     expect(lifetimeText(3601)).toBe('3601 s');
+  });
+});
+
+describe('afterText (#770)', () => {
+  it('says a valid lifetime', () => {
+    expect(afterText({ idleLifetimeS: 604_800 })).toBe(', after 7 d without use');
+    expect(afterText({})).toBe('');
+  });
+  it.each([0, -1, 1.5, Number.NaN, '604800'])('prints nothing for %j', (v) => {
+    expect(afterText({ idleLifetimeS: v as number })).toBe('');
   });
 });

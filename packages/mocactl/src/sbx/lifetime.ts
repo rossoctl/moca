@@ -13,6 +13,10 @@ export function parseLifetime(raw: string): number | undefined {
   return Number.isSafeInteger(n) ? n : undefined;
 }
 
+/** A lifetime the control plane answered that is fit to print: a positive whole number of seconds. */
+export const validLifetime = (v: unknown): v is number =>
+  Number.isSafeInteger(v) && (v as number) > 0;
+
 /** A lifetime in the largest unit that divides it exactly. */
 export function lifetimeText(s: number): string {
   if (s % 86_400 === 0) return `${s / 86_400} d`;
@@ -23,7 +27,7 @@ export function lifetimeText(s: number): string {
 
 /** `, after 7 d without use`, or nothing when the control plane did not say. */
 export function afterText(s: { idleLifetimeS?: number }): string {
-  return s.idleLifetimeS !== undefined
+  return validLifetime(s.idleLifetimeS)
     ? `, after ${lifetimeText(s.idleLifetimeS)} without use`
     : '';
 }
@@ -38,9 +42,8 @@ export function lifetimeNotTakenText(
   s: { idleLifetimeS?: number },
 ): string | undefined {
   if (asked === undefined || s.idleLifetimeS === asked) return undefined;
-  const ends =
-    s.idleLifetimeS !== undefined
-      ? lifetimeText(s.idleLifetimeS)
-      : "the deployment's default lifetime";
+  const ends = validLifetime(s.idleLifetimeS)
+    ? lifetimeText(s.idleLifetimeS)
+    : "the deployment's default lifetime";
   return `sbx: ${id} ends after ${ends} without use: the control plane did not take --lifetime`;
 }

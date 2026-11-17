@@ -26,7 +26,7 @@ import {
   setModeFailureText,
   type SetModeOutcome,
 } from './mode.js';
-import { afterText, lifetimeNotTakenText, lifetimeText } from './lifetime.js';
+import { afterText, lifetimeNotTakenText, lifetimeText, validLifetime } from './lifetime.js';
 import { forgetNotices } from './notices.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
@@ -489,7 +489,7 @@ export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
       const cell = (v: string, width = 0) => sanitizeRemote(v).padEnd(width);
       const expiry =
         when(s.expiresAt) +
-        (s.idleLifetimeS !== undefined ? ` (${lifetimeText(s.idleLifetimeS)})` : '');
+        (validLifetime(s.idleLifetimeS) ? ` (${lifetimeText(s.idleLifetimeS)})` : '');
       const row = [
         cell(s.id, 30),
         cell(s.name ?? '-', 16),
