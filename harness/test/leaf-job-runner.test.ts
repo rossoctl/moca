@@ -16,6 +16,7 @@ const CONFIG = { redisUrl: 'redis://127.0.0.1:6379', serverMode: true } as unkno
 class FakeQueue implements WorkQueue {
   next: ClaimedEntry | null = null;
   acked: string[] = [];
+  deferred: Array<[string, string, number]> = [];
   touched: string[] = [];
   /** Set false to play a heartbeat that finds the entry reclaimed by another worker. */
   stillOwned = true;
@@ -27,6 +28,9 @@ class FakeQueue implements WorkQueue {
   }
   async ack(id: string) {
     this.acked.push(id);
+  }
+  async defer(id: string, consumerId: string, retryCount: number) {
+    this.deferred.push([id, consumerId, retryCount]);
   }
   async touch(id: string) {
     this.touched.push(id);
@@ -313,6 +317,64 @@ describe('processOne', () => {
     expect(clearHeartbeat).toHaveBeenCalledTimes(1);
     expect(queue.acked).toEqual([]);
     expect(store.size).toBe(0);
+  });
+
+  // Per-owner fairness (#391).
+  describe('admitOwner', () => {
+    it('defers an entry whose owner is at cap: no credential, no run, no ack', async () => {
+      queue.next = entry({ deliveryCount: 2 });
+      const claimTurn = vi.fn();
+      const runLeaf = vi.fn();
+      const out = await processOne(deps({ admitOwner: async () => null, claimTurn, runLeaf }));
+      expect(out).toEqual({ kind: 'deferred', turnId: 't-1', reclaimed: false });
+      expect(claimTurn).not.toHaveBeenCalled();
+      expect(runLeaf).not.toHaveBeenCalled();
+      expect(queue.acked).toEqual([]); // acking would lose the turn outright
+      expect(finalized).toEqual([]);
+      // deliveryCount - 1: the counter goes back to what it read BEFORE this delivery, so three
+      // deferrals cannot dead-letter a turn whose only sin is a busy owner.
+      expect(queue.deferred).toEqual([['1-0', 'moca-host-w0', 1]]);
+    });
+
+    it('holds the owner slot across the run and releases it once', async () => {
+      queue.next = entry();
+      const release = vi.fn();
+      let heldDuringRun = false;
+      const out = await processOne(
+        deps({
+          admitOwner: async () => release,
+          runLeaf: async () => {
+            heldDuringRun = release.mock.calls.length === 0;
+            return { status: 'done' } as LeafResult;
+          },
+        }),
+      );
+      expect(out).toMatchObject({ kind: 'completed' });
+      expect(heldDuringRun).toBe(true);
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+
+    // A leaked slot is permanent: the counter is in-process, so an owner whose turns throw would
+    // lose their async concurrency for the life of the worker.
+    it('releases the owner slot when the leaf throws', async () => {
+      queue.next = entry();
+      const release = vi.fn();
+      const d = deps({
+        admitOwner: async () => release,
+        runLeaf: async () => {
+          throw new Error('sandbox gone');
+        },
+      });
+      await expect(processOne(d)).rejects.toThrow('sandbox gone');
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+
+    it('never asks for a slot for an entry that is already dead-lettered', async () => {
+      queue.next = entry({ deliveryCount: 4 });
+      const admitOwner = vi.fn();
+      await processOne(deps({ admitOwner, maxAttempts: 3 }));
+      expect(admitOwner).not.toHaveBeenCalled();
+    });
   });
 
   // The watchdog (#391). `heartbeats[0]` is the touch beat; `heartbeats[1]` is the watchdog, armed

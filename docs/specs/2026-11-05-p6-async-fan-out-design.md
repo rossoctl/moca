@@ -838,11 +838,15 @@ counters join that object and follow it.
 | `async_reclaims`          | count | `XAUTOCLAIM` firing. A nonzero steady rate means workers die mid-leaf       |
 | `async_dead_letters`      | count | Entries that reached `lost` (§6.2) — always an alert, never normal          |
 | `async_claim_denied_full` | count | Claims not attempted because every slot was busy (§5.3's accepted cost)     |
+| `async_deferred_subject`  | count | Entries handed back unrun because their owner was at their cap (#391)       |
 | `async_quota_refusals`    | count | Submissions refused by §4.3's per-owner quota — the containment, firing     |
 
 `async_claim_denied_full` is the design's own stated risk made visible: §5.3 reserves no headroom, so
 a full queue can occupy every slot. If it and interactive `429`s rise together, that is the
-measurement which would justify the per-class caps §12 holds in reserve. `async_quota_refusals` is
+measurement which would justify the per-class caps §12 holds in reserve. `async_deferred_subject`
+reads against it: deferrals while slots sit idle are the per-owner cap pacing one submitter, which
+is the fairness working, while deferrals with no second owner submitting mean the cap is too low
+for this deployment's shape. `async_quota_refusals` is
 the other one that is about this design's choices rather than the queue's health — §4.3's quota is
 the single containment against a runaway submitter, so a deployment needs to see it firing to know
 whether 50 is the right number.
@@ -1164,13 +1168,23 @@ it adds is the schedule. Its design should cite this document for both.
   holding it — new control-plane-to-worker machinery.~~ **Done in #391**: the two sides already
   share a Redis keyspace, so the `DELETE` writes a `cancelRequested` flag the worker's 2 s watchdog
   reads and the leaf aborts — no transport. §4.5's amendment has the shape and the M2 caveat.
-- **Per-subject fairness on the async drain, and per-turn cost attribution.** #391's remaining
-  scope, which #391 stays open for. The counting side exists (`SubjectCounter`,
-  `packages/server/src/subject-quota.ts`), but the queue is one FIFO stream and a claim reveals the
-  subject only _after_ a slot is taken, so one owner's 50 queued turns sit in front of another
-  owner's turn whatever a counter says. Fixing it means claim-time filtering or per-owner streams —
-  the queue-shape question this section's per-class-caps item below also waits on — and the cost
-  half waits on the price table §4.3's amendment says does not exist (#359).
+- ~~**Per-subject fairness on the async drain.**~~ **Done in #391**, as claim-time filtering: the
+  queue is still one FIFO stream, so the worker reads the claimed entry's `owner` (one `HGET`) and,
+  when that owner already holds `SH_TURNS_PER_SUBJECT` of this worker's slots, hands the entry back
+  **unrun and unpenalised** — `XCLAIM … JUSTID RETRYCOUNT <before>`, so a defer is invisible to
+  `maxAttempts` — and backs off as it does on an empty queue. The check runs _before_ the claim
+  handshake, so a turn that may not run yet mints no credential and writes no audit entry, and it
+  shares the sync route's one `SubjectCounter` instance, so async leaves and interactive turns of
+  one subject count against one number. `async_deferred_subject` (§7) counts it.
+  **Known limit:** the defer resets the entry's idle timer, so a deferred turn waits up to one
+  `minIdleMs` (90 s) before any worker may reclaim it, even if a slot frees sooner. Leaving IDLE
+  high instead would have this worker's own next claim reclaim the same entry (XAUTOCLAIM leads
+  every claim), defer it again, and never reach the entries behind it. Per-owner streams, where a
+  claim can skip an owner without touching their entries, are the upgrade — the queue-shape
+  question this section's per-class-caps item below also waits on.
+- **Per-turn cost attribution.** #391's other half, split out: it wants the per-model price table
+  §4.3's amendment says does not exist (#359), which is the same reason `caps.costUsd` is refused
+  at submission rather than enforced.
 - ~~Result retention beyond 24 h, and richer artifacts than the current patch/text/summary.~~
   **Done in #390**: seven days by default, moved on the one knob §5.1 describes, plus a base commit
   and a diffstat on every captured patch and a `GET …/turns/{turnId}/artifacts/{kind}` route so a

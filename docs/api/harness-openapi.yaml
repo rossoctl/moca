@@ -196,7 +196,9 @@ paths:
           description: |
             subject_quota_exceeded — the authenticated subject already holds
             SH_TURNS_PER_SUBJECT in-flight turns on this worker (default half the per-worker
-            turn cap). Distinct from the supervisor's pre-hand-off `overloaded` 429, which has
+            turn cap), counting the subject's running QUEUED turns as well as its interactive
+            ones: one owner's async fan-out and its /turn traffic share one per-subject budget
+            (#391), so a caller can be refused here while its own queued leaves are running. Distinct from the supervisor's pre-hand-off `overloaded` 429, which has
             no error body: this one names the caller's own share, so a client can tell "you are
             over your share" from "the host is full". Carries Retry-After. No quota is
             configured (neither SH_TURNS_PER_SUBJECT nor SH_TURNS_PER_WORKER set) or the caller

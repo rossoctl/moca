@@ -36,7 +36,8 @@ advice in the deploy README and not tested. If `SH_WORKERS` were unset, W would 
 - **One user cannot take every slot:** each authenticated subject is capped at `SH_TURNS_PER_SUBJECT` in-flight turns
   per worker (default half of S), refused with 429 `subject_quota_exceeded` and `Retry-After` — a different code from
   the pool-wide `overloaded` 429. The cap is per worker, so a subject's host-wide share is `cap/S`, not the knob value
-  itself.
+  itself. Async turns count against the same number (#391): an entry claimed past its owner's cap is handed back to the
+  queue unrun, counted as `async_deferred_subject`, so a deep queue from one owner cannot crowd out another's turn.
 - **More sandboxes:** set `SH_SANDBOX_COUNT` for `setup.sh` (default 2, sticky). Each pod's sandbox id is its pod
   name. Each sandbox accepts up to `KAGENTI_SANDBOX_CAP` concurrent leases (the manifest sets 4; the code default is
   20), so container capacity is roughly sandboxes x 4 concurrent turns. A pool with no free slot returns 503

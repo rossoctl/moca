@@ -1333,10 +1333,16 @@ and as two top-level gauges:
 | `async_reclaims`          | of those, the ones redelivered after a worker died holding one (90 s idle floor) |
 | `async_dead_letters`      | of those, the ones that exhausted their attempts                                 |
 | `async_claim_denied_full` | claims this pod's workers refused because their admission cap was full           |
+| `async_deferred_subject`  | entries handed back unrun because their owner was at `SH_TURNS_PER_SUBJECT`      |
 | `async_queue_depth`       | queued turns, from slot 0 only                                                   |
 | `async_oldest_age_ms`     | age of the oldest queued turn, from slot 0 only                                  |
 
-The four counters are **one pod's**, not the deployment's: `/metrics` answers from whichever pod you
+`async_deferred_subject` rising while slots sit idle is the per-owner cap pacing one submitter -- the
+fairness working, not a fault. Rising with no second owner submitting means `SH_TURNS_PER_SUBJECT` is
+too low for this deployment: a deferred entry waits out the 90 s reclaim window before any worker may
+take it again, so each deferral costs that turn up to 90 s.
+
+The five counters are **one pod's**, not the deployment's: `/metrics` answers from whichever pod you
 reached, each worker counts in its own memory, and a worker that respawns starts its own count at
 zero. At `replicas` > 1 (section 4) add the pods up yourself. The two gauges describe the one shared
 queue, so every pod's slot 0 reports the same numbers.

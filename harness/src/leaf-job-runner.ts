@@ -1,4 +1,4 @@
-import type { WorkQueue } from '@moca/work-queue';
+import type { ClaimedEntry, WorkQueue } from '@moca/work-queue';
 import { classifyOutcome } from './classify-outcome.js';
 import type { LeafEnvelope, LeafResult } from './run-leaf.js';
 import type { TurnConfig } from './run-turn.js';
@@ -59,6 +59,17 @@ export interface LeafJobDeps {
    * blip must not cancel a turn.
    */
   cancelRequested?: (turnId: string) => Promise<boolean>;
+  /**
+   * Take one of this turn's OWNER's concurrency slots (§5.3, #391), or answer `null` when that
+   * owner already holds every slot their cap allows on this worker. The release is held for the
+   * whole run and is idempotent.
+   *
+   * Injected, and taking a turn id rather than a subject, because the owner is on the turn record:
+   * resolving it is a Redis read `@moca/server` already does, and the counter it checks against is
+   * the same `SubjectCounter` instance the sync `/turn` path uses -- the two must share one count
+   * or neither cap means anything. Absent ⇒ no per-owner fairness, the pre-#391 behaviour.
+   */
+  admitOwner?: (turnId: string) => Promise<(() => void) | null>;
   /** Stamp the terminal state on the record. 'aborted' has no TurnState; the caller maps it. */
   finalize: (turnId: string, status: LeafResult['status']) => Promise<void>;
   /**
@@ -104,6 +115,9 @@ export interface LeafJobDeps {
  *   whose answer will not change.
  * - `lost`: a heartbeat found the entry owned by someone else, so this run's work is discarded --
  *   no result, no finalize, NO ack. The reclaiming worker owns the turn and ends it.
+ * - `deferred`: the turn's owner is at their per-worker cap, so the entry was handed back UNRUN and
+ *   unpenalised (#391). Not a failure and not progress: the loop backs off as it does on `idle`,
+ *   because claiming again immediately would re-read the same owner's next entry.
  *
  * Every outcome but `idle` carries `reclaimed`, because `async_reclaims` (§7) counts XAUTOCLAIM
  * firing -- "a nonzero steady rate means workers die mid-leaf" -- and a reclaimed entry that then
@@ -122,7 +136,8 @@ export type ProcessOutcome =
   | { kind: 'redelivered'; turnId: string; reclaimed: boolean }
   | { kind: 'dead_lettered'; turnId: string; reclaimed: boolean }
   | { kind: 'refused'; turnId: string; reclaimed: boolean }
-  | { kind: 'lost'; turnId: string; reclaimed: boolean };
+  | { kind: 'lost'; turnId: string; reclaimed: boolean }
+  | { kind: 'deferred'; turnId: string; reclaimed: boolean };
 
 /**
  * Claim and process at most one queue entry.
@@ -139,13 +154,6 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
   const maxAttempts = deps.maxAttempts ?? 3;
   const minIdleMs = deps.minIdleMs ?? 90_000;
   const blockMs = deps.blockMs ?? 0;
-  // A third of minIdleMs: two consecutive misses still leave the entry un-reclaimable.
-  const heartbeatMs = deps.heartbeatMs ?? 30_000;
-  const now = deps.now ?? (() => new Date().toISOString());
-  const log = deps.log ?? console.warn;
-  const setHb = deps.setHeartbeat ?? ((fn, ms) => setInterval(fn, ms));
-  const clearHb =
-    deps.clearHeartbeat ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>));
 
   const claimed = await deps.queue.claim(deps.consumerId, { minIdleMs, blockMs });
   if (!claimed) return { kind: 'idle' };
@@ -162,6 +170,45 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
     await deps.queue.ack(claimed.entryId);
     return { kind: 'dead_lettered', turnId: claimed.turnId, reclaimed: claimed.reclaimed };
   }
+
+  // FAIRNESS (#391). The queue is one FIFO stream, so an entry's owner is unknowable until it is
+  // claimed -- which is why this is a check-and-hand-back rather than a filter on the read. One
+  // owner's fan-out holds at most `SH_TURNS_PER_SUBJECT` of this worker's slots, the same cap an
+  // interactive `/turn` is held to, so another owner's single turn is never queued behind all of
+  // it. Before `claimTurn` deliberately: a turn that may not run yet must not have a credential
+  // minted for it, must not flip to `running`, and must not appear in the audit log as an issuance.
+  const releaseOwner = deps.admitOwner ? await deps.admitOwner(claimed.turnId) : noRelease;
+  if (!releaseOwner) {
+    // Handed back UNRUN and at no cost to its attempt budget; see `defer`'s own doc for why the
+    // entry then waits out `minIdleMs` rather than being instantly reclaimable.
+    await deps.queue.defer(claimed.entryId, deps.consumerId, claimed.deliveryCount - 1);
+    return { kind: 'deferred', turnId: claimed.turnId, reclaimed: claimed.reclaimed };
+  }
+  try {
+    return await runClaimedEntry(deps, claimed);
+  } finally {
+    // Idempotent (`SubjectCounter.acquire`), and in a `finally` around the whole of the run rather
+    // than beside each of its returns: every path out gives the owner their slot back, including a
+    // throw, which would otherwise leak one of their slots for the life of the process.
+    releaseOwner();
+  }
+}
+
+/** The no-cap answer, so a caller without `admitOwner` takes exactly the admitted path. */
+const noRelease = () => {};
+
+/**
+ * Everything from the claim handshake to the ack. Its own function so that the owner's fairness
+ * slot can be released in one `finally` wrapped around all of it.
+ */
+async function runClaimedEntry(deps: LeafJobDeps, claimed: ClaimedEntry): Promise<ProcessOutcome> {
+  // A third of minIdleMs: two consecutive misses still leave the entry un-reclaimable.
+  const heartbeatMs = deps.heartbeatMs ?? 30_000;
+  const now = deps.now ?? (() => new Date().toISOString());
+  const log = deps.log ?? console.warn;
+  const setHb = deps.setHeartbeat ?? ((fn, ms) => setInterval(fn, ms));
+  const clearHb =
+    deps.clearHeartbeat ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>));
 
   const turn = await deps.claimTurn(claimed.turnId, claimed.deliveryCount);
   if (!turn) {

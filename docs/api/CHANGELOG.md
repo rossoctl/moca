@@ -35,6 +35,13 @@ because that is what Preview requires.
   deployment's `MOCA_TURN_MAX_S`. The data plane's `budget` joins the failed-reason enum, and its
   `TurnResult` gains `budgetExceeded` (the loop reports `end_turn` when every call was refused, so
   the cap firing is otherwise invisible).
+- **`subject_quota_exceeded` on the data plane's `/v1/turn` now counts the caller's running queued
+  turns too.** `SH_TURNS_PER_SUBJECT` is one budget per subject across both paths, so a caller whose
+  async fan-out is executing can be refused an interactive turn it would previously have been given.
+  Nothing new on the wire -- the same 429, the same code -- but the condition is wider. On the queue
+  side there is no refusal at all: an entry claimed past its owner's cap is handed back unrun and
+  retried, with its attempt budget untouched, so a deep queue from one owner cannot crowd out
+  another's turn.
 - `DELETE /v1/sessions/{id}/turns/{turnId}` now cancels a **running** turn as well as a queued one.
   It answers `202` with `{turnId, state: "running", cancelRequested: true}`; the worker stops the
   leaf within a few seconds, releases its sandbox, and the turn reaches `cancelled`. `409`

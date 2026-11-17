@@ -43,6 +43,22 @@ export interface WorkQueue {
   ): Promise<ClaimedEntry | null>;
   ack(entryId: string): Promise<void>;
   /**
+   * Hand a claimed entry back UNRUN, at no cost to its attempt budget (#391's fairness defer).
+   *
+   * `retryCount` is what the delivery counter should read afterwards — the caller passes the value
+   * from BEFORE this delivery, so a defer is invisible to `maxAttempts`. Without that, an owner at
+   * their concurrency cap would have their own turns dead-lettered for being deferred three times,
+   * which is a refusal dressed up as a failure.
+   *
+   * shortcut: the idle timer is RESET, so a deferred entry is not reclaimable for `minIdleMs` even
+   * if a slot frees sooner — the defer buys fairness with up to one `minIdleMs` of latency for the
+   * deferred turn. Setting IDLE high instead would make this worker's own next claim reclaim the
+   * same entry immediately (XAUTOCLAIM leads every claim), defer it again, and starve the fresh
+   * entries behind it — the exact starvation this call exists to prevent. Upgrade when the queue
+   * grows per-owner streams and a claim can skip an owner without touching their entries.
+   */
+  defer(entryId: string, consumerId: string, retryCount: number): Promise<void>;
+  /**
    * Reset the entry's idle timer so a healthy long run is not reclaimed. Returns false when the
    * entry is NO LONGER this consumer's — reclaimed by someone else, or already acked — in which
    * case nothing was touched. Callers treat false as "stop pretending to own this".
@@ -203,6 +219,15 @@ export class RedisWorkQueue implements WorkQueue {
 
   async ack(entryId: string): Promise<void> {
     await this.client.xAck(this.stream, this.group, entryId);
+  }
+
+  async defer(entryId: string, consumerId: string, retryCount: number): Promise<void> {
+    // Claiming to the consumer that already holds it, with min-idle 0 so the state it is in cannot
+    // make this fail. JUSTID keeps Redis from counting a delivery of an entry nobody read, and
+    // RETRYCOUNT then puts the counter back where the caller says it belongs.
+    await this.client.xClaimJustId(this.stream, this.group, consumerId, 0, [entryId], {
+      RETRYCOUNT: Math.max(0, retryCount),
+    });
   }
 
   async touch(entryId: string, consumerId: string): Promise<boolean> {

@@ -1,6 +1,6 @@
 # ADR-0047: P6 async fan-out is a drain loop inside the turn worker, sharing its admission budget
 
-- **Status:** Accepted (2026-11-12; M1 and M3 implemented by #704, #713, #717, #765, with per-turn budgets and running-turn cancel by #391; M2, which lifts the single-tenancy gate, owed) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-11-17; all three milestones implemented — M1 by #704, #713, #717, M2 by #788, #807, #822 (`turn_exp`, grant-at-dequeue, the single-tenancy gate lifted), M3 by #765 — with per-turn budgets, running-turn cancel and per-subject fairness by #391) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-11-05
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-11-05-p6-async-fan-out-design.md`](../specs/2026-11-05-p6-async-fan-out-design.md)
@@ -283,10 +283,12 @@ never-submitted and reaped-as-lost.
   outright (MI1 §6.2's current rule, and what M2 should ship) or whether a provably-still-running
   leaf may extend once — the §6.2 heartbeat is what such an extension would key off, since it
   already proves liveness. Also owed (result retention and richer artifacts were done in #390,
-  cancelling a running leaf in #391): per-subject fairness on the async drain and per-turn cost
-  attribution (#391's remaining scope — the queue is one FIFO stream, so a claim reveals the subject
-  only after a slot is taken, and the cost half wants the price table #391 established does not
-  exist); per-class concurrency caps, for which `async_claim_denied_full` against
+  cancelling a running leaf and per-subject fairness in #391 — the latter as a claim-time check that
+  reads the entry's owner and hands a capped owner's entry back unrun and unpenalised, since the
+  queue is one FIFO stream and a claim reveals the owner only after it is taken; spec §12 records the
+  90 s latency that buys): per-turn cost attribution (#391's split-out half, which wants the price
+  table #391 established does not exist); per-class concurrency caps, for which
+  `async_claim_denied_full` against
   interactive `429`s is the measurement that would justify them; `/v1/batches` (#537) once a working
   fan-out exists to measure against; the documentation updates in #690 (ADR-0041's "Still owed" note,
   the Archetype A row, the `async_removed` entry); and the wording amendment where MU1 §4.2 and MI1

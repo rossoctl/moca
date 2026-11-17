@@ -418,6 +418,18 @@ export class TurnStore {
     return v === '1';
   }
 
+  /**
+   * Who owns this turn, or '' when there is no record (#391's per-owner fairness). One field for
+   * `cancelRequested`'s reason: the async worker reads it for every entry it claims, before it
+   * decides whether that owner may run another leaf, and the whole record carries an envelope.
+   *
+   * An absent record answers '' rather than throwing: the caller's next step is the claim, which
+   * is the call that resolves what a missing record means (refused, not deferred).
+   */
+  async owner(turnId: string): Promise<string> {
+    return (await this.guard(() => this.redis.hGet(this.key(turnId), 'owner'))) ?? '';
+  }
+
   /** One CAS attempt, with the transport mapped to 503 like every other call here. */
   private async cas(
     key: string,

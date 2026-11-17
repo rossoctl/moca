@@ -199,6 +199,16 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       await done();
     });
 
+    it('reads the owner of a turn, and empty for no record (#391)', async () => {
+      const { store, done } = await make();
+      await store.create(rec({ turnId: 't-1', owner: 'github:1234' }));
+      expect(await store.owner('t-1')).toBe('github:1234');
+      // '' not a throw: the async drain reads this before its claim, and the claim is what decides
+      // what a missing record means.
+      expect(await store.owner('t-missing')).toBe('');
+      await done();
+    });
+
     it('finalizes once: a second finalize is refused and does not move the state', async () => {
       const { store, now, done } = await make();
       await store.create(rec());

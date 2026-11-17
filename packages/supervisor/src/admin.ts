@@ -44,6 +44,7 @@ export interface MetricsBody {
     readonly async_reclaims: number;
     readonly async_dead_letters: number;
     readonly async_claim_denied_full: number;
+    readonly async_deferred_subject: number;
   };
   readonly lease_saturation: number | 'NaN';
   readonly file_op_p95_ms: number | 'NaN';
@@ -86,6 +87,7 @@ export function metricsBody(pool: WorkerPool, env: NodeJS.ProcessEnv): MetricsBo
       async_reclaims: agg.asyncReclaims,
       async_dead_letters: agg.asyncDeadLetters,
       async_claim_denied_full: agg.asyncClaimDeniedFull,
+      async_deferred_subject: agg.asyncDeferredSubject,
     },
     lease_saturation: num(agg.leaseSaturation),
     file_op_p95_ms: num(agg.fileOpP95Ms),
