@@ -30,6 +30,10 @@ const NOT_ENV_ON_K8S: Record<string, string> = {
     'SBX0 only: set by overlays/ocp-sbx (the sandbox front door); a MOCA relay has no sandbox callers',
   SH_SANDBOX_MAX_INFLIGHT:
     'SBX0 only: set by overlays/ocp-sbx (the sandbox front door); a MOCA relay has no sandbox callers',
+  // Tuning knobs with a code default (#439); no manifest sets them, so the default applies.
+  MOCA_RELAY_KEEPALIVE_TIME_MS: 'a tuning knob with a code default (#439); unset on every manifest',
+  MOCA_RELAY_KEEPALIVE_TIMEOUT_MS:
+    'a tuning knob with a code default (#439); unset on every manifest',
   // An operator's debug switch, off unless set by hand; no manifest sets it, ocp-sbx included.
   SH_SANDBOX_AUDIT_COMMANDS:
     'SBX0 only: an operator debug flag (commands in audit lines), off unless set by hand; no manifest sets it',
