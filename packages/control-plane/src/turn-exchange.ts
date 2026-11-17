@@ -172,6 +172,12 @@ export async function exchangeTurnCredential(
   // Returned in BOTH modes (#391), because the WORKER now stops the leaf on it and a wall-clock cap
   // that only existed under `multi` would be a cap that depends on tenancy. Computed once, here, and
   // handed to the grant mint below so the grants' `exp` and this field cannot disagree (decision D4).
+  //
+  // "This dequeue" means PER DELIVERY, as the contract says (openapi `caps`, `turnExp`): a reclaimed
+  // redelivery gets a fresh window rather than its predecessor's remainder, so one turn's aggregate
+  // can reach the cap times the delivery limit. Persisting the first dequeue's deadline instead would
+  // hand a reclaimed delivery grants that expire the moment they are minted -- a turn that cannot be
+  // retried at all, which is a worse answer than one that may run long after a worker died.
   const turnExpS = turnExp(
     Math.floor(deps.now() / 1000),
     turn.caps.wallClock,

@@ -658,7 +658,11 @@ over the cap by a factor of two. The policy:
   `turn_exp = dequeue + min(caps.wallClock ?? MOCA_TURN_MAX_S, MOCA_TURN_MAX_S)`. The `min` is the
   whole policy: a per-turn value that can only tighten. A caller asking for more is not refused —
   the request is clamped, because refusing would make a client's cap request a deployment-coupling
-  concern.
+  concern. `dequeue` is **each** dequeue, so both caps bound a DELIVERY and not a turn: a reclaimed
+  redelivery gets a fresh window and a fresh token budget, and a turn's aggregate can reach the cap
+  times `maxAttempts`. Persisting the first dequeue's deadline is the alternative and is worse — the
+  grants are minted from it, so a reclaimed delivery would get credentials already expired, making
+  the turn unretryable rather than merely capped. The contract says per delivery (openapi `caps`).
 - **An hour-long turn is therefore an operator decision, not a caller's.** Raising
   `MOCA_TURN_MAX_S` to 3600 is the supported way to get one, and it is a deliberate, auditable
   change to a deployment-wide ceiling rather than something any client can ask for. This is a
@@ -873,7 +877,7 @@ counters join that object and follow it.
 | `async_queue_depth`       | gauge | The one KEDA gave for free. Sustained growth means arrival outruns drain    |
 | `async_oldest_age_ms`     | gauge | Depth alone cannot distinguish a deep fast queue from a stalled shallow one |
 | `async_claims`            | count | Drain throughput; with depth, the arrival-vs-drain ratio                    |
-| `async_reclaims`          | count | `XAUTOCLAIM` firing. A nonzero steady rate means workers die mid-leaf       |
+| `async_reclaims`          | count | `XAUTOCLAIM` firing. Read net of `async_deferred_subject` (below)           |
 | `async_dead_letters`      | count | Entries that reached `lost` (§6.2) — always an alert, never normal          |
 | `async_claim_denied_full` | count | Claims not attempted because every slot was busy (§5.3's accepted cost)     |
 | `async_deferred_subject`  | count | Entries handed back unrun because their owner was at their cap (#391)       |
@@ -884,7 +888,14 @@ a full queue can occupy every slot. If it and interactive `429`s rise together, 
 measurement which would justify the per-class caps §12 holds in reserve. `async_deferred_subject`
 reads against it: deferrals while slots sit idle are the per-owner cap pacing one submitter, which
 is the fairness working, while deferrals with no second owner submitting mean the cap is too low
-for this deployment's shape. `async_quota_refusals` is
+for this deployment's shape. It also reads against `async_reclaims`, which since #391 no longer
+means "workers die mid-leaf" on its own: a deferred entry stays in the PEL, so `XREADGROUP >` never
+offers it again and `XAUTOCLAIM` is the only way back — every turn that was ever deferred is
+therefore counted a reclaim when it finally runs. **`async_reclaims` net of
+`async_deferred_subject` is the dying-worker signal**; keeping them apart would need the drain to
+tell a hand-back's return from a crash's, and the two arrive on the same `XAUTOCLAIM` with the same
+delivery count (the defer's `RETRYCOUNT: n - 1` is exactly what the reclaim re-increments).
+`async_quota_refusals` is
 the other one that is about this design's choices rather than the queue's health — §4.3's quota is
 the single containment against a runaway submitter, so a deployment needs to see it firing to know
 whether 50 is the right number.

@@ -5027,9 +5027,15 @@ paths:
                   turnExp:
                     type: integer
                     description: |
-                      unix seconds: the absolute end of this turn, anchored at the DEQUEUE and
+                      unix seconds: the absolute end of THIS DELIVERY, anchored at the DEQUEUE and
                       clamped to `min(caps.wallClock, MOCA_TURN_MAX_S)`. In `grant` mode both grants
                       expire at it and no refresh extends past it.
+
+                      Per delivery, not per turn, because it is anchored at each dequeue: a
+                      redelivery after a worker died mid-leaf gets a fresh window, since its grants
+                      are minted here too and a deadline it had already passed would make the turn
+                      unrunnable rather than merely capped. See `caps` on the submission route for
+                      the aggregate this allows (the cap times the delivery limit).
 
                       Returned in EVERY mode since #391, because it is also the deadline the worker
                       enforces: it stops the leaf at this instant and ends the turn `failed` with

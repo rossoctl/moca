@@ -201,6 +201,8 @@ export function createAsyncTally(): AsyncTally {
         return;
       }
       t.asyncClaims += 1;
+      // Counts a DEFERRED entry's return as well as a dead worker's: both arrive by XAUTOCLAIM and
+      // the drain cannot tell them apart. §7 says to read this net of `async_deferred_subject`.
       if (outcome.reclaimed) t.asyncReclaims += 1;
       if (outcome.kind === 'dead_lettered') t.asyncDeadLetters += 1;
     },

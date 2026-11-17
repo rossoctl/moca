@@ -127,9 +127,10 @@ export interface LeafJobDeps {
  *   because claiming again immediately would re-read the same owner's next entry.
  *
  * Every outcome but `idle` carries `reclaimed`, because `async_reclaims` (§7) counts XAUTOCLAIM
- * firing -- "a nonzero steady rate means workers die mid-leaf" -- and a reclaimed entry that then
- * dead-letters or is refused is exactly the case that signal exists to show. Putting the flag only
- * on `completed` would hide the worst of them.
+ * firing, and a reclaimed entry that then dead-letters or is refused is exactly the case that
+ * signal exists to show. Putting the flag only on `completed` would hide the worst of them. The
+ * counter reads as "workers die mid-leaf" only NET of `async_deferred_subject`: a hand-back comes
+ * back by the same XAUTOCLAIM, and nothing here can tell the two apart (§7).
  */
 /**
  * The watchdog's period (#391). Two seconds, not the heartbeat's thirty: §4.5 asks that a cancel
