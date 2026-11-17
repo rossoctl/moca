@@ -299,6 +299,12 @@ validate_egress_ca() {
     echo "build-snapshot.sh: --egress-ca: $EGRESS_CA holds more than one certificate; the fingerprint covers exactly one, pass a single CA certificate" >&2
     exit 2
   fi
+  # Checked apart from the parse below, whose stderr is discarded: without openssl the parse fails
+  # for a good certificate too, and the refusal would blame the operator's file.
+  if ! command -v openssl >/dev/null 2>&1; then
+    echo "build-snapshot.sh: --egress-ca requires openssl on PATH (to check the certificate and record its fingerprint)" >&2
+    exit 2
+  fi
   if ! openssl x509 -in "$EGRESS_CA" -noout >/dev/null 2>&1; then
     echo "build-snapshot.sh: --egress-ca: $EGRESS_CA is not a parseable X.509 certificate" >&2
     exit 2

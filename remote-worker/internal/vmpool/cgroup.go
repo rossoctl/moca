@@ -407,6 +407,16 @@ type SweepResult struct {
 	// the note below on why that distinction is load-bearing.
 	Swept int
 
+	// Killed counts the swept directories whose cgroup.procs listed at least one process
+	// still running when the sweep signalled it: a VM that was actually alive and that this
+	// sweep SIGKILLed. Swept-Killed is the rest, the directories that held nothing still
+	// running (an empty cgroup.procs, or only pids that had already exited), which is what a
+	// worker that stopped cleanly but left its pool's cgroup directories behind looks like.
+	// Swept alone cannot tell those two apart, and they mean very different things to an
+	// operator reading the start log: the first is a VM that leaked and ran on unaccounted,
+	// the second is housekeeping. Summary prints both.
+	Killed int
+
 	// Skipped names the immediate subdirectories the guards refused, in readdir order.
 	// In the shipped systemd configuration this is normally exactly
 	// ["microvm-worker.service"] — the worker's own cgroup — and an operator seeing
@@ -420,6 +430,16 @@ type SweepResult struct {
 	// placed in a cgroup that still holds the old one. The caller decides what that
 	// means for its start; microvm-worker refuses to start.
 	Stuck []string
+}
+
+// Summary is the one-line account of a sweep microvm-worker logs at startup. It splits
+// Swept into the directories that held a live process (killed) and those that were empty,
+// for the reason Killed gives, and names what the guards declined, for the reason Skipped
+// gives. Stuck is not in it: a stuck cgroup fails the start with its own message.
+func (r SweepResult) Summary() string {
+	return fmt.Sprintf("swept %d VM cgroup(s) from a previous incarnation: %d held a live process (killed), %d were empty; "+
+		"left alone %d non-VM cgroup(s) %v",
+		r.Swept, r.Killed, r.Swept-r.Killed, len(r.Skipped), r.Skipped)
 }
 
 // SweepOrphans walks slicePath's immediate subdirectories, and for each one that THIS
@@ -436,6 +456,8 @@ type SweepResult struct {
 // exactly the same as one whose occupant this call actually SIGKILLed, by design (the
 // brief's own framing: "pids that no longer exist still count as swept") — so that
 // counter cannot be used to infer whether any live process was found or killed.
+// SweepResult.Killed is the counter that can: it counts the swept directories that held a
+// process still running when it was signalled, and SweepResult.Summary logs both.
 // An absent slice (first boot on a fresh host) returns a zero result and no error — spec
 // §6's posture is "fail at start" for things that make the tier unusable, and an empty
 // slice is not one of them.
@@ -490,6 +512,9 @@ func SweepOrphans(slicePath string) (SweepResult, error) {
 			res.Skipped = append(res.Skipped, name)
 		case cgroupStuck:
 			res.Stuck = append(res.Stuck, name)
+		case cgroupSweptLive:
+			res.Swept++
+			res.Killed++
 		default:
 			res.Swept++
 		}
@@ -502,13 +527,17 @@ type sweepOutcome int
 
 const (
 	// cgroupSwept: every pid was signalled, none was still running by the end of the
-	// wait, and the directory was removed.
+	// wait, and the directory was removed. None of those pids was still running when it was
+	// signalled either (or there were none): the directory was empty of live processes.
 	cgroupSwept sweepOutcome = iota
 	// cgroupRefused: guard 3 declined the directory before any signal was sent.
 	cgroupRefused
 	// cgroupStuck: every pid was signalled, and at least one was still running when
 	// sweepExitWait ran out. The directory is left in place.
 	cgroupStuck
+	// cgroupSweptLive: as cgroupSwept, except that at least one pid was still running when
+	// it was signalled, so this sweep killed a live process. SweepResult.Killed counts these.
+	cgroupSweptLive
 )
 
 // defaultSweepExitWait bounds how long sweepOneCgroup waits for the processes it has just
@@ -548,7 +577,15 @@ func sweepOneCgroup(dir string) (sweepOutcome, error) {
 			return cgroupRefused, nil
 		}
 	}
+	// Whether a pid is still running is read just before it is signalled, for the count
+	// only (SweepResult.Killed): the signal is sent either way, as before. A pid that exits
+	// on its own between the two is counted as killed, which is the safe side to err on
+	// for a line that exists to say a VM may have been alive.
+	live := false
 	for _, pid := range pids {
+		if pidStillRunning(pid) {
+			live = true
+		}
 		if err := sweepKill(pid); err != nil {
 			return cgroupRefused, fmt.Errorf("kill pid %d: %w", pid, err)
 		}
@@ -558,7 +595,11 @@ func sweepOneCgroup(dir string) (sweepOutcome, error) {
 			"left in place", dir, running, sweepExitWait)
 		return cgroupStuck, nil
 	}
-	return cgroupSwept, removeCgroupDir(dir)
+	outcome := cgroupSwept
+	if live {
+		outcome = cgroupSweptLive
+	}
+	return outcome, removeCgroupDir(dir)
 }
 
 // removeCgroupDir rmdirs dir (D5: rmdir, never rm -rf). On REAL cgroupfs this is the

@@ -13,14 +13,21 @@ import (
 
 // reapingLauncher is fakeLauncher with VMs that split their teardown the way
 // firecrackerVM does: a barrier that ends when the VMM can no longer touch the workspace,
-// then a reap tail. blockReap gates the tail so a test can hold it open and observe what the
+// then a reap tail. holdReaps gates the tail so a test can hold it open and observe what the
 // pool does MEANWHILE -- which is the entire point of the change.
 type reapingLauncher struct {
 	*fakeLauncher
-	blockReap  chan struct{}
 	barrierErr error
 
+	// held is closed by releaseReaps; until then the first holdN reaps to start wait on it, each
+	// sending on parked as it does. Later reaps run at once: an inline reap runs on the Exec's
+	// own goroutine, so holding one would wedge that Exec.
+	held   chan struct{}
+	holdN  int
+	parked chan struct{}
+
 	mu        sync.Mutex
+	started   int      // reaps that have entered Reap
 	barriers  []string // vm ids whose barrier completed, in order
 	reaps     []string // vm ids whose reap completed, in order
 	reapCount map[string]int
@@ -57,16 +64,13 @@ func (v *reapingVM) KillAndBarrier() error {
 }
 
 func (v *reapingVM) Reap() error {
-	if v.lc.blockReap != nil {
-		// BOUNDED, not an indefinite park. The inline fallback runs the tail on the CALLER's
-		// goroutine -- which is correct, it is exactly today's synchronous teardown -- so a reap
-		// that never returns wedges the Exec that triggered the fallback, and the test hangs
-		// rather than failing. Holding it for a bounded window still keeps every worker busy
-		// long enough to fill the queue and force the fallback.
-		select {
-		case <-v.lc.blockReap:
-		case <-time.After(250 * time.Millisecond):
-		}
+	v.lc.mu.Lock()
+	v.lc.started++
+	hold := v.lc.started <= v.lc.holdN
+	v.lc.mu.Unlock()
+	if hold {
+		v.lc.parked <- struct{}{}
+		<-v.lc.held
 	}
 	v.lc.mu.Lock()
 	v.lc.reaps = append(v.lc.reaps, v.id)
@@ -74,6 +78,13 @@ func (v *reapingVM) Reap() error {
 	v.lc.mu.Unlock()
 	return v.VM.Destroy()
 }
+
+// holdReaps makes the next n reaps to start wait for releaseReaps. Call it before any Exec.
+func (l *reapingLauncher) holdReaps(n int) {
+	l.held, l.holdN, l.parked = make(chan struct{}), n, make(chan struct{}, n)
+}
+
+func (l *reapingLauncher) releaseReaps() { close(l.held) }
 
 func (l *reapingLauncher) counts() (barriers, reaps int, perVM map[string]int) {
 	l.mu.Lock()
@@ -111,8 +122,8 @@ func testReapingPool(t *testing.T, workers int) (Pool, *reapingLauncher) {
 // first VM's reap is still blocked.
 func TestDeferredReapOpensTheGateAtTheBarrierNotAfterTheReap(t *testing.T) {
 	p, lc := testReapingPool(t, 4)
-	lc.blockReap = make(chan struct{})
-	defer func() { close(lc.blockReap); _ = p.Close() }()
+	lc.holdReaps(2) // both Execs' reaps: four workers, so neither runs inline
+	defer func() { lc.releaseReaps(); _ = p.Close() }()
 
 	entered := make(chan struct{}, 2)
 	lc.setRunFn(func(v *fakeVM, c Command, out Sink) (Result, error) {
@@ -120,7 +131,14 @@ func TestDeferredReapOpensTheGateAtTheBarrierNotAfterTheReap(t *testing.T) {
 		return Result{ExitCode: 0}, nil
 	})
 
-	if _, err := p.Exec(context.Background(), "run-a", Exec{ReqID: 1, Command: "one", TimeoutS: 5}, discardingSink{}); err != nil {
+	// In a goroutine, so a first Exec that waited for its own held reap fails here rather than
+	// hanging.
+	first := make(chan error, 1)
+	go func() {
+		_, err := p.Exec(context.Background(), "run-a", Exec{ReqID: 1, Command: "one", TimeoutS: 5}, discardingSink{})
+		first <- err
+	}()
+	if err := recvWithin(t, first, "the first Exec, its reap held"); err != nil {
 		t.Fatalf("first Exec: %v", err)
 	}
 	<-entered
@@ -148,7 +166,7 @@ func TestDeferredReapOpensTheGateAtTheBarrierNotAfterTheReap(t *testing.T) {
 		default:
 			t.Fatalf("second Exec returned without entering Run: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(testWaitBound):
 		barriers, reaps, _ := lc.counts()
 		t.Fatalf("second Exec never reached Run while a reap was outstanding: the gate is "+
 			"still held across the reap (barriers=%d reaps=%d)", barriers, reaps)
@@ -207,13 +225,26 @@ func TestCloseDrainsEveryDeferredReapExactlyOnce(t *testing.T) {
 // right floor for the degenerate case.
 func TestAFullReapQueueFallsBackToReapingInline(t *testing.T) {
 	p, lc := testReapingPool(t, 1)
-	lc.blockReap = make(chan struct{})
+	lc.holdReaps(1)
+	var release sync.Once
+	t.Cleanup(func() { release.Do(lc.releaseReaps) }) // a failure below leaves the held reap waiting
 
 	// One worker, all of it parked in the first reap, so everything after fills the queue and
-	// then has to go inline.
+	// then has to go inline. The first Exec runs in a goroutine: if its reap were inline it
+	// would be the one held.
+	exec := func(i int) error {
+		_, err := p.Exec(context.Background(), "run-a", Exec{ReqID: uint64(i + 1), Command: "c", TimeoutS: 5}, discardingSink{})
+		return err
+	}
+	first := make(chan error, 1)
+	go func() { first <- exec(0) }()
+	recvWithin(t, lc.parked, "the first reap held")
+	if err := recvWithin(t, first, "the first Exec"); err != nil {
+		t.Fatalf("Exec 0: %v", err)
+	}
 	const n = 8
-	for i := 0; i < n; i++ {
-		if _, err := p.Exec(context.Background(), "run-a", Exec{ReqID: uint64(i + 1), Command: "c", TimeoutS: 5}, discardingSink{}); err != nil {
+	for i := 1; i < n; i++ {
+		if err := exec(i); err != nil {
 			t.Fatalf("Exec %d: %v", i, err)
 		}
 	}
@@ -223,7 +254,7 @@ func TestAFullReapQueueFallsBackToReapingInline(t *testing.T) {
 		t.Fatalf("ReapsInline=0 with a blocked single worker and %d Execs: either the queue is "+
 			"unbounded or the fallback never fired", n)
 	}
-	close(lc.blockReap)
+	release.Do(lc.releaseReaps)
 	if err := p.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

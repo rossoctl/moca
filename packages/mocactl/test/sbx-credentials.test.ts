@@ -235,6 +235,66 @@ describe('mocactl sbx credentials add --host', () => {
     );
   });
 
+  it('splits a comma-separated --host and trims each entry, across repeated flags', async () => {
+    const r = run(
+      [
+        'credentials',
+        'add',
+        'corp',
+        '--host',
+        'a.example, b.example:8443/x,',
+        '--host',
+        'c.example',
+      ],
+      { 'PUT /v1/credentials/corp': ok },
+      { stdin: 'tok' },
+    );
+    expect(await r.code).toBe(0);
+    expect(r.cp.calls[0]!.body).toMatchObject({
+      destination: { hosts: ['a.example', 'b.example:8443/x', 'c.example'] },
+    });
+  });
+
+  it('reads a non-preset basic credential as field=value lines, and never prints the password', async () => {
+    const r = run(
+      ['credentials', 'add', 'corp', '--host', 'a.example', '--kind', 'basic'],
+      { 'PUT /v1/credentials/corp': ok },
+      { stdin: 'username=svc\npassword=pw-fixture=with=equals\n' },
+    );
+    expect(await r.code).toBe(0);
+    expect(r.cp.calls[0]!.body).toEqual({
+      kind: 'basic',
+      consumer: 'sandbox-egress',
+      destination: { hosts: ['a.example'] },
+      secret: { username: 'svc', password: 'pw-fixture=with=equals' },
+    });
+    expect(r.text()).not.toContain('pw-fixture');
+    // A missing field is a usage error naming it, before any request.
+    const bad = run(
+      ['credentials', 'add', 'corp', '--host', 'a.example', '--kind', 'basic'],
+      {},
+      { stdin: 'username=svc\n' },
+    );
+    expect(await bad.code).toBe(2);
+    expect(bad.text()).toContain('stdin is missing password=…');
+    expect(bad.cp.calls).toEqual([]);
+  });
+
+  it('prints one JSON object on stdout with --json: each credential, its hosts and status', async () => {
+    const r = run(
+      ['credentials', 'add', 'github', '--preset', 'github-mcp', '--json'],
+      { 'PUT /v1/credentials/github': ok },
+      { stdin: PAT },
+    );
+    expect(await r.code).toBe(0);
+    // stdout is the JSON alone (the progress lines go to stderr), so it parses whole.
+    const j = JSON.parse(r.s.io.outs.join('')) as unknown;
+    expect(j).toEqual({
+      credentials: [{ name: 'github', hosts: ['api.githubcopilot.com'], status: 'stored' }],
+    });
+    expect(r.s.io.outs.join('')).not.toContain(PAT);
+  });
+
   it('needs a host or a preset, and a piped secret', async () => {
     let r = run(['credentials', 'add', 'corp'], {}, { stdin: 'tok' });
     expect(await r.code).toBe(2);

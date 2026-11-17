@@ -59,6 +59,20 @@ export const EGRESS_HANDLERS: Record<string, Handler> = {
       });
       throw new CpError('no_credential', 'no credential for this destination');
     };
+    // A 500 is the lookup refusing what it found, which `none` must not hide: it is audited with the
+    // error code and the credential names involved (never a value), then thrown unchanged.
+    const refused = async (err: CpError, names: string[]): Promise<never> => {
+      await auditBestEffort(deps, 'lookupEgressCredential', sandboxId, {
+        subject: owner,
+        sandboxId,
+        decision: 'egress_credential_refused',
+        reason: err.code,
+        credential: [...new Set(names)].sort().join(','),
+        destination: requested,
+        egressHost: host.id,
+      });
+      throw err;
+    };
     // The route gate, not the login gate: on `combined` login is open, the sandbox service is not.
     // Roles and store enrollment now, as a request of the owner's would be.
     const m = await membershipNow(deps, owner, deps.identity.rolesFor(owner));
@@ -95,13 +109,17 @@ export const EGRESS_HANDLERS: Record<string, Handler> = {
         cmp(x.name, y.name),
     );
     // Detection must not depend on sort order: a same-length prefix can sort between duplicates.
-    const seen = new Set<string>();
+    const seen = new Map<string, string>();
     for (const e of elements) {
       const key = `${e.port} ${e.pathPrefix}`;
-      if (seen.has(key)) {
-        throw new CpError('destination_ambiguous', 'two credentials hold the same destination');
+      const other = seen.get(key);
+      if (other !== undefined) {
+        return refused(
+          new CpError('destination_ambiguous', 'two credentials hold the same destination'),
+          [other, e.name],
+        );
       }
-      seen.add(key);
+      seen.set(key, e.name);
     }
 
     // 4. Resolve and render (the seam).
@@ -112,7 +130,15 @@ export const EGRESS_HANDLERS: Record<string, Handler> = {
     for (const e of elements) {
       // One decrypt per credential per lookup, however many entries of it match the host.
       if (!resolved.has(e.name)) {
-        resolved.set(e.name, await resolverFor(e.descriptor)(owner, e.descriptor, deps));
+        try {
+          resolved.set(e.name, await resolverFor(e.descriptor)(owner, e.descriptor, deps));
+        } catch (err) {
+          // credential_unsafe: a stored value that cannot render. Other failures (the store being
+          // down) are not this credential's doing and pass through unaudited, as before.
+          if (err instanceof CpError && err.code === 'credential_unsafe')
+            return refused(err, [e.name]);
+          throw err;
+        }
       }
       const r = resolved.get(e.name);
       if (!r) continue; // deleted between list and get: omit this element

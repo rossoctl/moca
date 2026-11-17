@@ -106,7 +106,7 @@ func TestRunOverConnFeedsStdinAndClosesIt(t *testing.T) {
 		if len(b) != len(payload) || string(b) != string(payload) {
 			t.Fatalf("guest got %d bytes, want %d identical", len(b), len(payload))
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitBound):
 		// The EOF is the point: `base64 -d > file` only terminates at EOF
 		// (remote-worker/DESIGN.md step 4), so a protocol that never closes stdin
 		// hangs every write.
@@ -199,7 +199,7 @@ func TestRunOverConnUnblocksOnContextCancel(t *testing.T) {
 		if !errors.Is(err, ErrAborted) {
 			t.Fatalf("err = %v, want ErrAborted", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitBound):
 		// A read that only unblocks when the guest answers would leave Abort unable to
 		// stop anything, and Abort is GrpcRelayTransport's DECLARED truncation
 		// mechanism (transport.ts:57-73).
@@ -220,9 +220,8 @@ func TestRunOverConnRefusesACommandLargerThanOneFrameAtOnce(t *testing.T) {
 			got <- struct{}{}
 		}
 	}()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitBound)
 	defer cancel()
-	t0 := time.Now()
 	_, err := runOverConn(ctx, host, Command{Command: strings.Repeat("x", ga.MaxFrame), CapBytes: OutputCapBytes}, &capturingSink{}, time.Now())
 	if !errors.Is(err, ErrCommandTooLarge) {
 		t.Fatalf("err = %v, want ErrCommandTooLarge", err)
@@ -230,8 +229,8 @@ func TestRunOverConnRefusesACommandLargerThanOneFrameAtOnce(t *testing.T) {
 	if !strings.Contains(err.Error(), "stdin") {
 		t.Fatalf("err = %v, want it to name stdin as the way to send large content", err)
 	}
-	if d := time.Since(t0); d > 2*time.Second {
-		t.Fatalf("refused after %v, want at once", d)
+	if ctx.Err() != nil {
+		t.Fatal("refused only at the caller's deadline, want at once")
 	}
 	select {
 	case <-got:
@@ -278,7 +277,7 @@ func TestRunOverConnClosesTheConnOnACommandTooLarge(t *testing.T) {
 		if err == nil {
 			t.Fatal("the guest read a frame for a command it cannot take")
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("the guest's read is still blocked after the refusal")
 	}
 }

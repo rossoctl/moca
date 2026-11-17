@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { q } from '@moca/sandbox-client';
 import { ApiError, TOKEN_CODES } from '../api/errors.js';
 import { deviceLogin, toCachedAuth } from '../core/auth.js';
-import { describeError, describeLoginError } from '../core/messages.js';
+import { describeError, describeLoginError, displayUrl } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
 import { sameControlPlane, saveConfig, storedLoginUrl } from '../config.js';
 import { deviceLoginEnd, devicePrompt, type Io, type LoginHelpers } from '../headless.js';
@@ -79,14 +79,22 @@ export function notEnrolledMessage(err: ApiError): string {
   return `sbx: ${server}; ask an operator to add it`;
 }
 
+/** What to run next when the control plane could not be asked: `sbx doctor` checks it step by step. */
+const DOCTOR_HINT = 'run `mocactl sbx doctor` to diagnose';
+
+/** ` at URL` (userinfo, query and fragment dropped), or nothing when the caller has no URL. */
+const at = (url?: string): string => (url ? ` at ${sanitizeRemote(displayUrl(url))}` : '');
+
 /**
  * A refresh that did not end in "log in again": an ApiError is reported as any other (status 0 is
  * exit 4, `not_enrolled` exit 1); anything else (a timeout, another mocactl holding the refresh
  * lock) means the control plane could not be asked, exit 4, as `mocactl auth token`.
  */
-export function failRefresh(io: Io, error: unknown): number {
-  if (error instanceof ApiError) return fail(io, error);
-  io.err(`sbx: cannot refresh the sandbox-service login: ${describeError(error)}`);
+export function failRefresh(io: Io, error: unknown, url?: string): number {
+  if (error instanceof ApiError) return fail(io, error, { url });
+  io.err(
+    `sbx: cannot refresh the sandbox-service login${at(url)}: ${describeError(error)}; ${DOCTOR_HINT}`,
+  );
   return SBX_EXIT.unreachable;
 }
 
@@ -95,16 +103,26 @@ const OWN_404 = new Set(['sandbox_not_found', 'template_not_found']);
 
 /**
  * One line per failure. A refusal from the control plane is exit 1 with its message; a network
- * failure (status 0) is exit 4; a token the control plane will not take any more is exit 3 --
- * unless the refresh behind the client's retry failed for another reason, which is then the cause
- * reported (`refreshFailure`).
+ * failure (status 0) is exit 4, naming the control plane tried (`url`) and `sbx doctor`; a token
+ * the control plane will not take any more is exit 3 -- unless the refresh behind the client's
+ * retry failed for another reason, which is then the cause reported (`refreshFailure`).
  */
-export function fail(io: Io, err: unknown, refreshFailure?: RefreshFailure): number {
+export function fail(
+  io: Io,
+  err: unknown,
+  opts: { refreshFailure?: RefreshFailure; url?: string | undefined } = {},
+): number {
+  const { refreshFailure, url } = opts;
   if (refreshFailure && err instanceof ApiError && TOKEN_CODES.has(err.code)) {
-    return failRefresh(io, refreshFailure.error);
+    return failRefresh(io, refreshFailure.error, url);
   }
   if (err instanceof ApiError && err.status === 0) {
-    io.err(`sbx: cannot reach the sandbox control plane: ${describeError(err)}`);
+    // A dropped connection reached the peer, so it is not "cannot reach" (describeError words it).
+    const what =
+      err.code === 'connection_dropped'
+        ? `the sandbox control plane${at(url)}: ${describeError(err)}`
+        : `cannot reach the sandbox control plane${at(url)}: ${sanitizeRemote(err.message)}`;
+    io.err(`sbx: ${what}; ${DOCTOR_HINT}`);
     return SBX_EXIT.unreachable;
   }
   if (err instanceof ApiError && err.code === 'not_enrolled') {
@@ -148,7 +166,30 @@ export function refusalText(err: ApiError): string {
  * `fail` with what this command's client saw of its refresh (`rt.lastRefreshFailure`): every sbx
  * command reports through this, so a 401 whose retry refresh failed names the real cause.
  */
-export const failed = (c: SbxCtx, err: unknown): number => fail(c.io, err, c.rt.lastRefreshFailure);
+export const failed = (c: SbxCtx, err: unknown): number =>
+  fail(c.io, err, { refreshFailure: c.rt.lastRefreshFailure, url: c.url });
+
+/**
+ * `sbx login --control-plane-url URL`'s URL, saved to config.json for the commands after it, and,
+ * when it replaces another, the change said out loud. Saved even when discovery fails for any
+ * reason, or the login after it fails (not enrolled, abandoned): the user named this control plane, so `sbx doctor` and the
+ * next `sbx login` should look at it, not the old one. Its old login in sbx-auth.json stays but
+ * does not match the new URL, so no command uses it against the new control plane.
+ */
+function rememberUrl(c: SbxCtx): void {
+  const old = c.rt.config.sbxControlPlaneUrl || storedLoginUrl(c.rt.paths.authFile);
+  // "The same" as loadAuth means it (sameControlPlane), not only up to a trailing slash.
+  const same = old !== undefined && sameControlPlane(old, c.url);
+  if (same && c.rt.config.sbxControlPlaneUrl) return;
+  if (old && !same) {
+    c.io.err(
+      `sbx: mocactl's sandbox control plane URL is changing from ` +
+        `${sanitizeRemote(displayUrl(old))} to ${sanitizeRemote(displayUrl(c.url))}`,
+    );
+  }
+  c.rt.config = { ...c.rt.config, sbxControlPlaneUrl: c.url };
+  saveConfig(c.rt.paths, c.rt.config);
+}
 
 export async function cmdLogin(
   c: SbxCtx,
@@ -156,6 +197,12 @@ export async function cmdLogin(
   helpers?: LoginHelpers,
 ): Promise<number> {
   if (!c.rt.cp) return SBX_EXIT.usage;
+  let remembered = false;
+  const rememberOnce = (): void => {
+    if (!remember || remembered) return;
+    remembered = true;
+    rememberUrl(c);
+  };
   try {
     // Refuse a MOCA control plane before a device code is shown: its login would be useless here.
     const d: SbxDiscovery = await c.api.sandboxDiscovery().catch((err: unknown) => {
@@ -169,18 +216,23 @@ export async function cmdLogin(
       );
       return SBX_EXIT.usage;
     }
+    // A sandbox service, or so it says: the URL is the one to use from now on, logged in or not.
+    rememberOnce();
     const login = await deviceLogin(
       { cp: c.rt.cp, sleep: c.rt.sleep, now: c.rt.now },
       devicePrompt(c.io, helpers),
       c.signal,
     );
     setAuth(c.rt, toCachedAuth(login, c.url));
-    if (remember) saveConfig(c.rt.paths, { ...c.rt.config, sbxControlPlaneUrl: c.url });
     c.io.err(
       `logged in to the sandbox service as ${sanitizeRemote(login.displayName ?? login.subject)}`,
     );
     return SBX_EXIT.ok;
   } catch (err) {
+    // Discovery failed for any reason (unreachable, a 5xx, a page that is not JSON), or the login
+    // after it did: still the control plane the user asked for, so the next `sbx doctor` checks
+    // it. Only one whose discovery answered "not a sandbox service" is not kept.
+    rememberOnce();
     const end = deviceLoginEnd(c.io, err, { prefix: 'sbx', again: 'mocactl sbx login' });
     if (end !== undefined) return end;
     // A refusal `fail` words for itself (not enrolled, a token code) keeps its words; any other
@@ -724,14 +776,24 @@ function sealedText(sealed: boolean | undefined): string {
  * `sbx token`: a fresh sandbox token on stdout. With `renewEveryS`, a new one every S seconds, one
  * line each, until stopped (the signal; exit 0), so a long-lived client can read its next token
  * from a pipe rather than run mocactl again.
+ *
+ * `--json` adds the token's own `expiresAt` and the sandbox's `sandboxExpiresAt`, as the control
+ * plane sent them. The sandbox's deadline slides with activity, and each mint counts as activity,
+ * so a client holding a token learns from every line when the sandbox itself will end, which the
+ * token's own short expiry doesn't show (the token never outlives it: it is capped at the
+ * sandbox's deadline when minted). A control plane from before the field sends none, and the line
+ * then has none either: absent, never a made-up value.
  */
 export async function cmdToken(c: SbxCtx, id: string, renewEveryS?: number): Promise<number> {
   try {
     for (;;) {
       const t = await c.api.mintSandboxToken(id);
-      c.io.out(
-        (c.json ? JSON.stringify({ token: t.token, expiresAt: t.expiresAt }) : t.token) + '\n',
-      );
+      const json = {
+        token: t.token,
+        expiresAt: t.expiresAt,
+        ...(t.sandboxExpiresAt !== undefined ? { sandboxExpiresAt: t.sandboxExpiresAt } : {}),
+      };
+      c.io.out((c.json ? JSON.stringify(json) : t.token) + '\n');
       if (renewEveryS === undefined) return SBX_EXIT.ok;
       await (c.sleep ?? c.rt.sleep)(renewEveryS * 1000, c.signal);
       if (c.signal?.aborted) return SBX_EXIT.ok;

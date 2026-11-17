@@ -206,7 +206,8 @@ Checks, in order. Each one fails closed:
 5. **Audit.** `egress_credential_issued` to `sh:cp:audit` and the stdout mirror (ADR-0044), with
    subject, sandbox id, credential **name**, destination host and egress host `H`. A `no_credential`
    answer is audited as `egress_credential_none`, which is cheap and makes "why was this
-   unauthenticated" answerable.
+   unauthenticated" answerable. A `500 credential_unsafe` or `500 destination_ambiguous` is audited
+   as `egress_credential_refused`, with the code as `reason` and the credential names involved.
 
 `ttlSeconds` is the smaller of `SH_EGRESS_CREDENTIAL_TTL_SECONDS` (default 60, range 5–300) and the
 seconds left until the earliest non-null `expiresAt`, floored at 5. Rotating or deleting a credential

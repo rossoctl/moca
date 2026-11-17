@@ -111,12 +111,12 @@ func TestConcurrentColdAcquiresShareOneWarming(t *testing.T) {
 		}(i)
 	}
 	// Let the second goroutine reach the wait before releasing the first.
-	waitFor(t, func() bool { mu.Lock(); defer mu.Unlock(); return restores == 1 })
+	waitFor(t, "the first restore started", func() bool { mu.Lock(); defer mu.Unlock(); return restores == 1 })
 	// A cold acquire in the middle of its restore is charged as WARMING, not as
 	// inFlight — inFlight is incremented only once the VM exists, so that one VM is not
 	// charged to the budget twice (see acquire). CommittedBytes covers both, so it is
 	// what this wait can observe; the assertion below is unchanged.
-	waitFor(t, func() bool { return p.Stats().CommittedBytes > 0 })
+	waitFor(t, `p.Stats().CommittedBytes > 0`, func() bool { return p.Stats().CommittedBytes > 0 })
 	close(gate)
 	wg.Wait()
 	for i, err := range errs {
@@ -177,18 +177,4 @@ func TestNextBackoff(t *testing.T) {
 	if got := nextBackoff(replenishBackoffMax); got != replenishBackoffMax {
 		t.Errorf("nextBackoff(max) = %v, want it capped at %v", got, replenishBackoffMax)
 	}
-}
-
-// waitFor polls cond for up to two seconds. Used only where a real goroutine must
-// reach a real blocking point — never for anything the fake clock drives.
-func waitFor(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("condition not met within 2s")
 }

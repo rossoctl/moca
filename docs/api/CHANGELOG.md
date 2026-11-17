@@ -26,6 +26,17 @@ Additive.
   address is the socket peer, or the X-Forwarded-For entry `SH_TRUSTED_PROXY_HOPS` names. The
   GitHub provider is unchanged.
 
+## 1.27.0
+
+The base URL says what it is ([#779](https://github.com/rossoctl/moca/issues/779)). Additive on the
+wire.
+
+- `GET /` answers `200` with a short `text/plain` page on every profile: that this is a Moca control
+  plane, where its API is (`/v1`, and `GET /v1/discovery`), how to install `mocactl` and log in, and
+  that a sandbox's egress is an allowlist the operator extends. Before, it was the unknown-path
+  `404 not_found`. The page names no URL of the deployment and echoes nothing of the request. Its
+  wording is not a contract: a client reads `/v1/discovery`.
+
 ## 1.26.0
 
 Per-turn artifacts and a bounded status read

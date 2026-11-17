@@ -414,7 +414,7 @@ func TestEndingALeaseIsBoundedByTheGraceLimit(t *testing.T) {
 			endc := make(chan error, 1)
 			deadline := clk.Now().Add(p.cfg.LeaseGraceLimit)
 			go func() { endc <- tc.end(p) }()
-			waitFor(t, func() bool { return timerArmed(clk, deadline) })
+			waitFor(t, `timerArmed(clk, deadline)`, func() bool { return timerArmed(clk, deadline) })
 
 			clk.Advance(p.cfg.LeaseGraceLimit - time.Second)
 			select {
@@ -449,12 +449,12 @@ func TestEndLeaseAfterTheCutEndsOnlyThatLease(t *testing.T) {
 	recvWithin(t, entered, "Exec a's Run")
 	first := vmID(leaseAlive(t, p, "during Exec a").vm)
 	errB := execAsync(p, "k", long)
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 }) // b waits on the gate
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2) // b waits on the gate
 
 	endc := make(chan error, 1)
 	deadline := clk.Now().Add(p.cfg.LeaseGraceLimit)
 	go func() { endc <- p.EndLease("k", LeaseEndReset) }()
-	waitFor(t, func() bool { return timerArmed(clk, deadline) })
+	waitFor(t, `timerArmed(clk, deadline)`, func() bool { return timerArmed(clk, deadline) })
 	clk.Advance(p.cfg.LeaseGraceLimit)
 
 	var le *LeaseEndedError
@@ -498,11 +498,11 @@ func TestDowngradeRefusesALeaseExecQueuedBehindIt(t *testing.T) {
 	errA := execAsync(p, "k", leaseExec("a", 1))
 	recvWithin(t, entered, "Exec a's Run")
 	errB := execAsync(p, "k", leaseExec("b", 1))
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 }) // b is past routeExec
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2) // b is past routeExec
 
 	setc := make(chan error, 1)
 	go func() { setc <- setModeErr(p, "k", ModePerExec, 2) }()
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 3 }) // SetMode waits on the gate
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 3) // SetMode waits on the gate
 	close(release)
 
 	if err := recvWithin(t, errA, "Exec a"); err != nil {
@@ -764,10 +764,10 @@ func TestPendingEndSurvivesWorkspaceRemoval(t *testing.T) {
 			clk.Advance(31 * time.Second)
 			leaseEnded(t, p, lc, LeaseEndIdle)
 			ended := p.LeaseStatus("k").Pending
-			waitFor(t, func() bool { return pinnedCount(p, "k") == 0 }) // the sweep's destroy is done
+			waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 0) // the sweep's destroy is done
 
 			tc.remove(t, p, clk)
-			waitFor(t, func() bool {
+			waitFor(t, `p.runs["k"] == nil`, func() bool {
 				p.mu.Lock()
 				defer p.mu.Unlock()
 				return p.runs["k"] == nil
@@ -820,9 +820,9 @@ func TestLeaseModeSurvivesAnIdleWorkspaceReclaim(t *testing.T) {
 			mustExec(t, p, "k", e)
 			clk.Advance(31 * time.Second)
 			leaseEnded(t, p, lc, LeaseEndIdle)
-			waitFor(t, func() bool { return pinnedCount(p, "k") == 0 })
+			waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 0)
 			tc.remove(t, p, clk)
-			waitFor(t, func() bool {
+			waitFor(t, `p.runs["k"] == nil`, func() bool {
 				p.mu.Lock()
 				defer p.mu.Unlock()
 				return p.runs["k"] == nil
@@ -869,7 +869,7 @@ func TestQueuedExecOnACutLeaseNeverRuns(t *testing.T) {
 	mustExec(t, p, "k", leaseExec("one", 1))
 	release := holdGateWithCut(t, p, "k", LeaseEndReset)
 	errc := execAsync(p, "k", leaseExec("two", 1))
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 1 }) // queued on the gate
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 1) // queued on the gate
 	release()
 
 	var le *LeaseEndedError
@@ -896,7 +896,7 @@ func TestPerExecOnACutLeaseEndsItWithTheCutsReason(t *testing.T) {
 	mustExec(t, p, "k", leaseExec("one", 1))
 	release := holdGateWithCut(t, p, "k", LeaseEndReset)
 	errc := execAsync(p, "k", Exec{Command: "per-exec", TimeoutS: 30})
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 1 }) // endFirst waits on the gate
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 1) // endFirst waits on the gate
 	release()
 	if err := recvWithin(t, errc, "the per-Exec Exec"); err != nil {
 		t.Fatalf("per-Exec Exec: %v", err)
@@ -931,9 +931,9 @@ func TestCutDuringLeaseStartNeverRuns(t *testing.T) {
 	setc := make(chan error, 1)
 	deadline := clk.Now().Add(p.cfg.LeaseGraceLimit)
 	go func() { setc <- setModeErr(p, "k", ModePerExec, 2) }()
-	waitFor(t, func() bool { return timerArmed(clk, deadline) })
+	waitFor(t, `timerArmed(clk, deadline)`, func() bool { return timerArmed(clk, deadline) })
 	clk.Advance(p.cfg.LeaseGraceLimit)
-	waitFor(t, func() bool { l := liveLease(p, "k"); return l != nil && leaseCut(p, l) == LeaseEndModeChange })
+	waitFor(t, "the live lease cut for mode_change", func() bool { l := liveLease(p, "k"); return l != nil && leaseCut(p, l) == LeaseEndModeChange })
 	close(resume)
 
 	var le *LeaseEndedError
@@ -1039,7 +1039,7 @@ func TestSameEpochDowngradeWhileQueued(t *testing.T) {
 		first := execAsync(p, "k", l2)
 		recvWithin(t, entered, "the first Exec's Run")
 		queued := execAsync(p, "k", l2)
-		waitFor(t, func() bool { return pinnedCount(p, "k") == 2 }) // routed at lease+processes, on the gate
+		waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2) // routed at lease+processes, on the gate
 		mustSetMode(t, p, "k", ModeLease, 3)
 		if l := leaseAlive(t, p, "after the downgrade"); l.mode != ModeLease {
 			t.Fatalf("lease mode after SetMode(lease) = %s, want %s", l.mode, ModeLease)
@@ -1065,10 +1065,10 @@ func TestSameEpochDowngradeWhileQueued(t *testing.T) {
 		first := execAsync(p, "k", e)
 		recvWithin(t, entered, "the first Exec's Run")
 		queued := execAsync(p, "k", e)
-		waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
+		waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2)
 		setMode := make(chan error, 1)
 		go func() { setMode <- setModeErr(p, "k", ModePerExec, 3) }() // waits for the gate
-		waitFor(t, func() bool { return pinnedCount(p, "k") == 3 })
+		waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 3)
 		close(release)
 		for _, errc := range []<-chan error{first, queued, setMode} {
 			if err := recvWithin(t, errc, "an Exec or the SetMode"); err != nil {
@@ -1088,6 +1088,6 @@ func TestSameEpochDowngradeWhileQueued(t *testing.T) {
 		if st := p.Stats(); st.LeaseEnds[LeaseEndModeChange] != 1 || leaseEndTotal(st) != 1 {
 			t.Fatalf("LeaseEnds = %v, want exactly one mode_change", st.LeaseEnds)
 		}
-		waitFor(t, func() bool { return lc.liveCount() == 0 })
+		waitForValue(t, `lc.liveCount()`, func() int { return lc.liveCount() }, 0)
 	})
 }

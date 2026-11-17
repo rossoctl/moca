@@ -125,7 +125,7 @@ func TestLeaseGuestGetsTheRemainingBudget(t *testing.T) {
 	first := execAsync(p, "k", Exec{Command: "long", TimeoutS: 600, Mode: ModeLease, ModeEpoch: 1})
 	recvWithin(t, entered, "the first Exec's Run")
 	second := execAsync(p, "k", Exec{Command: "queued", TimeoutS: 60, Mode: ModeLease, ModeEpoch: 1})
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 }) // queued on the gate, its timer armed
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2) // queued on the gate, its timer armed
 	clk.Advance(50 * time.Second)
 	close(release)
 	for _, errc := range []<-chan error{first, second} {
@@ -241,10 +241,10 @@ func downgradedWhileQueued(t *testing.T) (lc *leaseLauncher, clk *fakeClock, rel
 	first = execAsync(p, "k", e)
 	recvWithin(t, entered, "the first Exec's Run")
 	queued = execAsync(p, "k", e)
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2)
 	sm := make(chan error, 1)
 	go func() { sm <- setModeErr(p, "k", ModePerExec, 3) }()
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 3 })
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 3)
 	return lc, clk, release, first, queued, sm
 }
 
@@ -280,7 +280,7 @@ func TestPerExecFallbackTimesOutAtTheBudgetNotTheSlack(t *testing.T) {
 	if err := recvWithin(t, first, "the first Exec"); err != nil {
 		t.Fatalf("the first Exec: %v", err)
 	}
-	waitFor(t, func() bool { return len(lc.commands()) == 2 }) // the queued Exec is in its per-Exec Run
+	waitForValue(t, `len(lc.commands())`, func() int { return len(lc.commands()) }, 2) // the queued Exec is in its per-Exec Run
 	if c := lc.commands()[1]; c.Lease || c.TimeoutS != 10 {
 		t.Fatalf("the queued Exec's Command = %+v, want per-Exec with timeout_s 10", c)
 	}
@@ -310,7 +310,7 @@ func TestLeaseExecSpentWhileQueuedNeverRuns(t *testing.T) {
 	recvWithin(t, entered, "the first Exec's Run")
 	before := liveLease(p, "k")
 	queued := execAsync(p, "k", Exec{Command: "queued", TimeoutS: 10, Mode: ModeLease, ModeEpoch: 1})
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 }) // queued on the gate, its timer armed
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2) // queued on the gate, its timer armed
 	clk.Advance(12 * time.Second)
 	close(release)
 	if err := recvWithin(t, first, "the first Exec"); err != nil {
@@ -357,7 +357,7 @@ func TestLeaseGuestGetsWhatIsLeftAndTheHostWaitsTheSlack(t *testing.T) {
 	first := execAsync(p, "k", Exec{Command: "long", TimeoutS: 600, Mode: ModeLease, ModeEpoch: 1})
 	recvWithin(t, entered, "the first Exec's Run")
 	queued := execAsync(p, "k", Exec{Command: "queued", TimeoutS: 10, Mode: ModeLease, ModeEpoch: 1})
-	waitFor(t, func() bool { return pinnedCount(p, "k") == 2 })
+	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2)
 	clk.Advance(7 * time.Second)
 	close(release)
 	if err := recvWithin(t, first, "the first Exec"); err != nil {

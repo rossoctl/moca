@@ -36,9 +36,26 @@ const (
 	capEventEvery = time.Second
 )
 
+// refusalHints is the text that follows a refusal's first line, for the codes
+// whose fix is a person's, not a retry's (#779). The reader is as often an
+// agent as a user, and with only "destination_denied: <host>" an agent went on
+// probing or set out to build the package from source. Fixed text on purpose:
+// the proxy does not know the deployment's user-facing URL (its credentials
+// URL is the host's view of the control plane), and the allowlist itself is
+// not echoed, since no API shows it to a sandbox's user either.
+var refusalHints = map[string]string{
+	DecisionDestinationDenied: "This host is not on this sandbox's egress allowlist, so the egress proxy refused it.\n" +
+		"Retrying will not help: only the hosts the operator allowlisted are reachable.\n" +
+		"To have it added, ask the operator of this Moca deployment. For a sandbox of the\n" +
+		"sandbox service, `mocactl sbx egress` on your own machine lists the hosts it reached\n" +
+		"and was refused.\n",
+}
+
 // refusalBytes renders a named refusal as a complete raw HTTP/1.1 response.
+// The body's first line, "<code>: <host>", is the contract a client parses
+// (with X-Moca-Egress-Error); a hint from refusalHints may follow it.
 func refusalBytes(status int, code, host string) []byte {
-	body := code + ": " + host + "\n"
+	body := code + ": " + host + "\n" + refusalHints[code]
 	return []byte(fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nX-Moca-Egress-Error: %s\r\n"+
 		"Content-Length: %d\r\nConnection: close\r\n\r\n%s", status, http.StatusText(status), code, len(body), body))
 }

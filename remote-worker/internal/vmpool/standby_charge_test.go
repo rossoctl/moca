@@ -172,7 +172,7 @@ func TestAWarmAcquireIsRepricedAtPopTime(t *testing.T) {
 
 	// Once the running VM finishes, the same warm acquire fits and succeeds.
 	release()
-	waitFor(t, func() bool { return p.Stats().InFlight == 0 })
+	waitForValue(t, `p.Stats().InFlight`, func() int { return p.Stats().InFlight }, 0)
 	if _, err := p.Exec(context.Background(), "run-a", Exec{Command: "true"}, &capturingSink{}); err != nil {
 		t.Fatalf("warm acquire after the running VM drained: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestEvictionShedsAsMuchDirtyChargeAsAdmissionNeeds(t *testing.T) {
 	case <-entered: // run-z's own Run started: the admission went through
 	case err := <-done:
 		t.Fatalf("new run against a standby-heavy host: %v — eviction must shed enough dirty charge to fund it", err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("run-z neither reached Run nor returned — admission stuck")
 	}
 	if evicted := p.Stats().BudgetEvictions - before; evicted != 8 {
@@ -265,7 +265,7 @@ func TestSequentialWarmAcquiresOnOneRunShedIdleStandbys(t *testing.T) {
 	case <-entered: // the second warm acquire reached Run: the promotion was funded
 	case err := <-done:
 		t.Fatalf("second warm acquire on run-z: %v — the promotion must be funded from other runs' standbys", err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("second warm acquire neither reached Run nor returned — promotion stuck")
 	}
 	// 2816 - 32 + 288 = 3072 > 2880, short 192 MiB = six floor-charged standbys.
@@ -332,7 +332,7 @@ func TestPromotionEvictionSparesThePromotingRun(t *testing.T) {
 			t.Fatalf("warm acquire fundable only by the promoting run's own standbys: err = %v, want a %s refusal — those standbys are excluded from the victim set",
 				err, RefuseMemoryBudget)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("run-y's warm acquire was admitted instead of refused — it is now parked in hold's gate, which is exactly what spending the promoting run's own standbys would buy")
 	}
 	if evicted := p.Stats().BudgetEvictions - before; evicted != 0 {

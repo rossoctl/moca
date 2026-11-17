@@ -530,12 +530,12 @@ check "the rejection names the token as a cause" "$(grep -c 'wrong or revoked to
 rm -f "$TMP/journal-calls"; : >"$MOCK_LOG"
 check "a worker reconnecting through the settle window (churn): exit 1" "$(MOCK_JOURNAL_CHURN=1 runr "$B")" "1"
 check "churn: the journal was re-read after the settle" "$(cat "$TMP/journal-calls")" "2"
-# The wait is bounded by the wall clock: TIMEOUT=3 SETTLE=2 ends within about 3 + 2 + 1 s. The old
-# count of polls took 3 x (1 + 2) = 9 s, since each churning poll spends a whole settle window.
-rm -f "$TMP/journal-calls"; t0=$SECONDS
-MICROVM_ATTACH_TIMEOUT=3 MICROVM_ATTACH_SETTLE=2 MOCK_JOURNAL_CHURN=1 runr "$B" >/dev/null
-check "churn, TIMEOUT=3 SETTLE=2: refused within TIMEOUT + SETTLE + 1 (+1 s slack), not 9 s" \
-  "$( ((SECONDS - t0 <= 7)) && echo bounded || echo "took $((SECONDS - t0))s")" "bounded"
+# The wait is bounded by the deadline, not a count of polls: with SETTLE >= TIMEOUT the first churning
+# poll's settle outlasts the deadline, so there is one poll (2 journal reads) however loaded the host.
+# A count of polls makes TIMEOUT of them (4 reads).
+rm -f "$TMP/journal-calls"
+MICROVM_ATTACH_TIMEOUT=2 MICROVM_ATTACH_SETTLE=2 MOCK_JOURNAL_CHURN=1 runr "$B" >/dev/null
+check "churn, TIMEOUT=2 SETTLE=2: one poll, then refused at the deadline" "$(cat "$TMP/journal-calls")" "2"
 check "churn: the refusal names the current invocation's journal" "$(grep -c 'journalctl -u microvm-worker _SYSTEMD_INVOCATION_ID=inv-1' "$TMP/run.log")" "1"
 check "an attach after a stream that ended counts (a reconnect): exit 0" \
   "$(MOCK_JOURNAL_TAIL="$(printf 'microvm-worker: stream ended (EOF); reconnecting in 1s\nmicrovm-worker: attached, serving execs')" runr "$B")" "0"

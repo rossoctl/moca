@@ -134,7 +134,7 @@ func TestSweepOrphansSparesTheWorkersOwnCgroupAndStillKillsAVMOrphan(t *testing.
 	// orphan's real process is dead and its directory is gone.
 	select {
 	case <-vmReaped:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("the VM-shaped orphan (vm-9) survived the sweep — the fail-closed filter has narrowed to nothing, which is the orphan leak spec §6 lists as its first practical failure mode")
 	}
 	if _, err := os.Stat(filepath.Join(root, "vm-9")); !os.IsNotExist(err) {
@@ -355,8 +355,48 @@ func TestSweepOrphansActuallyKillsALiveProcess(t *testing.T) {
 	case <-waitDone:
 		// Good: the kernel actually reaped the process, i.e. SweepOrphans really
 		// signalled it — not merely removed a cgroup directory around it.
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("real child process was still running well after SweepOrphans returned — the kill was not actually delivered")
+	}
+}
+
+// TestSweepOrphansSummaryTellsAKilledVMFromAnEmptyDirectory pins the startup log line's
+// split. Swept counts directories, so a VM that was still running and had to be killed and
+// a pool directory a clean shutdown left behind both added one to it, and the line
+// microvm-worker logged ("swept N VM cgroup(s)") read the same for both. The slice below
+// holds one of each, plus a directory whose only listed pid has already exited, which is
+// empty in the sense that matters: nothing was alive to kill.
+func TestSweepOrphansSummaryTellsAKilledVMFromAnEmptyDirectory(t *testing.T) {
+	livePid, liveReaped := startSleeper(t, true) // a leaked VMM, Setpgid'd as both launchers do
+
+	// A pid that names no running process: a child this test started and has reaped.
+	gone := exec.Command("true")
+	if err := gone.Run(); err != nil {
+		t.Fatalf("running a short-lived child: %v", err)
+	}
+
+	root := fakeSlice(t, map[string][]string{
+		"vm-12":  {strconv.Itoa(livePid)},
+		"pool-0": {}, // a clean shutdown's leftover: an empty cgroup.procs
+		"vm-13":  {strconv.Itoa(gone.Process.Pid)},
+	})
+
+	res, err := SweepOrphans(root)
+	if err != nil {
+		t.Fatalf("SweepOrphans: %v", err)
+	}
+	select {
+	case <-liveReaped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the live process in vm-12 survived the sweep")
+	}
+	if res.Swept != 3 || res.Killed != 1 {
+		t.Fatalf("Swept = %d, Killed = %d; want 3 swept, 1 of them holding a live process", res.Swept, res.Killed)
+	}
+	const want = "swept 3 VM cgroup(s) from a previous incarnation: 1 held a live process (killed), 2 were empty; " +
+		"left alone 0 non-VM cgroup(s) []"
+	if got := res.Summary(); got != want {
+		t.Fatalf("Summary() = %q\nwant        %q", got, want)
 	}
 }
 
