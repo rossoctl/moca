@@ -389,6 +389,10 @@ describe('resolveInferenceName', () => {
     expect(codeOf(() => resolveInferenceName([desc('gh', 'sandbox-egress')], 'gh'))).toBe(
       'invalid_request',
     );
+    // The text is what the user sees: it names the credential and the consumer it does have.
+    expect(() => resolveInferenceName([desc('gh', 'sandbox-egress')], 'gh')).toThrow(
+      "credential 'gh' has consumer 'sandbox-egress', not 'inference'",
+    );
   });
 });
 

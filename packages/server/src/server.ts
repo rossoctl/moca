@@ -417,8 +417,8 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
   } catch (err) {
     const status = turnErrorStatus(err);
     // A 500's text never reaches the body (see turnErrorCode), so the server log is the only place
-    // it exists. A 503 is logged as one line naming its cause (logTurnCapacity); 404/410 name the
-    // caller's own mistake and are not logged.
+    // it exists. A 503 is logged as one line naming its cause (logTurnCapacity); 404/410/422 carry
+    // their cause in the body and are not logged.
     if (status === 500) console.error('[turn] unclassified error:', err);
     else if (status === 503) logTurnCapacity('turn', sessionId, err);
     res.writeHead(status, turnErrorHeaders(status, err)).end(
@@ -516,13 +516,24 @@ export function clientErrorText(err: unknown): string {
 }
 
 export function turnErrorMessage(status: number, err: unknown): { message?: string } {
-  if (status !== 503 || !(err instanceof Error) || err.message === '') return {};
+  if (!(err instanceof Error) || err.message === '') return {};
+  // A 422's text is BundleFormatError's own sentence (the format versions found and known, and what
+  // to upgrade), built by config-bundle and naming no secret. It is the one thing a caller needs to
+  // act on, so it goes to the body rather than only to the log (#510).
+  if (status === 422) return { message: err.message.slice(0, 500) };
+  if (status !== 503) return {};
   if (err.name === 'SandboxCapacityRefusedError') return { message: HOST_REFUSAL_MESSAGE };
   return { message: err.message.slice(0, 500) };
 }
 
 export function turnErrorStatus(err: unknown): number {
   if (err instanceof Error && err.name === 'BundleNotFoundError') return 410;
+  // The session's bundle is stored and verified, but in a format newer than this harness reads, or
+  // with a marker it cannot parse (#510). 422, not 409: this codebase's 409s are state a retry can
+  // outlive (`turn_in_progress`, `template_not_active`), and on this route a 409 is TurnConflict,
+  // whose `turnId` a client attaches to. Nothing a retry does fixes this one; upgrading the harness
+  // does, the same "refused as it is" a 422 means for `policy_refused` and `workload_refused`.
+  if (err instanceof Error && err.name === 'BundleFormatError') return 422;
   if (err instanceof Error && NO_CAPACITY.has(err.name)) return 503;
   const message = err instanceof Error ? err.message : String(err);
   return message.includes('no session in backend') ? 404 : 500;
@@ -539,6 +550,7 @@ export function turnErrorStatus(err: unknown): number {
 export function turnErrorCode(status: number): string {
   if (status === 404) return 'session_not_found';
   if (status === 410) return 'config_bundle_not_found';
+  if (status === 422) return 'config_bundle_unsupported';
   if (status === 503) return 'sandbox_unavailable';
   return 'internal_error';
 }

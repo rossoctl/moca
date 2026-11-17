@@ -137,7 +137,8 @@ commands should always send it. Each `mocactl sbx token` and each `--renew-every
 use: a token pump keeps the sandbox alive whether or not its client runs commands, and at a
 30-day lifetime the margin before the host reclaims an unreachable workspace is 2 days (spec §7).
 The token response's `sandboxExpiresAt` is
-the deadline after the mint; track it, since it moves.
+the deadline after the mint; track it, since it moves. `mocactl sbx token --json` prints it beside
+the token and its `expiresAt`.
 
 **Delete and de-enrollment are not immediate.** A token already issued keeps working until its
 `exp`, plus the relay's 30 s leeway: up to one token lifetime plus 30 s (15.5 minutes by default)
@@ -351,8 +352,11 @@ the operator upgrades the worker. Level 2 is off by default: only a deployment t
 - **16 MiB** per message, so send large trees as several calls.
 - **8 MiB** of stdout per call.
 - **The longest command** is one token lifetime minus 60 s (14 minutes by default).
-- **A sandbox lives 7 days by default**, then it is gone with its workspace. There is no
-  extension: pull your work out before then. `mocactl sbx ls` shows each sandbox's expiry.
+- **A sandbox lives 7 days past its last use by default**, then it is gone with its workspace.
+  Each mint that counts as activity moves its deadline (see [Tokens](#tokens)), on a deployment
+  that sets a maximum lifetime, as `deploy/sbx` does by default; without one the deadline stays
+  fixed at create. Pull your work out before the deadline. `mocactl sbx ls` shows each sandbox's
+  expiry.
 
 ## The stability promise
 

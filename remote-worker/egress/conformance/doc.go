@@ -8,7 +8,8 @@
 //   - the section 8.3 control protocol, driven here by a fake vmpool that hands
 //     each VM's listening socket over with control.Client;
 //   - the per-VM HTTP/1.1 proxy socket (CONNECT and absolute-form http://);
-//   - named refusals (X-Moca-Egress-Error, a "<code>: <host>\n" text/plain body);
+//   - named refusals (X-Moca-Egress-Error, a text/plain body whose first line
+//     is "<code>: <host>\n"; free text for a person or an agent may follow it);
 //   - one JSON audit event per line on the implementation's stdout.
 //
 // The package lives outside internal/ on purpose: Go's import rule would
@@ -26,7 +27,8 @@
 //   - via: the string "moca-egress" on every event;
 //   - vm_id, sid: the VM and session the conn's listener was registered with;
 //   - sub: the subject, present on credential_injected events (the lookup's
-//     subject, for the audit only) and absent or "" on every other;
+//     subject, for the audit only) and absent or "" on every other; this one
+//     is checked on every event a case reads, not only those it waits for;
 //   - host: the destination host as requested, normalised (lower case, no
 //     trailing dot); for conn_cap, which is decided before any request is
 //     read, it is not checked;

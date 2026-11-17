@@ -432,6 +432,15 @@ They are ordinary files in your working tree, so `git status` shows them. Leave 
 committed, they would point every teammate's agents at a sandbox and deny their local tools.
 `mocactl sbx up --no-agent-config` creates and pushes without touching them.
 
+**Whether they reach the sandbox is up to your `.gitignore`.** `up` writes them after its push, so
+the first push never carries them. From then on, `up` and `push` treat them like any other file:
+one that is tracked, or untracked and not ignored, is pushed; an untracked one your ignore rules
+match is left out. `.sbx/` is never pushed. The sandbox needs none of them, since the agent there
+gets its instructions from the MCP server, so ignoring them (as the Moca repository's own
+`.gitignore` does for `.mcp.json`, `opencode.json`, `.bob/` and `AGENTS.md`) only keeps them on
+your machine. The decision is recorded in
+[ADR-0049](../adrs/0049-sbx-push-agent-config-follows-gitignore.md).
+
 ### Loading your project's `CLAUDE.md`: `sbx up --cortex`
 
 The `Read` deny in `.claude/settings.json` also stops Claude Code loading your project's own
@@ -545,7 +554,14 @@ that is not bound here.
   egress reaches nothing. A package installs only from a registry on the allowlist: the default
   one carries the common registries (PyPI, npm, crates.io, the Go module proxy), but your operator
   may have changed it. The templates carry the toolchains: `mocactl sbx templates` lists them, with
-  their tools, and `mocactl sbx policy` lists each profile's egress.
+  their tools, and `mocactl sbx policy` lists each profile's egress. A refused request's body says
+  that the host is not on the sandbox's egress allowlist; retrying does not help. That body shows
+  only for plain-HTTP requests and clients that print it: an HTTPS request is refused at its
+  `CONNECT`, so most clients (curl, git, pip) show just `403` or `CONNECT tunnel failed`, and the
+  agent learns the rule from its sandbox instructions instead. To have a host
+  added, ask your operator and name the host: `mocactl sbx egress` lists the hosts your sandbox
+  reached and the ones it was refused. The service's own URL, opened in a browser or with `curl`,
+  says the same and how to get `mocactl`.
 - **One command at a time per sandbox.** The sandbox runs one call at a time, so batch the work:
   read several files in one call, run the whole test suite in one call. The agent's tools refuse a
   call that would wait more than 30 s behind another one with `sandbox busy: … retry later`, and
@@ -686,7 +702,10 @@ supported. Two of your credentials cannot hold the identical destination (`409 d
     excluded directory comes back as a bare delete, and a `push` replaces the agent's new files
     there without warning, since they never count as unpulled;
   - new files under a directory your own `.gitignore` ignores are not protected: they may not come
-    back, and a `push` can replace them.
+    back, and a `push` can replace them. The same holds for an ignored file: in a repository that
+    ignores `AGENTS.md`, a hand-written one is not pushed, and one the agent writes may not come
+    back. Commit it (`git add -f AGENTS.md`) to have it pushed and pulled (§4); a pulled `AGENTS.md`
+    comes back with a warning if it changed outside the `sbx` block.
 - **Pull --apply needs a recent git.** When your files have moved on since the push, the patch is
   merged 3-way; that uses `git apply --3way --cached`, which git accepts from version 2.32
   ([git 2.32 release notes](https://github.com/git/git/blob/master/Documentation/RelNotes/2.32.0.adoc)).
@@ -806,7 +825,9 @@ prints, for the bound sandbox, `export` lines for a client: `SBX_ADDR`, `SBX_TLS
 `SBX_SANDBOX_ID`, `SBX_WORKSPACE_KEY`, `SBX_TOKEN_CMD` and, when the endpoint's certificate is
 self-issued, `SBX_CA_FILE`. `mocactl sbx token` prints a fresh token; `mocactl sbx token
 --renew-every 600` prints a new one every 600 seconds, one line each, until stopped, for a
-long-lived client that reads its next token from a pipe. Each token printed counts as use of the
+long-lived client that reads its next token from a pipe. With `--json`, each line is an object
+with the `token`, its `expiresAt` and the sandbox's `sandboxExpiresAt` (epoch seconds, as the
+control plane returns them; a control plane from before `sandboxExpiresAt` leaves it out). Each token printed counts as use of the
 sandbox, so a `--renew-every` pump keeps it alive whether or not its client runs commands. See
 [the direct-client guide](../api/sandbox-v1-direct-client.md) for what a client sends.
 

@@ -54,6 +54,11 @@ Send `Authorization: Bearer <session token>`. The token is an Ed25519 JWT checke
 | `GET /runs/status?sessionId=`            | session token | Read a leaf's stored result                                                          |
 | `POST /run-leaf`, `GET /run-leaf/status` | session token | **Deprecated** aliases of `/runs` and `/runs/status`; log a warning once per process |
 
+The unprefixed `POST /turn` and `POST /runs` are supported, frozen aliases of the `/v1` routes: the same handler, so
+the same auth, body and responses, with no removal date ([change policy](change-policy.md), decision 3). New
+features appear under `/v1` only, so the detachable-turn routes have no unprefixed form; a new client should use
+`/v1`. `docs/api/harness-openapi.yaml` describes both aliases.
+
 Matching is by URL and not uniform. `/health`, `/turn`, `/v1/turn` (POST), `/v1/turn/cancel`, `/runs`,
 `/v1/runs` and `/run-leaf` match the exact URL, so a query string defeats them. `GET /v1/turn` requires
 and accepts a query string, `/runs/status` and `/run-leaf/status` match by prefix, and `/workloads`

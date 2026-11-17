@@ -58,6 +58,7 @@ import { refuseMisnamedIdentityProvider } from './identity-switch.js';
 import { TurnStore } from './turn-store.js';
 import { resultTtlSeconds, TURN_RECORD_TTL_MARGIN_SECONDS } from './turn-record.js';
 import { RedisTurnQueue } from './turn-queue.js';
+import { guardSchemaVersion } from './schema-version.js';
 import type { ResultRedisLike } from './turn-result.js';
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -836,6 +837,12 @@ if (isMainModule) {
   const env = withCredentials(process.env, CONTROL_PLANE_SECRETS);
   const deps = depsFromEnv(env);
   startControlPlane(deps, portFromEnv(env), hostFromEnv(env));
+  // The Redis schema version (#509): written if absent, and the process exits on a newer one once
+  // Redis answers. In the background, because this server starts before Redis and waits for it.
+  void guardSchemaVersion({
+    component: 'control-plane',
+    url: env.REDIS_URL ?? 'redis://127.0.0.1:6379',
+  });
   const addr = inferenceAddrFromEnv(env);
   // Not started without the address, so every existing deployment still opens exactly one port.
   if (addr) {

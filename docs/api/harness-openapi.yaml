@@ -6,15 +6,16 @@
 #
 # Scope, mirroring the control-plane document's own boundary note: only the client-facing
 # surface. The handler also serves the workload lifecycle (/workloads — off unless the operator
-# enables it, see docs/context-service.md) and the pre-/v1 wire paths (/turn, /runs,
-# /run-leaf*) — all listed in src/routes.ts as surface: 'internal' and not described here.
-# /turn and /runs are nonetheless SUPPORTED, frozen aliases of /v1/turn and /v1/runs
-# (docs/reference/change-policy.md, decision 3); moving them to the client surface and describing
-# them here is #507. /runs/status has no /v1 form; it is the canonical path.
+# enables it, see docs/context-service.md) and the deprecated pre-rename paths (/run-leaf,
+# /run-leaf/status) — listed in src/routes.ts as surface: 'internal' and not described here.
+# The unprefixed /turn and /runs ARE described: supported, frozen aliases of /v1/turn and /v1/runs
+# (docs/reference/change-policy.md, decision 3; #507), whose request body and responses are $refs
+# to the /v1 route's, so the two cannot drift apart here. /runs/status has no /v1 form; it is the
+# canonical path.
 openapi: 3.1.0
 info:
   title: MOCA harness (data plane)
-  version: 1.5.0
+  version: 1.6.0
   description: |
     The agent execution tier: HTTP server and P6 workers that run turns and jobs against sandboxed
     workspaces. It is a separate deployable from the control plane, and a client that knows only
@@ -37,6 +38,12 @@ info:
     connection, which a client re-attaches to (GET /v1/turn) and cancels (POST
     /v1/turn/cancel). With it off, both of those routes answer 404 turn_not_found and POST
     /v1/turn ignores `detachable`.
+
+    UNPREFIXED ALIASES. POST /turn and POST /runs are aliases of POST /v1/turn and POST /v1/runs:
+    the same handler, so the same auth, request body and responses. They are supported and frozen,
+    with no removal date, and the change policy's notice rules apply to them as to any route. New
+    features appear under /v1 only (the detachable-turn routes, GET /v1/turn and POST
+    /v1/turn/cancel, have no unprefixed form), so a new client should use /v1.
 
     What changed in each version: docs/api/CHANGELOG.md (each data-plane version is noted in the
     control-plane section that shipped it).
@@ -189,6 +196,15 @@ paths:
               schema: { $ref: '#/components/schemas/TurnConflict' }
         '410':
           description: config_bundle_not_found — the session's promoted bundle digest is gone
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '422':
+          description: |
+            config_bundle_unsupported — the session's promoted bundle is stored and intact, but its
+            format (format.json) is newer than this harness reads, or its marker is not a format
+            version. The message says which, and what to upgrade. Not retryable as-is: the turn
+            succeeds once the harness is upgraded to a release that reads that format.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -417,6 +433,32 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /turn:
+    post:
+      operationId: createTurnUnversioned
+      summary: Supported unversioned alias of POST /v1/turn
+      description: |
+        The pre-/v1 path of POST /v1/turn, kept indefinitely as a supported, frozen alias
+        (docs/reference/change-policy.md, decision 3). It runs the same handler, so everything
+        POST /v1/turn documents holds here: the same session-token rules, the same body (including
+        `detachable`), the same sync and SSE answers and the same errors. Frozen means new features
+        are added under /v1 only; the detachable-turn routes (GET /v1/turn, POST /v1/turn/cancel)
+        have no unprefixed form. Not deprecated: removing it would need the same notice as any
+        route. A new client should call POST /v1/turn.
+      security:
+        - sessionToken: []
+      requestBody: { $ref: '#/paths/~1v1~1turn/post/requestBody' }
+      responses:
+        '200': { $ref: '#/paths/~1v1~1turn/post/responses/200' }
+        '400': { $ref: '#/paths/~1v1~1turn/post/responses/400' }
+        '401': { $ref: '#/paths/~1v1~1turn/post/responses/401' }
+        '404': { $ref: '#/paths/~1v1~1turn/post/responses/404' }
+        '409': { $ref: '#/paths/~1v1~1turn/post/responses/409' }
+        '410': { $ref: '#/paths/~1v1~1turn/post/responses/410' }
+        '422': { $ref: '#/paths/~1v1~1turn/post/responses/422' }
+        '429': { $ref: '#/paths/~1v1~1turn/post/responses/429' }
+        '503': { $ref: '#/paths/~1v1~1turn/post/responses/503' }
+        '500': { $ref: '#/paths/~1v1~1turn/post/responses/500' }
   /v1/runs:
     post:
       operationId: createRun
@@ -530,6 +572,29 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /runs:
+    post:
+      operationId: createRunUnversioned
+      summary: Supported unversioned alias of POST /v1/runs
+      description: |
+        The pre-/v1 path of POST /v1/runs, kept indefinitely as a supported, frozen alias
+        (docs/reference/change-policy.md, decision 3). It runs the same handler, so everything
+        POST /v1/runs documents holds here: the same session-token and tenant rules, the same job
+        shapes and the same answers and errors. Frozen means new features are added under /v1
+        only. Not deprecated: removing it would need the same notice as any route (the
+        deprecated /run-leaf is a different path). A new client should call POST /v1/runs.
+      security:
+        - sessionToken: []
+      requestBody: { $ref: '#/paths/~1v1~1runs/post/requestBody' }
+      responses:
+        '200': { $ref: '#/paths/~1v1~1runs/post/responses/200' }
+        '400': { $ref: '#/paths/~1v1~1runs/post/responses/400' }
+        '401': { $ref: '#/paths/~1v1~1runs/post/responses/401' }
+        '404': { $ref: '#/paths/~1v1~1runs/post/responses/404' }
+        '409': { $ref: '#/paths/~1v1~1runs/post/responses/409' }
+        '501': { $ref: '#/paths/~1v1~1runs/post/responses/501' }
+        '503': { $ref: '#/paths/~1v1~1runs/post/responses/503' }
+        '500': { $ref: '#/paths/~1v1~1runs/post/responses/500' }
   /runs/status:
     get:
       operationId: getRunStatus

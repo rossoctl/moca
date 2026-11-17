@@ -5,6 +5,7 @@ import {
   SandboxAffinityPendingError,
   SandboxCapacityRefusedError,
   BundleNotFoundError,
+  BundleFormatError,
 } from '@moca/harness/run-turn';
 import {
   turnErrorStatus,
@@ -162,8 +163,28 @@ describe('an expired config bundle', () => {
 
   it('answers a stable code for every status, never the exception text', () => {
     expect(turnErrorCode(404)).toBe('session_not_found');
+    expect(turnErrorCode(422)).toBe('config_bundle_unsupported');
     expect(turnErrorCode(503)).toBe('sandbox_unavailable');
     expect(turnErrorCode(500)).toBe('internal_error');
+  });
+});
+
+describe('a config bundle in a format this harness does not read (#510)', () => {
+  it('is 422 config_bundle_unsupported, not a 500, and the body says what to upgrade', () => {
+    const err = new BundleFormatError('2', 1);
+    const status = turnErrorStatus(err);
+    expect(status).toBe(422);
+    expect(turnErrorCode(status)).toBe('config_bundle_unsupported');
+    expect(turnErrorMessage(status, err).message).toMatch(
+      /format version 2 is newer than the 1 this release reads; upgrade the harness/,
+    );
+    expect(turnErrorHeaders(status, err)).not.toHaveProperty('Retry-After');
+  });
+
+  it('maps a malformed marker the same way', () => {
+    const err = new BundleFormatError('unparseable JSON', 1);
+    expect(turnErrorStatus(err)).toBe(422);
+    expect(turnErrorMessage(422, err).message).toContain('unparseable JSON');
   });
 });
 

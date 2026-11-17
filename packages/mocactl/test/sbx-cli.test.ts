@@ -59,6 +59,100 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(io.outs.join('')).toContain('mocactl sbx login');
   });
 
+  describe('COMMAND --help shows that command, not every command', () => {
+    const help = async (...argv: string[]) => {
+      const { env, io } = setup();
+      expect(await main(['sbx', ...argv, '--help'], env, io)).toBe(0);
+      return io.outs.join('');
+    };
+
+    it('credentials --help: every credentials form, and nothing else', async () => {
+      const out = await help('credentials');
+      for (const form of [
+        'credentials [list]',
+        'credentials add NAME',
+        'credentials presets',
+        'credentials delete NAME',
+      ])
+        expect(out).toContain(`mocactl sbx ${form}`);
+      expect(out).not.toContain('mocactl sbx up');
+      expect(out).not.toContain('mocactl sbx login');
+      expect(out).toContain('mocactl sbx --help');
+      // --preset ID is not a sandbox ID.
+      expect(out).not.toContain('.sbx/sandbox.json');
+    });
+
+    it('a subcommand narrows it further: templates create, proc logs', async () => {
+      const create = await help('templates', 'create');
+      expect(create).toContain('mocactl sbx templates create --spec F');
+      expect(create).toContain('--dry-run: reads the policy'); // its whole description
+      expect(create).not.toContain('mocactl sbx templates build');
+      const logs = await help('proc', 'logs');
+      expect(logs).toContain('mocactl sbx proc logs (NAME|ID)');
+      expect(logs).not.toContain('mocactl sbx proc start');
+      expect(logs).toContain('.sbx/sandbox.json'); // its [ID] is the sandbox's
+    });
+
+    it('two forms that share one description stay together (templates quota)', async () => {
+      const out = await help('templates', 'quota');
+      expect(out).toContain('mocactl sbx templates quota TARGET --templates N');
+      expect(out).toContain('mocactl sbx templates quota TARGET --clear');
+      expect(out).toContain("set a subject's template quotas");
+      expect(out).not.toContain('mocactl sbx quota [--json]');
+    });
+
+    it('an optional subcommand narrows too: credentials list is its own entry', async () => {
+      const list = await help('credentials', 'list');
+      expect(list).toContain('mocactl sbx credentials [list] [--json]');
+      expect(list).not.toContain('mocactl sbx credentials add');
+      expect(list).not.toContain('mocactl sbx credentials delete');
+    });
+
+    it('a word that is not a subcommand is ignored: run -- CMD, an id', async () => {
+      expect(await help('rm', 'sbx-123')).toContain('mocactl sbx rm [ID]');
+      const { env, io } = setup();
+      expect(await main(['sbx', 'run', '--help', '--', 'ls'], env, io)).toBe(0);
+      expect(io.outs.join('')).toContain('mocactl sbx run [--sandbox ID]');
+      expect(io.outs.join('')).not.toContain('mocactl sbx put');
+    });
+
+    it("a usage error shows the failed command's help, not every command's", async () => {
+      const { env, io } = setup();
+      // An unknown flag: the parse fails, yet the help is still the command's own.
+      expect(await main(['sbx', 'credentials', 'list', '--jsn'], env, io)).toBe(2);
+      const err = io.errs.join('\n');
+      expect(err).toMatch(/--jsn/);
+      expect(err).toContain('mocactl sbx credentials [list] [--json]');
+      expect(err).not.toContain('mocactl sbx credentials add');
+      expect(err).not.toContain('mocactl sbx up');
+      // The error is the exit code: no list of the others, no Ctrl-C.
+      expect(err).not.toMatch(/exit codes|Ctrl-C/);
+      expect(err).toContain('Run `mocactl sbx --help` for the list of all commands.');
+      // --help keeps them: there they are reference.
+      expect(await help('credentials', 'list')).toMatch(/exit codes: 0 ok/);
+      // A misused flag after a parse that succeeded, with a string flag's value before the word.
+      const { io: io2 } = setup();
+      expect(await main(['sbx', '--sandbox', SBX, 'ls', '--timeout', '5'], env, io2)).toBe(2);
+      expect(io2.errs.join('\n')).toContain('mocactl sbx ls [--all] [--json]');
+      expect(io2.errs.join('\n')).not.toContain('mocactl sbx run');
+      // No command, or an unknown one: the whole usage, as before.
+      const { io: io3 } = setup();
+      expect(await main(['sbx', 'bogus'], env, io3)).toBe(2);
+      expect(io3.errs.join('\n')).toContain('mocactl sbx up');
+    });
+
+    it('every command has its own help; bare --help still lists them all', async () => {
+      const all = await help();
+      for (const command of all.matchAll(/^ {2}mocactl sbx ([a-z]+)/gm)) {
+        const out = await help(command[1]!);
+        expect(out, command[1]).not.toBe(all);
+        expect(out, command[1]).toContain(`mocactl sbx ${command[1]}`);
+      }
+      expect(all).toContain('mocactl sbx login');
+      expect(all).toContain('mocactl sbx up');
+    });
+  });
+
   it('passes the terminal check and stdin through from the top-level CLI to sbx run', async () => {
     const { env, io } = setup();
     let read = 0;
@@ -116,6 +210,90 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(loadAuth(sbxPaths(paths), URL_)?.apiToken).toBe('api-new');
     expect(existsSync(paths.authFile)).toBe(false); // MOCA's auth.json is not touched
     expect(loadConfig(paths).config.sbxControlPlaneUrl).toBe(URL_);
+    // Nothing was configured before, so there is no change to announce.
+    expect(io.errs.join('\n')).not.toMatch(/is changing from/);
+  });
+
+  describe('sbx login --control-plane-url remembers the URL even when the login fails', () => {
+    const NEW = 'https://sbx-new.example.com';
+    const OLD = 'https://sbx-old.example.com';
+    const configured = () => {
+      const s = setup({ loggedIn: false });
+      saveConfig(s.paths, { ...DEFAULT_CONFIG, sbxControlPlaneUrl: OLD });
+      return s;
+    };
+
+    it('not enrolled: saves the new URL, says it changed, and later commands use it', async () => {
+      const { home, paths, io } = configured();
+      const cp = fakeCp({
+        'GET /v1/discovery': () => ({ status: 200, body: SBX_DISCOVERY }),
+        'POST /v1/auth/device': () => ({ status: 200, body: DEVICE }),
+        'POST /v1/auth/device/token': () => ({
+          status: 403,
+          body: { error: 'not_enrolled', message: 'github:7 is not enrolled' },
+        }),
+      });
+      expect(
+        await sbxMain(['login', '--control-plane-url', NEW], { HOME: home }, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+        }),
+      ).toBe(1);
+      expect(io.errs.join('\n')).toContain(
+        `sbx: mocactl's sandbox control plane URL is changing from ${OLD} to ${NEW}`,
+      );
+      expect(loadConfig(paths).config.sbxControlPlaneUrl).toBe(NEW);
+      // The next command targets the new URL (and asks for a login there).
+      const next = setup({ loggedIn: false }).io;
+      expect(await sbxMain(['ls'], { HOME: home }, next, { home, fetchImpl: cp.fetchImpl })).toBe(
+        3,
+      );
+    });
+
+    it('unreachable: saves the new URL so `sbx doctor` checks it', async () => {
+      const { home, paths, io } = configured();
+      const cp = fakeCp({ 'GET /v1/discovery': () => new TypeError('fetch failed') });
+      expect(
+        await sbxMain(['login', '--control-plane-url', NEW], { HOME: home }, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+        }),
+      ).toBe(4);
+      expect(io.errs.join('\n')).toMatch(/is changing from/);
+      expect(loadConfig(paths).config.sbxControlPlaneUrl).toBe(NEW);
+    });
+
+    it('not a sandbox service: keeps the old URL', async () => {
+      const { home, paths, io } = configured();
+      const cp = fakeCp({
+        'GET /v1/discovery': () => ({
+          status: 200,
+          body: { profile: 'harness', harnessUrl: 'https://h', sandboxTiers: [], version: '1' },
+        }),
+      });
+      expect(
+        await sbxMain(['login', '--control-plane-url', NEW], { HOME: home }, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+        }),
+      ).toBe(2);
+      expect(io.errs.join('\n')).not.toMatch(/is changing from/);
+      expect(loadConfig(paths).config.sbxControlPlaneUrl).toBe(OLD);
+    });
+
+    // The same control plane as loadAuth means it (sameControlPlane): spelling alone is no change.
+    it.each([`${OLD}/`, 'HTTPS://SBX-OLD.example.com:443'])(
+      'the same control plane again (%s): no change announced',
+      async (again) => {
+        const { home, io } = configured();
+        const cp = fakeCp({ 'GET /v1/discovery': () => new TypeError('fetch failed') });
+        await sbxMain(['login', '--control-plane-url', again], { HOME: home }, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+        });
+        expect(io.errs.join('\n')).not.toMatch(/is changing from/);
+      },
+    );
   });
 
   it.each([
@@ -324,6 +502,17 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     const cp = fakeCp({ 'POST /v1/auth/token': () => new TypeError('fetch failed') });
     expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(4);
     expect(io.errs.join('\n')).toMatch(/cannot reach the sandbox control plane/);
+  });
+
+  it('names the control plane tried and suggests `sbx doctor` when a call cannot reach it', async () => {
+    const { home, env, io } = setup();
+    const cause = Object.assign(new Error('connect timeout'), { code: 'UND_ERR_CONNECT_TIMEOUT' });
+    const cp = fakeCp({ 'GET /v1/sandboxes': () => new TypeError('fetch failed', { cause }) });
+    expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(4);
+    expect(io.errs.at(-1)).toBe(
+      `sbx: cannot reach the sandbox control plane at ${URL_}: fetch failed ` +
+        '(UND_ERR_CONNECT_TIMEOUT); run `mocactl sbx doctor` to diagnose',
+    );
   });
 
   it('lists templates, as a table and as JSON', async () => {
@@ -1083,6 +1272,39 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     });
     expect(await sbxMain(['token', SBX], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
     expect(io.outs.join('')).toBe(`${TOKEN.token}\n`);
+  });
+
+  it("token --json: the token's expiresAt and the sandbox's sandboxExpiresAt, as sent", async () => {
+    const { home, env, io } = setup();
+    // The sandbox ends before its token does: the line must say so, not just the token's exp.
+    // As the control plane mints them: the token is capped at the sandbox's deadline, so the
+    // sandbox ends at or after the token (a 900 s token on a sandbox with an hour left).
+    const sandboxExpiresAt = TOKEN.expiresAt + 2700;
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({
+        status: 200,
+        body: { ...TOKEN, sandboxExpiresAt },
+      }),
+    });
+    const d = { home, fetchImpl: cp.fetchImpl };
+    expect(await sbxMain(['token', SBX, '--json'], env, io, d)).toBe(0);
+    expect(JSON.parse(io.outs.join(''))).toEqual({
+      token: TOKEN.token,
+      expiresAt: TOKEN.expiresAt,
+      sandboxExpiresAt,
+    });
+  });
+
+  it('token --json from a control plane before sandboxExpiresAt: the field is left out', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+    });
+    const d = { home, fetchImpl: cp.fetchImpl };
+    expect(await sbxMain(['token', SBX, '--json'], env, io, d)).toBe(0);
+    const line = JSON.parse(io.outs.join('')) as Record<string, unknown>;
+    expect(line).toEqual({ token: TOKEN.token, expiresAt: TOKEN.expiresAt });
+    expect('sandboxExpiresAt' in line).toBe(false);
   });
 
   it('token --renew-every: a fresh token per period, one line each, until stopped', async () => {

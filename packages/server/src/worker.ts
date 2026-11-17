@@ -15,6 +15,8 @@ import { prepareServerProcess } from './server-process.js';
 import { attachTurnSlot } from './turn-slot.js';
 // #389: arm the async leaf drain on this worker, sharing its admission cap with sync /turn.
 import { armAsyncLeafWorker, type AsyncWorkerStats } from './async-worker.js';
+// #509: the Redis schema-version check, shared with the control plane and the relay.
+import { guardSchemaVersion } from '@moca/control-plane';
 
 /**
  * Worker → supervisor. Four rows: the first three are exactly P6 §3.9's; the fourth, `stats`,
@@ -371,6 +373,14 @@ if (isMainModule) {
   // itself is periodic, not boot-only: a worker restarted seconds after an OOM crash would
   // otherwise find the orphan's heartbeat not yet stale and never look again.
   armRunReaper();
+  // The Redis schema version (#509), as the control plane checks it: written if absent, and a
+  // worker exits on a newer one once Redis answers (the supervisor's restart backoff then shows the
+  // reason in the journal). Here too, not only in the control plane, because a deployment without
+  // the control plane still has workers writing sessions to this Redis.
+  void guardSchemaVersion({
+    component: 'sh-worker',
+    url: process.env.REDIS_URL ?? 'redis://127.0.0.1:6379',
+  });
 
   // process.send is overloaded three ways in @types/node; pin the signature we actually use
   // before .call() so tsc doesn't resolve .call to a differently-shaped overload.

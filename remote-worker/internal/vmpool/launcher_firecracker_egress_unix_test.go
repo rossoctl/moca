@@ -13,7 +13,6 @@ import (
 	"sync"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/rossoctl/moca/remote-worker/internal/egress/control"
 	"github.com/rossoctl/moca/remote-worker/internal/shortdir"
@@ -67,15 +66,17 @@ func (b *recordingBinder) log() []string {
 }
 
 // egressLauncher builds a launcher whose fake jailer records whether the egress socket
-// existed at the moment it ran. The jail layout is <base>/firecracker/<id>/root, and the
-// jailer's argv is "--id <id> ...", so the script derives the jail from $2.
+// existed at the moment it ran, then signals jailerRan. The jail layout is
+// <base>/firecracker/<id>/root, and the jailer's argv is "--id <id> ...", so the script
+// derives the jail from $2.
 func egressLauncher(t *testing.T, b EgressBinder) (Launcher, string, string) {
 	t.Helper()
 	base := shortdir.New(t, "fceg", len("/firecracker/vm-99999999999999999999/root/run/firecracker.socket"))
 	marker := filepath.Join(base, "jailer-marker")
 	jailer := filepath.Join(base, "jailer")
 	script := "#!/bin/sh\njail=" + base + "/firecracker/$2/root\n" +
-		"if [ -S \"$jail/run/v.sock_1025\" ]; then echo yes >" + marker + "; else echo no >" + marker + "; fi\nexit 0\n"
+		"if [ -S \"$jail/run/v.sock_1025\" ]; then echo yes >" + marker + "; else echo no >" + marker + "; fi\n" +
+		jailerRanSignal(t, base) + "exit 0\n"
 	if err := os.WriteFile(jailer, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -114,10 +115,45 @@ func seedSnapshot(t *testing.T, base string) {
 	}
 }
 
-func restoreShort(lc Launcher, base, id string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+// jailerRanSignal makes <base>/jailer-ran, a FIFO, and returns the script line that opens it
+// for writing. The open blocks until restoreUntilJailerRan's reader has it, so the reader
+// returning means every line before it has run.
+func jailerRanSignal(t *testing.T, base string) string {
+	t.Helper()
+	if err := syscall.Mkfifo(filepath.Join(base, "jailer-ran"), 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	return ": >" + filepath.Join(base, "jailer-ran") + "\n"
+}
+
+// restoreUntilJailerRan runs a Restore and cancels it once the fake jailer has signalled
+// jailerRan, so the restore ends in its API socket wait (the fake jailer never creates the
+// socket) as soon as the jailer has done its work. The socket wait is raised to testWaitBound
+// so a slow jailer start cannot end the restore first.
+func restoreUntilJailerRan(t *testing.T, lc Launcher, base, id string) error {
+	t.Helper()
+	oldWait := apiSocketWait
+	apiSocketWait = testWaitBound
+	t.Cleanup(func() { apiSocketWait = oldWait })
+	ran := filepath.Join(base, "jailer-ran")
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		if f, err := os.Open(ran); err == nil {
+			_ = f.Close()
+		}
+		cancel()
+	}()
 	_, err := lc.Restore(ctx, RestoreRequest{ID: id, Key: "sess-1", WorkspaceDir: base, GuestRAMBytes: 256 << 20})
+	// A read-write open never blocks, and releases the reader if the jailer never ran.
+	w, werr := os.OpenFile(ran, os.O_RDWR, 0)
+	if werr != nil {
+		t.Fatalf("open %s: %v", ran, werr)
+	}
+	<-read
+	_ = w.Close()
 	return err
 }
 
@@ -152,7 +188,7 @@ func TestEgressSocketIsBoundBeforeTheJailerStarts(t *testing.T) {
 			_ = c.Close()
 		}
 	}
-	_ = restoreShort(lc, base, "vm-2") // fails at the API socket wait; the fake jailer never creates one
+	_ = restoreUntilJailerRan(t, lc, base, "vm-2") // fails at the API socket wait; the fake jailer never creates one
 	got, err := os.ReadFile(marker)
 	if err != nil {
 		t.Fatalf("jailer never ran: %v", err)
@@ -268,7 +304,7 @@ func TestEgressUnregisterFailureDoesNotFailDestroy(t *testing.T) {
 func TestEgressOffLeavesRestoreUnchanged(t *testing.T) {
 	lc, base, marker := egressLauncher(t, nil)
 	seedSnapshot(t, base)
-	_ = restoreShort(lc, base, "vm-4")
+	_ = restoreUntilJailerRan(t, lc, base, "vm-4")
 	got, err := os.ReadFile(marker)
 	if err != nil {
 		t.Fatalf("jailer never ran: %v", err)
@@ -368,7 +404,8 @@ func TestLauncherFromEnvWiresEgressFromControlSock(t *testing.T) {
 func TestFirecrackerRestoreErrorCarriesTheJailerOutput(t *testing.T) {
 	base := shortdir.New(t, "fcout", len("/firecracker/vm-99999999999999999999/root/run/firecracker.socket"))
 	jailer := filepath.Join(base, "jailer")
-	script := "#!/bin/sh\necho 'jailer: Failed to chroot: Os { code: 2 }' >&2\necho second line\nexit 1\n"
+	script := "#!/bin/sh\necho 'jailer: Failed to chroot: Os { code: 2 }' >&2\necho second line\n" +
+		jailerRanSignal(t, base) + "exit 1\n"
 	if err := os.WriteFile(jailer, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -380,7 +417,7 @@ func TestFirecrackerRestoreErrorCarriesTheJailerOutput(t *testing.T) {
 		t.Fatalf("NewFirecrackerLauncher: %v", err)
 	}
 	seedSnapshot(t, base)
-	err = restoreShort(lc, base, "vm-5")
+	err = restoreUntilJailerRan(t, lc, base, "vm-5")
 	if err == nil {
 		t.Fatal("a restore whose jailer exits 1 succeeded")
 	}

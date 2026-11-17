@@ -206,7 +206,7 @@ func TestConcurrentWorkspaceImageBuildsNeverExposeAnUnformattedImage(t *testing.
 	// on the very regression this test exists to catch.
 	select {
 	case <-inFormat:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("no builder ever reached the formatter")
 	}
 	select {
@@ -221,7 +221,7 @@ func TestConcurrentWorkspaceImageBuildsNeverExposeAnUnformattedImage(t *testing.
 	go func() { wg.Wait(); close(waited) }()
 	select {
 	case <-waited:
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("a builder never returned after the formatter was released")
 	}
 	close(errs)

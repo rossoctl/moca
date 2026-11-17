@@ -929,8 +929,7 @@ func main() {
 	} else if res, err := vmpool.SweepOrphans(sweepPath); err != nil {
 		log.Printf("microvm-worker: orphan sweep: %v", err)
 	} else {
-		log.Printf("microvm-worker: orphan sweep: swept %d VM cgroup(s) from a previous incarnation; left alone %d non-VM cgroup(s) %v",
-			res.Swept, len(res.Skipped), res.Skipped)
+		log.Printf("microvm-worker: orphan sweep: %s", res.Summary())
 		if err := settleSweep(res, func(d time.Duration) []string { return vmpool.WaitForHeldJails(lc, d) }); err != nil {
 			log.Fatalf("microvm-worker: %v", err)
 		}

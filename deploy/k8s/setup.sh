@@ -116,6 +116,18 @@ WORKLOAD_CLASSES_GIVEN=''
 WORKLOAD_CLASSES_INPUT=''
 WORKLOAD_CLASSES=''
 OTHER_CLASSES=''
+# moca-provisioner's own Redis ACL user (#626; workload sandboxes spec §6.2, §9), after its
+# password: the orphan sweep's one command, GET, on workload records only, and no Pub/Sub channel.
+# The deployment's other callers keep the default user (requirepass); this one cannot write
+# sh:sandbox:records or any other key. node-redis's connect needs nothing more: its HELLO ... AUTH
+# is checked against the connection's user before it authenticates, and the CLIENT SETINFO it
+# sends after is allowed to fail. packages/provisioner/test/sweep.test.ts reads this line and
+# holds a real Valkey to it.
+REDIS_PROVISIONER_ACL='~sh:wl:* resetchannels +get'
+# sha256 of that user's redis.conf line, with SH_WORKLOAD_SANDBOXES=1 (ensure_redis_secret):
+# write_overlay stamps it on Redis's pod template, because Redis reads redis.conf only at start, so
+# adding, changing or dropping the user must roll it.
+REDIS_ACL_HASH=''
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() {
@@ -714,14 +726,32 @@ ensure_p4_tokens() {
 }
 
 ensure_redis_secret() {
-  local json pw
+  local json pw ppw acl=''
   json="$(secret_json moca-redis "$NS")"
   pw="$(json_value "$json" REDIS_PASSWORD)"
   [[ -n "$pw" ]] || { log 'generating the Redis password'; pw="$(rand_hex)"; }
-  # URL and config are re-derived from the password on every run, so the three can never disagree.
+  # With workload sandboxes on, moca-provisioner gets a Redis user of its own (REDIS_PROVISIONER_ACL)
+  # in a Secret of its own, moca-redis-provisioner, so it never holds the read-write password. Its
+  # password is kept once made, like every other; redis.conf carries only its SHA-256 (#<hex>).
+  # Off, redis.conf has no such user, and the Secret, if an earlier run made it, stays unreferenced,
+  # as moca-provisioner's does.
+  if [[ "$WORKLOAD_SANDBOXES" == 1 ]]; then
+    json="$(secret_json moca-redis-provisioner "$NS")"
+    ppw="$(json_value "$json" REDIS_PASSWORD)"
+    json=''
+    [[ -n "$ppw" ]] || { log "generating moca-provisioner's Redis password"; ppw="$(rand_hex)"; }
+    acl="user moca-provisioner reset on #$(printf '%s' "$ppw" | sha256) $REDIS_PROVISIONER_ACL"
+    REDIS_ACL_HASH="$(printf '%s' "$acl" | sha256)"
+    (
+      export S_0="$ppw" S_1="redis://moca-provisioner:$ppw@redis.$NS.svc:6379"
+      apply_secret moca-redis-provisioner "$NS" REDIS_PASSWORD REDIS_URL
+    )
+  fi
+  # URLs and config are re-derived from the passwords on every run, so they can never disagree.
   (
     export S_0="$pw" S_1="redis://:$pw@redis.$NS.svc:6379"
     S_2="$(printf 'requirepass %s\nappendonly yes\ndir /data\n' "$pw")"
+    [[ -z "$acl" ]] || S_2="$S_2"$'\n'"$acl"
     export S_2
     apply_secret moca-redis "$NS" REDIS_PASSWORD REDIS_URL redis.conf
   )
@@ -1536,6 +1566,11 @@ write_overlay() {
         printf '                  - { name: MOCA_WORKLOAD_STORAGE_CLASSES, value: "%s" }\n' "$classes_csv"
       done
       printf '  - target: { kind: NetworkPolicy, name: moca-provisioner }\n    patch: |-\n      - { op: replace, path: /spec/egress, value: %s }\n' "$KUBE_API_EGRESS"
+      # moca-provisioner's Redis user (ensure_redis_secret): Redis reads redis.conf only at start,
+      # so the user's hash on its pod template rolls it when the user is added or its password
+      # changes, and the annotation's going rolls it when the feature is turned off. Redis's pod
+      # template carries no annotations in the base or any overlay, so "add" creates the map.
+      printf '  - target: { kind: StatefulSet, name: redis }\n    patch: |-\n      - { op: add, path: /spec/template/metadata/annotations, value: { moca.dev/redis-acl-hash: "%s" } }\n' "$REDIS_ACL_HASH"
       if is_kind; then
         printf '  - target: { kind: Deployment, name: moca-provisioner }\n    patch: |-\n      - { op: add, path: /spec/template/metadata/annotations, value: { moca.dev/image-id: "%s" } }\n' "$HARNESS_IMAGE_ID"
         printf '  - target: { kind: PodTemplate, name: moca-workload-sandbox }\n    patch: |-\n      - { op: add, path: /template/metadata/annotations, value: { %s } }\n' "$sandbox_ann"

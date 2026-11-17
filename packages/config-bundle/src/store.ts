@@ -1,5 +1,6 @@
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { contentDigest, LOCKFILE_PATH } from './build.js';
+import { assertBundleFormat } from './format.js';
 import { canonicalTar, untar } from './tar.js';
 
 /**
@@ -54,6 +55,10 @@ export function prepareBundle(digest: string, tar: Buffer): string {
   }
   const actual = contentDigest(content);
   if (actual !== digest) throw new BundleDigestMismatchError(digest, actual);
+  // After the digest: the marker is only meaningful on content that is what it claims to be. A
+  // format this release cannot read is refused at upload, the earliest point anyone can be told,
+  // rather than stored for a harness to fail on at the first turn (#510).
+  assertBundleFormat(content);
   return gzipSync(canonicalTar(content)).toString('base64');
 }
 
@@ -82,9 +87,9 @@ export async function putBundle(
 }
 
 /**
- * Fetch and verify. A missing digest or a hash mismatch throws, never degrades: running a leaf
- * with silently-absent configuration produces plausible-but-wrong work, which is the expensive
- * remote failure this design exists to prevent (spec §4.4).
+ * Fetch and verify. A missing digest, a hash mismatch or an unknown format throws, never degrades:
+ * running a leaf with silently-absent configuration produces plausible-but-wrong work, which is the
+ * expensive remote failure this design exists to prevent (spec §4.4).
  */
 export async function getBundle(redis: BundleRedisLike, digest: string): Promise<Buffer> {
   const raw = await redis.get(bundleKey(digest));
@@ -97,12 +102,16 @@ export async function getBundle(redis: BundleRedisLike, digest: string): Promise
     throw new BundleDigestMismatchError(digest, 'unreadable (gunzip failed)');
   }
 
-  let actual: string;
+  let entries: ReturnType<typeof untar>;
   try {
-    actual = contentDigest(untar(tar));
+    entries = untar(tar);
   } catch {
     throw new BundleDigestMismatchError(digest, 'unreadable (untar failed)');
   }
+  const actual = contentDigest(entries);
   if (actual !== digest) throw new BundleDigestMismatchError(digest, actual);
+  // A format newer than this reader knows throws rather than unpacking a layout it would misread:
+  // the same "never degrade" rule as above (#510). No marker reads as version 1.
+  assertBundleFormat(entries);
   return tar;
 }

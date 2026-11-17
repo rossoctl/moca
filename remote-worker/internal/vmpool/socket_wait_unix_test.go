@@ -34,9 +34,10 @@ func sockBase(t *testing.T) string {
 //
 // The quantum was a measurement FLOOR, and removing it was worth ~11% on the mean (24.92 ->
 // 22.24 ms), NOT the ~5x #304 predicted: the socket genuinely takes ~10-40 ms to bind on that
-// host, so most of sockwait was never our sleep. This test pins that the floor is gone, which
-// is a real and separate property -- it must not be read as having removed a throughput ceiling.
-func TestWaitForUnixSocketReturnsWellInsideOneOldQuantum(t *testing.T) {
+// host, so most of sockwait was never our sleep. TestWaitForUnixSocketBackoffGrowsAndIsCapped pins
+// that the floor is gone; this test is the end-to-end half, that a real bind on a real filesystem
+// is noticed at all.
+func TestWaitForUnixSocketNoticesARealBind(t *testing.T) {
 	path := filepath.Join(sockBase(t), "fc.sock")
 
 	// Stands in for Firecracker binding its API socket a couple of ms after the jailer
@@ -47,14 +48,12 @@ func TestWaitForUnixSocketReturnsWellInsideOneOldQuantum(t *testing.T) {
 	// registered from a non-test goroutine races the test's return, and waitForUnixSocket can
 	// return the instant the bind is visible, so a cleanup registered after tRunner drained
 	// the list never runs and the listener fd leaks for the life of the test binary.
-	var bindAt time.Time
 	bindErr := make(chan error, 1)
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
 		time.Sleep(2 * time.Millisecond)
 		l, err := net.Listen("unix", path)
-		bindAt = time.Now()
 		bindErr <- err
 		if err == nil {
 			defer func() { _ = l.Close() }()
@@ -62,26 +61,12 @@ func TestWaitForUnixSocketReturnsWellInsideOneOldQuantum(t *testing.T) {
 		}
 	}()
 
-	err := waitForUnixSocket(context.Background(), path, 5*time.Second)
-	returnedAt := time.Now()
+	err := waitForUnixSocket(context.Background(), path, testWaitBound)
 	if be := <-bindErr; be != nil {
 		t.Fatalf("FIXTURE failed to bind %s: %v (not a failure of waitForUnixSocket)", path, be)
 	}
 	if err != nil {
 		t.Fatalf("waitForUnixSocket: %v", err)
-	}
-	// Measured FROM THE BIND, not from the start of the wait: on a loaded runner the
-	// fixture's own 2 ms bind sleep can overshoot by tens of ms, and that overshoot is
-	// the runner's, not the poll's. This test's job is the END-TO-END sanity that a
-	// real bind on a real filesystem is noticed well inside its overall budget, not
-	// timed out against — the precise schedule (fine first retry, 3/2 growth, 1 ms
-	// cap, and the absence of any restored fixed-sleep floor) is pinned
-	// deterministically by TestWaitForUnixSocketBackoffGrowsAndIsCapped, which is
-	// where a regression of the #304 quantum actually fails. The bound here is
-	// therefore deliberately loose: tight bounds on wall clock pinned the CI runner,
-	// not the code (CI recorded 12.9 ms for a ~2 ms bind with the schedule intact).
-	if since := returnedAt.Sub(bindAt); since >= 100*time.Millisecond {
-		t.Fatalf("took %v after the bind to notice a listening socket — the poll did not notice a bound socket inside its budget", since)
 	}
 }
 
@@ -90,7 +75,9 @@ func TestWaitForUnixSocketReturnsWellInsideOneOldQuantum(t *testing.T) {
 func TestWaitForUnixSocketStillHonoursItsOverallTimeout(t *testing.T) {
 	path := filepath.Join(sockBase(t), "never.sock")
 	start := time.Now()
-	err := waitForUnixSocket(context.Background(), path, 80*time.Millisecond)
+	errc := make(chan error, 1)
+	go func() { errc <- waitForUnixSocket(context.Background(), path, 80*time.Millisecond) }()
+	err := recvWithin(t, errc, "a wait for a socket that never appears")
 	elapsed := time.Since(start)
 	if err == nil {
 		t.Fatal("waitForUnixSocket succeeded against a socket that never appeared")
@@ -104,13 +91,6 @@ func TestWaitForUnixSocketStillHonoursItsOverallTimeout(t *testing.T) {
 	if elapsed < 80*time.Millisecond {
 		t.Fatalf("returned after %v, before its own %v budget", elapsed, 80*time.Millisecond)
 	}
-	// A loose sanity bound only. It CANNOT detect a coarse cap and does not claim to: with
-	// 1.5x growth the last sleep is at most ~0.5x the elapsed time, so elapsed stays within
-	// ~1.5x the budget for ANY cap value -- setting socketPollMax to 2s (2000x coarser) still
-	// passes this. TestWaitForUnixSocketBackoffGrowsAndIsCapped is what pins the schedule.
-	if elapsed > 400*time.Millisecond {
-		t.Fatalf("elapsed %v against an 80ms budget: far beyond the ~1.5x the schedule allows", elapsed)
-	}
 }
 
 // ctx cancellation is the other refusal path: Restore's cleanup() depends on it to unwind
@@ -120,17 +100,13 @@ func TestWaitForUnixSocketStillHonoursContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(5 * time.Millisecond); cancel() }()
 
-	start := time.Now()
-	err := waitForUnixSocket(ctx, path, 10*time.Second)
-	elapsed := time.Since(start)
+	// A wait that ignored ctx would sit out testWaitBound and fail with its timeout error.
+	err := waitForUnixSocket(ctx, path, testWaitBound)
 	if err == nil {
 		t.Fatal("waitForUnixSocket succeeded despite a cancelled context")
 	}
 	if !strings.Contains(err.Error(), context.Canceled.Error()) {
 		t.Fatalf("want a context error, got: %v", err)
-	}
-	if elapsed > 500*time.Millisecond {
-		t.Fatalf("took %v to notice cancellation", elapsed)
 	}
 }
 

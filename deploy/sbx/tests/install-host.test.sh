@@ -675,6 +675,19 @@ bash "$COPY/install-host.sh" "$(bundle sbx_fb3)" --snapshot default --no-egress 
   fail 'install from a script copy with --no-egress'
 ! grep -q 'falling back to the GitHub hosts' "$TMP/out" || fail 'warned although --no-egress was given'
 for id in sbx_fb2 sbx_fb3; do bash "$INSTALL" --uninstall "$id" >"$TMP/out" 2>&1 || fail "uninstall $id"; done
+# An install that fails part-way leaves no temp file behind: here the unit's source is missing, so
+# writing the unit text fails after its temp file exists.
+# mktemp is shimmed to create its files in one directory: macOS's ignores TMPDIR without a template.
+rm "$COPY/../microvm/moca-egress.service"
+mkdir -p "$TMP/mt" "$TMP/mtbin"
+printf '#!/usr/bin/env bash\nexec %q "%s/mt/tmp.XXXXXX"\n' "$(command -v mktemp)" "$TMP" >"$TMP/mtbin/mktemp"
+chmod +x "$TMP/mtbin/mktemp"
+! PATH="$TMP/mtbin:$PATH" bash "$COPY/install-host.sh" "$(bundle sbx_fb4)" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'installed with no moca-egress.service source beside the script'
+[[ -z "$(ls -A "$TMP/mt")" ]] || fail "a failed egress install left its temp file: $(ls -A "$TMP/mt")"
+grep -qF 'cannot read the moca-egress unit source' "$TMP/out" || fail 'the failure does not name the missing unit source'
+rm -rf "$TMP/mtbin"; rmdir "$TMP/mt"
+pass 'an egress install that fails part-way names the cause and leaves no temp file'
 rm -rf "$TMP/scriptcopy"
 pass 'seeds the GitHub hosts (with a warning) when egress-allow.env is missing beside the script, and stays quiet when the default is not used'
 
@@ -842,6 +855,20 @@ bash "$INSTALL" --egress "$(ebundle)" >"$TMP/out" 2>&1 || fail '--egress re-run'
 [[ "$(fp_of "$CD/ca.crt")" == "$FP1" ]] || fail '--egress-ca-out regenerated the CA'
 pass 'the CA is generated once: the fingerprint survives a re-run; --egress-ca-out prints its path'
 
+# A re-run with a new token (setup.sh rotated it, or the host was re-listed) replaces the old one:
+# the file holds the new token alone, keeps its mode, and moca-egress is restarted to read it.
+TOKEN_FIRST="$TOKEN" TOKEN="$(printf 'cd%.0s' $(seq 32))"
+: >"$MOCK_LOG"
+bash "$INSTALL" --egress "$(ebundle)" >"$TMP/out" 2>&1 || fail '--egress re-run with a new token'
+[[ "$(cat "$CD/token")" == "$TOKEN" ]] || fail 'a re-run with a new token did not replace the token file'
+[[ "$(mode "$CD/token")" == 600 ]] || fail "the replaced token file is not 0600 ($(mode "$CD/token"))"
+[[ "$(grep -c "egress credential $CD/token" "$EM")" == 1 ]] || fail 'a re-run recorded the token file twice'
+grep -qx 'systemctl restart moca-egress.service' "$MOCK_LOG" || fail 'a re-run with a new token did not restart moca-egress'
+! grep -rq "$TOKEN" "$SBX_UNIT_DIR" "$TMP/out" "$MOCK_LOG" || fail 'the new token appears in a unit file, the output or a command line'
+[[ "$(fp_of "$CD/ca.crt")" == "$FP1" ]] || fail 'a re-run with a new token regenerated the CA'
+TOKEN="$TOKEN_FIRST"
+pass 'a re-run with a new token replaces the token file (0600, recorded once), restarts moca-egress, keeps the CA'
+
 # The fingerprint check: before any systemctl call, naming the rebuild command.
 for case in missing mismatch; do
   snap_with fpbad "$([[ $case == mismatch ]] && printf '%064d' 1)"
@@ -886,6 +913,31 @@ grep -qx 'systemctl restart moca-egress.service' "$MOCK_LOG" || fail '--uninstal
 grep -q '^egress credential' "$EM" && ! grep -q "egress credential $DROPIN" "$EM" || fail "manifest after --uninstall-egress: $(cat "$EM")"
 bash "$INSTALL" "$(bundle sbx_cr)" --snapshot default >"$TMP/out" 2>&1 || fail 'no check once the drop-in is gone'
 pass '--uninstall-egress removes the drop-in, token and api CA, keeps the CA, restarts moca-egress'
+
+# The manifest is a file under SBX_ENV_DIR, not proof that a path is ours: an `egress credential` line
+# naming a file outside the credential directory (an edited or corrupted manifest) never deletes it.
+# The check is on the path itself, so it holds for every way out (a sibling, a deeper path, a `..`).
+mkdir -p "$CD/sub" "$TMP/cred-outside"
+for f in "$TMP/cred-outside/precious" "$CD/sub/precious" "$CD/../precious"; do
+  echo keep >"$f"
+  echo "egress credential $f" >>"$EM"
+done
+bash "$INSTALL" --uninstall-egress >"$TMP/out" 2>&1 || fail '--uninstall-egress with foreign credential lines'
+for f in "$TMP/cred-outside/precious" "$CD/sub/precious" "$CD/../precious"; do
+  [[ "$(cat "$f" 2>/dev/null)" == keep ]] || fail "--uninstall-egress deleted $f, which is not a file of $CD"
+  grep -qF "kept $f (not a credential file of this script)" "$TMP/out" || fail "--uninstall-egress did not say it kept $f"
+  sed -i.bak "\\#^egress credential $f\$#d" "$EM"; rm -f "$EM.bak" "$f"
+done
+rmdir "$CD/sub" "$TMP/cred-outside"
+# An empty name (the directory itself, `egress credential <dir>/`) names no credential file: kept and named,
+# not logged as removed (review nit).
+echo "egress credential $CD/" >>"$EM"
+bash "$INSTALL" --uninstall-egress >"$TMP/out" 2>&1 || fail '--uninstall-egress with an empty credential name'
+grep -qF "kept $CD/ (not a credential file of this script)" "$TMP/out" || fail "--uninstall-egress did not keep and name $CD/"
+grep -qF "removed $CD/" "$TMP/out" && fail "--uninstall-egress logged $CD/ as removed"
+[[ -d "$CD" ]] || fail "--uninstall-egress removed the credential directory itself"
+sed -i.bak "\\#^egress credential $CD/\$#d" "$EM"; rm -f "$EM.bak"
+pass '--uninstall-egress deletes only files of the credential directory and the drop-in, whatever the manifest says'
 
 # The last worker's uninstall removes the credential files the same way.
 bash "$INSTALL" --egress "$(ebundle api)" >"$TMP/out" 2>&1 || fail '--egress before the last uninstall'

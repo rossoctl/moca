@@ -51,6 +51,9 @@ const KUBE_API_EGRESS = [
   { to: [{ ipBlock: { cidr: '172.18.0.2/32' } }], ports: [{ protocol: 'TCP', port: 6443 }] },
 ];
 
+/** ensure_redis_secret's REDIS_ACL_HASH: the sha256 of the provisioner's redis.conf line. */
+const REDIS_ACL_HASH = 'a'.repeat(64);
+
 /** setup.sh's own write_overlay with SH_WORKLOAD_SANDBOXES=1, rendered through kubectl kustomize. */
 function renderGenerated(dir: string, env: Record<string, string>): K8sObject[] {
   execFileSync('bash', [WRITER, dir], {
@@ -63,6 +66,7 @@ function renderGenerated(dir: string, env: Record<string, string>): K8sObject[] 
       GO_KUBE_API_EGRESS: JSON.stringify(KUBE_API_EGRESS),
       GO_WORKLOAD_CLASSES: 'standard:rwo nfs:rwx',
       GO_OTHER_CLASSES: 'slow',
+      GO_REDIS_ACL_HASH: REDIS_ACL_HASH,
       ...env,
     },
     stdio: ['ignore', 'ignore', 'inherit'],
@@ -393,11 +397,15 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s workload-sandboxes component (setup.sh o
     });
   });
 
-  it('reaches Redis for the orphan sweep (spec §6.2), with the one credential, and DNS', () => {
+  it('reaches Redis for the orphan sweep (spec §6.2), as its own ACL user (#626), and DNS', () => {
     const c = container(find(objs, 'Deployment', 'moca-provisioner', 'moca'), 'provisioner');
+    // Its own Secret, whose URL names its read-only user: never moca-redis's read-write password.
     expect(envVar(c, 'REDIS_URL')?.valueFrom).toEqual({
-      secretKeyRef: { name: 'moca-redis', key: 'REDIS_URL' },
+      secretKeyRef: { name: 'moca-redis-provisioner', key: 'REDIS_URL' },
     });
+    expect(
+      JSON.stringify(podSpec(find(objs, 'Deployment', 'moca-provisioner', 'moca'))),
+    ).not.toMatch(/"moca-redis"/);
     expect(envVar(c, 'MOCA_PROVISIONER_ORPHAN_GRACE_S')?.value).toBe('600');
     expect(envVar(c, 'MOCA_PROVISIONER_RECONCILE_S')?.value).toBe('300');
     // Its own policy: setup.sh replaces moca-provisioner's egress with the API server's addresses.
@@ -442,6 +450,21 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s workload-sandboxes component (setup.sh o
       find(ocp, 'NetworkPolicy', 'allow-openshift-dns', 'moca').spec.egress,
     );
     expect(objs.some((o) => o.metadata.name === 'allow-openshift-dns-provisioner')).toBe(false);
+  });
+
+  it("rolls Redis on its provisioner user's hash: Redis reads redis.conf only at start (#626)", () => {
+    for (const render of [objs, ocp]) {
+      const redis = find(render, 'StatefulSet', 'redis', 'moca');
+      expect(redis.spec.template.metadata.annotations).toEqual({
+        'moca.dev/redis-acl-hash': REDIS_ACL_HASH,
+      });
+      // Still the one Secret's redis.conf: the user is defined there, beside requirepass.
+      expect(podSpec(redis).volumes).toContainEqual(
+        expect.objectContaining({
+          secret: expect.objectContaining({ secretName: 'moca-redis' }),
+        }),
+      );
+    }
   });
 
   it('leaves every image the base and target set unchanged', () => {

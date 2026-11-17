@@ -8,19 +8,20 @@ that shipped it ("The data plane's twin … goes to"):
 
 | `harness-openapi.yaml` | Shipped with                   |
 | ---------------------- | ------------------------------ |
-| 1.5.0                  | [1.27.0](#1270)                |
+| 1.6.0                  | [1.29.0](#1290)                |
+| 1.5.0                  | [1.28.0](#1280)                |
 | 1.4.0                  | [1.26.0](#1260)                |
 | 1.3.0                  | [1.17.0](#1170)                |
 | 1.2.0                  | [1.16.0](#1160)                |
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
-## 1.27.0
+## 1.29.0
 
 Per-turn budgets, and cancelling a turn that is already running
 ([#391](https://github.com/rossoctl/moca/issues/391)), per the
 [async fan-out spec](../specs/2026-11-05-p6-async-fan-out-design.md) §4.3 and §4.5. The data plane's
-twin goes to **1.5.0** with it. One **narrowing** on the wire, deliberate and named below — allowed
+twin goes to **1.6.0** with it. One **narrowing** on the wire, deliberate and named below — allowed
 because `/v1` is Preview ([maturity](../reference/maturity-and-lifecycle.md)), and recorded here
 because that is what Preview requires.
 
@@ -55,6 +56,34 @@ because that is what Preview requires.
 - `POST /internal/turn-credentials` returns `turnExp` in **every** tenancy mode, not only `grant`:
   it is the deadline the worker enforces, so a single-tenant deployment got an unenforceable
   `caps.wallClock` without it. `caps.costUsd` is gone from that body too.
+
+## 1.28.0
+
+A config bundle's format version, checked where a bundle is stored and where it is applied
+([#510](https://github.com/rossoctl/moca/issues/510)), per the
+[change policy](../reference/change-policy.md#version-markers) (decision 7). Additive on the wire.
+
+- POST /v1/config-bundles refuses a bundle whose `format.json` names a format newer than this
+  release reads, or is not a format version, with `400 invalid_request` and the reason in
+  `message`. A bundle without `format.json` is format 1, so every bundle stored before it existed
+  keeps its digest and stays usable.
+
+The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.5.0: POST /v1/turn
+answers `422 config_bundle_unsupported` when the session's bundle is stored and intact but in a
+format the harness does not read, with the reason and what to upgrade in `message`, on the sync
+path and before the first SSE frame alike; after it, the terminal `error` frame carries the same
+reason.
+
+## 1.27.0
+
+The base URL says what it is ([#779](https://github.com/rossoctl/moca/issues/779)). Additive on the
+wire.
+
+- `GET /` answers `200` with a short `text/plain` page on every profile: that this is a Moca control
+  plane, where its API is (`/v1`, and `GET /v1/discovery`), how to install `mocactl` and log in, and
+  that a sandbox's egress is an allowlist the operator extends. Before, it was the unknown-path
+  `404 not_found`. The page names no URL of the deployment and echoes nothing of the request. Its
+  wording is not a contract: a client reads `/v1/discovery`.
 
 ## 1.26.0
 
