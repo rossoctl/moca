@@ -19,14 +19,19 @@
 #   SBX_WORKSPACE_FS_GIB    required; the KVM host's workspace filesystem size, for the disk check
 #   SBX_LIFETIME_DAYS       optional; 1-30, default 7: the default idle lifetime of a sandbox, at
 #                           most SBX_MAX_LIFETIME_DAYS
-#   SBX_MAX_LIFETIME_DAYS   optional; 1-30, default 30: the most an owner may pick for a sandbox's
-#                           idle lifetime. Writing it (SH_SANDBOX_MAX_LIFETIME_SECONDS) turns idle
+#   SBX_MAX_LIFETIME_DAYS   optional; 1-30 or off, default 30: the most an owner may pick for a
+#                           sandbox's idle lifetime. Writing it (SH_SANDBOX_MAX_LIFETIME_SECONDS) turns idle
 #                           lifetimes on in the control plane. Each worker's idle reclaim
 #                           (SH_WORKSPACE_IDLE) is set to it plus two days; a change means
 #                           reinstalling every host's workers (install-host.sh), and the run
 #                           refuses unless SBX_ACK_HOSTS=1. A lowered maximum keeps the workers'
 #                           idle at the highest the bundles hold (sandboxes keep the deadlines set
 #                           under the old maximum) until SBX_LOWER_WORKSPACE_IDLE=1
+#                           off: idle lifetimes stay off (no SH_SANDBOX_MAX_LIFETIME_SECONDS: the
+#                           absolute lifetime) and the idle is SBX_LIFETIME_DAYS plus two days, as
+#                           before (216h at 7 days): the way to take this setup.sh on an existing
+#                           deployment before its hosts can be reinstalled. Set a number on the day
+#                           you reinstall the hosts
 #   SBX_LOWER_WORKSPACE_IDLE optional; unset or 1: write the shorter idle of a lowered maximum into
 #                           the bundles (a host change: SBX_ACK_HOSTS=1). Set it only once the old
 #                           maximum has passed since the run that lowered SBX_MAX_LIFETIME_DAYS
@@ -185,8 +190,10 @@ validate() {
   : "${SBX_WORKSPACE_IMAGE_MB:=2048}" "${SBX_TOKEN_TTL_MINUTES:=15}" "${SBX_RETENTION_DAYS:=14}"
   : "${SBX_MODES_ALLOWED:=per-exec}" "${SBX_IDLE_CEILING_S:=1800}"
   [[ "$SBX_LIFETIME_DAYS" =~ ^([1-9]|[12][0-9]|30)$ ]] || die 'SBX_LIFETIME_DAYS must be a whole number of days, 1-30'
-  [[ "$SBX_MAX_LIFETIME_DAYS" =~ ^([1-9]|[12][0-9]|30)$ ]] || die 'SBX_MAX_LIFETIME_DAYS must be a whole number of days, 1-30'
-  ((SBX_LIFETIME_DAYS <= SBX_MAX_LIFETIME_DAYS)) || die 'SBX_LIFETIME_DAYS must not exceed SBX_MAX_LIFETIME_DAYS'
+  [[ "$SBX_MAX_LIFETIME_DAYS" =~ ^([1-9]|[12][0-9]|30|off)$ ]] ||
+    die 'SBX_MAX_LIFETIME_DAYS must be a whole number of days, 1-30, or off'
+  [[ "$SBX_MAX_LIFETIME_DAYS" == off ]] || ((SBX_LIFETIME_DAYS <= SBX_MAX_LIFETIME_DAYS)) ||
+    die 'SBX_LIFETIME_DAYS must not exceed SBX_MAX_LIFETIME_DAYS'
   [[ -z "${SBX_LOWER_WORKSPACE_IDLE:-}" || "$SBX_LOWER_WORKSPACE_IDLE" == 1 ]] ||
     die 'SBX_LOWER_WORKSPACE_IDLE must be unset or 1'
   [[ "$SBX_TOKEN_TTL_MINUTES" =~ ^([5-9]|[1-5][0-9]|60)$ ]] || die 'SBX_TOKEN_TTL_MINUTES must be a whole number of minutes, 5-60'
@@ -235,10 +242,17 @@ validate() {
   ((SBX_MAX_TOTAL * SBX_WORKSPACE_IMAGE_MB * 10 <= SBX_WORKSPACE_FS_GIB * 1024 * 8)) ||
     die "SBX_MAX_TOTAL ($SBX_MAX_TOTAL) x SBX_WORKSPACE_IMAGE_MB ($SBX_WORKSPACE_IMAGE_MB) exceeds 80% of SBX_WORKSPACE_FS_GIB ($SBX_WORKSPACE_FS_GIB GiB)"
   # SBX0 §5.4: the worker's idle reclaim outlasts the sandbox, so it never reclaims a live one.
+  # off: no SH_SANDBOX_MAX_LIFETIME_SECONDS (MAX_LIFETIME_S empty), so the control plane keeps the
+  # absolute lifetime, and the idle follows SBX_LIFETIME_DAYS, as before idle lifetimes.
   LIFETIME_S=$((SBX_LIFETIME_DAYS * 86400))
-  MAX_LIFETIME_S=$((SBX_MAX_LIFETIME_DAYS * 86400))
-  WORKSPACE_IDLE_H=$((SBX_MAX_LIFETIME_DAYS * 24 + 48))
-  ((WORKSPACE_IDLE_H * 3600 > MAX_LIFETIME_S)) || die 'SH_WORKSPACE_IDLE must exceed SH_SANDBOX_MAX_LIFETIME_SECONDS'
+  MAX_LIFETIME_S=''
+  local longest_days="$SBX_LIFETIME_DAYS"
+  if [[ "$SBX_MAX_LIFETIME_DAYS" != off ]]; then
+    MAX_LIFETIME_S=$((SBX_MAX_LIFETIME_DAYS * 86400))
+    longest_days="$SBX_MAX_LIFETIME_DAYS"
+  fi
+  WORKSPACE_IDLE_H=$((longest_days * 24 + 48))
+  ((WORKSPACE_IDLE_H * 3600 > longest_days * 86400)) || die 'SH_WORKSPACE_IDLE must exceed the longest sandbox lifetime'
   check_host_idle
   check_host_ceiling
 
@@ -837,8 +851,10 @@ ensure_settings() {
     'SH_SANDBOX_TIERS=' 'SH_SANDBOX_DEFAULT_TIER=' 'SH_MODEL_CATALOG_HOSTS=' 'SH_TEST_USERS=0')
   sbx=("SH_ALLOWED_SUBJECTS=$SBX_ALLOWED_SUBJECTS" "SH_SANDBOX_TEMPLATES=$TEMPLATES_JSON"
     "SH_SANDBOX_EXEC_ENDPOINT=$SBX_EXEC_HOST:443" 'SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane'
-    "SH_SANDBOX_LIFETIME_SECONDS=$LIFETIME_S" "SH_SANDBOX_MAX_LIFETIME_SECONDS=$MAX_LIFETIME_S"
-    "SH_SANDBOX_TOKEN_TTL_SECONDS=$TOKEN_TTL_S"
+    "SH_SANDBOX_LIFETIME_SECONDS=$LIFETIME_S")
+  # Absent with SBX_MAX_LIFETIME_DAYS=off: idle lifetimes stay off (the absolute lifetime).
+  [[ -z "$MAX_LIFETIME_S" ]] || sbx+=("SH_SANDBOX_MAX_LIFETIME_SECONDS=$MAX_LIFETIME_S")
+  sbx+=("SH_SANDBOX_TOKEN_TTL_SECONDS=$TOKEN_TTL_S"
     "SH_SANDBOX_RETENTION_SECONDS=$RETENTION_S" "SH_SANDBOX_MAX_PER_SUBJECT=$SBX_MAX_PER_SUBJECT"
     "SH_SANDBOX_MAX_TOTAL=$SBX_MAX_TOTAL" "SH_SANDBOX_MAX_INFLIGHT=$SBX_MAX_INFLIGHT"
     "SH_SANDBOX_MODES_ALLOWED=$SBX_MODES_ALLOWED" "SH_SANDBOX_IDLE_CEILING_S=$SBX_IDLE_CEILING_S")

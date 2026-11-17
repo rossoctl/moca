@@ -107,7 +107,16 @@ carry on.
 **Moving to idle lifetimes (#770).** The first run of this `setup.sh` on an existing deployment
 changes every worker's idle from 216 h to 768 h, and starts idle lifetimes: the control plane counts
 idle time only when `SH_SANDBOX_MAX_LIFETIME_SECONDS` is set, and keeps the old absolute lifetime
-otherwise. In this order:
+otherwise. Until the hosts can be reinstalled, take this `setup.sh` with idle lifetimes off: it
+writes no `SH_SANDBOX_MAX_LIFETIME_SECONDS` and keeps every worker's idle at 216 h (at the defaults),
+so no host changes and routine runs (enrolling a user, a quota change) need no ack:
+
+```bash
+SBX_MAX_LIFETIME_DAYS=off deploy/sbx/setup.sh --env-file <env file>
+```
+
+Idle lifetimes stay off; set a number on the day you reinstall the hosts. On that day, in this
+order:
 
 ```bash
 SBX_ACK_HOSTS=1 deploy/sbx/setup.sh --env-file <env file>

@@ -198,6 +198,7 @@ refusals=(
   'export SBX_MAX_LIFETIME_DAYS=0 => SBX_MAX_LIFETIME_DAYS must be'
   'export SBX_LIFETIME_DAYS=10 SBX_MAX_LIFETIME_DAYS=5 => SBX_LIFETIME_DAYS must not exceed SBX_MAX_LIFETIME_DAYS'
   'export SBX_LOWER_WORKSPACE_IDLE=yes => SBX_LOWER_WORKSPACE_IDLE must be unset or 1'
+  'export SBX_MAX_LIFETIME_DAYS=of => SBX_MAX_LIFETIME_DAYS must be a whole number of days, 1-30, or off'
   'export SBX_MAX_TOTAL=0 => SBX_MAX_TOTAL must be a positive whole number'
   'export SBX_MAX_PER_SUBJECT=x => SBX_MAX_PER_SUBJECT must be a positive whole number'
   'export SBX_TOKEN_TTL_MINUTES=4 => SBX_TOKEN_TTL_MINUTES must be a whole number of minutes, 5-60'
@@ -537,9 +538,38 @@ grep -q 'sbx_default sbx_py312' "$TMP/out" || fail 'the upgrade refusal does not
 ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the upgrade refusal changed something first'
 [[ -z "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" || "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 2592000 ]] ||
   fail 'the refused upgrade moved the maximum in the ConfigMap'
+pass 'an upgrade from 216h bundles refuses without SBX_ACK_HOSTS=1'
+
+# SBX_MAX_LIFETIME_DAYS=off takes this setup.sh before the hosts can be reinstalled: idle lifetimes
+# stay off (no SH_SANDBOX_MAX_LIFETIME_SECONDS, so the control plane keeps the absolute lifetime) and
+# the idle is SBX_LIFETIME_DAYS plus two days, as before: no host change. Removing the key of an
+# earlier run turns sliding off, which is safe.
+: >"$MOCK_LOG"
+run_setup export SBX_MAX_LIFETIME_DAYS=off || fail 'SBX_MAX_LIFETIME_DAYS=off over 216h bundles was refused'
+! grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" || fail 'SBX_MAX_LIFETIME_DAYS=off warns about SH_WORKSPACE_IDLE'
+for w in sbx_default sbx_py312; do
+  grep -qx 'SH_WORKSPACE_IDLE=216h' "$GEN/workers/$w/worker.env" || fail "SBX_MAX_LIFETIME_DAYS=off moved the $w bundle off 216h"
+done
+! jq -e '.data | has("SH_SANDBOX_MAX_LIFETIME_SECONDS")' "$MOCK_STATE/configmap-sbx-settings.json" >/dev/null ||
+  fail 'SBX_MAX_LIFETIME_DAYS=off wrote SH_SANDBOX_MAX_LIFETIME_SECONDS'
+[[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 604800 ]] || fail 'SBX_MAX_LIFETIME_DAYS=off lost the lifetime'
+render
+grep -A5 -- '- name: SH_SANDBOX_MAX_LIFETIME_SECONDS$' "$TMP/render.yaml" | grep -q 'optional: true' ||
+  fail 'the control plane does not read SH_SANDBOX_MAX_LIFETIME_SECONDS as optional'
+pass 'SBX_MAX_LIFETIME_DAYS=off over 216h bundles applies with no ack: bundles stay 216h, no maximum in sbx-settings'
+
 run_setup export SBX_ACK_HOSTS=1 || fail 'the acknowledged upgrade failed'
 grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'the acknowledged upgrade did not write 768h'
-pass 'an upgrade from 216h bundles refuses until SBX_ACK_HOSTS=1, then applies'
+[[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 2592000 ]] || fail 'the acknowledged upgrade did not write the maximum'
+pass 'an upgrade from 216h bundles applies with SBX_ACK_HOSTS=1'
+
+# off checks nothing against the maximum: SBX_LIFETIME_DAYS may be any of 1-30.
+run_setup export SBX_MAX_LIFETIME_DAYS=off SBX_LIFETIME_DAYS=30 || fail 'SBX_MAX_LIFETIME_DAYS=off refused SBX_LIFETIME_DAYS=30'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'off at 30 d did not keep 768h'
+[[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 2592000 ]] || fail 'off at 30 d did not write the lifetime'
+[[ -z "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" ]] || fail 'off at 30 d wrote a maximum'
+run_setup true || fail 'the run back to the defaults failed'
+pass 'SBX_MAX_LIFETIME_DAYS=off rejects no SBX_LIFETIME_DAYS of 1-30'
 
 # 4b'. A template, subject or quota change is the control plane's alone: it rolls the control plane
 # and not the relay, so running Execs survive it (RUNBOOK §5).
