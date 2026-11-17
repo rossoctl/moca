@@ -1005,8 +1005,8 @@ reset_state
 [[ "$(cm moca-settings SH_OIDC_CLIENT_ID)" == 0123456789abcdef ]] || fail 'oidc client id not written'
 [[ "$(cm moca-settings SH_OIDC_REDIRECT_URI)" == https://sbx-api.apps.example.invalid/v1/auth/oidc/callback ]] || fail 'oidc redirect URI not written'
 [[ "$(cm moca-settings SH_OIDC_SCOPE)" == 'openid email profile' ]] || fail 'oidc scope not written'
-jq -e '.data | has("SH_GITHUB_CLIENT_ID") | not' "$MOCK_STATE/configmap-moca-settings.json" >/dev/null ||
-  fail 'an oidc deployment writes a GitHub client id'
+jq -e '.data | has("SH_GITHUB_CLIENT_ID") and (.SH_GITHUB_CLIENT_ID == "")' "$MOCK_STATE/configmap-moca-settings.json" >/dev/null ||
+  fail 'an oidc deployment must write an empty SH_GITHUB_CLIENT_ID (the base reads the key unconditionally)'
 [[ "$(cm sbx-settings SH_ALLOWED_SUBJECTS)" == 'oidc:ghe@us.ibm.com,github:1' ]] || fail 'oidc allowed subjects not written'
 [[ "$(cm moca-settings SH_ADMIN_SUBJECTS)" == oidc:ghe@us.ibm.com ]] || fail 'oidc admin subject not written'
 render

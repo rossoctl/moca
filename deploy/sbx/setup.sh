@@ -968,9 +968,12 @@ ensure_settings() {
     moca=("SH_GITHUB_CLIENT_ID=$SBX_GITHUB_CLIENT_ID" "SH_ADMIN_SUBJECTS=${SBX_ADMIN_SUBJECTS:-}"
       'SH_API_TOKEN_TTL_SECONDS=' 'SH_SESSION_TOKEN_TTL_SECONDS=')
   else
-    moca=("SH_ADMIN_SUBJECTS=${SBX_ADMIN_SUBJECTS:-}" 'SH_API_TOKEN_TTL_SECONDS=' 'SH_SESSION_TOKEN_TTL_SECONDS='
-      "SH_IDENTITY_PROVIDER=oidc" "SH_OIDC_ISSUER=$SBX_OIDC_ISSUER" "SH_OIDC_CLIENT_ID=$SBX_OIDC_CLIENT_ID"
-      "SH_OIDC_REDIRECT_URI=$SBX_OIDC_REDIRECT_URI")
+    # SH_GITHUB_CLIENT_ID stays, empty: the base's env ref for it is not optional, so the key must
+    # exist, and the control plane ignores it on an oidc deployment (it refuses a VALUE only when
+    # the provider is github).
+    moca=("SH_GITHUB_CLIENT_ID=" "SH_ADMIN_SUBJECTS=${SBX_ADMIN_SUBJECTS:-}" 'SH_API_TOKEN_TTL_SECONDS='
+      'SH_SESSION_TOKEN_TTL_SECONDS=' "SH_IDENTITY_PROVIDER=oidc" "SH_OIDC_ISSUER=$SBX_OIDC_ISSUER"
+      "SH_OIDC_CLIENT_ID=$SBX_OIDC_CLIENT_ID" "SH_OIDC_REDIRECT_URI=$SBX_OIDC_REDIRECT_URI")
     [[ -z "${SBX_OIDC_SCOPE:-}" ]] || moca+=("SH_OIDC_SCOPE=$SBX_OIDC_SCOPE")
   fi
   # Combined: the keys the base's control plane reads beside these (base/control-plane.yaml), with
