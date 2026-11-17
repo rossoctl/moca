@@ -64,15 +64,24 @@ spec:
       volumes:
         - name: credentials
           # The base (ADR-0045) makes this a PROJECTED volume so the test-user secret can come from
-          # an `optional` source of its own. Volumes merge by name, so without this the strategic
-          # merge would keep the base's `projected:` ALONGSIDE the `secret:` below -- a volume with
-          # two types, which the API server refuses, and which would also mount the KEK and
-          # exchange token that SBX0 §4.1 deliberately removes here.
-          projected: null
-          secret:
-            secretName: moca-mu1
-            items:
-              - { key: SH_SESSION_TOKEN_PRIVATE_KEY, path: SH_SESSION_TOKEN_PRIVATE_KEY }
-              # The host janitor's bearer (SBX0 §8.1), admitted on GET /v1/janitor/sandboxes only.
-              - { key: SH_JANITOR_TOKEN, path: SH_JANITOR_TOKEN }
+          # an `optional` source of its own. Volumes merge by name, so a `secret:` here would keep
+          # the base's `projected:` ALONGSIDE it -- a volume with two types, which the API server
+          # refuses. Staying PROJECTED replaces the base's source list wholesale, which both drops
+          # the KEK and exchange token that SBX0 §4.1 deliberately removes AND adds the oidc client
+          # secret's optional source back (an SBX_IDENTITY_PROVIDER=oidc deployment reads it as a
+          # file under CREDENTIALS_DIRECTORY; a GitHub one has no moca-oidc Secret and renders
+          # exactly as before, the source being optional).
+          projected:
+            sources:
+              - secret:
+                  name: moca-mu1
+                  items:
+                    - { key: SH_SESSION_TOKEN_PRIVATE_KEY, path: SH_SESSION_TOKEN_PRIVATE_KEY }
+                    # The host janitor's bearer (SBX0 §8.1), admitted on GET /v1/janitor/sandboxes only.
+                    - { key: SH_JANITOR_TOKEN, path: SH_JANITOR_TOKEN }
+              - secret:
+                  name: moca-oidc
+                  optional: true
+                  items:
+                    - { key: SH_OIDC_CLIENT_SECRET, path: SH_OIDC_CLIENT_SECRET }
             defaultMode: 256 # 0400

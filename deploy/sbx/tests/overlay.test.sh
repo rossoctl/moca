@@ -146,19 +146,19 @@ for k in SH_SANDBOX_MODES_ALLOWED SH_SANDBOX_IDLE_CEILING_S; do
   [[ "$(cp_env "$k" | jq -r .valueFrom.configMapKeyRef.optional)" == true ]] ||
     fail "$k must be optional (the control plane defaults it)"
 done
-[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.secret) | {s: .secret.secretName, k: [.secret.items[]?.key]}]' <<<"$CP")" == '[{"s":"moca-mu1","k":["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN"]}]' ]] ||
-  fail "the control plane mounts more or less than its signing key and the janitor token: $(jq -c '[.spec.template.spec.volumes[] | select(.secret)]' <<<"$CP")"
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.projected) | {s: [.projected.sources[] | .secret.name], o: [.projected.sources[] | .secret.optional], k: [.projected.sources[] | .secret.items[]?.key]}]' <<<"$CP")" == '[{"s":["moca-mu1","moca-oidc"],"o":[null,true],"k":["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN","SH_OIDC_CLIENT_SECRET"]}]' ]] ||
+  fail "the control plane mounts more or less than its signing key, the janitor token and the optional oidc client secret: $(jq -c '[.spec.template.spec.volumes[] | select(.projected)]' <<<"$CP")"
 [[ "$(jq -r .spec.template.spec.automountServiceAccountToken <<<"$CP")" == false ]] || fail 'the control plane still mounts a service account token'
 # Exactly ONE source type per volume. The base makes `credentials` a projected volume (ADR-0045);
-# volumes merge by name, so an overlay that supplies `secret:` without nulling `projected:` renders
+# volumes merge by name, so an overlay that supplies `secret:` without replacing `projected:` renders
 # BOTH -- which the API server refuses, and which would re-mount the KEK and exchange token this
-# profile removes. The assertion above cannot see that: `select(.secret)` matches either way.
+# profile removes. The assertion above cannot see that: `select(.projected)` matches either way.
 VOL_TYPES="$(jq -c '[.spec.template.spec.volumes[] | {name, types: ([to_entries[] | select(.key != "name") | .key] | sort)}]' <<<"$CP")"
 [[ "$(jq -c '[.[] | select((.types | length) != 1)]' <<<"$VOL_TYPES")" == '[]' ]] ||
   fail "a volume declares more than one source type: $(jq -c '[.[] | select((.types | length) != 1)]' <<<"$VOL_TYPES")"
-[[ "$(jq -r '.[] | select(.name == "credentials") | .types[0]' <<<"$VOL_TYPES")" == secret ]] ||
-  fail "the credentials volume is not a plain secret volume here: $(jq -c '.[] | select(.name == "credentials")' <<<"$VOL_TYPES")"
-pass 'the control plane runs the sandbox profile with only its signing key and the janitor token mounted'
+[[ "$(jq -r '.[] | select(.name == "credentials") | .types[0]' <<<"$VOL_TYPES")" == projected ]] ||
+  fail "the credentials volume is not a projected volume here: $(jq -c '.[] | select(.name == "credentials")' <<<"$VOL_TYPES")"
+pass 'the control plane runs the sandbox profile with only its signing key, the janitor token and the optional oidc secret mounted'
 
 # The control plane's own policy admits nothing (the base's supervisor ingress is reset).
 [[ "$(obj NetworkPolicy moca-control-plane | jq -c '.spec.ingress')" == '[]' ]] ||

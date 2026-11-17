@@ -876,7 +876,9 @@ install_janitor() {
   # stays there (spec §8.1), where the lifetime is known.
   [[ "$age" =~ ^(0|[1-9][0-9]{0,8})$ ]] || die "SBX_JANITOR_AGE in $b/janitor.env must be whole seconds, in decimal without a leading zero"
   ((10#$age > 60)) || die "SBX_JANITOR_AGE in $b/janitor.env is ${age} s: it must exceed 60 s (re-run deploy/sbx/setup.sh and copy the new bundle)"
-  [[ "$(<"$b/janitor.token")" =~ ^[!-~]{32,}$ ]] || die "$b/janitor.token does not hold a token of 32+ printable characters: copy the bundle again"
+  # [[:graph:]], not [!-~]: under a UTF-8 locale the latter can NOMATCH printable ASCII it should
+  # match (the LC_ALL=C workaround's bug class; same fix as setup.sh's janitor-token check).
+  [[ "$(<"$b/janitor.token")" =~ ^[[:graph:]]{32,}$ ]] || die "$b/janitor.token does not hold a token of 32+ printable characters: copy the bundle again"
   if [[ -f "$b/api-ca.crt" ]]; then
     grep -q -- '-----BEGIN CERTIFICATE-----' "$b/api-ca.crt" || die "$b/api-ca.crt holds no PEM certificate"
     ca="$SBX_ENV_DIR/janitor-api-ca.crt"
