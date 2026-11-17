@@ -35,7 +35,10 @@ because that is what Preview requires.
   that outruns `wallClock`, counted from the moment a worker dequeues it and clamped to the
   deployment's `MOCA_TURN_MAX_S`. The data plane's `budget` joins the failed-reason enum, and its
   `TurnResult` gains `budgetExceeded` (the loop reports `end_turn` when every call was refused, so
-  the cap firing is otherwise invisible).
+  the cap firing is otherwise invisible). Both caps are **per delivery**: a worker that dies mid-leaf
+  has its turn redelivered, and the retry gets a fresh token budget and a wall clock anchored at its
+  own dequeue, because a retry must not fail on its predecessor's spend. Across a turn's deliveries
+  the aggregate can therefore reach the cap times the delivery limit (three).
 - **`subject_quota_exceeded` on the data plane's `/v1/turn` now counts the caller's running queued
   turns too.** `SH_TURNS_PER_SUBJECT` is one budget per subject across both paths, so a caller whose
   async fan-out is executing can be refused an interactive turn it would previously have been given.

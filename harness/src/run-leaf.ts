@@ -473,6 +473,9 @@ function budgetVoters(
   return [
     budgetVoterExtension(sessionManager, {
       limit,
+      // PER DELIVERY, as the contract says (openapi `caps`): a redelivery after a worker died mid-
+      // leaf starts from this branch's spend, so the retry gets its own full budget rather than
+      // failing on its predecessor's tokens.
       baseline: branchSpend(sessionManager) ?? 0,
       onExceeded: () => {
         capture.budgetExceeded = true;

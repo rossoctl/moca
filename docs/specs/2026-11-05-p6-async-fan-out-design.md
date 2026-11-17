@@ -1219,6 +1219,12 @@ it adds is the schedule. Its design should cite this document for both.
   deferred entry does wait up to one `minIdleMs` (90 s) before any worker may reclaim it, even if a
   slot frees sooner: leaving IDLE high instead would have this worker's own next claim reclaim the
   same entry (XAUTOCLAIM leads every claim), defer it again, and never reach the entries behind it.
+  Because the defer also refunds the attempt budget, nothing else bounds how often one entry can be
+  handed back, so **fairness yields after ten minutes** (`DEFER_CEILING_MS`, measured from the
+  entry's own stream id): past that the entry runs one leaf over its owner's share and logs that it
+  did, because an owner who never frees a slot would otherwise have their turn deferred forever —
+  never run, never dead-lettered, and with `turnExp` never starting, since it is anchored at a
+  dequeue that never comes. The worker-wide `SH_TURNS_PER_WORKER` cap still holds.
   **What it is NOT, and what #391 therefore leaves open.** It does not bound an owner's share of an
   **async-only** drain. A worker runs one queued leaf at a time (§5.3), so an owner's async turns
   reach a cap of `max(1, ⌊S/2⌋)` only when their sync turns are in flight too; with async alone the

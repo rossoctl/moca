@@ -1989,6 +1989,12 @@ paths:
                     from the moment a worker dequeues it, clamped to the deployment's
                     `MOCA_TURN_MAX_S`.
 
+                    Both are PER DELIVERY. A worker that dies mid-leaf has its turn redelivered, and
+                    the retry gets a fresh token budget and a fresh wall clock anchored at its own
+                    dequeue -- a retry must not fail on its predecessor's spend. So the aggregate
+                    across a turn's deliveries can reach the cap times the delivery limit (three).
+                    Size `tokens` as a per-attempt ceiling, not a total.
+
                     There is no `costUsd`: a present one is a 400 `invalid_request`. It was recorded
                     and never enforceable -- nothing here prices a token -- and silently ignoring a
                     spend cap is worse than refusing it. Use `tokens`.

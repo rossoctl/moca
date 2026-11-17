@@ -96,10 +96,16 @@ export interface LeafJobDeps {
    * and §4.5's criterion is that a cancel releases the sandbox within 10 s.
    */
   cancelPollMs?: number;
+  /** How old a deferred entry may get before fairness yields to it. Defaults to DEFER_CEILING_MS. */
+  deferCeilingMs?: number;
   log?: (msg: string) => void;
   now?: () => string;
-  setHeartbeat?: (fn: () => void, ms: number) => unknown;
-  clearHeartbeat?: (handle: unknown) => void;
+  /**
+   * The timer seam, shared by the touch heartbeat and the cancel/deadline watchdog -- two periods,
+   * one injection point, because a test that drives one wants to drive the other.
+   */
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
 }
 
 /**
@@ -177,6 +183,11 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
   // is the reclaim. Honoured HERE, before the fairness slot and before `claimTurn`, so a turn that
   // must not run never mints a credential, never writes an issuance to the audit log, never leases a
   // sandbox, and never waits out another owner's cap first.
+  //
+  // A failed poll reads as "no cancel" and the turn RUNS: the in-run watchdog re-polls every
+  // `cancelPollMs` and aborts within §4.5's ten seconds, so a Redis blip at claim time costs a few
+  // seconds of a sandbox rather than a turn. Do not turn this catch into a refusal -- that would
+  // make a blip strand a turn nobody asked to cancel.
   if (await deps.cancelRequested?.(claimed.turnId).catch(() => false)) {
     // No result record, exactly as a cancel while `queued` leaves none. `finalize` maps `aborted` to
     // `cancelled`, and the entry is acked because nothing will ever run it.
@@ -198,12 +209,21 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
   // served ahead of B's single turn. Upgrade when async-only fan-out from several owners is real:
   // the count has to be cluster-wide (per-owner streams, or a per-owner running count checked at the
   // dequeue exchange), which no in-process counter can provide. Open on #391; spec §12 has the shape.
-  const releaseOwner = deps.admitOwner ? await deps.admitOwner(claimed.turnId) : noRelease;
+  let releaseOwner = deps.admitOwner ? await deps.admitOwner(claimed.turnId) : noRelease;
   if (!releaseOwner) {
-    // Handed back UNRUN and at no cost to its attempt budget; see `defer`'s own doc for why the
-    // entry then waits out `minIdleMs` rather than being instantly reclaimable.
-    await deps.queue.defer(claimed.entryId, deps.consumerId, claimed.deliveryCount - 1);
-    return { kind: 'deferred', turnId: claimed.turnId, reclaimed: claimed.reclaimed };
+    if (entryAgeMs(claimed.entryId) < (deps.deferCeilingMs ?? DEFER_CEILING_MS)) {
+      // Handed back UNRUN and at no cost to its attempt budget; see `defer`'s own doc for why the
+      // entry then waits out `minIdleMs` rather than being instantly reclaimable.
+      await deps.queue.defer(claimed.entryId, deps.consumerId, claimed.deliveryCount - 1);
+      return { kind: 'deferred', turnId: claimed.turnId, reclaimed: claimed.reclaimed };
+    }
+    // Past the ceiling, so fairness yields: see DEFER_CEILING_MS. Logged because this is the one
+    // trace a starving owner leaves -- `async_deferred_subject` counts defers in aggregate and
+    // cannot tell "paced for 90 s" from "waiting since this morning".
+    (deps.log ?? console.warn)(
+      `[async] entry ${claimed.entryId} for turn ${claimed.turnId} deferred past the ceiling: running it over its owner's share`,
+    );
+    releaseOwner = noRelease;
   }
   try {
     return await runClaimedEntry(deps, claimed);
@@ -213,6 +233,29 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
     // throw, which would otherwise leak one of their slots for the life of the process.
     releaseOwner();
   }
+}
+
+/**
+ * How long an entry may be handed back before fairness yields to it (#391). A defer costs the entry
+ * `minIdleMs` (90 s) and refunds its attempt budget, so nothing else bounds the number of deferrals:
+ * an owner who stays at their cap -- a long interactive turn, or a slot leaked on another worker --
+ * would otherwise have their queued turns deferred forever, never run and never dead-lettered, with
+ * `turnExp` never starting because it is anchored at a dequeue that never comes.
+ *
+ * Ten minutes: a few rounds of pacing are the normal case, and past this the entry is being starved
+ * rather than paced. It then runs on the worker's own admission slot, one leaf over its owner's
+ * share, which is the smaller harm -- the global `SH_TURNS_PER_WORKER` cap still holds.
+ */
+export const DEFER_CEILING_MS = 600_000;
+
+/**
+ * How long ago this entry was enqueued, from the stream id's millisecond part -- so the ceiling
+ * above costs no extra read. An id that does not parse reads as age 0, i.e. keep pacing it: the
+ * fairness cap is the behaviour worth preserving when the clock is unknowable.
+ */
+function entryAgeMs(entryId: string): number {
+  const enqueuedMs = Number(entryId.split('-')[0]);
+  return Number.isFinite(enqueuedMs) ? Math.max(0, Date.now() - enqueuedMs) : 0;
 }
 
 /** The no-cap answer, so a caller without `admitOwner` takes exactly the admitted path. */
@@ -227,9 +270,8 @@ async function runClaimedEntry(deps: LeafJobDeps, claimed: ClaimedEntry): Promis
   const heartbeatMs = deps.heartbeatMs ?? 30_000;
   const now = deps.now ?? (() => new Date().toISOString());
   const log = deps.log ?? console.warn;
-  const setHb = deps.setHeartbeat ?? ((fn, ms) => setInterval(fn, ms));
-  const clearHb =
-    deps.clearHeartbeat ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>));
+  const setTimer = deps.setTimer ?? ((fn, ms) => setInterval(fn, ms));
+  const clearTimer = deps.clearTimer ?? ((h) => clearInterval(h as ReturnType<typeof setInterval>));
 
   const turn = await deps.claimTurn(claimed.turnId, claimed.deliveryCount);
   if (!turn) {
@@ -240,7 +282,7 @@ async function runClaimedEntry(deps: LeafJobDeps, claimed: ClaimedEntry): Promis
   // Set by a heartbeat that finds the entry owned by someone else. There is no cancellation path
   // into `runLeaf`, so this run still finishes -- but its OUTPUT is discarded below.
   let lost = false;
-  const hb = setHb(() => {
+  const hb = setTimer(() => {
     // Fire-and-forget, so a rejection here (e.g. the client was destroyed by a stop() racing this
     // leaf's shutdown, or a transient Redis blip) must not become an unhandled rejection that kills
     // a process also serving healthy sync traffic. A missed touch is already non-fatal by design:
@@ -278,7 +320,7 @@ async function runClaimedEntry(deps: LeafJobDeps, claimed: ClaimedEntry): Promis
   const watchdog =
     stop.signal.aborted || (!deps.cancelRequested && deadlineMs === undefined)
       ? undefined
-      : setHb(() => {
+      : setTimer(() => {
           if (deadlineMs !== undefined && deadlineMs <= Date.now()) {
             stop.abort(DEADLINE_ABORT);
             return;
@@ -298,8 +340,8 @@ async function runClaimedEntry(deps: LeafJobDeps, claimed: ClaimedEntry): Promis
   try {
     result = await deps.runLeaf(turn.envelope, turn.config, stop.signal);
   } finally {
-    clearHb(hb);
-    if (watchdog !== undefined) clearHb(watchdog);
+    clearTimer(hb);
+    if (watchdog !== undefined) clearTimer(watchdog);
   }
 
   // The turn belongs to whoever holds the entry, and that is no longer this worker: drop this run's

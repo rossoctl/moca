@@ -40,9 +40,19 @@ const NOT_CLAIMABLE = new Set(['turn_not_found', 'turn_not_claimable', 'session_
  * COERCED, not refused: `parseTurnSubmission` already rejected a non-positive `caps` at submission
  * and `turnExp` is minted here, so anything odd means a control plane older or newer than this
  * worker. Dropping it runs the turn uncapped, as before #391; throwing would make it unrunnable.
+ *
+ * A PRESENT but unusable value is logged, because dropping it silently degrades enforcement with no
+ * trace at all: an operator would meet it as a turn that over-ran its cap rather than as a version
+ * skew. Absent is the ordinary case (no cap was set) and says nothing.
  */
-function positive(v: unknown): number | undefined {
-  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+function positive(v: unknown, what: string): number | undefined {
+  if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v;
+  if (v !== undefined && v !== null) {
+    console.warn(
+      `[async] ignoring unusable ${what} ${JSON.stringify(v)}: this turn runs without it`,
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -123,7 +133,9 @@ export async function claimTurn(
   // plane already clamped it into `turnExp` below, and a second copy of that arithmetic in the
   // worker is a second place for the two numbers to disagree.
   const caps = (body.caps ?? {}) as Record<string, unknown>;
-  const budgetTokens = positive(caps.tokens);
+  const budgetTokens = positive(caps.tokens, 'caps.tokens');
+  // Hoisted beside the cap rather than spread inline, so the coercion and the value cannot diverge.
+  const turnExp = positive(body.turnExp, 'turnExp');
   const auth: TurnAuth = {
     subject: String(body.subject ?? ''),
     sessionId: body.sessionId,
@@ -160,7 +172,7 @@ export async function claimTurn(
     // The deadline the control plane anchored at THIS dequeue, enforced by the job runner's
     // watchdog (#391). Not recomputed from `caps.wallClock`: the grants expire at this instant, so a
     // leaf outrunning it would fail with 401s instead of a clean `failed: budget`.
-    ...(positive(body.turnExp) ? { turnExp: body.turnExp as number } : {}),
+    ...(turnExp ? { turnExp } : {}),
     // The SAME builder the sync `/turn` path uses, so an async leaf and a sync one differ in how
     // they were admitted and in nothing else.
     config: buildConfig(auth),

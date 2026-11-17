@@ -55,7 +55,7 @@ let queue: FakeQueue;
 let store: Map<string, string>;
 let finalized: Array<[string, string]>;
 let deadLettered: string[];
-let heartbeats: Array<() => void>;
+let timers: Array<() => void>;
 
 function deps(over: Partial<LeafJobDeps> = {}): LeafJobDeps {
   return {
@@ -75,11 +75,11 @@ function deps(over: Partial<LeafJobDeps> = {}): LeafJobDeps {
     },
     ttlSeconds: 60,
     now: () => '2026-11-10T00:00:00.000Z',
-    setHeartbeat: (fn) => {
-      heartbeats.push(fn);
-      return heartbeats.length - 1;
+    setTimer: (fn) => {
+      timers.push(fn);
+      return timers.length - 1;
     },
-    clearHeartbeat: () => {},
+    clearTimer: () => {},
     ...over,
   };
 }
@@ -89,7 +89,7 @@ beforeEach(() => {
   store = new Map();
   finalized = [];
   deadLettered = [];
-  heartbeats = [];
+  timers = [];
 });
 
 const entry = (over: Partial<ClaimedEntry> = {}): ClaimedEntry => ({
@@ -230,8 +230,8 @@ describe('processOne', () => {
   it('touches the entry on each heartbeat tick while the leaf runs', async () => {
     queue.next = entry();
     await processOne(deps());
-    expect(heartbeats).toHaveLength(1);
-    heartbeats[0]!();
+    expect(timers).toHaveLength(1);
+    timers[0]!();
     await Promise.resolve();
     expect(queue.touched).toEqual(['1-0']);
   });
@@ -243,7 +243,7 @@ describe('processOne', () => {
     queue.stillOwned = false;
     const log = vi.fn();
     await processOne(deps({ log }));
-    heartbeats[0]!();
+    timers[0]!();
     for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
     expect(log.mock.calls.flat().join(' ')).toContain('1-0');
   });
@@ -260,7 +260,7 @@ describe('processOne', () => {
         // The beat the real loop fires on its timer, fired from inside the leaf instead: the loss
         // has to be discovered while runLeaf is still running for the flag to matter.
         runLeaf: async () => {
-          heartbeats[0]!();
+          timers[0]!();
           for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
           return { status: 'done' } as LeafResult;
         },
@@ -276,7 +276,7 @@ describe('processOne', () => {
     queue.next = entry();
     const log = vi.fn();
     await processOne(deps({ log }));
-    heartbeats[0]!();
+    timers[0]!();
     for (let i = 0; i < 3; i++) await new Promise((r) => setImmediate(r));
     expect(log).not.toHaveBeenCalled();
   });
@@ -296,8 +296,8 @@ describe('processOne', () => {
     process.on('unhandledRejection', unhandled);
     try {
       await processOne(deps());
-      expect(heartbeats).toHaveLength(1);
-      heartbeats[0]!();
+      expect(timers).toHaveLength(1);
+      timers[0]!();
       // Flush several microtask turns: an unguarded rejection surfaces as 'unhandledRejection'
       // once nothing has attached a handler by the end of the current tick.
       for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
@@ -309,12 +309,12 @@ describe('processOne', () => {
 
   it('clears the heartbeat and rethrows when the leaf throws, leaving the entry pending', async () => {
     queue.next = entry();
-    const clearHeartbeat = vi.fn();
+    const clearTimer = vi.fn();
     const runLeaf = async () => {
       throw new Error('sandbox gone');
     };
-    await expect(processOne(deps({ runLeaf, clearHeartbeat }))).rejects.toThrow('sandbox gone');
-    expect(clearHeartbeat).toHaveBeenCalledTimes(1);
+    await expect(processOne(deps({ runLeaf, clearTimer }))).rejects.toThrow('sandbox gone');
+    expect(clearTimer).toHaveBeenCalledTimes(1);
     expect(queue.acked).toEqual([]);
     expect(store.size).toBe(0);
   });
@@ -322,7 +322,10 @@ describe('processOne', () => {
   // Per-owner fairness (#391).
   describe('admitOwner', () => {
     it('defers an entry whose owner is at cap: no credential, no run, no ack', async () => {
-      queue.next = entry({ deliveryCount: 2 });
+      // A CURRENT stream id, because the defer ceiling reads the id's millisecond part: the shared
+      // fixture's '1-0' is an entry enqueued at the epoch, which is the next test's case.
+      const fresh = `${Date.now()}-0`;
+      queue.next = entry({ entryId: fresh, deliveryCount: 2 });
       const claimTurn = vi.fn();
       const runLeaf = vi.fn();
       const out = await processOne(deps({ admitOwner: async () => null, claimTurn, runLeaf }));
@@ -333,7 +336,29 @@ describe('processOne', () => {
       expect(finalized).toEqual([]);
       // deliveryCount - 1: the counter goes back to what it read BEFORE this delivery, so three
       // deferrals cannot dead-letter a turn whose only sin is a busy owner.
-      expect(queue.deferred).toEqual([['1-0', 'moca-host-w0', 1]]);
+      expect(queue.deferred).toEqual([[fresh, 'moca-host-w0', 1]]);
+    });
+
+    // Nothing else bounds the number of deferrals -- each one refunds the attempt budget -- so an
+    // owner who never frees a slot would starve their own queued turns forever.
+    it("runs an entry deferred past the ceiling, over its owner's share", async () => {
+      queue.next = entry(); // entryId '1-0': enqueued at the epoch, so older than any ceiling
+      const logged: string[] = [];
+      const out = await processOne(
+        deps({ admitOwner: async () => null, log: (m) => logged.push(m) }),
+      );
+      expect(out).toMatchObject({ kind: 'completed', turnId: 't-1' });
+      expect(queue.deferred).toEqual([]);
+      expect(queue.acked).toEqual(['1-0']);
+      expect(logged.join('\n')).toContain('deferred past the ceiling');
+    });
+
+    it('keeps deferring while the entry is younger than the ceiling', async () => {
+      queue.next = entry();
+      const out = await processOne(
+        deps({ admitOwner: async () => null, deferCeilingMs: Infinity }),
+      );
+      expect(out).toMatchObject({ kind: 'deferred' });
     });
 
     it('holds the owner slot across the run and releases it once', async () => {
@@ -377,7 +402,7 @@ describe('processOne', () => {
     });
   });
 
-  // The watchdog (#391). `heartbeats[0]` is the touch beat; `heartbeats[1]` is the watchdog, armed
+  // The watchdog (#391). `timers[0]` is the touch beat; `timers[1]` is the watchdog, armed
   // only when there is something for it to watch.
   describe('cancel and deadline', () => {
     const claimedWith =
@@ -392,14 +417,14 @@ describe('processOne', () => {
 
     /** The real loop's tick, fired by hand, then its fire-and-forget poll flushed. */
     const tick = async (i: number) => {
-      heartbeats[i]!();
+      timers[i]!();
       for (let n = 0; n < 3; n++) await new Promise((r) => setImmediate(r));
     };
 
     it('arms no watchdog when nothing can abort the leaf', async () => {
       queue.next = entry();
       await processOne(deps());
-      expect(heartbeats).toHaveLength(1);
+      expect(timers).toHaveLength(1);
     });
 
     it('aborts the running leaf when a watchdog tick finds a cancel request', async () => {
@@ -443,7 +468,7 @@ describe('processOne', () => {
       expect(claimTurn).not.toHaveBeenCalled();
       expect(runLeaf).not.toHaveBeenCalled();
       expect(admitOwner).not.toHaveBeenCalled();
-      expect(heartbeats).toHaveLength(0);
+      expect(timers).toHaveLength(0);
       // `asyncFinalizeState` maps 'aborted' to `cancelled`, and the entry leaves the PEL for good.
       expect(finalized).toEqual([['t-1', 'aborted']]);
       expect(queue.acked).toEqual(['1-0']);
@@ -510,17 +535,17 @@ describe('processOne', () => {
 
     it('clears both timers when the leaf throws', async () => {
       queue.next = entry();
-      const clearHeartbeat = vi.fn();
+      const clearTimer = vi.fn();
       const d = deps({
         cancelRequested: async () => false,
-        clearHeartbeat,
+        clearTimer,
         runLeaf: async () => {
           throw new Error('sandbox gone');
         },
       });
       await expect(processOne(d)).rejects.toThrow('sandbox gone');
-      expect(heartbeats).toHaveLength(2);
-      expect(clearHeartbeat).toHaveBeenCalledTimes(2);
+      expect(timers).toHaveLength(2);
+      expect(clearTimer).toHaveBeenCalledTimes(2);
     });
   });
 });

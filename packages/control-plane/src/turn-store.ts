@@ -399,6 +399,11 @@ export class TurnStore {
     // happens and a running turn is uncancellable for the rest of its life. Two passes are enough
     // because only queued → running can defeat the first, and the running CAS that follows loses
     // only to a finalize, which is a real conflict.
+    //
+    // So falling out of the loop is an HONEST conflict, not a lost race: CAS_STATE_LUA returns 0
+    // only when the state is outside the allowed set or the record is gone, and the sole transition
+    // out of `running` is a terminal one. A third pass would re-read a turn that is already final.
+    // The 409's message is built from a FRESH read for the same reason (turn-handlers.ts).
     for (let attempt = 0; attempt < 2; attempt++) {
       const rec = await this.get(turnId);
       if (!rec) return 'conflict';

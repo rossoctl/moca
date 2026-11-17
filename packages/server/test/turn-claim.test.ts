@@ -98,7 +98,9 @@ describe('claimTurn', () => {
   // Both were validated at submission, so an odd value means a control plane older or newer than
   // this worker. Running the turn uncapped is the pre-#391 behaviour; refusing would make it
   // unrunnable, which is a worse answer to a version skew.
-  it('ignores an unusable cap or deadline rather than refusing the turn', async () => {
+  it('ignores an unusable cap or deadline rather than refusing the turn, and says so', async () => {
+    // console.warn is already spied suite-wide (the credential-leak guard above).
+    const warn = vi.mocked(console.warn);
     const d = deps({
       fetchImpl: reply(200, ok({ caps: { tokens: -5 }, turnExp: 'soon' })),
     });
@@ -106,9 +108,16 @@ describe('claimTurn', () => {
     expect(claimed).not.toBeNull();
     expect(claimed!.config.budgetTokens).toBeUndefined();
     expect(claimed!.turnExp).toBeUndefined();
-    // And with no caps at all, which is most turns.
+    // Both dropped values are named: degrading enforcement silently leaves an operator to meet the
+    // version skew as a turn that over-ran its cap.
+    const said = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(said).toContain('caps.tokens');
+    expect(said).toContain('turnExp');
+    warn.mockClear();
+    // And with no caps at all, which is most turns: absent says nothing, so no warning.
     const bare = await claimTurn(TURN, 1, deps({ fetchImpl: reply(200, ok({ caps: undefined })) }));
     expect(bare!.config.budgetTokens).toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('puts the resolved credential on the config it hands to runLeaf', async () => {
