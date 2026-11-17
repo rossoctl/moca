@@ -178,12 +178,19 @@ func (c *CPCredentials) Lookup(ctx context.Context, cl Caller, host string) ([]C
 
 // fly runs the call detached from any one caller's context, so one caller
 // going away does not fail the others sharing the flight.
+//
+// The entry's life is counted from before the call, not from its answer. The
+// server's TTL starts when it answered, which is after the request left, so
+// counting from the start can only end an entry early; counting from the
+// answer would let it outlive the server's word by however long the call took,
+// up to the timeout.
 func (c *CPCredentials) fly(k cpKey, f *cpFlight) {
+	start := c.now()
 	set, ttl, err := c.fetch(k)
 	c.mu.Lock()
 	f.set, f.err = set, err
 	if err == nil && ttl > 0 {
-		c.insertLocked(k, cpEntry{set: set, expires: c.now().Add(ttl)})
+		c.insertLocked(k, cpEntry{set: set, expires: start.Add(ttl)})
 	}
 	delete(c.flights, k)
 	c.mu.Unlock()

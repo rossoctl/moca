@@ -460,6 +460,14 @@ func (h *harness) next(d time.Duration) (map[string]any, bool, error) {
 			return nil, false, fmt.Errorf("audit line is not a JSON object: %v", u)
 		}
 		h.seen = append(h.seen, m)
+		// The audit contract's sub rule holds for every event a case reads,
+		// not only the ones it waits for: a subject on any other decision
+		// would attribute a request no credential was injected into.
+		if m["decision"] != "credential_injected" && !noSubject(m) {
+			j, _ := json.Marshal(redactEvent(m))
+			return nil, false, fmt.Errorf("a %v event carries sub, want it absent or \"\" on every event but credential_injected: %s",
+				m["decision"], j)
+		}
 		return m, true, nil
 	case <-timer.C:
 		return nil, false, nil
@@ -534,7 +542,9 @@ func (h *harness) seenText() string {
 // redactEvent copies m with every value that could carry a secret replaced:
 // those under a key such as authorization, cookie, x-api-key or value, and
 // any string that looks like a Bearer or Basic credential. Failure messages
-// of a public suite must not print a credential.
+// of a public suite must not print a credential. The copy is deep: an
+// implementation may emit nested objects and arrays, and a key such as
+// authorization inside one is as much a credential as at the top.
 func redactEvent(m map[string]any) map[string]any {
 	out := make(map[string]any, len(m))
 	for k, v := range m {
@@ -542,14 +552,30 @@ func redactEvent(m map[string]any) map[string]any {
 		case lk == "authorization" || lk == "cookie" || lk == "x-api-key" || lk == "value" || lk == "token":
 			out[k] = "<redacted>"
 		default:
-			if s, ok := v.(string); ok && (strings.Contains(s, "Bearer ") || strings.Contains(s, "Basic ")) {
-				out[k] = "<redacted>"
-			} else {
-				out[k] = v
-			}
+			out[k] = redactValue(v)
 		}
 	}
 	return out
+}
+
+// redactValue is redactEvent for a value: objects and arrays are walked, and
+// a string that looks like a credential is replaced.
+func redactValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		return redactEvent(x)
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = redactValue(e)
+		}
+		return out
+	case string:
+		if strings.Contains(x, "Bearer ") || strings.Contains(x, "Basic ") {
+			return "<redacted>"
+		}
+	}
+	return v
 }
 
 // ---- fake upstreams ----

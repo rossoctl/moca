@@ -3,6 +3,7 @@ package egress
 import (
 	"io"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -46,6 +47,21 @@ type idleClock struct {
 	read  []net.Conn
 	write []net.Conn
 	idle  time.Duration
+	// stopped ends the refreshing for good; see stop.
+	stopped atomic.Bool
+}
+
+// stop makes every later touch a no-op, so a deadline set by hand after it
+// stands. A refusal needs this: its write and drain are bounded by
+// drainTimeout, but they go through the same wrappers as everything else, and
+// the first byte would push the deadline back out to idle — leaving a guest
+// that never reads holding the conn for the whole idle bound instead of a
+// second. Once a conn is being refused nothing on it is live any more, so
+// there is nothing left for the clock to keep alive.
+func (k *idleClock) stop() {
+	if k != nil {
+		k.stopped.Store(true)
+	}
 }
 
 // touch pushes every deadline in the clock out by idle. Concurrent callers are
@@ -53,7 +69,7 @@ type idleClock struct {
 // differ only by the microseconds between their time.Now calls, so whichever
 // lands last sets the same deadline either way.
 func (k *idleClock) touch() {
-	if k == nil || k.idle <= 0 {
+	if k == nil || k.idle <= 0 || k.stopped.Load() {
 		return
 	}
 	t := time.Now().Add(k.idle)
