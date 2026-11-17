@@ -40,6 +40,7 @@ import { checkpointExtension } from './checkpoint-extension.js';
 import { budgetVoterExtension, branchSpend } from './budget-voter.js';
 import { AMBIENT_KEY_SENTINEL } from './ambient-sentinel.js';
 import { toolChoiceExtension } from './tool-choice-extension.js';
+import { promptCacheExtension } from './prompt-cache-extension.js';
 // Type-only import (erased at compile time) so it is safe against the run-leaf↔run-turn value
 // cycle: run-leaf.ts imports values from run-turn.js, but a `import type` adds no runtime edge.
 import type { LeafUsage } from './run-leaf.js';
@@ -1359,6 +1360,9 @@ async function executeTurnCore(
     ...(sandbox ? [k8sSandboxExtension({ ...sandbox, capacity })] : []),
     checkpointExtension(store, sessionManager),
     toolChoiceExtension(),
+    // SH_PROMPT_CACHE / SH_GATEWAY_CACHE (#754). Built here, not inside pi's loader, so a refused
+    // value throws out of the turn; with both unset it registers nothing.
+    promptCacheExtension(),
   ];
   if (Number.isFinite(budgetLimit) && budgetLimit > 0) {
     // session_start is not emitted in the headless path, so compute the pre-turn baseline

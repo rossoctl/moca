@@ -21,7 +21,8 @@
     "./select-sandbox": "./src/select-sandbox.ts",
     "./config-resolver": "./src/config-resolver.ts",
     "./config-overlay": "./src/config-overlay.ts",
-    "./promote": "./src/promote.ts"
+    "./promote": "./src/promote.ts",
+    "./prompt-cache-extension": "./src/prompt-cache-extension.ts"
   },
   "scripts": {
     "test": "vitest run",

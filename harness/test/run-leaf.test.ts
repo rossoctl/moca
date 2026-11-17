@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 
 // realProduceVerdict (exercised via the exported runLeaf() below, with no `deps.produceVerdict`
 // override) drives real Redis/Pi/model machinery in production. Mock those module boundaries so
@@ -564,6 +564,118 @@ describe('realProduceSolve / realProduceVerdict: resource-loader lockdown (MI1 R
     expect(opts).not.toHaveProperty('noContextFiles');
     expect(lastSettingsManagerThirdArg()).toEqual({});
   });
+});
+
+describe('realProduceSolve / realProduceVerdict: the caching switches (#754)', () => {
+  // These two leaves build their own Pi stack instead of going through executeTurn, so the
+  // switches must be wired into each; run-turn-cache-switches.test.ts covers the turn's stack.
+  // Server mode, so the test also shows MI1 R4's noExtensions leaves them on.
+  const lease = () => ({
+    transport: {
+      exec: vi.fn(async () => ({ stdout: Buffer.from(''), exitCode: 0, truncated: false })),
+      close: vi.fn(async () => {}),
+    },
+    podCwd: '/workspace',
+    sandboxId: 'sandbox-0',
+    heartbeat: vi.fn(async () => {}),
+    release: vi.fn(async () => {}),
+  });
+  type Handler = (e: { type: string; payload: unknown }) => unknown;
+
+  /** The payload one model request of the last-built leaf stack would carry. */
+  async function lastStackPayload(payload: Record<string, unknown>): Promise<unknown> {
+    const call = createAgentSessionMock.mock.calls.at(-1)!;
+    const { resourceLoader } = call[0] as { resourceLoader: { opts: Record<string, unknown> } };
+    expect(resourceLoader.opts).toMatchObject({ noExtensions: true });
+    const handlers: Handler[] = [];
+    const pi = new Proxy(
+      {},
+      {
+        get: (_t, prop) =>
+          prop === 'on'
+            ? (event: string, h: Handler) => {
+                if (event === 'before_provider_request') handlers.push(h);
+              }
+            : () => undefined,
+      },
+    );
+    for (const f of resourceLoader.opts.extensionFactories as Array<(pi: unknown) => unknown>)
+      await f(pi);
+    let cur: unknown = payload;
+    for (const h of handlers) {
+      const r = await h({ type: 'before_provider_request', payload: cur });
+      if (r !== undefined) cur = r;
+    }
+    return cur;
+  }
+  const marked = () => ({
+    model: 'm',
+    system: [{ type: 'text', text: 's', cache_control: { type: 'ephemeral' } }],
+    messages: [{ role: 'user', content: 'hi' }],
+  });
+
+  const NAMES = ['SH_PROMPT_CACHE', 'SH_GATEWAY_CACHE'] as const;
+  const saved = Object.fromEntries(NAMES.map((n) => [n, process.env[n]]));
+  afterEach(() => {
+    for (const n of NAMES)
+      saved[n] === undefined ? delete process.env[n] : (process.env[n] = saved[n]);
+  });
+
+  const leaves = {
+    solve: () =>
+      realProduceSolve(
+        {
+          sessionId: 'run/solve-cache',
+          item: { item_id: 'i1', file: 'f', pattern: 'p' },
+          problemStatement: 'do the thing',
+          repoUrl: 'https://git.example/r.git',
+          ref: 'abc123',
+        },
+        { serverMode: true },
+        {},
+      ),
+    verdict: () => {
+      const item = { item_id: 'i1', file: 'f', pattern: 'p' };
+      return realProduceVerdict(
+        item,
+        { sessionId: 'run/verdict-cache', item },
+        { serverMode: true },
+        {},
+      );
+    },
+  };
+
+  for (const [kind, run] of Object.entries(leaves)) {
+    it(`${kind} leaf, both unset: the payload is unchanged`, async () => {
+      for (const n of NAMES) delete process.env[n];
+      selectPoolSandboxMock.mockReset().mockResolvedValue(lease());
+      createAgentSessionMock.mockClear();
+      await run();
+      expect(JSON.stringify(await lastStackPayload(marked()))).toBe(JSON.stringify(marked()));
+    });
+
+    it(`${kind} leaf, SH_PROMPT_CACHE=off: the markers are stripped`, async () => {
+      for (const n of NAMES) delete process.env[n];
+      process.env.SH_PROMPT_CACHE = 'off';
+      selectPoolSandboxMock.mockReset().mockResolvedValue(lease());
+      createAgentSessionMock.mockClear();
+      await run();
+      const out = (await lastStackPayload(marked())) as Record<string, unknown>;
+      expect(JSON.stringify(out)).not.toContain('cache_control');
+      expect(out).not.toHaveProperty('cache');
+    });
+
+    it(`${kind} leaf, SH_GATEWAY_CACHE=off: the payload carries cache.no-cache`, async () => {
+      for (const n of NAMES) delete process.env[n];
+      process.env.SH_GATEWAY_CACHE = 'off';
+      selectPoolSandboxMock.mockReset().mockResolvedValue(lease());
+      createAgentSessionMock.mockClear();
+      await run();
+      const out = (await lastStackPayload(marked())) as Record<string, unknown>;
+      expect(out.cache).toEqual({ 'no-cache': true });
+      expect(JSON.stringify(out)).toContain('cache_control');
+    });
+  }
 });
 
 describe('buildLeafPrompt with require_approval', () => {

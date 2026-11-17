@@ -105,6 +105,8 @@ The worker is `packages/server/src/worker.ts`. It validates
 | `SH_MODEL_CONTEXT_WINDOW`                                           | `131072`                                                       |                                                                                                                                                                                                             | Custom model context window                                                                           |
 | `SH_MODEL_MAX_TOKENS`                                               | `8192`                                                         |                                                                                                                                                                                                             | Custom model max tokens                                                                               |
 | `SH_BUDGET_TOKENS`, `SH_BUDGET_MARGIN`                              | none                                                           | Applied only when a positive number                                                                                                                                                                         | Token budget and margin                                                                               |
+| `SH_PROMPT_CACHE`                                                   | unset (caching on)                                             | Opt-in, for example for benchmarking and performance analysis. `off` or `on`; any other value (`OFF` too) refuses to boot. Deployment-wide (below)                                                          | `off` strips Anthropic prompt-caching `cache_control` markers from the agent's model requests         |
+| `SH_GATEWAY_CACHE`                                                  | unset (caching on)                                             | Opt-in, as above; independent of `SH_PROMPT_CACHE`, same values. Only for a caching gateway that reads the field; a provider's own API may reject it                                                        | `off` adds `cache: {"no-cache": true}` to the agent's model requests, bypassing the response cache    |
 | `ANTHROPIC_API_KEY`                                                 | none                                                           | **Secret.** Under `multi` tenancy it is forced to a sentinel and every ambient provider credential is scrubbed (see below)                                                                                  | Provider key                                                                                          |
 | `ANTHROPIC_AUTH_TOKEN`                                              | none                                                           | **Secret.** Not used for an authenticated (control-plane) turn                                                                                                                                              | Gateway bearer                                                                                        |
 | `ANTHROPIC_BASE_URL`                                                | none                                                           |                                                                                                                                                                                                             | Gateway or endpoint                                                                                   |
@@ -129,6 +131,21 @@ tenant's model requests), and a Vertex application-default credentials file at
 
 For authenticated turns, inference credentials come from the control plane per user rather than from
 these variables.
+
+`SH_PROMPT_CACHE` and `SH_GATEWAY_CACHE` (`harness/src/prompt-cache-extension.ts`) are opt-in
+switches for runs that need model requests free of caching effects, for example benchmarking and
+performance analysis: re-running the same prompts to compare two configurations, where cached
+prefixes move tokens into the cache-read class and change timings, and a gateway's response cache
+can return a stored reply without calling the model. Unset, requests are byte-for-byte what they
+were. They are deployment-wide operator switches read from the worker's environment, not per
+session or per tenant: under `MOCA_TENANCY=multi` they apply to every tenant's turns alike, and no
+request can set or clear them. They cover the agent's model requests in a `/turn` turn (sync,
+streamed or detached), a prompt leaf, and a solve or verdict leaf, in server mode too: they are
+harness-internal extension factories, which the server-mode `noExtensions` lockdown does not
+affect, not extension files a user could load or drop. They do not reach a compaction's summary
+request, which pi sends outside the extension payload hook. A bad value fails the worker's boot,
+and a turn built outside the worker (the CLI) fails instead of running cached. Turning prompt
+caching off raises the billed input tokens of a long session.
 
 ## Worker: Context Service workloads (optional)
 
