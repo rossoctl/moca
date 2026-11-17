@@ -94,7 +94,8 @@ func helloCapabilities() []string {
 // SH_WORKSPACE_ROOT must equal the harness's KAGENTI_SANDBOX_CWD: the harness sends
 // <that>/<session id> as every absolute path, and this is where the directory is made.
 // SH_WORKSPACE_IDLE is the microVM worker's knob with the same meaning and default: the
-// only trigger that deletes a session's workspace (#338). Garbage is an error rather than
+// only trigger that deletes a session's workspace with anything in it (#338; an empty one
+// goes sooner, see DefaultWorkspaceEmptyIdle). Garbage is an error rather than
 // a fallback, since a misread idle can delete a waiting session's work.
 func workspaceRunner(get func(string) string) (*wexec.WorkspaceRunner, error) {
 	w := &wexec.WorkspaceRunner{
@@ -116,6 +117,20 @@ func workspaceRunner(get func(string) string) (*wexec.WorkspaceRunner, error) {
 			return nil, fmt.Errorf("SH_WORKSPACE_IDLE=%q must be a positive Go duration such as 8h or 90m", v)
 		}
 		w.Idle = d
+	}
+	// SH_WORKSPACE_EMPTY_IDLE (#551): how long an EMPTY session directory that no process
+	// is in outlives its last Exec. Parsed like SH_WORKSPACE_IDLE, and refused above it:
+	// a value that cannot shorten Idle is a misreading, not a setting. Unset, the default
+	// applies, capped at Idle by the runner itself.
+	if v := get("SH_WORKSPACE_EMPTY_IDLE"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return nil, fmt.Errorf("SH_WORKSPACE_EMPTY_IDLE=%q must be a positive Go duration such as 15m", v)
+		}
+		if d > w.Idle {
+			return nil, fmt.Errorf("SH_WORKSPACE_EMPTY_IDLE=%s must not exceed SH_WORKSPACE_IDLE=%s", d, w.Idle)
+		}
+		w.EmptyIdle = d
 	}
 	return w, nil
 }
