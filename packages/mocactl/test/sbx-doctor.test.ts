@@ -143,7 +143,10 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     expect(s.ok).toBe(false);
     expect(s.detail).toContain(new Date((nowS() + 7200) * 1000).toISOString().slice(0, 13));
     expect(s.detail).toMatch(/less than 24 h left/);
-    expect(s.fix).toContain('mocactl sbx up');
+    expect(s.fix).toContain('ends after');
+    expect(s.fix).toContain('any command extends it');
+    expect(s.fix).toContain('mocactl sbx pull --apply');
+    expect(s.fix).not.toContain('mocactl sbx rm');
     // A sandbox that expires soon still runs: the exec checks are made.
     expect(byName(cs, 'exec').ok).toBe(true);
   });

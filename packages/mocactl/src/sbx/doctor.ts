@@ -16,7 +16,7 @@ import {
 } from './agentop.js';
 import { notEnrolledMessage, SBX_EXIT, type SbxCtx } from './commands.js';
 import { openExec, sandboxFailureText, type ExecFactory, type OpenedExec } from './exec.js';
-import { afterText } from './lifetime.js';
+import { afterText, lifetimeText, validLifetime } from './lifetime.js';
 import { PushError, sandboxState } from './push.js';
 import { noticingExec } from './notices.js';
 import { readRecords } from './recorder.js';
@@ -146,8 +146,9 @@ async function sandboxCheck(
         ok: false,
         detail: `${detail}: less than 24 h left`,
         fix:
-          'pull its work before then (mocactl sbx pull --apply); for a fresh sandbox, ' +
-          `mocactl sbx rm, then ${UP}`,
+          `it ends after ${validLifetime(s.idleLifetimeS) ? lifetimeText(s.idleLifetimeS) : 'its lifetime'} ` +
+          "without use, and any command extends it (this doctor run's own check included); " +
+          'if it is not going to be used, pull its work (mocactl sbx pull --apply)',
       },
       live: true,
       mode: s.mode,

@@ -144,7 +144,7 @@ The hint is the client's own say about its own sandbox: a client that lies only 
 sandbox alive, within the owner's quota, or lets it expire sooner.
 
 A command that only reads the record (`mocactl sbx ls`, `get` on a per-exec sandbox) does not mint
-and does not extend the lifetime. `doctor` does not mint (it reads the record).
+and does not extend the lifetime. `doctor` runs a check command (`true`) on the sandbox, so its mint counts as use.
 
 ## 4. The rule, and where it runs
 
@@ -413,7 +413,7 @@ These were not discussed explicitly; each is the designer's call:
 - the per-sandbox minimum of 3600 s;
 - the name `idleLifetimeS` and the flag `--lifetime`;
 - the set-mode token counting as activity, and `PUT …/mode` always counting;
-- the hint's default being `true`, its name `activity`, and `doctor` sending none (it does not mint);
+- the hint's default being `true`, its name `activity`, and `doctor`'s check command counting as use;
 - old records sliding at the current `cfg.lifetimeS`;
 - the 60 s write skip being optional;
 - the MCP description's wording change;
