@@ -985,7 +985,7 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
         /* usage is best-effort */
       }
       const diff = swebench
-        ? await captureSwebenchDiff(transport, sid)
+        ? await captureSwebenchDiff(transport, sid, env.ref!)
         : await captureWorkspaceDiff(transport, sid);
       capture.patch = diff.patch;
       capture.baseline = diff.baseline;

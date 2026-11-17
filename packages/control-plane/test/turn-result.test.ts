@@ -88,6 +88,25 @@ describe('projectLeafResult (#390)', () => {
     });
   });
 
+  it('drops the verdict s reason and the gate s two lines at a cap of 0, keeping the rest', () => {
+    // 0 means "no model prose in this body" (configuration.md), and these three are model prose just
+    // as `summary` is -- a `reason` clipped to the bare `…[truncated]` marker would obey the cap in
+    // bytes while ignoring what the operator asked for. The SHAPED fields stay: `verdict` is what a
+    // client branches on, and dropping it at a cap of 0 would make the knob change the contract.
+    const out = projectLeafResult(
+      {
+        status: 'done',
+        verdict: { item_id: 'i-1', verdict: 'FLAGGED', reason: 'y'.repeat(5000) },
+        gate: { gateId: 1, summary: 'g'.repeat(5000), proposed_action: 'p'.repeat(5000) },
+      },
+      0,
+    );
+    expect(out.verdict).toEqual({ item_id: 'i-1', verdict: 'FLAGGED' });
+    expect(out.gate).toEqual({ gateId: 1 });
+    expect(out.summary).toBeUndefined();
+    expect(JSON.stringify(out)).not.toContain('truncated');
+  });
+
   it('clips the OTHER model-written strings too: a verdict s reason and a gate s two lines', () => {
     // `validateVerdict` caps `reason` nowhere, so without this a `done` turn's body is as unbounded
     // as the patch this projection exists to remove -- on every poll.

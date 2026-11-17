@@ -371,7 +371,9 @@ describe('async turn, end to end (#387 acceptance)', () => {
     expect(art.bytes).toEqual(Buffer.from('diff --git a/x b/x'));
     expect(art.headers['content-type']).toBe('text/x-diff');
     expect(art.headers['content-length']).toBe('18');
-    expect(art.headers.etag).toMatch(/^"[0-9a-f]{64}"$/);
+    // `sha256:`-prefixed whether the record carried a digest or not: one grammar, so a client's
+    // stored ETag still compares against a later fetch of the same bytes.
+    expect(art.headers.etag).toMatch(/^"sha256:[0-9a-f]{64}"$/);
 
     const nope = await request('GET', `/v1/sessions/${sid}/turns/${turnId}/artifacts/transcript`, {
       headers: auth(ALICE),

@@ -44,6 +44,8 @@ async function isolated() {
     // applies internally, wrapped in the same `turnKey()` the store uses.
     ttlOf: async (turnId: string) => client.ttl(turnKey(`${turnId}:${tag}`)),
     ttlOfSession: async (sessionId: string) => client.ttl(sessionTurnsKey(`${sessionId}:${tag}`)),
+    indexedTurns: async (sessionId: string) =>
+      client.zRange(sessionTurnsKey(`${sessionId}:${tag}`), 0, -1),
     // The tag is IN the session id, not appended by the store: `leafResultKey` is untagged, so this
     // is what puts the results below inside `done()`'s sweep.
     sessionId: `s-${tag}`,

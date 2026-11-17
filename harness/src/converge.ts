@@ -45,7 +45,12 @@ export function buildConvergeScript(repoUrl: string, ref: string, sessionId: str
     `    echo .sh-config >> "$REPO/.git/info/exclude"`,
     `) 9>"$LOCK"`,
     `COMMIT=$(git -C "$REPO" rev-parse FETCH_HEAD)`,
-    `[ -d "$LEAF" ] || git -C "$REPO" worktree add --quiet --detach "$LEAF" "$COMMIT"`,
+    // The pinned commit is recorded next to the worktree, not inside it: `buildDiffCaptureScript`
+    // diffs against THIS, because by capture time the leaf's own HEAD may be a commit the model made
+    // -- a sha nobody outside the sandbox has, and one that hides its own changes from the diff. A
+    // sibling path rather than a file in the tree, so `git add -A` can never stage it. Written only
+    // when the worktree is created, so a re-converge onto an existing leaf keeps the original base.
+    `[ -d "$LEAF" ] || { git -C "$REPO" worktree add --quiet --detach "$LEAF" "$COMMIT"; printf '%s\\n' "$COMMIT" >"$LEAF.base"; }`,
     `printf '%s' "$LEAF"`,
   ].join('\n');
 }
@@ -57,6 +62,7 @@ export function buildCleanupScript(sessionId: string): string {
     `set -u`,
     `REPO=/workspace/repo; LEAF=${sq(LEAF)}`,
     `git -C "$REPO" worktree remove --force "$LEAF" 2>/dev/null || rm -rf "$LEAF"`,
+    `rm -f "$LEAF.base"`,
     `git -C "$REPO" worktree prune 2>/dev/null || true`,
   ].join('\n');
 }
@@ -109,17 +115,22 @@ export interface WorkspaceDiff {
  * unified diff (vs the pinned base). The baseline goes FIRST, as `buildPatchCaptureScript` already
  * does it for a templated turn, so one exec yields both and the two cannot describe different trees.
  *
- * `rev-parse HEAD`, not the envelope's `ref`: that can be a branch name, which names a different
- * commit by the time anyone reapplies the patch.
+ * The baseline is the commit `buildConvergeScript` pinned, read back from `$LEAF.base`, NOT the
+ * leaf's current HEAD: an agent that ran `git commit` in its worktree moves HEAD to a sha that
+ * exists only inside that sandbox, and `diff --cached` against it would also leave the committed
+ * work out of the patch entirely. Diffing the index against the pinned commit covers committed,
+ * staged and untracked changes alike. `rev-parse HEAD` stays as the fallback, for a worktree a
+ * pre-#390 converge created without the file.
  */
 export function buildDiffCaptureScript(sessionId: string): string {
   const LEAF = leafWorkspaceRef(sessionId);
   return [
     `set -eu`,
     `LEAF=${sq(LEAF)}`,
-    `git -C "$LEAF" rev-parse HEAD`,
+    `BASE=$(cat "$LEAF.base" 2>/dev/null || git -C "$LEAF" rev-parse HEAD)`,
+    `printf '%s\\n' "$BASE"`,
     `git -C "$LEAF" add -A`,
-    `git -C "$LEAF" diff --cached`,
+    `git -C "$LEAF" diff --cached "$BASE"`,
   ].join('\n');
 }
 

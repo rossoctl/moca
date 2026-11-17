@@ -16,7 +16,7 @@ const lastExpire = (expires: { key: string; seconds: number }[], key: string): n
 };
 
 turnStoreContract('fake', async () => {
-  const { redis, strings, expires } = fakeRedis();
+  const { redis, strings, expires, zsets } = fakeRedis();
   return {
     store: new TurnStore(redis, { resultTtlSeconds, ttlMarginSeconds }),
     now: 1_757_000_000_000,
@@ -24,6 +24,8 @@ turnStoreContract('fake', async () => {
     ttlMarginSeconds,
     ttlOf: async (turnId: string) => lastExpire(expires, turnKey(turnId)),
     ttlOfSession: async (sessionId: string) => lastExpire(expires, sessionTurnsKey(sessionId)),
+    indexedTurns: async (sessionId: string) =>
+      (zsets.get(sessionTurnsKey(sessionId)) ?? []).map((m) => m.value),
     // No key tag to work around here: this fake's keyspace is one Map per store.
     sessionId: 's-1',
     putResult: async (sessionId: string, turnId: string, body: string) => {

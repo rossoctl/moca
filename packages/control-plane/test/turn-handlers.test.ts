@@ -637,8 +637,11 @@ describe('getTurnArtifact (#390)', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual(Buffer.from(patch, 'utf8'));
     expect(res.contentType).toBe('text/x-diff');
+    // `sha256:`-prefixed, the SAME format the capture's own digest uses (`run-turn.ts` writes
+    // `patchSha256` that way). A record with a digest and one without must not hand a client two
+    // different ETag grammars for the same route: a comparison across the two would never match.
     expect(res.headers?.ETag).toBe(
-      `"${createHash('sha256').update(Buffer.from(patch, 'utf8')).digest('hex')}"`,
+      `"sha256:${createHash('sha256').update(Buffer.from(patch, 'utf8')).digest('hex')}"`,
     );
   });
 

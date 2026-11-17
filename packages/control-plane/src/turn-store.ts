@@ -15,7 +15,7 @@ import {
 import { leafResultKey } from './turn-result.js';
 
 export interface TurnStoreOptions {
-  /** `LEAF_RESULT_TTL_SECONDS` (86400 default) -- the RESULT's lifetime, not the record's. */
+  /** `LEAF_RESULT_TTL_SECONDS` (604800 default) -- the RESULT's lifetime, not the record's. */
   resultTtlSeconds: number;
   /** How much longer than its result a terminal record lives (async spec §5.1). */
   ttlMarginSeconds: number;
@@ -187,6 +187,20 @@ export class TurnStore {
       this.redis.zAdd(this.sessionKey(rec.sessionId), { score: rec.createdAt, value: rec.turnId }),
     );
     await this.guard(() => this.redis.expire(this.sessionKey(rec.sessionId), this.ttlSeconds()));
+    // ...and TRIMMED to the retention window on the same write. This is the one index here that keeps
+    // a member after its turn finished, and every `create` pushes its expiry out again -- so without
+    // this a session that runs turns for a year holds a year of ids, all but the last week of them
+    // naming keys that are already gone, and `deleteSessionTurns` enumerates and DELs every one.
+    // By score, the same sweep `bundle-budget.ts` does for expired bundles.
+    //
+    // Safe because of what the score MEANS: `toTerminal` re-scores a member to the moment the turn
+    // finished, which is when its record's and result's own TTLs start. So nothing trimmed here can
+    // still have a record -- and a turn that outlived the window while still OPEN is reached by the
+    // walk's owner-set pass, which does not consult this index at all.
+    const cutoff = rec.createdAt - this.ttlSeconds() * 1000;
+    await this.guard(() =>
+      this.redis.zRemRangeByScore(this.sessionKey(rec.sessionId), '-inf', cutoff),
+    );
   }
 
   async get(turnId: string): Promise<TurnRecord | null> {
@@ -429,6 +443,13 @@ export class TurnStore {
     // Re-armed rather than set once, because this turn's record just started a fresh clock. A record
     // written before #390 has no index entry; the walk keeps the owner-set pass for those.
     if (rec.sessionId) {
+      // Re-scored to NOW first, which is what makes `create`'s trim safe: the member's score becomes
+      // the moment this record's own TTL started, so "older than the window" means "its record is
+      // gone" rather than "it was submitted a long time ago". Same member, so nothing is added; the
+      // walk reads this index as a set and has no order to disturb.
+      await this.guard(() =>
+        this.redis.zAdd(this.sessionKey(rec.sessionId), { score: now, value: rec.turnId }),
+      );
       await this.guard(() => this.redis.expire(this.sessionKey(rec.sessionId), this.ttlSeconds()));
     }
     return 'ok';

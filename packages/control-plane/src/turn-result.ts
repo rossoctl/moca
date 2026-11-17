@@ -51,6 +51,9 @@ const str = (v: unknown): string | null => (typeof v === 'string' && v !== '' ? 
  * — restated, not imported, for the layering reason this module's header gives. Bytes, not tokens:
  * every bound in this repo is bytes, and the clip must hold whatever the model wrote.
  *
+ * `maxBytes` bounds the CONTENT; the marker is 14 bytes on top of it, so a clipped field is up to
+ * `maxBytes + 14`. Docs say so too — the cap is not a bound on the field's total length.
+ *
  * `subarray` can land mid-codepoint; `toString('utf8')` replaces the partial tail with U+FFFD
  * rather than emitting invalid UTF-8, so the result is always a well-formed string under the cap.
  */
@@ -126,7 +129,13 @@ export function projectLeafResult(
   return out;
 }
 
-/** A copy of `src` with the named string fields clipped; anything else passes through untouched. */
+/**
+ * A copy of `src` with the named string fields clipped; anything else passes through untouched.
+ *
+ * At a cap of 0 the field is REMOVED rather than replaced by the bare `…[truncated]` marker, for the
+ * same reason `summary` is omitted there: 0 is how an operator asks for no model prose in this body,
+ * and a `reason` whose whole content is a truncation marker is not that.
+ */
 function clipFields(
   src: Record<string, unknown>,
   fields: readonly string[],
@@ -135,7 +144,9 @@ function clipFields(
   const out = { ...src };
   for (const f of fields) {
     const s = str(out[f]);
-    if (s) out[f] = clip(s, maxBytes);
+    if (!s) continue;
+    if (maxBytes > 0) out[f] = clip(s, maxBytes);
+    else delete out[f];
   }
   return out;
 }

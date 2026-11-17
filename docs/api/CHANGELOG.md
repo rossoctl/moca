@@ -33,12 +33,15 @@ because that is what Preview requires.
 - The same cap now holds every **model-written** string in that body, not just `summary`:
   `result.verdict.reason` and `result.gate.summary`/`proposed_action` are clipped to
   `MOCA_TURN_SUMMARY_BYTES` with the same trailing `…[truncated]`. Nothing upstream caps them, so
-  unclipped they kept a `done` turn's polled body unbounded. `MOCA_TURN_SUMMARY_BYTES=0` omits
-  `result.summary` entirely rather than returning a bare marker.
+  unclipped they kept a `done` turn's polled body unbounded. The cap bounds each string's CONTENT,
+  so a clipped one is `MOCA_TURN_SUMMARY_BYTES` plus that 14-byte marker. `MOCA_TURN_SUMMARY_BYTES=0`
+  omits all four keys rather than returning a bare marker; `verdict` and `gate` keep their shaped
+  fields (`item_id`, `verdict`, `gateId`), so a client can still branch on them.
 - `GET /v1/sessions/{id}/turns/{turnId}/artifacts/{kind}` serves the output whole: bytes, with
-  `text/x-diff` and an `ETag` — the capture's own digest of those bytes, the same value
-  `result.artifacts[].sha256` carries (so with its `sha256:` prefix), or a bare hex digest for a
-  result that recorded none. `patch` is the only kind. Every absence is 404 (unknown kind, a turn
+  `text/x-diff` and an `ETag` — always `"sha256:<hex>"`, the one format
+  `result.artifacts[].sha256` uses: the capture's own digest when the record carries one, else a
+  digest of the bytes served. `If-None-Match` is not honoured, so the ETag is for comparison, not
+  for skipping a fetch. `patch` is the only kind. Every absence is 404 (unknown kind, a turn
   not yet terminal, no stored result, a capture refused for size).
 - The data plane's `TurnWorkspace` gains `diffstat` (`{files, insertions, deletions}`), counted from
   the diff's hunks and present even when `patchRefused` left the bytes behind; `LeafResult`'s

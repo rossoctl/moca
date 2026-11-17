@@ -217,8 +217,12 @@ export const TURN_HANDLERS: Record<string, Handler> = {
         state: turn.state,
         attempts: turn.attempts,
         // PROJECTED, not the stored record (#390): the patch and the assistant text are fetched as
-        // artifacts, so polling this route costs the same whether the leaf produced four lines or
-        // four megabytes.
+        // artifacts instead, so the RESPONSE is bounded whatever the leaf produced.
+        //
+        // The READ is not: `readLeafResult` still GETs and JSON.parses the whole stored record, so a
+        // four-megabyte patch is still fetched from Redis and parsed per poll -- only not serialised
+        // back out. Bounding that too means storing the descriptor under its own key, a second writer
+        // in the harness; §4.4 records it as the known limit rather than pretending it is closed.
         ...(result ? { result: projectLeafResult(result, deps.config.turnSummaryBytes) } : {}),
       },
     };
@@ -248,8 +252,10 @@ export const TURN_HANDLERS: Record<string, Handler> = {
     // The CAPTURE's digest of these same bytes, which is also what the status read advertises as
     // `artifacts[].sha256` -- so the ETag and that field cannot disagree, and an 8 MiB patch is not
     // re-hashed on the single event loop once per fetch. Hashed here only for a record that carries
-    // no digest (an older worker's, or a solve whose baseline was never captured).
-    const etag = artifact.sha256 ?? createHash('sha256').update(artifact.bytes).digest('hex');
+    // no digest (an older worker's, or a solve whose baseline was never captured), and carrying the
+    // same `sha256:` prefix the capture writes, so a client comparing the two never has to strip one.
+    const etag =
+      artifact.sha256 ?? `sha256:${createHash('sha256').update(artifact.bytes).digest('hex')}`;
     return {
       status: 200,
       body: artifact.bytes,

@@ -244,8 +244,10 @@ Goal 4 is satisfied by N of these — one per leaf — which is also the measure
 > - Every **model-written** string in that body is held to the same cap, not just `summary`:
 >   `verdict.reason` and the gate's `summary` and `proposed_action` are capped nowhere upstream
 >   (`validateVerdict` checks the shape, not the length), so unclipped they would keep a `done`
->   turn's body unbounded — exactly the cost this amendment removes. A cap of `0` means no model
->   prose at all: no `summary` key, and the other three clipped to the marker.
+>   turn's body unbounded — exactly the cost this amendment removes. The cap bounds each string's
+>   content, so a clipped one is the cap plus the 14-byte `…[truncated]` marker. A cap of `0` means
+>   no model prose at all: all four keys are omitted, while `verdict` and `gate` keep their shaped
+>   fields so a client can still branch on them.
 > - `result.patch` and `result.text` are **gone** from that body. A narrowing, permitted because
 >   `/v1` is Preview, and listed in the API changelog (1.26.0) because that is what Preview requires.
 > - The artifact route serves the bytes whole — never truncated, and byte-exact for a diff that is
@@ -253,6 +255,13 @@ Goal 4 is satisfied by N of these — one per leaf — which is also the measure
 >   artifact by design: those bytes never left the sandbox, so the descriptor is the whole answer.
 > - The projection is **read-time only**. Nothing extra is stored, so there is no second writer, no
 >   migration, and a record written before #390 projects exactly like one written after it.
+> - **Known limit: the RESPONSE is bounded, the READ is not.** `readLeafResult` still `GET`s the
+>   whole stored value and `JSON.parse`s it, so a 4 MiB patch is still moved from Redis and parsed on
+>   the event loop once per poll — the projection only keeps it off the wire. Closing that needs the
+>   writer to split the record (a small status value beside the bytes), which is a stored-format
+>   change and a migration for every result written before it. Recorded here rather than pretended
+>   closed; the trigger to do it is a poll rate where that parse shows up in the control plane's
+>   event-loop lag, not a patch size.
 
 **`GET /runs/status` is deliberately left exactly as it is.** It already exists
 (`server.ts:1237-1240`) and infers status _from the result store_: no record answers
@@ -1005,6 +1014,17 @@ is the whole keyspace per session delete, not the matches.
 > terminal, so `toTerminal` has freed both, and the pass is a bulk `del` of their keys in chunks of 500. That bound matters because the walk is **one-shot** — the cascade tombstones the session
 > first, so a retried `DELETE` answers `session_not_found` and never re-enters the walk, and anything
 > a cut walk leaves is reclaimed only by the index's own TTL.
+>
+> The index is also **trimmed by score on every `create`**, dropping members past the retention
+> window (`ZREMRANGEBYSCORE -inf <createdAt − window>`, the sweep `bundle-budget.ts` already uses for
+> expired bundles). Without it the key's size is unbounded in a way its TTL does not catch: every
+> `create` re-arms the expiry, so a session submitting turns for a year holds a year of ids, all but
+> the last week of them naming keys Redis has already expired, and the walk above enumerates and
+> `DEL`s every one. What makes trimming safe is the **re-score**: `toTerminal` rewrites a member's
+> score to the moment the turn finished, which is when its record's and result's own TTLs start — so
+> "older than the window" means "its keys are gone", not "it was submitted a long time ago". A turn
+> that outlived the window while still open is reached by the owner-set pass, which never consults
+> this index.
 
 **Deferred, with the reason on the record.** #389's scope item 5 — retire #380's interim
 sync-disconnect contract — is **not** in M1. §5.5 already argues the condition is a supported

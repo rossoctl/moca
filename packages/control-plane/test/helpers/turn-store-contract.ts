@@ -18,6 +18,12 @@ export type MakeTurnStore = () => Promise<{
   /** The same, for the session's turn index (§9.2). */
   ttlOfSession(sessionId: string): Promise<number>;
   /**
+   * The members of that index. Read directly rather than inferred from `deleteSessionTurns`, because
+   * the thing to assert about the trim is which ids it DROPPED -- and a dropped id is invisible to
+   * every public method of the store.
+   */
+  indexedTurns(sessionId: string): Promise<string[]>;
+  /**
    * A session id unique to this make(). The suite cannot hardcode one: `leafResultKey` is
    * deliberately UNTAGGED (turn-result.ts -- the worker writes it, and it knows no test key tag), so
    * the only thing that keeps the real-Redis backing's `*${tag}*` sweep able to delete the results
@@ -371,6 +377,53 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       // route to a finished turn -- the failure is silent, and the leaked bytes outlive the session.
       const indexTtl = await ttlOfSession(sessionId);
       expect(indexTtl).toBeGreaterThanOrEqual(await ttlOf('t-idx'));
+      await done();
+    });
+
+    it('trims index members past the retention window, but never a turn that just finished (§9.2)', async () => {
+      const {
+        store,
+        now,
+        sessionId,
+        resultTtlSeconds,
+        ttlMarginSeconds,
+        indexedTurns,
+        putResult,
+        hasResult,
+        done,
+      } = await make();
+      const band = (resultTtlSeconds + ttlMarginSeconds) * 1000;
+
+      // Submitted three windows ago and never finished a terminal write: whatever became of its
+      // record, the window it was submitted in is long over, and its index entry would otherwise sit
+      // here for as long as the session keeps submitting -- every `create` re-arms the key's expiry.
+      await store.create(
+        rec({ turnId: 't-ancient', sessionId, createdAt: now - band * 3, idempotencyKey: 'k-anc' }),
+      );
+      // Submitted two windows ago and finished NOW. By submission time it is as stale as the one
+      // above; by the clock that governs its record and result -- which starts at the terminal
+      // transition -- it is brand new. The re-score in `toTerminal` is the only thing that tells
+      // these two apart, and getting it wrong deletes a live turn's only route home.
+      await store.create(
+        rec({ turnId: 't-late', sessionId, createdAt: now - band * 2, idempotencyKey: 'k-late' }),
+      );
+      await putResult(sessionId, 't-late', '{"status":"done"}');
+      expect(await store.finalize('t-late', 'done', now)).toBe('ok');
+
+      // Today's submission is what runs the sweep.
+      await store.create(
+        rec({ turnId: 't-fresh', sessionId, createdAt: now, idempotencyKey: 'k-fresh' }),
+      );
+
+      const members = await indexedTurns(sessionId);
+      expect(members).toContain('t-late');
+      expect(members).toContain('t-fresh');
+      expect(members).not.toContain('t-ancient');
+
+      // ...and the one the sweep kept is still reachable, result bytes included.
+      await store.deleteSessionTurns(sessionId, 'github:1234');
+      expect(await store.get('t-late')).toBeNull();
+      expect(await hasResult(sessionId, 't-late')).toBe(false);
       await done();
     });
   });

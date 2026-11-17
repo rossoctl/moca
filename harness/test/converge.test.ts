@@ -119,10 +119,21 @@ describe('buildDiffCaptureScript', () => {
     const s = buildDiffCaptureScript('run-1');
     expect(s).toContain('/workspace/leaves/run-1');
     expect(s).toContain('git -C "$LEAF" add -A');
-    expect(s).toContain('git -C "$LEAF" diff --cached');
-    // The baseline comes FIRST, and from rev-parse: the envelope's `ref` can be a branch name,
-    // which names a different commit by the time anyone reapplies the patch.
-    expect(s.indexOf('rev-parse HEAD')).toBeLessThan(s.indexOf('add -A'));
+    // The baseline comes FIRST, and the diff is taken AGAINST it.
+    expect(s).toContain('git -C "$LEAF" diff --cached "$BASE"');
+    expect(s.indexOf('BASE=')).toBeLessThan(s.indexOf('add -A'));
+  });
+
+  // The whole point of the file: an agent that ran `git commit` in its worktree leaves HEAD at a sha
+  // that exists nowhere else, and `diff --cached` against it drops the committed work from the
+  // patch. The pinned commit is written beside the worktree by buildConvergeScript, so neither the
+  // baseline nor the diff depends on where the agent left HEAD.
+  it('reads the pinned commit from the sibling file, with HEAD only as the fallback', () => {
+    const s = buildDiffCaptureScript('run-1');
+    expect(s).toContain(`BASE=$(cat "$LEAF.base" 2>/dev/null || git -C "$LEAF" rev-parse HEAD)`);
+    expect(buildConvergeScript('https://x/y', 'main', 'run-1')).toContain(`>"$LEAF.base"`);
+    // And it is cleaned up with the worktree, not left on the pooled sandbox for the next leaf.
+    expect(buildCleanupScript('run-1')).toContain(`rm -f "$LEAF.base"`);
   });
 });
 
@@ -276,5 +287,23 @@ describe('converge + overlay + diff, executed end-to-end over a local repo', () 
     expect(patch).toContain('src.txt');
     expect(patch).toContain('+patched');
     expect(patch).not.toContain('.sh-config');
+  });
+
+  // A patch is worthless if its baseline is a commit nobody outside the sandbox has. An agent that
+  // runs `git commit` in the leaf worktree moves HEAD to exactly such a sha -- and a diff taken
+  // against that HEAD also drops the committed work from the patch, silently. The commit converge
+  // pinned, written beside the worktree, fixes both halves.
+  it("captures work the agent COMMITTED, against the commit converge pinned (not the agent's HEAD)", () => {
+    const sid = 'leaf-2';
+    sh(buildConvergeScript(`file://${seedRepo}`, 'main', sid));
+    const leaf = `${root}/workspace/leaves/${sid}`;
+    const pinned = git(leaf, 'rev-parse', 'HEAD').trim();
+    writeFileSync(join(leaf, 'src.txt'), 'committed\n');
+    git(leaf, 'add', '.');
+    git(leaf, 'commit', '-q', '-m', 'the agent committed its own fix');
+    expect(git(leaf, 'rev-parse', 'HEAD').trim()).not.toBe(pinned);
+    const { baseline, patch } = splitBaseline(sh(buildDiffCaptureScript(sid)));
+    expect(baseline).toBe(pinned);
+    expect(patch).toContain('+committed');
   });
 });

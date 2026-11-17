@@ -71,6 +71,19 @@ export function fakeRedis() {
       if (opts.LIMIT) rows = rows.slice(opts.LIMIT.offset, opts.LIMIT.offset + opts.LIMIT.count);
       return rows.map((m) => m.value);
     },
+    // Only the form the turn index uses: ('-inf', <number>), inclusive at the top. A wider fake
+    // would be guessing at semantics no caller here asks for.
+    async zRemRangeByScore(key, min, max) {
+      ops.push(`zRemRangeByScore ${key}`);
+      if (String(min) !== '-inf') throw new Error('this fake only sweeps from -inf');
+      const hi = Number(max);
+      const before = zsets.get(key) ?? [];
+      zsets.set(
+        key,
+        before.filter((m) => m.score > hi),
+      );
+      return before.length - (zsets.get(key) ?? []).length;
+    },
     async del(keys) {
       ops.push(`del ${keys.join(',')}`);
       for (const k of keys) {
