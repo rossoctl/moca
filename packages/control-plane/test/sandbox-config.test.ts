@@ -106,6 +106,46 @@ describe('the sandbox profile config (SBX0 §4.1, §5)', () => {
     expect(c.sandbox!.idleCeilingS).toBe(1800);
   });
 
+  it('defaults the maximum idle lifetime to the default lifetime, so an unset key offers nothing longer', () => {
+    const c = configFromEnv(env()).sandbox!;
+    expect(c.lifetimeS).toBe(7 * 86_400);
+    expect(c.maxLifetimeS).toBe(7 * 86_400);
+    const d = configFromEnv(env({ SH_SANDBOX_LIFETIME_SECONDS: '172800' })).sandbox!;
+    expect(d.maxLifetimeS).toBe(172_800);
+  });
+
+  it('takes SH_SANDBOX_MAX_LIFETIME_SECONDS', () => {
+    const c = configFromEnv(env({ SH_SANDBOX_MAX_LIFETIME_SECONDS: '1209600' })).sandbox!;
+    expect(c.maxLifetimeS).toBe(1_209_600);
+  });
+
+  it('slides the deadline on activity only when SH_SANDBOX_MAX_LIFETIME_SECONDS is set', () => {
+    expect(configFromEnv(env()).sandbox!.slideOnActivity).toBe(false);
+    expect(
+      configFromEnv(env({ SH_SANDBOX_MAX_LIFETIME_SECONDS: '' })).sandbox!.slideOnActivity,
+    ).toBe(false);
+    expect(
+      configFromEnv(env({ SH_SANDBOX_MAX_LIFETIME_SECONDS: '1209600' })).sandbox!.slideOnActivity,
+    ).toBe(true);
+  });
+
+  it('refuses a default above the maximum', () => {
+    expect(() =>
+      configFromEnv(
+        env({ SH_SANDBOX_LIFETIME_SECONDS: '864000', SH_SANDBOX_MAX_LIFETIME_SECONDS: '432000' }),
+      ),
+    ).toThrow(/SH_SANDBOX_LIFETIME_SECONDS must be at most SH_SANDBOX_MAX_LIFETIME_SECONDS/);
+  });
+
+  it('refuses lifetimes under an hour', () => {
+    expect(() => configFromEnv(env({ SH_SANDBOX_LIFETIME_SECONDS: '3599' }))).toThrow(
+      /at least 3600/,
+    );
+    expect(() => configFromEnv(env({ SH_SANDBOX_MAX_LIFETIME_SECONDS: '3599' }))).toThrow(
+      /at least 3600/,
+    );
+  });
+
   it('reads SH_SANDBOX_MODES_ALLOWED as a comma list, and an empty value as the default', () => {
     const modes = (v: string | undefined) =>
       [...configFromEnv(env({ SH_SANDBOX_MODES_ALLOWED: v })).sandbox!.modesAllowed].sort();

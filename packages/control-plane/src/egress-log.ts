@@ -355,7 +355,7 @@ export class MemoryEgressStore implements EgressStore {
         }
       }
       l.meta.proxy += g.proxyDropped;
-      l.expireAtS = g.expireAtS;
+      l.expireAtS = Math.max(l.expireAtS, g.expireAtS);
     }
     this.hosts.set(host, { cursor, answer: a });
     return a;
@@ -459,9 +459,16 @@ for i = 1, g do
     if o > 0 then redis.call('HINCRBY', m, 'budget', o); over = over + o end
     if pd > 0 then redis.call('HINCRBY', m, 'proxy', pd) end
     if size > 0 then
-      redis.call('HSET', KEYS[3], id, size); redis.call('ZADD', KEYS[2], exp, id)
+      redis.call('HSET', KEYS[3], id, size)
+      -- Only ever later: a post computed from a record read before a mint moved the deadline
+      -- must not shorten what that mint set.
+      local cur = redis.call('ZSCORE', KEYS[2], id)
+      if (not cur) or tonumber(cur) < tonumber(exp) then redis.call('ZADD', KEYS[2], exp, id) end
     end
-    redis.call('EXPIREAT', s, exp); redis.call('EXPIREAT', m, exp)
+    for _, key in ipairs({s, m}) do
+      local t = redis.call('EXPIRETIME', key)
+      if t < 0 or t < tonumber(exp) then redis.call('EXPIREAT', key, exp) end
+    end
   end
   li = li + n
 end

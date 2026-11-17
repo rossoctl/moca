@@ -790,6 +790,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
         : credentialStoreFromEnv(env),
     ...(servesSandboxes
       ? {
+          // Its egress prefix default must equal RedisEgressStore's below: touch moves those keys.
           sandboxes: new RedisSandboxStore(client as unknown as SandboxRedisLike),
           // A host's last post is kept for the replay check as long as a sandbox record is.
           egress: new RedisEgressStore(

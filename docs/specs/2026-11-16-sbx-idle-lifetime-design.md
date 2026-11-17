@@ -53,7 +53,7 @@ retention`) and the name key's `PXAT` (same instant, in ms).
 - A sandbox with no activity for its lifetime reads `terminated / expired` and refuses to mint, as
   today.
 - The owner can choose a sandbox's lifetime at create, from 1 hour up to the deployment maximum
-  (30 days by default); without a choice it is the deployment default (7 days).
+  (unset, the deployment default; `deploy/sbx/setup.sh` sets 30 days); without a choice it is the deployment default (7 days).
 - `expiresAt` on every route reflects the extended deadline.
 - The Redis extension is one atomic script, and it refuses an expired or deleted sandbox: an ended
   sandbox is never revived.
@@ -74,7 +74,7 @@ retention`) and the name key's `PXAT` (same instant, in ms).
   loss this design removes, and it is not needed for safety (§6). Disk stays bounded by the live
   quotas (SBX0 §5.3) and by idle expiry.
 - **The owner chooses the lifetime at create**: `idleLifetimeS`, 3600 s to
-  `SH_SANDBOX_MAX_LIFETIME_SECONDS` (default 30 days), default `SH_SANDBOX_LIFETIME_SECONDS` (7
+  `SH_SANDBOX_MAX_LIFETIME_SECONDS` (unset: the default lifetime; `setup.sh` sets 30 days), default `SH_SANDBOX_LIFETIME_SECONDS` (7
   days). Create only; it cannot be changed later.
 - **The worker's idle reclaim follows the maximum**, not the default: `SH_WORKSPACE_IDLE` =
   max + 48 h (768 h for 30 days).
@@ -255,13 +255,23 @@ the write when the extension would be under 60 s.
 
 ### 6.1 Settings
 
-| Control plane                     | `setup.sh`              | Default | Meaning                                   |
-| --------------------------------- | ----------------------- | ------- | ----------------------------------------- |
-| `SH_SANDBOX_LIFETIME_SECONDS`     | `SBX_LIFETIME_DAYS`     | 7 days  | the default idle lifetime (was: absolute) |
-| `SH_SANDBOX_MAX_LIFETIME_SECONDS` | `SBX_MAX_LIFETIME_DAYS` | 30 days | new: the most an owner may set at create  |
+| Control plane                     | `setup.sh`              | Default                                  | Meaning                                   |
+| --------------------------------- | ----------------------- | ---------------------------------------- | ----------------------------------------- |
+| `SH_SANDBOX_LIFETIME_SECONDS`     | `SBX_LIFETIME_DAYS`     | 7 days                                   | the default idle lifetime (was: absolute) |
+| `SH_SANDBOX_MAX_LIFETIME_SECONDS` | `SBX_MAX_LIFETIME_DAYS` | 30 days (`setup.sh`; unset: the default) | new: the most an owner may set at create  |
 
 - The control plane refuses to start when `SH_SANDBOX_LIFETIME_SECONDS > SH_SANDBOX_MAX_LIFETIME_SECONDS`,
   or when either is under 3600.
+- **Unset, `SH_SANDBOX_MAX_LIFETIME_SECONDS` is `SH_SANDBOX_LIFETIME_SECONDS`**, not 30 days: a
+  control plane upgraded before `setup.sh` writes the key still runs over workers whose
+  `SH_WORKSPACE_IDLE` covers only the old lifetime (216 h), so it must offer nothing longer. The
+  30 days are `setup.sh`'s default, written behind its `SBX_ACK_HOSTS` refusal (§6.3).
+  **Unset also means no extension**: activity mints do not slide the deadline, which stays the
+  absolute lifetime of SBX0 as first built. An older `mocactl sbx mcp` keepalive mints as activity
+  every ~14 minutes without the worker counting it as use, so sliding over workers still at 216 h
+  would let the control plane's deadline outrun the worker's reclaim and reset the workspace
+  silently. `setup.sh` writes the key together with `SH_WORKSPACE_IDLE` = maximum + 48 h, so the
+  key's presence is the signal that the workers were sized for sliding.
 - `setup.sh`: `SBX_MAX_LIFETIME_DAYS` is 1–30, default 30, and must be at least `SBX_LIFETIME_DAYS`.
 
 ### 6.2 The worker's idle reclaim
@@ -291,6 +301,9 @@ Raising the maximum from 7 to 30 days changes `SH_WORKSPACE_IDLE` from 216 h to 
 worker. `setup.sh` refuses that change before applying anything, as it does today, so the operator
 runs it with `SBX_ACK_HOSTS=1` and then re-runs `install-host.sh` with the new bundles on every host
 right after (the deploy README's existing procedure).
+
+Extension on activity is off until `SH_SANDBOX_MAX_LIFETIME_SECONDS` is set (§6.1), so deploying
+the control plane alone changes no deadline; sliding starts with the `setup.sh` run above.
 
 Between the two steps the control plane already accepts a 30-day lifetime while the hosts' workers
 still reclaim after 216 h idle. That window is harmless as long as it is short: a sandbox created in

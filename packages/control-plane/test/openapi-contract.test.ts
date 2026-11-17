@@ -116,6 +116,7 @@ describe('§9.3 test 3 — contract drift', () => {
       'mode',
       'idleTimeoutS',
       'modeEpoch',
+      'idleLifetimeS',
     ];
     expect([...s.required].sort()).toEqual([...fields].sort());
     expect(Object.keys(s.properties).sort()).toEqual([...fields].sort());
@@ -151,11 +152,21 @@ describe('§9.3 test 3 — contract drift', () => {
 
   it('documents the set-mode token response', () => {
     const post = doc().paths['/v1/sandboxes/{id}/mode-token'].post;
-    expect(post.requestBody).toBeUndefined();
+    // An optional `activity` body only (idle-lifetime spec §4.2).
+    expect(post.requestBody.required).toBe(false);
+    expect(Object.keys(post.requestBody.content['application/json'].schema.properties)).toEqual([
+      'activity',
+    ]);
     const schema = post.responses['200'].content['application/json'].schema;
     expect(schema.required).toEqual(['setModeToken']);
     expect(Object.keys(schema.properties)).toEqual(['setModeToken']);
     expect(post.responses['409']).toBeDefined();
+    expect(Object.keys(post.responses).sort()).toEqual(
+      ['200', '400', '401', '403', '404', '409', '503'].sort(),
+    );
+    expect(Object.keys(doc().paths['/v1/sandboxes/{id}/token'].post.responses).sort()).toEqual(
+      ['200', '400', '401', '403', '404', '409', '503'].sort(),
+    );
   });
 
   it('states the label rules the code enforces: key pattern, and no character-count limit', () => {
@@ -177,7 +188,7 @@ describe('§9.3 test 3 — contract drift', () => {
     const ok = doc().paths['/v1/sandboxes/{id}/token'].post.responses['200'];
     const schema = ok.content['application/json'].schema;
     expect([...schema.required].sort()).toEqual(
-      ['execCa', 'execEndpoint', 'expiresAt', 'token', 'wrk', 'wsk'].sort(),
+      ['execCa', 'execEndpoint', 'expiresAt', 'sandboxExpiresAt', 'token', 'wrk', 'wsk'].sort(),
     );
     expect(schema.properties.execCa.type).toEqual(['string', 'null']);
   });

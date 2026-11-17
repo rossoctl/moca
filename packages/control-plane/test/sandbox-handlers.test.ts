@@ -60,6 +60,7 @@ describe('sandbox handlers (SBX0 §5)', () => {
       mode: 'per-exec',
       idleTimeoutS: 0,
       modeEpoch: 0,
+      idleLifetimeS: 7 * 86_400,
     });
     expect(b.id).toMatch(/^sbx-[0-9a-f]{26}$/);
     const rec = await d.sandboxes!.get(b.id as string, NOW);
@@ -68,6 +69,36 @@ describe('sandbox handlers (SBX0 §5)', () => {
     expect(rec?.buildId).toBe(b.buildId);
     // No mode asked for: per-exec, the worker's idle default, epoch 0 (lease-mode spec §8.1).
     expect(rec).toMatchObject({ mode: 'per-exec', idleTimeoutS: 0, modeEpoch: 0 });
+    expect(rec?.idleLifetimeS).toBe(7 * 86_400);
+  });
+
+  it('takes an idle lifetime at create, from an hour to the maximum', async () => {
+    const d = sbxDeps();
+    const b = await create(d, alice, { template: 'default', idleLifetimeS: 3600 });
+    expect(b.expiresAt).toBe(NOW + 3600);
+    expect(b.idleLifetimeS).toBe(3600);
+    const m = await create(d, alice, { template: 'default', idleLifetimeS: 30 * 86_400 });
+    expect(m.idleLifetimeS).toBe(30 * 86_400);
+    for (const bad of [3599, 30 * 86_400 + 1, 1.5, '3600', 0]) {
+      expect(
+        await codeOf(() => create(d, alice, { template: 'default', idleLifetimeS: bad })),
+      ).toBe('invalid_request');
+    }
+  });
+
+  it('views a record from before idle lifetimes at the default', async () => {
+    const d = sbxDeps();
+    const b = await create(d);
+    const rec = (await d.sandboxes!.get(b.id as string, NOW))!;
+    const { idleLifetimeS: _drop, ...old } = rec;
+    const id = 'sbx-' + 'a'.repeat(26);
+    await d.sandboxes!.create(
+      { ...old, id, wsk: id, name: '' },
+      { perSubject: 100, total: 100, retentionS: 86_400 },
+      NOW,
+    );
+    const got = await HANDLERS.getSandbox!(on(alice, id), d);
+    expect((got.body as Record<string, unknown>).idleLifetimeS).toBe(7 * 86_400);
   });
 
   it('shows an unnamed sandbox as name null', async () => {
@@ -240,6 +271,7 @@ describe('sandbox handlers (SBX0 §5)', () => {
     expect(b).toEqual({
       token: b.token,
       expiresAt: NOW + 900,
+      sandboxExpiresAt: NOW + 7 * 86_400,
       execEndpoint: 'sbx-exec.apps.example.invalid:443',
       wrk: 'sbx_node22',
       wsk: id,
@@ -317,16 +349,206 @@ describe('sandbox handlers (SBX0 §5)', () => {
     expect((r.body as { wrk: string }).wrk).toBe('sbx_node22');
   });
 
-  it('returns the exec CA when one is configured, and caps a token at the sandbox expiry', async () => {
+  it('returns the exec CA when one is configured, and caps a token at the extended deadline', async () => {
     const execCa = '-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n';
     const d = sbxDeps({ config: { sandbox: { ...makeDeps().config.sandbox!, execCa } } });
     const { id, expiresAt } = await create(d);
-    const late = { ...d, now: () => ((expiresAt as number) - 60) * 1000 };
-    const b = (await HANDLERS.mintSandboxToken!(on(alice, id), late)).body as Record<
-      string,
-      unknown
-    >;
-    expect(b).toMatchObject({ execCa, expiresAt });
+    const old = expiresAt as number;
+    const late = { ...d, now: () => (old - 60) * 1000 };
+    const mint = (body?: unknown) =>
+      HANDLERS.mintSandboxToken!(
+        ctx({ principal: alice, params: { id: id as string }, body }),
+        late,
+      );
+    // activity: false keeps the old deadline: the token is capped at it and the record is untouched.
+    const quiet = (await mint({ activity: false })).body as Record<string, unknown>;
+    expect(quiet).toMatchObject({ execCa, expiresAt: old, sandboxExpiresAt: old });
+    expect((await d.sandboxes!.get(id as string, old - 60))?.expiresAt).toBe(old);
+    // A plain mint at the same instant slides the deadline and the token gets its full TTL.
+    const b = (await mint()).body as Record<string, unknown>;
+    expect(b).toMatchObject({
+      execCa,
+      sandboxExpiresAt: old - 60 + 7 * 86_400,
+      expiresAt: old - 60 + 900,
+    });
+  });
+
+  it('mints slide the deadline: a mint every 6 days keeps a 7-day sandbox alive for 60 days', async () => {
+    const d = sbxDeps();
+    const { id } = await create(d);
+    for (let k = 1; k <= 10; k++) {
+      const at = { ...d, now: () => NOW_MS + k * 6 * DAY_MS };
+      const r = await HANDLERS.mintSandboxToken!(on(alice, id), at);
+      expect(r.status).toBe(200);
+      expect((r.body as { sandboxExpiresAt: number }).sandboxExpiresAt).toBe(
+        NOW + k * 6 * 86_400 + 7 * 86_400,
+      );
+    }
+    const end = { ...d, now: () => NOW_MS + 60 * DAY_MS };
+    expect((await HANDLERS.getSandbox!(on(alice, id), end)).body).toMatchObject({ state: 'ready' });
+  });
+
+  it("without a configured maximum a mint does not slide the deadline (today's absolute lifetime)", async () => {
+    const base = makeDeps();
+    const d = sbxDeps({
+      config: { sandbox: { ...base.config.sandbox!, slideOnActivity: false } },
+    });
+    const { id } = await create(d);
+    const at = { ...d, now: () => NOW_MS + 6 * DAY_MS };
+    const r = await HANDLERS.mintSandboxToken!(on(alice, id), at);
+    expect(r.body).toMatchObject({ sandboxExpiresAt: NOW + 7 * 86_400 });
+    expect((await d.sandboxes!.get(id as string, NOW + 6 * 86_400))?.expiresAt).toBe(
+      NOW + 7 * 86_400,
+    );
+    const at7 = { ...d, now: () => NOW_MS + 7 * DAY_MS };
+    const err = await HANDLERS.mintSandboxToken!(on(alice, id), at7).catch((e) => e);
+    expect(err).toMatchObject({ code: 'sandbox_terminated', extra: { reason: 'expired' } });
+  });
+
+  it('a sandbox with no activity mint for its lifetime expires, and reads and lists never extend it', async () => {
+    const d = sbxDeps();
+    const { id } = await create(d);
+    for (let k = 1; k <= 6; k++) {
+      const at = { ...d, now: () => NOW_MS + k * DAY_MS };
+      await HANDLERS.getSandbox!(on(alice, id), at);
+      await HANDLERS.listSandboxes!(ctx({ principal: alice }), at);
+    }
+    const at7 = { ...d, now: () => NOW_MS + 7 * DAY_MS };
+    const err = await HANDLERS.mintSandboxToken!(on(alice, id), at7).catch((e) => e);
+    expect(err).toMatchObject({ code: 'sandbox_terminated', extra: { reason: 'expired' } });
+    expect((await HANDLERS.getSandbox!(on(alice, id), at7)).body).toMatchObject({
+      state: 'terminated',
+      reason: 'expired',
+      terminatedAt: NOW + 7 * 86_400,
+    });
+  });
+
+  it('refuses a non-boolean activity, and activity on a mode change', async () => {
+    const d = sbxDeps({
+      config: { sandbox: { ...makeDeps().config.sandbox!, modesAllowed: new Set(['lease']) } },
+    });
+    const { id, expiresAt } = await create(d);
+    const at = { ...d, now: () => NOW_MS + DAY_MS };
+    const call = (
+      h: 'mintSandboxToken' | 'mintSandboxModeToken' | 'setSandboxMode',
+      body: unknown,
+    ) => HANDLERS[h]!(ctx({ principal: alice, params: { id: id as string }, body }), at);
+    for (const body of [{ activity: 'false' }, { activity: 0 }, { activity: null }]) {
+      for (const h of ['mintSandboxToken', 'mintSandboxModeToken'] as const) {
+        expect(await codeOf(() => call(h, body))).toBe('invalid_request');
+      }
+    }
+    expect(await codeOf(() => call('setSandboxMode', { mode: 'per-exec', activity: false }))).toBe(
+      'invalid_request',
+    );
+    expect(await codeOf(() => call('setSandboxMode', { mode: 'lease', activity: true }))).toBe(
+      'invalid_request',
+    );
+    const rec = await d.sandboxes!.get(id as string, NOW);
+    expect(rec).toMatchObject({ expiresAt, mode: 'per-exec', modeEpoch: 0 });
+  });
+
+  it('slides an old record at the default, and clamps a lifetime above the current maximum', async () => {
+    const d = sbxDeps();
+    const seed = (await d.sandboxes!.get((await create(d)).id as string, NOW))!;
+    const put = async (id: string, extra: object) => {
+      const { idleLifetimeS: _drop, ...base } = seed;
+      await d.sandboxes!.create(
+        { ...base, ...extra, id, wsk: id, name: '' },
+        { perSubject: 100, total: 100, retentionS: 86_400 },
+        NOW,
+      );
+      return id;
+    };
+    const oldId = await put('sbx-' + 'b'.repeat(26), { expiresAt: NOW + 7 * 86_400 });
+    const day1 = { ...d, now: () => NOW_MS + DAY_MS };
+    const r = await HANDLERS.mintSandboxToken!(on(alice, oldId), day1);
+    expect((r.body as { sandboxExpiresAt: number }).sandboxExpiresAt).toBe(NOW + 8 * 86_400);
+
+    // 30 days asked for, 14 allowed now: the mint slides by 14 days, not 30. The old deadline
+    // (2 days out) is below now + 14 d, so the clamp decides where it lands.
+    const clampId = await put('sbx-' + 'c'.repeat(26), {
+      expiresAt: NOW + 2 * 86_400,
+      idleLifetimeS: 30 * 86_400,
+    });
+    const narrow = {
+      ...day1,
+      config: {
+        ...d.config,
+        sandbox: { ...d.config.sandbox!, lifetimeS: 7 * 86_400, maxLifetimeS: 14 * 86_400 },
+      },
+    };
+    const c = await HANDLERS.mintSandboxToken!(on(alice, clampId), narrow);
+    expect((c.body as { sandboxExpiresAt: number }).sandboxExpiresAt).toBe(NOW + 15 * 86_400);
+    expect((await d.sandboxes!.get(clampId, NOW))?.expiresAt).toBe(NOW + 15 * 86_400);
+    const v = (await HANDLERS.getSandbox!(on(alice, clampId), narrow)).body as {
+      idleLifetimeS: number;
+    };
+    expect(v.idleLifetimeS).toBe(14 * 86_400);
+  });
+
+  it('a mint racing a delete refuses deleted and never revives the record', async () => {
+    const d = sbxDeps();
+    const { id, expiresAt } = await create(d);
+    const real = d.sandboxes!;
+    // The delete lands between the handler's read and its touch.
+    const racing = new Proxy(real, {
+      get(t, p, r) {
+        if (p === 'touch') {
+          return async (...a: Parameters<typeof real.touch>) => {
+            await t.markDeleted(id as string, a[1], a[3]);
+            return t.touch(...a);
+          };
+        }
+        const v = Reflect.get(t, p, r) as unknown;
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+    });
+    const err = await HANDLERS.mintSandboxToken!(on(alice, id), { ...d, sandboxes: racing }).catch(
+      (e) => e,
+    );
+    expect(err).toMatchObject({ code: 'sandbox_terminated', extra: { reason: 'deleted' } });
+    const rec = await real.get(id as string, NOW);
+    expect(rec?.deletedAt).toBeDefined();
+    expect(rec?.expiresAt).toBe(expiresAt);
+  });
+
+  it('a mode change racing a delete refuses deleted, raises no epoch and audits nothing', async () => {
+    const d = sbxDeps();
+    const { id } = await create(d);
+    const real = d.sandboxes!;
+    const before = await real.get(id as string, NOW);
+    const racing = new Proxy(real, {
+      get(t, p, r) {
+        if (p === 'touch') {
+          return async (...a: Parameters<typeof real.touch>) => {
+            await t.markDeleted(id as string, a[1], a[3]);
+            return t.touch(...a);
+          };
+        }
+        const v = Reflect.get(t, p, r) as unknown;
+        return typeof v === 'function' ? v.bind(t) : v;
+      },
+    });
+    const err = await HANDLERS.setSandboxMode!(
+      ctx({ principal: alice, params: { id: id as string }, body: { mode: 'lease' } }),
+      { ...d, sandboxes: racing },
+    ).catch((e) => e);
+    expect(err).toMatchObject({ code: 'sandbox_terminated', extra: { reason: 'deleted' } });
+    const rec = await real.get(id as string, NOW);
+    expect(rec?.modeEpoch).toBe(before?.modeEpoch);
+    expect(rec?.mode).toBe(before?.mode);
+  });
+
+  it('a no-activity mint on an expired sandbox still refuses expired', async () => {
+    const d = sbxDeps();
+    const { id } = await create(d);
+    const expired = { ...d, now: () => NOW_MS + 7 * DAY_MS };
+    const err = await HANDLERS.mintSandboxToken!(
+      { ...on(alice, id), body: { activity: false } },
+      expired,
+    ).catch((e) => e);
+    expect(err).toMatchObject({ code: 'sandbox_terminated', extra: { reason: 'expired' } });
   });
 
   it('refuses to mint once deleted (with the reason) or expired, with no job having run', async () => {
@@ -432,6 +654,23 @@ describe('sandbox handlers (SBX0 §5)', () => {
       HANDLERS.mintSandboxModeToken!(on(principal, id), d);
     const withSandbox = (over: object): Parameters<typeof makeDeps>[0] => ({
       config: { sandbox: { ...makeDeps().config.sandbox!, ...over } },
+    });
+
+    it('a mode change and a set-mode token mint extend; a no-activity set-mode mint does not', async () => {
+      const d = sbxDeps(withSandbox({ modesAllowed: new Set(['lease']) }));
+      const { id } = await create(d, alice, { template: 'default', mode: 'lease' });
+      const at = (days: number) => ({ ...d, now: () => NOW_MS + days * DAY_MS });
+      const r = (await put(at(3), id, { mode: 'lease' })).body as {
+        sandbox: { expiresAt: number };
+      };
+      expect(r.sandbox.expiresAt).toBe(NOW + 10 * 86_400);
+      await modeToken(at(5), id);
+      expect((await d.sandboxes!.get(id as string, NOW))?.expiresAt).toBe(NOW + 12 * 86_400);
+      await HANDLERS.mintSandboxModeToken!(
+        ctx({ principal: alice, params: { id: id as string }, body: { activity: false } }),
+        at(6),
+      );
+      expect((await d.sandboxes!.get(id as string, NOW))?.expiresAt).toBe(NOW + 12 * 86_400);
     });
 
     it('creates a lease mode at epoch 1, and per-exec at epoch 0 (ruling R8)', async () => {

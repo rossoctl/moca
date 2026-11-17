@@ -130,6 +130,11 @@ that names a timeout the held token cannot cover still gets a fresh token.
 
 The longest single command is therefore one token lifetime. Split longer work into several calls.
 
+A mint also moves the sandbox's deadline: to at least now plus the sandbox's idle lifetime
+(`idleLifetimeS`), never backwards. Send `{"activity": false}` as the body for a mint that runs no
+command, such as a keepalive, so that it does not count. The token response's `sandboxExpiresAt` is
+the deadline after the mint; track it, since it moves.
+
 **Delete and de-enrollment are not immediate.** A token already issued keeps working until its
 `exp`, plus the relay's 30 s leeway: up to one token lifetime plus 30 s (15.5 minutes by default)
 after `mocactl sbx rm`, or after an operator removes your account. An Exec still running at that

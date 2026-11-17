@@ -82,6 +82,8 @@ export function makeDeps(
       ],
       allowedSubjects: ['github:1234', 'github:9999'],
       lifetimeS: 7 * 86_400,
+      maxLifetimeS: 30 * 86_400,
+      slideOnActivity: true,
       retentionS: 14 * 86_400,
       tokenTtlS: 900,
       maxPerSubject: 3,
