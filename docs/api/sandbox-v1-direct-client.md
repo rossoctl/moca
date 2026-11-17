@@ -351,8 +351,11 @@ the operator upgrades the worker. Level 2 is off by default: only a deployment t
 - **16 MiB** per message, so send large trees as several calls.
 - **8 MiB** of stdout per call.
 - **The longest command** is one token lifetime minus 60 s (14 minutes by default).
-- **A sandbox lives 7 days by default**, then it is gone with its workspace. There is no
-  extension: pull your work out before then. `mocactl sbx ls` shows each sandbox's expiry.
+- **A sandbox lives 7 days past its last use by default**, then it is gone with its workspace.
+  Each mint that counts as activity moves its deadline (see [Tokens](#tokens)), on a deployment
+  that sets a maximum lifetime, as `deploy/sbx` does by default; without one the deadline stays
+  fixed at create. Pull your work out before the deadline. `mocactl sbx ls` shows each sandbox's
+  expiry.
 
 ## The stability promise
 
