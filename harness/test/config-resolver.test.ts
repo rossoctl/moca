@@ -2,13 +2,25 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { canonicalTar, contentDigest } from '@moca/config-bundle';
+import { gzipSync } from 'node:zlib';
+import {
+  bundleKey,
+  canonicalTar,
+  contentDigest,
+  type BundleRedisLike,
+  type TarEntry,
+} from '@moca/config-bundle';
 import {
   DefaultResourceLoader,
   formatSkillsForPrompt,
   getAgentDir,
 } from '@earendil-works/pi-coding-agent';
-import { unpackBundle, buildLoaderOptions, promotedLoaderOptions } from '../src/config-resolver.js';
+import {
+  unpackBundle,
+  buildLoaderOptions,
+  promotedLoaderOptions,
+  resolvePromotedConfig,
+} from '../src/config-resolver.js';
 
 let base: string;
 
@@ -248,5 +260,51 @@ describe('the advertised skill location', () => {
     await loader.reload();
     expect(loader.getSkills().skills[0]!.description).toBe('d');
     expect(loader.getSkills().diagnostics.filter((d) => d.type === 'error')).toEqual([]);
+  });
+});
+
+describe('resolvePromotedConfig checks the bundle format (#510)', () => {
+  /** A Redis holding `entries` exactly as the control plane stores them. */
+  const stored = (entries: TarEntry[]): { redis: BundleRedisLike; digest: string } => {
+    const digest = contentDigest(entries);
+    const value = gzipSync(canonicalTar(entries)).toString('base64');
+    return {
+      digest,
+      redis: {
+        set: async () => 'OK',
+        get: async (k) => (k === bundleKey(digest) ? value : null),
+        exists: async () => 1,
+        expire: async () => 1,
+      },
+    };
+  };
+  const skill = {
+    path: 'skills/keeper/SKILL.md',
+    content: Buffer.from('---\nname: keeper\ndescription: d\n---\nbody'),
+  };
+
+  it('fails loudly on a newer format and unpacks nothing', async () => {
+    // A literal marker, so this fails by assertion on a harness without the check.
+    const newer = { path: 'format.json', content: Buffer.from('{"formatVersion":2}\n') };
+    const { redis, digest } = stored([skill, newer]);
+    await expect(resolvePromotedConfig(redis, digest, base)).rejects.toThrow(
+      /format version 2 is newer/,
+    );
+    expect(readdirSync(base)).toEqual([]);
+  });
+
+  it('applies a bundle without the marker, as stored before it existed', async () => {
+    const { redis, digest } = stored([skill]);
+    const p = await resolvePromotedConfig(redis, digest, base);
+    expect(existsSync(join(p.skillsDir, 'keeper', 'SKILL.md'))).toBe(true);
+  });
+
+  it('applies a bundle in the current format, and the marker is not a skill, prompt or context', async () => {
+    const current = { path: 'format.json', content: Buffer.from('{"formatVersion":1}\n') };
+    const { redis, digest } = stored([skill, current]);
+    const p = await resolvePromotedConfig(redis, digest, base);
+    expect(existsSync(join(p.skillsDir, 'keeper', 'SKILL.md'))).toBe(true);
+    expect(p.context).toEqual([]);
+    expect(p.promptFragments).toEqual([]);
   });
 });

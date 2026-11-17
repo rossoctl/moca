@@ -7,4 +7,5 @@ export * from './lockfile.js';
 export * from './notes.js';
 export * from './preflight.js';
 export * from './build.js';
+export * from './format.js';
 export * from './store.js';

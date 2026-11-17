@@ -35,8 +35,10 @@ notes. A **Legacy** surface does not change except for security and breakage fix
 - **Wire contract.** `sandbox/v1` has been extended additively (for example the `workspace_key` field on `Exec`).
 - **Stored data.** There is no schema-version key for Redis; new fields are handled by tolerant reads. The credential
   envelope is versioned (`v1.` prefix). Token claims are read by the data plane from the control plane's tokens.
-- **Config bundles.** `BUNDLE_FORMAT_VERSION` is 1 and is written into the local `lockfile.json`, but the stored bundle
-  drops the lockfile and nothing reads the version.
+- **Config bundles.** `BUNDLE_FORMAT_VERSION` is 1. A bundle carries it as a content entry, `format.json`, which the
+  digest covers and the store keeps (the stored bundle still drops `lockfile.json`, which records the digest). The
+  control plane refuses to store a bundle in a newer format (`400 invalid_request`, naming the version), and the
+  harness refuses to apply one. A bundle without `format.json`, built before it existed, reads as version 1.
 - **Releases.** Tags are `v0.x.y`, so by semantic-versioning convention anything may change between minor releases.
 
 ## What counts as breaking
@@ -87,6 +89,15 @@ response fields and tolerate unknown error codes.** Text output meant for people
 | Stored data                           | New keys and new fields that older code ignores                             | A change the previous release cannot read. Stored data must be readable by the previous release                           |
 | Config bundles                        | None without a format version that survives upload                          | A format change the previous release cannot read; readers fail loudly on a version they do not understand                 |
 
+### Version markers
+
+A marker guards the stored bundle format, and it is bumped only by a change the previous release cannot read, which is a
+breaking change under rule 2 and decision 8:
+
+- **`BUNDLE_FORMAT_VERSION`** (config bundles). Readers accept their own version and every older one, and refuse a
+  newer one. Upgrade the harness and the control plane before the clients that build bundles (`mocactl`, the
+  promote tooling).
+
 ## Release notes
 
 Every release states: breaking changes, deprecations and their removal release, new required configuration, upgrade
@@ -95,16 +106,16 @@ supported runtime also satisfies the first Stable criterion for the deployment p
 
 ## Decisions (accepted 2026-10-13)
 
-| #   | Question                                                             | Decision                                                                                                                                    | Follow-up                                           |
-| --- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| 1   | Unit of notice                                                       | The longer of one minor release and the period in rule 2 (releases have come about two weeks apart, so releases alone are too short)        |                                                     |
-| 2   | Deprecation period                                                   | 90 days for the HTTP API and the sandbox wire contract; 30 days for the CLI, configuration and anything else                                |                                                     |
-| 3   | The `/turn` and `/runs` aliases                                      | Keep them indefinitely as supported, frozen aliases of `/v1`; only `/run-leaf` and `/run-leaf/status` (already deprecated) are removed      | [#507](https://github.com/rossoctl/moca/issues/507) |
-| 4   | `GET /runs/status`                                                   | Add `GET /v1/runs/status` and keep `/runs/status` as an alias                                                                               | [#508](https://github.com/rossoctl/moca/issues/508) |
-| 5   | `version` in the OpenAPI files (control plane 1.26.0, harness 1.4.0) | The version of the `/v1` contract: bump the minor for additive changes and the major only with a `/v2`; add a changelog                     | Done: [CHANGELOG.md](../api/CHANGELOG.md)           |
-| 6   | Stored-data compatibility                                            | Readable by the previous release, no migrations yet; add a schema-version key in Redis before the first change that needs one               | [#509](https://github.com/rossoctl/moca/issues/509) |
-| 7   | Config bundle format                                                 | Carry a format version into the stored bundle, have the harness check it and fail loudly, and require the previous version to stay readable | [#510](https://github.com/rossoctl/moca/issues/510) |
-| 8   | Who approves a breaking change                                       | A breaking change to a Stable surface needs an ADR and sign-off from the owner in `CODEOWNERS` for the affected area                        |                                                     |
+| #   | Question                                                             | Decision                                                                                                                                    | Follow-up                                                 |
+| --- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| 1   | Unit of notice                                                       | The longer of one minor release and the period in rule 2 (releases have come about two weeks apart, so releases alone are too short)        |                                                           |
+| 2   | Deprecation period                                                   | 90 days for the HTTP API and the sandbox wire contract; 30 days for the CLI, configuration and anything else                                |                                                           |
+| 3   | The `/turn` and `/runs` aliases                                      | Keep them indefinitely as supported, frozen aliases of `/v1`; only `/run-leaf` and `/run-leaf/status` (already deprecated) are removed      | [#507](https://github.com/rossoctl/moca/issues/507)       |
+| 4   | `GET /runs/status`                                                   | Add `GET /v1/runs/status` and keep `/runs/status` as an alias                                                                               | [#508](https://github.com/rossoctl/moca/issues/508)       |
+| 5   | `version` in the OpenAPI files (control plane 1.26.0, harness 1.4.0) | The version of the `/v1` contract: bump the minor for additive changes and the major only with a `/v2`; add a changelog                     | Done: [CHANGELOG.md](../api/CHANGELOG.md)                 |
+| 6   | Stored-data compatibility                                            | Readable by the previous release, no migrations yet; add a schema-version key in Redis before the first change that needs one               | [#509](https://github.com/rossoctl/moca/issues/509)       |
+| 7   | Config bundle format                                                 | Carry a format version into the stored bundle, have the harness check it and fail loudly, and require the previous version to stay readable | Done: [#510](https://github.com/rossoctl/moca/issues/510) |
+| 8   | Who approves a breaking change                                       | A breaking change to a Stable surface needs an ADR and sign-off from the owner in `CODEOWNERS` for the affected area                        |                                                           |
 
 Related, from the upgrade-order discussion: the control plane should not hand a `configRef` to a harness that cannot
 apply it. Every harness since v0.5.0 applies it, so this is closed in favour of decision 7's format-version check

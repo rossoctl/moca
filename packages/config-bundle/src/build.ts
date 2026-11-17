@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { classifySkills, detectBinaries } from './classify.js';
+import { formatEntry } from './format.js';
 import { buildLockfile, serializeLockfile, skillContentHash } from './lockfile.js';
 import { skillsRootNote, toolNameMappingNote } from './notes.js';
 import {
@@ -158,6 +159,9 @@ export function buildBundle(input: BuildBundleInput): BuildResult {
   fragments.forEach((text, i) => {
     entries.push({ path: `prompt/append-${i}.md`, content: Buffer.from(text, 'utf8') });
   });
+
+  // The format version travels as content (#510), so the store keeps it and the digest covers it.
+  entries.push(formatEntry());
 
   // Blocking gate: a credential reaching a shared cluster's store is not recoverable by
   // re-promoting, so nothing is packed or returned when the scan is dirty (spec §4.3).

@@ -75,6 +75,8 @@ period is only an outer bound. Practically:
   ConfigMap.
 - **No schema version.** There is no schema-version key or migration tool for Redis. New fields are handled by
   tolerant reads. The only versioned artefact at rest is the credential envelope (`v1.`).
+- **Config-bundle format.** A bundle carries its format version (`format.json`). The control plane refuses to store a
+  format newer than it knows, and the harness refuses to apply one, so a client upgraded first fails loudly.
 - No wire-version negotiation exists. `GET /v1/discovery` returns the control plane's `version`.
 
 ### Rolling the harness before the control plane
