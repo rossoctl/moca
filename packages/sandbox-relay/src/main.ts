@@ -225,17 +225,57 @@ function execCaller(md: Metadata, auth: ExecAuth): ExecCaller {
 }
 
 /**
- * Server-side keepalive (SBX0 §3.4). Some load balancers in front of a cluster router close a TCP
- * connection after a short idle period -- one was measured at 50 s -- so an Exec whose command prints
- * nothing would die mid-command. The relay pings every connection instead. These are the two
- * keepalive options grpc-js 1.14's server reads; it does not police client ping rates, so a client's
- * own pings are never refused.
+ * Server-side keepalive, for two reasons.
+ *
+ * - SBX0 §3.4: some load balancers in front of a cluster router close a TCP connection after a short
+ *   idle period -- one was measured at 50 s -- so an Exec whose command prints nothing would die
+ *   mid-command. The relay pings every connection instead.
+ * - #439: a P4 host whose network drops without a TCP close leaves its Attach stream open on the
+ *   relay, which then refuses the host's reconnect as a duplicate sandbox id and keeps its presence
+ *   record, until the router's idle timeout (5 m on the passthrough Route) closes the tunnel. A PING
+ *   the peer never acks destroys the connection within timeMs + timeoutMs instead, and the stream's
+ *   teardown removes presence. The pings are HTTP/2 frames inside the TLS stream, so the passthrough
+ *   router and the ghostunnel sidecar, byte-for-byte TCP proxies, carry them end to end: a dead host
+ *   behind them goes unanswered exactly as a direct one would.
+ *
+ * These are the two keepalive options grpc-js 1.14's server reads; it pings whether or not a call is
+ * open. It has no server-side ping policy: it never reads grpc.http2.min_ping_interval_without_data_ms,
+ * and reads grpc.keepalive_permit_without_calls only on a client, so setting either here would do
+ * nothing. The workers' own 30 s client pings (remote-worker/internal/session/dial.go) are therefore
+ * never answered with GOAWAY too_many_pings; keepalive-dead-peer.transport.test.ts pins that.
  */
 export interface Keepalive {
   timeMs: number;
   timeoutMs: number;
 }
 export const RELAY_KEEPALIVE = { timeMs: 20_000, timeoutMs: 10_000 } as const;
+
+/** The largest delay a Node timer holds; grpc-js also reads this keepalive time as "off". */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
+function keepaliveMs(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const v = raw.trim();
+  const n = Number(v);
+  if (!/^[1-9][0-9]*$/.test(v) || !Number.isSafeInteger(n) || n >= MAX_TIMER_MS) {
+    // Boot errors name variables, not values, everywhere here.
+    throw new Error(`${name} must be a positive integer of milliseconds below ${MAX_TIMER_MS}`);
+  }
+  return n;
+}
+
+/**
+ * MOCA_RELAY_KEEPALIVE_TIME_MS and MOCA_RELAY_KEEPALIVE_TIMEOUT_MS: unset or empty is the default
+ * (RELAY_KEEPALIVE), anything else must be a positive integer, or the relay does not boot. Keepalive
+ * cannot be turned off here: both reasons above hold on every deployment.
+ */
+export function relayKeepalive(env: NodeJS.ProcessEnv): Keepalive {
+  return {
+    timeMs: keepaliveMs(env, 'MOCA_RELAY_KEEPALIVE_TIME_MS', RELAY_KEEPALIVE.timeMs),
+    timeoutMs: keepaliveMs(env, 'MOCA_RELAY_KEEPALIVE_TIMEOUT_MS', RELAY_KEEPALIVE.timeoutMs),
+  };
+}
 
 export function relayServerOptions(keepalive: Keepalive = RELAY_KEEPALIVE): ChannelOptions {
   return {
@@ -608,6 +648,8 @@ export async function startRelay(
   } = {},
 ): Promise<{ port: number; execPort?: number; shutdown: () => Promise<void> }> {
   const env = opts.env ?? process.env;
+  // Before anything else, so a malformed value is a boot error.
+  const keepalive = opts.keepalive ?? relayKeepalive(env);
   // The store startRelay built itself, and so closes on shutdown; injected deps belong to the caller.
   let ownedRecords: RedisRecordStore | undefined;
   // The exec auth first: it throws on a missing credential before anything touches Redis.
@@ -631,11 +673,11 @@ export async function startRelay(
   const attachAddr = `0.0.0.0:${opts.port ?? Number(env.SH_RELAY_PORT ?? 8443)}`;
   const execAddr = opts.execAddr ?? env.MOCA_RELAY_EXEC_ADDR;
   if (!execAddr) {
-    const { server, relay } = buildServer(deps, opts.keepalive);
+    const { server, relay } = buildServer(deps, keepalive);
     const port = await bind(server, attachAddr);
     return { port, shutdown: () => stopGracefully([server], relay, close) };
   }
-  const { attachServer, execServer, relay } = buildServers(deps, opts.keepalive);
+  const { attachServer, execServer, relay } = buildServers(deps, keepalive);
   const port = await bind(attachServer, attachAddr);
   const execPort = await bind(execServer, execAddr);
   return {
