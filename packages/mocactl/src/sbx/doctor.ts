@@ -145,10 +145,13 @@ async function sandboxCheck(
         name,
         ok: false,
         detail: `${detail}: less than 24 h left`,
-        fix:
-          `it ends after ${validLifetime(s.idleLifetimeS) ? lifetimeText(s.idleLifetimeS) : 'its lifetime'} ` +
-          "without use, and any command extends it (this doctor run's own check included); " +
-          'if it is not going to be used, pull its work (mocactl sbx pull --apply)',
+        fix: validLifetime(s.idleLifetimeS)
+          ? `it ends after ${lifetimeText(s.idleLifetimeS)} without use, and any command extends it ` +
+            "(this doctor run's own check included); " +
+            'if it is not going to be used, pull its work (mocactl sbx pull --apply)'
+          : // No idle lifetime on the record: the lifetime is absolute, and nothing extends it.
+            'pull its work before then (mocactl sbx pull --apply); for a fresh sandbox, ' +
+            `mocactl sbx rm, then ${UP}`,
       },
       live: true,
       mode: s.mode,
