@@ -28,8 +28,10 @@ Decision record: [ADR-0033](../adrs/0033-multi-user-control-plane.md).
 > second `/v1/runs`: user-owned async dispatch is **`POST /v1/sessions/{id}/turns {async:true}` →
 > `202`**, with status read back at `GET /v1/sessions/{id}/turns/{turnId}` and a queued turn withdrawn
 > with `DELETE` on the same path. See [P6AF](2026-11-05-p6-async-fan-out-design.md) §4
-> ([ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md)). Batches stay with the caller;
-> `/v1/batches` is deferred until a working fan-out can measure whether it is needed.
+> ([ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md)). Batches stay with the caller:
+> `/v1/batches` was deferred until a working fan-out could measure whether it was needed, and
+> [#537](https://github.com/rossoctl/moca/issues/537) closed it against building one — a fan-out is
+> a loop over N sessions, each holding one async turn (P6AF §4.4, ADR-0047's alternatives).
 >
 > §4.3's data-plane row for `POST /v1/runs` ("unchanged — operator-authenticated,
 > orchestrator-facing") holds for _synchronous_ runs only. Its async half was removed with the
