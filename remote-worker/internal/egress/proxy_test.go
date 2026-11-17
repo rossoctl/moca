@@ -304,8 +304,10 @@ func assertRefusal(t *testing.T, resp *http.Response, body string, status int, c
 	if got := resp.Header.Get("X-Moca-Egress-Error"); got != code {
 		t.Fatalf("X-Moca-Egress-Error %q, want %q", got, code)
 	}
-	if want := code + ": " + host + "\n"; body != want {
-		t.Fatalf("body %q, want %q", body, want)
+	// The first line is the contract ("<code>: <host>", conformance doc.go);
+	// a hint may follow it (refusalHints).
+	if want := code + ": " + host + "\n"; !strings.HasPrefix(body, want) {
+		t.Fatalf("body %q, want a first line %q", body, want)
 	}
 	if ct := resp.Header.Get("Content-Type"); ct != "text/plain" {
 		t.Fatalf("content-type %q", ct)
@@ -373,6 +375,44 @@ func TestOffAllowlistIsANamed403(t *testing.T) {
 	}
 	if e := h.sink.waitEvent(t, DecisionDestinationDenied); e.Status != 403 || e.Host != "evil.test" {
 		t.Fatalf("event %+v", e)
+	}
+}
+
+// TestOffAllowlistRefusalSaysWhatToDo is #779: the 403's body named only the
+// code and the host, so an agent that met it went on probing, or set out to
+// build a package from source, instead of reporting that the host is not
+// allowlisted. The body now says so, that a retry will not help, and whom to
+// ask, while its first line and the header stay what a client parses.
+func TestOffAllowlistRefusalSaysWhatToDo(t *testing.T) {
+	h := newHarness(t, "up.test:443", nil)
+	c := dial(t, h.register("vm-1", "run-a"))
+	resp, body := roundTrip(t, c, "GET http://evil.test/simple/ HTTP/1.1\r\nHost: evil.test\r\n\r\n")
+	assertRefusal(t, resp, body, 403, DecisionDestinationDenied, "evil.test")
+	for _, want := range []string{
+		"not on this sandbox's egress allowlist",
+		"Retrying will not help",
+		"ask the operator",
+		"mocactl sbx egress",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body lacks %q:\n%s", want, body)
+		}
+	}
+	// Nothing of the allowlist itself reaches the guest: the hint is fixed text.
+	if strings.Contains(body, "up.test") {
+		t.Errorf("body names an allowlisted host:\n%s", body)
+	}
+	if n, err := strconv.Atoi(resp.Header.Get("Content-Length")); err != nil || n != len(body) {
+		t.Errorf("Content-Length %q for a %d-byte body", resp.Header.Get("Content-Length"), len(body))
+	}
+}
+
+// Other refusals keep their one-line body: the hint is for the one an
+// operator can fix by allowlisting the host.
+func TestOtherRefusalsKeepOneLine(t *testing.T) {
+	b := string(refusalBytes(502, DecisionUpstreamUnreachable, "up.test"))
+	if _, body, _ := strings.Cut(b, "\r\n\r\n"); body != DecisionUpstreamUnreachable+": up.test\n" {
+		t.Fatalf("body %q", body)
 	}
 }
 

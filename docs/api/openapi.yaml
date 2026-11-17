@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.26.0
+  version: 1.27.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -1048,6 +1048,25 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
 paths:
+  /:
+    get:
+      operationId: getIndex
+      summary: What this URL is, for a browser or curl
+      description: |
+        A short plain-text page (#779): that this is a Moca control plane (and on the `sandbox`
+        profile, the sandbox service), the deployment's `version` when it has one, that the API is
+        under `/v1` with `GET /v1/discovery` describing the deployment, how to install `mocactl` and
+        log in for the profiles it serves, and that a sandbox's egress is an allowlist whose additions
+        the operator makes. Fixed text: it names no URL of the deployment and echoes nothing of the
+        request. Its wording is for people and may change; a client reads `/v1/discovery` instead.
+        Only the exact path `/`; any other unknown path is the `not_found` 404.
+      security: []
+      responses:
+        '200':
+          description: the page
+          content:
+            text/plain:
+              schema: { type: string }
   /healthz:
     get:
       operationId: healthz

@@ -42,6 +42,8 @@ describe('the route table', () => {
         // are declared here but 404 on a deployment with no grant ring.
         'POST /internal/turn-grants',
         'POST /internal/grants/refresh',
+        // #779: what this URL is, for a browser or a curl, instead of a 404.
+        'GET /',
         'GET /healthz',
         'GET /readyz',
         // §7's async_quota_refusals: the control plane's own /metrics (async fan-out spec §7).
@@ -108,6 +110,7 @@ describe('the route table', () => {
 
   it('requires no auth on the probes and the device flow, and exchange auth on the exchange', () => {
     const auth = (m: string, p: string) => ROUTES.find((r) => r.method === m && r.path === p)!.auth;
+    expect(auth('GET', '/')).toBe('none');
     expect(auth('GET', '/healthz')).toBe('none');
     expect(auth('GET', '/readyz')).toBe('none');
     expect(auth('POST', '/v1/auth/device')).toBe('none');
@@ -210,7 +213,8 @@ describe('matchRoute', () => {
 
   it('returns null for an unknown path', () => {
     expect(matchRoute('GET', '/v1/nope')).toBeNull();
-    expect(matchRoute('GET', '/')).toBeNull();
+    expect(matchRoute('GET', '/nope')).toBeNull();
+    expect(matchRoute('POST', '/')).toBeNull();
   });
 });
 

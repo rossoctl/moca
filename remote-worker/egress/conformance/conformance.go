@@ -416,8 +416,10 @@ func wantRefusal(r response, status int, code, name string) error {
 	if ct := r.header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
 		return fmt.Errorf("Content-Type %q, want text/plain", ct)
 	}
-	if want := code + ": " + name + "\n"; r.body != want {
-		return fmt.Errorf("body %q, want %q", r.body, want)
+	// The first line is the contract; free text may follow it (moca-egress
+	// says there what to do about a destination_denied, #779).
+	if want := code + ": " + name + "\n"; !strings.HasPrefix(r.body, want) {
+		return fmt.Errorf("body %q, want a first line %q", r.body, want)
 	}
 	return nil
 }

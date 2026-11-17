@@ -113,6 +113,16 @@ describe('the sandbox MCP server (SBX0 §6.4)', () => {
     expect(client.getServerVersion()).toMatchObject({ name: 'moca-sandbox' });
   });
 
+  // #779: told only that other hosts answer 403, an agent that met one probed further or set out to
+  // obtain the package some other way. The rules say what the refusal means and whom it goes to.
+  it("tells the agent that a refused host is the operator's to allowlist, in every mode (#779)", () => {
+    for (const mode of ['per-exec', 'lease', 'lease+processes'] as const) {
+      const rules = sandboxRules('/workspace', mode);
+      expect(rules, mode).toContain('A refused host stays refused');
+      expect(rules, mode).toContain('ask the operator to allowlist it');
+    }
+  });
+
   it('puts a non-default workspace in its instructions', async () => {
     const { client } = await connect({ exec: async () => res(), workspace: '/srv/ws' });
     expect(client.getInstructions()).toMatch(/\/srv\/ws/);
