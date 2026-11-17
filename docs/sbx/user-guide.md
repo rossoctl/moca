@@ -546,7 +546,10 @@ that is not bound here.
   one carries the common registries (PyPI, npm, crates.io, the Go module proxy), but your operator
   may have changed it. The templates carry the toolchains: `mocactl sbx templates` lists them, with
   their tools, and `mocactl sbx policy` lists each profile's egress. A refused request's body says
-  that the host is not on the sandbox's egress allowlist; retrying does not help. To have a host
+  that the host is not on the sandbox's egress allowlist; retrying does not help. That body shows
+  only for plain-HTTP requests and clients that print it: an HTTPS request is refused at its
+  `CONNECT`, so most clients (curl, git, pip) show just `403` or `CONNECT tunnel failed`, and the
+  agent learns the rule from its sandbox instructions instead. To have a host
   added, ask your operator and name the host: `mocactl sbx egress` lists the hosts your sandbox
   reached and the ones it was refused. The service's own URL, opened in a browser or with `curl`,
   says the same and how to get `mocactl`.

@@ -583,9 +583,11 @@ worker, and wires every template worker to its control socket
 `sbx-worker@<id>.service.d/egress.conf` that orders the worker after `moca-egress`. A `--no-egress`
 worker gets neither, so it never starts a `moca-egress.service` that the host has. A sandbox can
 then reach only the hosts on the allowlist; everything else is refused with a named error
-(`destination_denied`), never a timeout. No credential is involved. The refusal's body tells the
-user or the agent that the host is not on the allowlist and to ask you, the operator; the
-allowlist below is where you add it.
+(`destination_denied`), never a timeout. No credential is involved. For a plain-HTTP request, the
+refusal's body tells the user or the agent that the host is not on the allowlist and to ask you,
+the operator. An HTTPS request is refused at its `CONNECT`, and most clients (curl, git, pip) show
+only `403` or `CONNECT tunnel failed`, with the `X-Moca-Egress-Error` header under `curl -v`; the
+agent's sandbox instructions carry the rule there. The allowlist below is where you add a host.
 
 - **The allowlist** is `MOCA_EGRESS_ALLOW` in `/etc/sbx/moca-egress.env`, a comma-separated list of
   hosts. It is seeded on the first install from `deploy/sbx/egress-allow.env` beside the installer
