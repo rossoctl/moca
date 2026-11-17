@@ -77,6 +77,12 @@ export interface PendingOidcAuth {
 }
 
 /**
+ * What `settle` may change: never the key, the TTL, or the source -- the per-source index is
+ * written at `put` and would no longer match an entry whose source moved.
+ */
+export type PendingOidcPatch = Partial<Omit<PendingOidcAuth, 'state' | 'expiresAtMs' | 'source'>>;
+
+/**
  * A put's outcome. Both refusals answer the client the same way (429 quota_exceeded); they are
  * told apart only so the message can say which bound was hit.
  */
@@ -105,10 +111,7 @@ export interface PendingAuthStore {
   put(entry: PendingOidcAuth): Promise<PendingPutOutcome>;
   get(state: string): Promise<PendingOidcAuth | undefined>;
   /** Record the callback's outcome; false when no live entry holds that state, or it is settled. */
-  settle(
-    state: string,
-    patch: Partial<Omit<PendingOidcAuth, 'state' | 'expiresAtMs'>>,
-  ): Promise<boolean>;
+  settle(state: string, patch: PendingOidcPatch): Promise<boolean>;
   delete(state: string): Promise<void>;
 }
 
@@ -186,10 +189,7 @@ export class MemoryPendingAuthStore implements PendingAuthStore {
     const e = this.entries.get(state);
     return e && e.expiresAtMs > this.now() ? e : undefined;
   }
-  async settle(
-    state: string,
-    patch: Partial<Omit<PendingOidcAuth, 'state' | 'expiresAtMs'>>,
-  ): Promise<boolean> {
+  async settle(state: string, patch: PendingOidcPatch): Promise<boolean> {
     const e = await this.get(state);
     if (!e) return false;
     // Write-once per outcome (see the interface): terminal once denied, principal never replaced.
