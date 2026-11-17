@@ -74,11 +74,18 @@ export function resultTtlSeconds(
   return Number(v);
 }
 
-/** Per-turn caps, resolved at submission and stored (§4.3). Enforcement is the worker's (#389). */
+/**
+ * Per-turn caps, resolved at submission and stored (§4.3). Enforced by the WORKER: the dequeue
+ * exchange hands both fields back and `turn-claim.ts` carries them into the leaf (#391).
+ *
+ * No `costUsd`. It was accepted and stored here and nothing could ever enforce it -- there is no
+ * price table in the repo and no USD arithmetic anywhere -- so `parseTurnSubmission` now REFUSES
+ * it rather than taking a cap it silently ignores. A record written before that carries a JSON
+ * field nothing reads.
+ */
 export interface TurnCaps {
   tokens?: number;
-  costUsd?: number;
-  /** Seconds. #388 clamps `turn_exp` to it at mint; nothing reads it in M1. */
+  /** Seconds. #388 clamps `turn_exp` to it at mint; the worker's deadline IS that `turn_exp`. */
   wallClock?: number;
 }
 
@@ -132,6 +139,13 @@ export interface TurnRecord {
   createdAt: number;
   /** Epoch ms the turn reached a terminal state; absent while it is live. */
   endedAt?: number;
+  /**
+   * `DELETE /v1/sessions/{id}/turns/{turnId}` on a RUNNING turn (§4.5, #391). The state stays
+   * `running`: the worker holding the leaf polls this field, aborts the run and finalizes
+   * `cancelled` itself, so a cancel needs no message addressed to a particular worker. A queued
+   * turn is still cancelled outright and never carries this.
+   */
+  cancelRequested?: boolean;
 }
 
 export const turnKey = (turnId: string): string => `sh:cp:turn:${turnId}`;
@@ -228,11 +242,20 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
 
   const capsIn = asRecord(b.caps);
   const caps: TurnCaps = {};
+  // REFUSED, not ignored (#391). Nothing in the repo can price a turn -- no model price table, no
+  // USD arithmetic -- so this cap was accepted and then had no effect, which is worse for an
+  // unattended fan-out than not offering it: a caller that set it believed its spend was bounded.
+  // A narrowing of a Preview surface, listed in the API changelog. `caps.tokens` is the bound that
+  // works.
+  if (capsIn.costUsd !== undefined) {
+    throw new CpError(
+      'invalid_request',
+      'caps.costUsd is not enforceable (no price table); use caps.tokens',
+    );
+  }
   const tokens = cap(capsIn.tokens, 'tokens');
-  const costUsd = cap(capsIn.costUsd, 'costUsd');
   const wallClock = cap(capsIn.wallClock, 'wallClock');
   if (tokens !== undefined) caps.tokens = tokens;
-  if (costUsd !== undefined) caps.costUsd = costUsd;
   if (wallClock !== undefined) caps.wallClock = wallClock;
 
   let idempotencyKey: string | undefined;

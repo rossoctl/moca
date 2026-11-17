@@ -14,7 +14,7 @@
 openapi: 3.1.0
 info:
   title: MOCA harness (data plane)
-  version: 1.4.0
+  version: 1.5.0
   description: |
     The agent execution tier: HTTP server and P6 workers that run turns and jobs against sandboxed
     workspaces. It is a separate deployable from the control plane, and a client that knows only
@@ -676,6 +676,12 @@ components:
         response: { type: string }
         stopReason: { type: string }
         errorMessage: { type: string }
+        budgetExceeded:
+          type: boolean
+          description: |
+            `true` when the turn's token cap was reached and tool calls were refused from then on
+            (#391). Reported because the loop itself stops with `stopReason: "end_turn"` in that
+            case, so the cap firing is otherwise invisible to the caller. Absent when it did not.
         usage: { $ref: '#/components/schemas/LeafUsage' }
         sandbox: { $ref: '#/components/schemas/TurnPlacement' }
         workspace: { $ref: '#/components/schemas/TurnWorkspace' }
@@ -858,6 +864,12 @@ components:
         sessionId: { type: string }
         stopReason: { type: string }
         errorMessage: { type: string }
+        budgetExceeded:
+          type: boolean
+          description: |
+            `true` when the turn's token cap was reached and tool calls were refused from then on
+            (#391). Reported because the loop itself stops with `stopReason: "end_turn"` in that
+            case, so the cap firing is otherwise invisible to the caller. Absent when it did not.
         usage: { $ref: '#/components/schemas/LeafUsage' }
         sandbox: { $ref: '#/components/schemas/TurnPlacement' }
         workspace: { $ref: '#/components/schemas/TurnWorkspace' }
@@ -1021,7 +1033,11 @@ components:
             status: { type: string, enum: [failed] }
             reason:
               type: string
-              enum: [no_verdict, invalid_verdict, bad_inputs, error, saturated]
+              enum: [no_verdict, invalid_verdict, bad_inputs, error, saturated, budget]
+              description: |
+                `budget` (#391): the turn spent a cap its caller set -- its token cap, or the wall
+                clock the control plane anchored at dequeue -- and the leaf was stopped. Terminal
+                like the other deterministic reasons; only `error` and `saturated` are retried.
             message: { type: string }
     RunStatus:
       oneOf:

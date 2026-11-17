@@ -103,6 +103,9 @@ export function buildConfig(auth?: TurnAuth | null): TurnConfig {
       ...(auth.sandboxBuildId ? { sandboxBuildId: auth.sandboxBuildId } : {}),
       // sessionModel, never model: runLeaf strips sessionModel, so /runs keeps its envelope's or the env's model.
       ...(auth.model ? { sessionModel: auth.model } : {}),
+      // The async claim's `caps.tokens` (#391). Absent for a sync turn, which then reads
+      // SH_BUDGET_TOKENS exactly as before.
+      ...(auth.budgetTokens ? { budgetTokens: auth.budgetTokens } : {}),
       ...server,
     };
   }

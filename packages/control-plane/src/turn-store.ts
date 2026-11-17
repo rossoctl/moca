@@ -240,6 +240,7 @@ export class TurnStore {
       attempts: Number(h.attempts ?? 0),
       createdAt: Number(h.createdAt ?? 0),
       ...(h.endedAt ? { endedAt: Number(h.endedAt) } : {}),
+      ...(h.cancelRequested === '1' ? { cancelRequested: true } : {}),
     };
   }
 
@@ -380,17 +381,41 @@ export class TurnStore {
   }
 
   /**
-   * A `queued` turn flips to `cancelled`; anything else is a conflict naming its state. A RUNNING
-   * leaf is deliberately not interrupted (§4.5): interrupting one needs a signal addressed to the
-   * single worker holding it, which does not exist.
+   * A `queued` turn flips to `cancelled` outright. A `running` one gets `cancelRequested` and STAYS
+   * `running`, answering `cancelling` (§4.5, #391): the worker holding the leaf polls the flag,
+   * aborts the run and finalizes `cancelled` itself -- so no message addressed to one particular
+   * worker is needed, only the turn record both already read. Anything else is a conflict naming
+   * its state.
+   *
+   * The state must not become a `cancelling` of its own. Every write a redelivery makes
+   * (`markRunning`, `finalize`) compare-and-sets against OPEN_STATES, so a third live state would
+   * refuse exactly the crash-reclaimed entries recovery exists for.
    */
-  async cancel(turnId: string, now: number): Promise<'cancelled' | 'conflict'> {
+  async cancel(turnId: string, now: number): Promise<'cancelled' | 'cancelling' | 'conflict'> {
     const rec = await this.get(turnId);
-    if (!rec || rec.state !== 'queued') return 'conflict';
+    if (!rec) return 'conflict';
+    if (rec.state === 'running') {
+      // Already requested: idempotent, so a caller retrying a DELETE sees the same answer rather
+      // than a 409 for a cancel that is in flight.
+      const won = await this.cas(this.key(turnId), ['running'], { cancelRequested: '1' });
+      return won ? 'cancelling' : 'conflict';
+    }
+    if (rec.state !== 'queued') return 'conflict';
     // `queued` ALONE in the CAS: a claim that won the race between the read above and this write
-    // made the record `running`, and §4.5 is explicit that a running leaf is not interrupted.
+    // made the record `running`, and that turn is cancelled through the flag above instead -- by
+    // the caller's next DELETE, which now has something to do.
     const res = await this.toTerminal(rec, 'cancelled', now, ['queued']);
     return res === 'ok' ? 'cancelled' : 'conflict';
+  }
+
+  /**
+   * Has a cancel been requested for this RUNNING turn (#391)? One field, not the whole record: the
+   * worker polls this every couple of seconds for every leaf it is running, and the record carries
+   * the turn's whole envelope.
+   */
+  async cancelRequested(turnId: string): Promise<boolean> {
+    const v = await this.guard(() => this.redis.hGet(this.key(turnId), 'cancelRequested'));
+    return v === '1';
   }
 
   /** One CAS attempt, with the transport mapped to 503 like every other call here. */

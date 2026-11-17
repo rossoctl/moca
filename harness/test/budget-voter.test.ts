@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { decideBudget, sessionSpendTotal, budgetVoterExtension } from '../src/budget-voter';
 
 // --- minimal fakes (no Pi runtime) -------------------------------------------
@@ -120,6 +120,22 @@ describe('budgetVoterExtension (headless: no session_start, injected baseline)',
     const { handlers, pi, sm } = harness();
     budgetVoterExtension(sm as never, { limit: 1, baseline: 0 })(pi as never);
     expect(handlers.tool_call({}, brokenCtx())).toEqual({}); // total == null -> no block
+  });
+  // #391: the only signal a caller gets. Blocking the call is invisible from outside -- pi reports
+  // `end_turn` for a turn whose every call was refused -- so without this an async turn over its
+  // `caps.tokens` would be finalized as a normal completion.
+  it('calls onExceeded exactly when it blocks, and still blocks', () => {
+    const { handlers, pi, sm } = harness();
+    const onExceeded = vi.fn();
+    budgetVoterExtension(sm as never, { limit: 50, baseline: 0, onExceeded })(pi as never);
+    expect(
+      handlers.tool_call({}, fakeCtx([{ input: 10, output: 0, cacheRead: 0, cacheWrite: 0 }])),
+    ).toEqual({});
+    expect(onExceeded).not.toHaveBeenCalled();
+    expect(
+      handlers.tool_call({}, fakeCtx([{ input: 60, output: 0, cacheRead: 0, cacheWrite: 0 }])),
+    ).toEqual({ block: true, reason: 'Session token budget exceeded' });
+    expect(onExceeded).toHaveBeenCalledTimes(1);
   });
   it('is disabled when limit <= 0', () => {
     const { handlers, appended, pi, sm } = harness();

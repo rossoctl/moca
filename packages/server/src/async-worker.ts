@@ -307,8 +307,18 @@ export function armAsyncLeafWorker(opts: {
     consumerId,
     claimTurn: (turnId, deliveryCount) =>
       claimTurn(turnId, deliveryCount, { controlPlaneUrl, exchangeToken, turns }),
-    // The same runLeaf the sync route calls (`server.ts:1105`), with the same signature.
-    runLeaf: (envelope, config) => runLeaf(envelope, config),
+    // The same runLeaf the sync route calls (`server.ts:1105`), with the same signature. The
+    // signal is runLeaf's fourth argument; the third is the injected-fakes bag, which production
+    // never passes.
+    runLeaf: (envelope, config, signal) => runLeaf(envelope, config, undefined, signal),
+    // One HGET on the turn record per watchdog tick (#391). It rides `cpClient`, the same client the
+    // finalize uses, so a cancel poll never shares a socket with the queue's claim burst.
+    //
+    // This works because records and results share one Redis in M1 (see above): the worker's own
+    // TurnStore IS the control plane's, so a `DELETE /turns/{id}` on a running turn is visible here
+    // with no control-plane-to-worker transport at all. A deployment that split the two keyspaces
+    // would need the second variable that note already calls for.
+    cancelRequested: (turnId) => turns.cancelRequested(turnId),
     finalize: async (turnId, status) => {
       await turns.finalize(turnId, asyncFinalizeState(status), Date.now());
     },

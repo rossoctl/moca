@@ -2,8 +2,11 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   SessionManager,
+  type ExtensionFactory,
   type FileEntry,
 } from '@earendil-works/pi-coding-agent';
+import { branchSpend, budgetVoterExtension } from './budget-voter.js';
+import { DEADLINE_ABORT } from './stop-reason.js';
 import { RedisSessionBackend } from '@moca/session-backend';
 import {
   createCapacityLatch,
@@ -40,6 +43,7 @@ import {
   seedWorkspace,
   sumBranchUsage,
   turnLoaderInputs,
+  wireAbort,
   type TurnConfig,
   type TurnResult,
   type TurnSeed,
@@ -244,6 +248,13 @@ export type LeafResult =
         | 'error'
         | 'saturated'
         | 'owner_lost'
+        /**
+         * The turn ran out of its own budget (#391): past `caps.tokens`, or past the wall-clock
+         * deadline the dequeue anchored. Distinct from `aborted`, which is "somebody asked it to
+         * stop" -- here nobody did, the turn asked for more than it was given. Terminal and NOT
+         * retryable: a redelivery would spend the same budget again and fail the same way.
+         */
+        | 'budget'
         /** A workload run found none of its workload's sandboxes (spec §3.3); never a fallback. */
         | 'workload_sandbox_unavailable';
       message?: string;
@@ -296,17 +307,25 @@ export function buildSolvePrompt(problemStatement: string, workspaceRef: string)
   ].join('\n');
 }
 
-export type LeafCapture = VerdictCapture & GateCapture;
+/** The token cap fired mid-leaf (#391); the caller turns it into `failed: budget`. */
+export type BudgetCapture = { budgetExceeded?: boolean };
+
+export type LeafCapture = VerdictCapture & GateCapture & BudgetCapture;
 
 export type ProduceVerdict = (
   item: LeafItem,
   env: LeafEnvelope,
   config: TurnConfig | undefined,
   capture: LeafCapture,
+  signal?: AbortSignal,
 ) => Promise<void>;
 
 /** `baseline` is the commit the patch applies to, when the capture printed one (#390). */
-export type SolveCapture = { patch?: string; baseline?: string; usage?: LeafUsage };
+export type SolveCapture = {
+  patch?: string;
+  baseline?: string;
+  usage?: LeafUsage;
+} & BudgetCapture;
 export type ProduceSolveDeps = {
   resolvePromotedConfig?: typeof resolvePromotedConfig;
   overlayConfig?: typeof overlayConfig;
@@ -317,6 +336,7 @@ export type ProduceSolve = (
   config: TurnConfig | undefined,
   capture: SolveCapture,
   deps?: ProduceSolveDeps,
+  signal?: AbortSignal,
 ) => Promise<void>;
 
 /**
@@ -416,6 +436,52 @@ function noCapacityFailure(err: unknown): LeafResult | null {
   return null;
 }
 
+/**
+ * How a leaf that was STOPPED reports, or null when it was not stopped. One helper for all three
+ * kinds, because the mapping is the part that must not drift: `failed: budget` and `aborted` finalize
+ * to different turn states, and only the abort REASON tells them apart.
+ *
+ * The budget flag is checked after the signal: a deadline abort and a spent token cap are both
+ * `failed: budget`, so the order only matters for a cancel that landed on a leaf already over its
+ * tokens -- and there the cancel is the newer fact.
+ */
+function stopFailure(signal?: AbortSignal, capture?: BudgetCapture): LeafResult | null {
+  if (signal?.aborted) {
+    return signal.reason === DEADLINE_ABORT
+      ? { status: 'failed', reason: 'budget', message: 'turn deadline reached' }
+      : { status: 'aborted' };
+  }
+  if (capture?.budgetExceeded) {
+    return { status: 'failed', reason: 'budget', message: 'turn token budget exceeded' };
+  }
+  return null;
+}
+
+/**
+ * The token-cap extension for a leaf that builds its own Pi stack (solve, verdict), or nothing when
+ * no cap is in play (#391). The turn's own `caps.tokens` first, then the deployment's
+ * SH_BUDGET_TOKENS -- the same precedence `executeTurnCore` applies for the prompt leaf and `/turn`.
+ */
+function budgetVoters(
+  sessionManager: SessionManager,
+  config: TurnConfig | undefined,
+  capture: BudgetCapture,
+): ExtensionFactory[] {
+  const limit = config?.budgetTokens ?? Number(process.env.SH_BUDGET_TOKENS);
+  if (!Number.isFinite(limit) || limit <= 0) return [];
+  const margin = Number(process.env.SH_BUDGET_MARGIN);
+  return [
+    budgetVoterExtension(sessionManager, {
+      limit,
+      baseline: branchSpend(sessionManager) ?? 0,
+      onExceeded: () => {
+        capture.budgetExceeded = true;
+      },
+      ...(Number.isFinite(margin) && margin > 0 ? { margin } : {}),
+    }),
+  ];
+}
+
 export async function runLeaf(
   env: LeafEnvelope,
   config?: TurnConfig,
@@ -428,9 +494,14 @@ export async function runLeaf(
     overlayContext?: typeof overlayContext;
     bundleRedis?: BundleRedisLike;
   },
+  /**
+   * Stops the leaf: the async worker aborts it on a cancel request or the turn's wall-clock
+   * deadline (#391). Its own parameter rather than a member of `deps`, which means "injected fakes".
+   */
+  signal?: AbortSignal,
 ): Promise<LeafResult> {
-  if (env.kind === 'solve') return runSolveLeaf(env, config, deps);
-  if (env.kind === 'prompt') return runPromptLeaf(env, config, deps);
+  if (env.kind === 'solve') return runSolveLeaf(env, config, deps, signal);
+  if (env.kind === 'prompt') return runPromptLeaf(env, config, deps, signal);
   const noWorkload = nonPromptWorkloadFailure(env);
   if (noWorkload) return noWorkload;
   const item = validateItem(env.item);
@@ -439,7 +510,7 @@ export async function runLeaf(
   const capture: LeafCapture = {};
   const produce = deps?.produceVerdict ?? realProduceVerdict;
   try {
-    await produce(item, env, config, capture);
+    await produce(item, env, config, capture, signal);
   } catch (err) {
     // Saturation is a distinct, transient signal: the sync /runs path bounded-waits and returns
     // 503 Retry-After on it (spec §4.3), and classifyOutcome keeps it retryable for the async
@@ -455,6 +526,12 @@ export async function runLeaf(
       message: err instanceof Error ? err.message : String(err),
     };
   }
+
+  // BEFORE the gate and verdict checks (#391): a leaf stopped mid-prompt has no verdict, so reading
+  // this order the other way round would report `failed: no_verdict` -- blaming the model for a turn
+  // the worker cut short.
+  const stopped = stopFailure(signal, capture);
+  if (stopped) return stopped;
 
   // Gate outcomes take precedence over verdict handling.
   if (capture.aborted) return { status: 'aborted' };
@@ -476,6 +553,7 @@ export async function runSolveLeaf(
   env: LeafEnvelope,
   config?: TurnConfig,
   deps?: { produceSolve?: ProduceSolve } & ProduceSolveDeps,
+  signal?: AbortSignal,
 ): Promise<LeafResult> {
   if (!env.problemStatement || !env.repoUrl || !env.ref)
     return { status: 'failed', reason: 'bad_inputs' };
@@ -497,7 +575,7 @@ export async function runSolveLeaf(
         }
       : undefined;
   try {
-    await produce(env, config, capture, produceDeps);
+    await produce(env, config, capture, produceDeps, signal);
   } catch (err) {
     const noCapacity = noCapacityFailure(err);
     if (noCapacity) return noCapacity;
@@ -507,6 +585,11 @@ export async function runSolveLeaf(
       message: err instanceof Error ? err.message : String(err),
     };
   }
+  // A stopped solve leaf returns NO patch (#391), for the reason realProduceSolve's own comment
+  // gives about a capacity refusal: its whole output is the diff, and a worktree cut off mid-edit
+  // returned as `solved` is a partial patch with nothing saying it was cut short.
+  const stopped = stopFailure(signal, capture);
+  if (stopped) return stopped;
   const patch = capture.patch ?? '';
   return {
     status: 'solved',
@@ -528,6 +611,7 @@ async function runPromptLeaf(
     overlayContext?: typeof overlayContext;
     bundleRedis?: BundleRedisLike;
   },
+  signal?: AbortSignal,
 ): Promise<LeafResult> {
   if (!env.prompt) return { status: 'failed', reason: 'bad_inputs' };
   const cwd = config?.cwd ?? process.cwd();
@@ -736,8 +820,16 @@ async function runPromptLeaf(
       createIfAbsent: true,
       selection,
       sandbox: turnSandbox,
+      // executeTurn wires it to the Pi session's abort and reports `stopReason: 'aborted'` (#391).
+      // It also carries the turn's `budgetTokens` through `config`, so the token cap needs nothing
+      // here: it comes back as `r.budgetExceeded`.
+      ...(signal ? { signal } : {}),
       ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
     });
+    // The signal decides WHICH stop this was, so it is read before `stopReason`: a deadline abort is
+    // `failed: budget` and a cancel is `aborted`, and both arrive here as `stopReason: 'aborted'`.
+    const stopped = stopFailure(signal, { budgetExceeded: r.budgetExceeded });
+    if (stopped) return stopped;
     if (r.stopReason === 'aborted') return { status: 'aborted' };
     if (r.stopReason === 'error')
       return { status: 'failed', reason: 'error', message: r.errorMessage };
@@ -833,7 +925,7 @@ export function contextNote(path: string, mode: ContextMode, scratch: string): s
 // Real solve runner: lease a sandbox, converge the per-leaf worktree, run the agent with ONLY the
 // sandbox tools (no verdict/gate extensions), then capture the staged diff. Mirrors realProduceVerdict's
 // session/pool wiring. Exercised by the Kind smoke, not unit tests.
-export const realProduceSolve: ProduceSolve = async (env, config, capture, deps) => {
+export const realProduceSolve: ProduceSolve = async (env, config, capture, deps, signal) => {
   const cwd = config?.cwd ?? process.cwd();
   const { provider, modelId } = resolveModelSelection({
     model: env.model ?? config?.model,
@@ -944,6 +1036,10 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
         checkpointExtension(store, sessionManager),
         // A solve leaf's model requests honor the same caching switches as a turn's (#754).
         promptCacheExtension(),
+        // And the same token cap (#391): this leaf builds its own stack, so executeTurn's voter is
+        // unreachable from here. The baseline is the spend already on the resumed branch, as
+        // run-turn.ts computes it -- a retry must not fail on its predecessor's tokens.
+        ...budgetVoters(sessionManager, config, capture),
       ],
       ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
     });
@@ -960,6 +1056,11 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
       ...(authStorage ? { authStorage } : {}),
     });
 
+    // The worker's cancel/deadline stop (#391), bridged to pi's abort exactly as executeTurn does
+    // for a client disconnect. An already-aborted signal aborts the session before the prompt, so
+    // the call below returns without spending anything.
+    if (signal) wireAbort(signal, session);
+
     try {
       const prompt = swebench
         ? buildSwebenchSolvePrompt(
@@ -969,6 +1070,10 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
           )
         : buildSolvePrompt(env.problemStatement!, workspaceRef);
       await session.prompt(prompt);
+      // A stopped leaf captures NOTHING, for the same reason the capacity check below runs before
+      // the diff: the patch of a worktree cut off mid-edit is a partial answer that reads as a whole
+      // one. The enclosing finally still flushes, so the work done so far is resumable.
+      if (signal?.aborted || capture.budgetExceeded) return;
       // BEFORE the diff capture, not after. A solve leaf's whole output is its patch, and a
       // turn whose tool calls were refused for capacity produces a half-written worktree —
       // returning that as `status: 'solved'` would hand the caller a partial patch with no
@@ -1009,7 +1114,7 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
 // (MVP spec §7 gate 7, §2.4 idempotency). The session is persisted to Redis under env.sessionId;
 // re-invoking the same sessionId after a crash resumes from the durable log (M5) instead of
 // starting fresh. Exercised by the Kind smoke, not the unit tests.
-export const realProduceVerdict: ProduceVerdict = async (item, env, config, capture) => {
+export const realProduceVerdict: ProduceVerdict = async (item, env, config, capture, signal) => {
   // Session cwd is a harness-local path (NOT workspaceRef): the agent's file/search tools run in
   // the sandbox pod, and workspaceRef is an absolute path inside that pod (see buildLeafPrompt).
   // Pointing the session cwd at workspaceRef would make the harness try to load a path it does not
@@ -1153,6 +1258,8 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
         verdictTerminationExtension(capture, { maxTurns: env.maxTurns }),
         // And so do a verdict leaf's (#754).
         promptCacheExtension(),
+        // And its turn's token cap (#391), as for a solve leaf.
+        ...budgetVoters(sessionManager, config, capture),
       ],
     });
     const resourceLoader = new DefaultResourceLoader(loaderOptions as never);
@@ -1168,8 +1275,14 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
       ...(authStorage ? { authStorage } : {}),
     });
 
+    // The worker's cancel/deadline stop (#391); runLeaf reads the signal again after this returns.
+    if (signal) wireAbort(signal, session);
+
     try {
       await session.prompt(seed.prompt);
+      // A stopped leaf looks for no verdict: `runLeaf`'s own stop check answers for it, and reading
+      // the store here would recover a PREVIOUS attempt's verdict and report a cancelled turn `done`.
+      if (signal?.aborted || capture.budgetExceeded) return;
       if (!capture.verdict && !capture.gate) {
         const row = await store.latestWhere(sid, isVerdictEntry);
         const recovered = verdictFromCustomEntry(row?.entry);

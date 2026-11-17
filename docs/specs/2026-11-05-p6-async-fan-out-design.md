@@ -1,8 +1,8 @@
 # P6 Async Fan-Out — Design
 
-Version: 1.7 — November 10, 2026
-Status: Proposed (M1 submission and dequeue-exchange slices built; §9.2 records the drain loop's
-implementation decisions and one correction to §5.5)
+Version: 1.8 — November 17, 2026
+Status: Proposed (M1 submission, dequeue-exchange and budget/cancel slices built; §9.2 records the
+drain loop's implementation decisions and one correction to §5.5)
 Issue: [#686](https://github.com/rossoctl/moca/issues/686) (epic); this document is the deliverable
 of its gating child [#386](https://github.com/rossoctl/moca/issues/386) (B1: spec + ADR)
 Decision record: [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md)
@@ -173,6 +173,24 @@ return rejectWorkloadRun(res)` sat _before_ the auth gate, deliberately, "so eve
 Every async turn carries caps resolved at submission and stored on the turn record: tokens, cost and
 wall-clock. §6 covers enforcement.
 
+> **Amended by #391: two caps, both enforced; `costUsd` refused.** The draft's third cap had no
+> enforcement path to describe — there is no price table anywhere in the runtime and no USD
+> arithmetic — so a `caps.costUsd` on a submission was accepted and silently ignored, which is a
+> worse answer than absent. It is now refused at submission with
+> `400 invalid_request: caps.costUsd is not enforceable (no price table); use caps.tokens`. A
+> narrowing, taken while `/v1` is Preview and recorded in `docs/api/CHANGELOG.md` 1.27.0. The other
+> two are enforced on two different sides, deliberately:
+>
+> - **`caps.tokens` inside the leaf.** It rides the dequeue response onto `TurnConfig.budgetTokens`
+>   and arms the existing budget voter (`harness/src/budget-voter.ts`), which blocks tool calls once
+>   the turn's spend crosses it — the same mechanism as the `SH_BUDGET_TOKENS` deployment default,
+>   which a turn's own cap overrides. The leaf then ends `failed` with `result.reason: "budget"`.
+> - **`caps.wallClock` outside it.** It is already clamped into `turn_exp` at mint (§5.4), and the
+>   worker's watchdog aborts the leaf at that instant and nothing else. The deadline is never
+>   recomputed in the worker: the grant expires then anyway, so a leaf outrunning it would die of
+>   401s instead of reporting a clean `failed: budget`, and there is no second number to keep in
+>   step with the clamp.
+
 **The per-owner queued-turn quota, which §6.4 leans on and which has to be more than a table row.**
 It is the only containment for unbounded fan-out from a submitter §3 assumes is misbehaving, so it is
 specified here rather than left to the implementation:
@@ -277,7 +295,7 @@ Goal 4 is satisfied by N of these — one per leaf — which is also the measure
 So the two routes coexist with one source of truth each: `/runs/status` serves synchronous callers
 from the result store as it always has, and the route above serves async callers from the record.
 
-### 4.5 Cancellation: queued only
+### 4.5 Cancellation
 
 ```
 DELETE /v1/sessions/{sessionId}/turns/{turnId}  → 202 | 409
@@ -298,6 +316,34 @@ redelivered entry's record already says `running` and must still run.
   latency improvement over waiting for the cap, not a containment property §6.4 depends on.
 
 Cancelling a running leaf is recorded as owed in §12.
+
+> **Amended by #391: a `running` turn is cancellable, and the machinery above was never needed.**
+> The paragraph's premise — that this takes a new control-plane-to-specific-worker channel — is
+> wrong for M1, because the two sides already share one Redis keyspace: the worker builds its own
+> `TurnStore` on `REDIS_URL` to finalize records (§5.5, §9.2), so it can read a flag the control
+> plane wrote. No transport, no addressing, no worker registry.
+>
+> - **The `DELETE` on a `running` record sets `cancelRequested` and leaves `state` at `running`**,
+>   answering `202 {state: "running", cancelRequested: true}`. The state must not change: every
+>   redelivery CAS (`markRunning`, `finalize`) is written against the open states, so a new state
+>   name would strand an entry reclaimed after a crash. `409 turn_not_cancellable` now means only
+>   "already terminal".
+> - **The worker notices within one poll.** Alongside the per-leaf heartbeat it already runs, the
+>   job runner ticks every 2 s on the same injectable timer seam: a set flag — or a `turn_exp` that
+>   has passed — aborts the `AbortSignal` handed to `runLeaf`. The 30 s heartbeat cannot be reused
+>   for it; it is derived from the reclaim idle time. A reclaimed `running` record is also checked
+>   once before the run, for the cancel that landed while the previous worker was dying.
+> - **202, not 200, because it stays best-effort.** A leaf that finishes before the tick stays
+>   finished. The abort's reason is the only discriminator the leaf needs: a deadline abort reports
+>   `failed: budget`, any other abort reports `aborted`, which `asyncFinalizeState` already maps to
+>   the record state `cancelled`.
+> - **The M2 caveat.** This holds exactly as long as the worker's turn records live in the same
+>   keyspace as the control plane's. A deployment that splits them (§9.1's tenanted direction) would
+>   need the flag delivered some other way, and the worker's own comment on that `TurnStore` is
+>   where that assumption is written down.
+>
+> 202 keeps the §6.4 reading intact: the caps still bound how long a leaf can run, and cancel is
+> still the latency improvement over waiting for one.
 
 ---
 
@@ -339,22 +385,23 @@ credential, no config. Everything authoritative is read from the record at deque
 makes §5.4 possible and what bounds the damage if the queue is ever read by something that should not
 have it.
 
-| Field            | Notes                                                                         |
-| ---------------- | ----------------------------------------------------------------------------- |
-| `turnId`         | opaque; the only thing in the queue                                           |
-| `owner`          | subject string, as `SessionRecord.owner` (`github:<id>`)                      |
-| `tenant`         | gates M1 (§9)                                                                 |
-| `sessionId`      | the session the turn belongs to                                               |
-| `cfg`            | bundle digest, as on the session                                              |
-| `credentialName` | a **name**, resolved server-side at dequeue — never the credential            |
-| `model`          | the session's model, copied at submission; `''` when it named none            |
-| `modelLimits`    | the catalog's limits for that model, snapshotted with it                      |
-| `sandboxTier`    | the session's **stored** tier, copied at submission; `''` resolved at dequeue |
-| `caps`           | tokens, cost, wall-clock (§4.3)                                               |
-| `idempotencyKey` | defaults to `sessionId` (§4.3)                                                |
-| `envelope`       | the `LeafEnvelope` to run                                                     |
-| `state`          | below                                                                         |
-| `attempts`       | written from the entry's `deliveryCount` at claim; descriptive (§5.4)         |
+| Field             | Notes                                                                         |
+| ----------------- | ----------------------------------------------------------------------------- |
+| `turnId`          | opaque; the only thing in the queue                                           |
+| `owner`           | subject string, as `SessionRecord.owner` (`github:<id>`)                      |
+| `tenant`          | gates M1 (§9)                                                                 |
+| `sessionId`       | the session the turn belongs to                                               |
+| `cfg`             | bundle digest, as on the session                                              |
+| `credentialName`  | a **name**, resolved server-side at dequeue — never the credential            |
+| `model`           | the session's model, copied at submission; `''` when it named none            |
+| `modelLimits`     | the catalog's limits for that model, snapshotted with it                      |
+| `sandboxTier`     | the session's **stored** tier, copied at submission; `''` resolved at dequeue |
+| `caps`            | tokens and wall-clock (§4.3; cost refused since #391)                         |
+| `idempotencyKey`  | defaults to `sessionId` (§4.3)                                                |
+| `envelope`        | the `LeafEnvelope` to run                                                     |
+| `state`           | below                                                                         |
+| `attempts`        | written from the entry's `deliveryCount` at claim; descriptive (§5.4)         |
+| `cancelRequested` | set by a `DELETE` on a `running` turn; read by the worker (§4.5, #391)        |
 
 > **`model`, `modelLimits` and `sandboxTier` added by #388's M2.** The first draft of this table
 > copied only `cfg` and `credentialName`, leaving the dequeue to read the model and the tier from the
@@ -1113,10 +1160,17 @@ it adds is the schedule. Its design should cite this document for both.
 
 ## 12. Owed, and explicitly not here
 
-- **Cancelling a `running` leaf** (§4.5). Needs a cancel signal addressed to the one worker holding
-  it — new control-plane-to-worker machinery, since interactive cancel (ADR-0040) rides the turn's own
-  connection and async has none. The §4.3 caps bound how long a leaf runs meanwhile, so this is a
-  latency improvement rather than a missing containment property.
+- ~~**Cancelling a `running` leaf** (§4.5). Needs a cancel signal addressed to the one worker
+  holding it — new control-plane-to-worker machinery.~~ **Done in #391**: the two sides already
+  share a Redis keyspace, so the `DELETE` writes a `cancelRequested` flag the worker's 2 s watchdog
+  reads and the leaf aborts — no transport. §4.5's amendment has the shape and the M2 caveat.
+- **Per-subject fairness on the async drain, and per-turn cost attribution.** #391's remaining
+  scope, which #391 stays open for. The counting side exists (`SubjectCounter`,
+  `packages/server/src/subject-quota.ts`), but the queue is one FIFO stream and a claim reveals the
+  subject only _after_ a slot is taken, so one owner's 50 queued turns sit in front of another
+  owner's turn whatever a counter says. Fixing it means claim-time filtering or per-owner streams —
+  the queue-shape question this section's per-class-caps item below also waits on — and the cost
+  half waits on the price table §4.3's amendment says does not exist (#359).
 - ~~Result retention beyond 24 h, and richer artifacts than the current patch/text/summary.~~
   **Done in #390**: seven days by default, moved on the one knob §5.1 describes, plus a base commit
   and a diffstat on every captured patch and a `GET …/turns/{turnId}/artifacts/{kind}` route so a

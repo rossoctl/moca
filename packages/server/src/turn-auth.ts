@@ -43,6 +43,12 @@ export interface TurnAuth {
   sandboxBuildId?: string;
   /** The session's model from the exchange (per-session model spec §5.1); absent ⇒ the deployment default. */
   model?: SessionModelSpec;
+  /**
+   * An async turn's token cap, `caps.tokens` from the dequeue exchange (async fan-out §4.3, #391);
+   * absent ⇒ SH_BUDGET_TOKENS, the deployment default. Only the async claim sets it: a sync `/turn`
+   * carries no caps, and its session token names no budget.
+   */
+  budgetTokens?: number;
 }
 
 export interface TurnAuthDeps {
@@ -224,9 +230,14 @@ async function exchange(token: string, deps: TurnAuthDeps): Promise<ExchangeResp
  *
  * `grant` mode (MI1 §6.1) passes the same six: `anthropicAuthToken` is the grant and
  * `anthropicBaseUrl` the control plane's inference listener, so the two that matter most -- a
- * non-empty token and a resolved endpoint -- are exactly the ones already here. `sandboxGrant` and
- * `turnExp` are deliberately NOT validated: nothing in the worker reads either yet, and a check on a
- * field no code consumes is a check that cannot fail for a real reason.
+ * non-empty token and a resolved endpoint -- are exactly the ones already here.
+ *
+ * `sandboxGrant` is deliberately NOT validated: nothing in the worker reads it yet, and a check on a
+ * field no code consumes is a check that cannot fail for a real reason. `turnExp` and `caps` ARE now
+ * read -- the worker enforces both (#391) -- but they are coerced where they are read
+ * (`turn-claim.ts`) rather than refused here: both were already validated at submission, so a
+ * missing or odd-shaped one means a control plane older than this worker, and failing the turn on
+ * that would make an uncapped turn unrunnable rather than uncapped.
  */
 export function validateExchangeBody(body: Record<string, unknown>): ExchangeResponse {
   // An UNKNOWN mode must not default to `direct`: that would send a placeholder upstream as though it

@@ -107,6 +107,10 @@ describe('exchangeTurnCredential (async spec §5.4)', () => {
     expect(res.turnId).toBe(turnId);
     // The caps the submission recorded, handed to the worker that will enforce them (#389).
     expect(res.caps).toEqual({ tokens: 500, wallClock: 120 });
+    // And the deadline those caps resolve to, in THIS mode too (#391): the wall-clock cap is
+    // enforced by the worker's watchdog, which reads `turnExp` and nothing else, so a single-tenant
+    // deployment that got no `turnExp` would have an unenforceable `caps.wallClock`.
+    expect(res.turnExp).toBe(Math.floor(d.now() / 1000) + 120);
   });
 
   it('returns a placeholder, never the secret, when the deployment has an injector', async () => {

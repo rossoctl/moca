@@ -109,7 +109,8 @@ export interface SubmitTurnRequest {
    * Set it only to run two async turns on one session deliberately.
    */
   idempotencyKey?: string;
-  caps?: { tokens?: number; costUsd?: number; wallClock?: number };
+  /** Both enforced by the worker (#391). No `costUsd`: the control plane 400s it, unpriceable. */
+  caps?: { tokens?: number; wallClock?: number };
 }
 
 export interface SubmittedTurn {

@@ -101,9 +101,11 @@ which looks like a real answer. Poll the turn route, not this one.
   check that a real cluster drains queued leaves, and `deploy/k8s/README.md` §14 documents the
   consumer and its capacity: `replicas` × `SH_WORKERS` wide, raised by hand
   ([#688](https://github.com/rossoctl/moca/issues/688), #765).
-- Per-turn wall-clock caps: `turn_exp` is set under `multi`, anchored at the dequeue and clamped to
-  `caps.wallClock`, and bounds how long the turn's grants are usable. `tokens` and `costUsd` are
-  recorded, not enforced.
+- Per-turn caps: `turn_exp` is anchored at the dequeue and clamped to `caps.wallClock`; it bounds how
+  long the turn's grants are usable under `multi`, and since
+  [#391](https://github.com/rossoctl/moca/issues/391) the worker stops the leaf at it in either
+  tenancy. `caps.tokens` is enforced inside the run. Either cap spent ends the turn
+  `failed: budget`. `caps.costUsd` is refused at submission -- nothing here prices a token.
 
 [#686](https://github.com/rossoctl/moca/issues/686) is the epic, and it closes when a fan-out
 pipeline runs end to end on `deploy/k8s` as well.

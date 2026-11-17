@@ -125,6 +125,7 @@ import {
 } from '../src/run-leaf.js';
 import type { LeafEnvelope } from '../src/run-leaf.js';
 import { SandboxPoolSaturatedError, SandboxRequiredError } from '../src/select-sandbox.js';
+import { DEADLINE_ABORT as DEADLINE } from '../src/stop-reason.js';
 // The REAL class, reaching this file through the importOriginal spread in the
 // @moca/k8s-sandbox mock above — which is what makes run-leaf's `instanceof` check against
 // it meaningful here rather than a comparison between two unrelated constructors (#452).
@@ -848,6 +849,139 @@ describe('runLeaf — prompt routing', () => {
       executeTurn: vi.fn(),
     });
     expect(r).toEqual({ status: 'failed', reason: 'bad_inputs' });
+  });
+});
+
+// #391. Two stops reach a leaf: the worker's signal (a cancel, or the turn's wall-clock deadline)
+// and the token cap, which the budget voter reports through the capture. They must not be confused:
+// a cancel is `aborted` (the record reads `cancelled`), a deadline and a spent token cap are
+// `failed: budget`.
+describe('runLeaf — stops on the signal and the token cap', () => {
+  const converge: LeafEnvelope = {
+    sessionId: 'run-1/i1',
+    item: { item_id: 'i1', file: 'f', pattern: 'p' },
+  };
+  const solve: LeafEnvelope = {
+    sessionId: 'run-1',
+    item: { item_id: 'x', file: 'f', pattern: 'p' },
+    kind: 'solve',
+    problemStatement: 'do the thing',
+    repoUrl: 'git://x/repo.git',
+    ref: 'work',
+  };
+  const prompt: LeafEnvelope = {
+    sessionId: 'run-1/i1',
+    item: { item_id: 'x', file: 'f', pattern: 'p' },
+    kind: 'prompt',
+    prompt: 'Summarize the repo.',
+  };
+  const aborted = (reason?: string) => {
+    const c = new AbortController();
+    c.abort(reason);
+    return c.signal;
+  };
+  const BUDGET = { status: 'failed', reason: 'budget' };
+
+  it('reports aborted for a cancelled leaf of each kind', async () => {
+    const executeTurn = vi.fn(async () => ({
+      sessionId: 'run-1-i1',
+      response: '',
+      stopReason: 'aborted',
+    }));
+    expect(
+      await runLeaf(converge, undefined, { produceVerdict: async () => {} }, aborted('cancelled')),
+    ).toEqual({ status: 'aborted' });
+    expect(
+      await runLeaf(solve, undefined, { produceSolve: async () => {} }, aborted('cancelled')),
+    ).toEqual({ status: 'aborted' });
+    expect(await runLeaf(prompt, undefined, { executeTurn }, aborted('cancelled'))).toEqual({
+      status: 'aborted',
+    });
+  });
+
+  it('reports failed:budget for a deadline abort of each kind', async () => {
+    const executeTurn = vi.fn(async () => ({
+      sessionId: 'run-1-i1',
+      response: '',
+      stopReason: 'aborted',
+    }));
+    for (const r of [
+      await runLeaf(converge, undefined, { produceVerdict: async () => {} }, aborted(DEADLINE)),
+      await runLeaf(solve, undefined, { produceSolve: async () => {} }, aborted(DEADLINE)),
+      await runLeaf(prompt, undefined, { executeTurn }, aborted(DEADLINE)),
+    ]) {
+      expect(r).toMatchObject(BUDGET);
+    }
+  });
+
+  // The converge leaf's stop is read BEFORE its verdict check: the other order blames the model
+  // (`no_verdict`) for a turn the worker cut short.
+  it('does not report no_verdict for a stopped converge leaf', async () => {
+    const r = await runLeaf(
+      converge,
+      undefined,
+      { produceVerdict: async () => {} },
+      aborted('cancelled'),
+    );
+    expect(r).toEqual({ status: 'aborted' });
+  });
+
+  // A solve leaf's whole output is the diff, and a worktree cut off mid-edit is a partial patch
+  // with nothing on it saying so.
+  it('returns no patch from a stopped solve leaf', async () => {
+    const r = await runLeaf(
+      solve,
+      undefined,
+      {
+        produceSolve: async (_e, _c, cap) => {
+          cap.patch = 'HALF A PATCH';
+          cap.baseline = 'c'.repeat(40);
+        },
+      },
+      aborted('cancelled'),
+    );
+    expect(r).toEqual({ status: 'aborted' });
+  });
+
+  it('reports failed:budget when the voter fired, with no signal in play', async () => {
+    expect(
+      await runLeaf(converge, undefined, {
+        produceVerdict: async (_i, _e, _c, cap) => {
+          cap.budgetExceeded = true;
+        },
+      }),
+    ).toMatchObject(BUDGET);
+    expect(
+      await runLeaf(solve, undefined, {
+        produceSolve: async (_e, _c, cap) => {
+          cap.patch = 'PATCH';
+          cap.budgetExceeded = true;
+        },
+      }),
+    ).toMatchObject(BUDGET);
+    expect(
+      await runLeaf(prompt, undefined, {
+        executeTurn: vi.fn(async () => ({
+          sessionId: 'run-1-i1',
+          response: 'blocked every call',
+          stopReason: 'end_turn',
+          budgetExceeded: true,
+        })),
+      }),
+    ).toMatchObject(BUDGET);
+  });
+
+  // Without this the prompt leaf could not be cancelled at all: it owns no Pi session of its own,
+  // so executeTurn is the only thing that can reach one.
+  it('hands the signal to executeTurn', async () => {
+    const executeTurn = vi.fn(async () => ({
+      sessionId: 'run-1-i1',
+      response: 'ok',
+      stopReason: 'end_turn',
+    }));
+    const signal = new AbortController().signal;
+    await runLeaf(prompt, undefined, { executeTurn }, signal);
+    expect(executeTurn).toHaveBeenCalledWith(expect.objectContaining({ signal }));
   });
 });
 

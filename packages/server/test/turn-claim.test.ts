@@ -79,6 +79,38 @@ describe('claimTurn', () => {
     expect(claimed!.envelope).toEqual({ kind: 'prompt', prompt: 'go', sessionId: SID });
   });
 
+  // #391. Two caps, enforced on two different sides: `tokens` rides into the leaf as
+  // `config.budgetTokens` (the budget voter blocks tool calls), while the wall clock is the
+  // control plane's already-anchored `turnExp` and is enforced by the job runner's watchdog.
+  it("carries the turn's token cap onto the config it hands to runLeaf", async () => {
+    const claimed = await claimTurn(TURN, 1, deps());
+    expect(claimed!.config.budgetTokens).toBe(100);
+  });
+
+  it('carries turnExp as sent, and omits it when the control plane sends none', async () => {
+    const exp = Math.floor(Date.now() / 1000) + 300;
+    const withExp = await claimTurn(TURN, 1, deps({ fetchImpl: reply(200, ok({ turnExp: exp })) }));
+    expect(withExp!.turnExp).toBe(exp);
+    // A pre-#391 control plane: the leaf runs to its grant's own expiry, as before.
+    expect(await claimTurn(TURN, 1, deps())).not.toHaveProperty('turnExp');
+  });
+
+  // Both were validated at submission, so an odd value means a control plane older or newer than
+  // this worker. Running the turn uncapped is the pre-#391 behaviour; refusing would make it
+  // unrunnable, which is a worse answer to a version skew.
+  it('ignores an unusable cap or deadline rather than refusing the turn', async () => {
+    const d = deps({
+      fetchImpl: reply(200, ok({ caps: { tokens: -5 }, turnExp: 'soon' })),
+    });
+    const claimed = await claimTurn(TURN, 1, d);
+    expect(claimed).not.toBeNull();
+    expect(claimed!.config.budgetTokens).toBeUndefined();
+    expect(claimed!.turnExp).toBeUndefined();
+    // And with no caps at all, which is most turns.
+    const bare = await claimTurn(TURN, 1, deps({ fetchImpl: reply(200, ok({ caps: undefined })) }));
+    expect(bare!.config.budgetTokens).toBeUndefined();
+  });
+
   it('puts the resolved credential on the config it hands to runLeaf', async () => {
     const claimed = await claimTurn(TURN, 1, deps());
     expect(claimed!.config.upstreamCredential).toEqual({ mode: 'direct', value: SECRET });

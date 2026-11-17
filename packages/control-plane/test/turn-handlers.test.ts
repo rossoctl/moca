@@ -753,18 +753,24 @@ describe('cancelTurn (spec §4.5)', () => {
     expect((await d.turns.get(turnId))?.state).toBe('cancelled');
   });
 
-  it('409s a running turn, naming its state, and does NOT interrupt it', async () => {
+  it('REQUESTS a cancel on a running turn: 202, state unchanged, flag on the record (#391)', async () => {
     const d = turnDeps();
     const sid = await session(d);
     const { turnId } = (await submit(d, sid, { item, async: true })).body as { turnId: string };
     await d.turns.markRunning(turnId, 1);
-    // Interrupting a running leaf needs control-plane-to-specific-worker machinery that does not
-    // exist; interactive cancel rides the turn's own connection and async has none (§4.5, §12).
-    expect(await codeOf(() => cancel(d, sid, turnId))).toBe('turn_not_cancellable');
-    // The STATE, not just the code: a caller told only "not cancellable" cannot tell a turn already
-    // running from one already finished, and the two call for different next steps.
-    await expect(cancel(d, sid, turnId)).rejects.toThrow(/'running'/);
+    // 202 and `running`, not a `cancelling` state of its own: the worker holding the leaf aborts it
+    // and finalizes `cancelled` itself, and until it does the turn really is still running.
+    expect(await cancel(d, sid, turnId)).toEqual({
+      status: 202,
+      body: { turnId, state: 'running', cancelRequested: true },
+    });
     expect((await d.turns.get(turnId))?.state).toBe('running');
+    expect(await d.turns.cancelRequested(turnId)).toBe(true);
+    // And the poller sees it, so "running" and "running, stopping" are distinguishable.
+    const status = (
+      await HANDLERS.getTurn!(ctx({ principal: alice, params: { id: sid, turnId } }), d)
+    ).body as { cancelRequested?: boolean };
+    expect(status.cancelRequested).toBe(true);
   });
 
   it('409s an already-terminal turn and 404s an unknown one', async () => {

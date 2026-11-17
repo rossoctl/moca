@@ -1357,9 +1357,11 @@ for you.
   redeemer, so an async turn gets inference isolation and not egress isolation.
 - **Two leaves per pod at the default W.** The loop is sequential; see section 4 for the width rule
   and why no autoscaler ships.
-- **Caps: wall clock yes, the other two no.** Under `multi`, `turn_exp` is enforced — anchored at
-  the dequeue and clamped to `min(caps.wallClock, MOCA_TURN_MAX_S)` — and bounds how long the turn's
-  grants are usable. `tokens` and `costUsd` are recorded, not enforced.
+- **Caps: both of them, enforced by the worker.** `turn_exp` — anchored at the dequeue and clamped
+  to `min(caps.wallClock, MOCA_TURN_MAX_S)` — is the deadline the worker stops the leaf at, and under
+  `multi` it also bounds how long the turn's grants are usable. `caps.tokens` is enforced inside the
+  run. Either one spent ends the turn `failed` with `result.reason: "budget"`
+  ([#391](https://github.com/rossoctl/moca/issues/391)). `caps.costUsd` is refused at submission.
 - **The scheduled on-ramp has no equivalent.** Archetype C went with the KEDA path and has no P6
   design ([#536](https://github.com/rossoctl/moca/issues/536)).
 

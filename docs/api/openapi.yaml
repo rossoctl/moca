@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.26.0
+  version: 1.27.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -304,11 +304,18 @@ components:
           description: |
             deliveries so far, DESCRIPTIVE only: the queue's delivery count is the sole authority for
             retry exhaustion. `0` while queued.
+        cancelRequested:
+          type: boolean
+          description: |
+            present and `true` only on a `running` turn a `DELETE` has asked to stop (#391): the
+            request is in flight and the worker has not yet reported. The turn reaches `cancelled`
+            on its own; absent otherwise.
         result:
           type: object
           description: |
             the leaf's result, absent until one is written. Its own `status` may read `aborted`, which
-            has no corresponding turn `state` -- such a turn reads `state: "failed"`.
+            has no corresponding turn `state` -- such a turn reads `state: "cancelled"`, since a leaf
+            that aborted stopped because something asked it to.
 
             BOUNDED: this is a projection of the stored result, not the result itself. The turn's
             OUTPUT -- a solve leaf's patch, a prompt leaf's assistant text -- is never inlined here,
@@ -349,7 +356,12 @@ components:
                     type: string
                     description: the capture's own digest, when the leaf recorded one
             gate: { type: object }
-            reason: { type: string }
+            reason:
+              type: string
+              description: |
+                on `failed` only, the leaf's own reason (harness-openapi.yaml). `budget` means the
+                turn spent one of its `caps` -- its token cap, or the wall clock -- and was stopped
+                (#391).
             seed:
               type: object
               description: |
@@ -1940,13 +1952,21 @@ paths:
                 caps:
                   type: object
                   description: |
-                    per-turn budget ceilings, recorded on the turn record for the worker that runs it
-                    (ADR-0047 §5.1); a cap above the deployment's own limit does not raise it. Not
-                    enforced yet: no worker reads them, so a turn runs to the deployment's limits
-                    whatever it names (#391).
+                    per-turn budget ceilings, recorded on the turn record and enforced by the worker
+                    that runs it (ADR-0047 §5.1, #391); a cap above the deployment's own limit does
+                    not raise it. A turn that spends either cap ends `failed` with
+                    `result.reason: "budget"`.
+
+                    `tokens` bounds this turn's assistant token spend and is enforced inside the run:
+                    once it is reached, further tool calls are refused. `wallClock` bounds the turn
+                    from the moment a worker dequeues it, clamped to the deployment's
+                    `MOCA_TURN_MAX_S`.
+
+                    There is no `costUsd`: a present one is a 400 `invalid_request`. It was recorded
+                    and never enforceable -- nothing here prices a token -- and silently ignoring a
+                    spend cap is worse than refusing it. Use `tokens`.
                   properties:
                     tokens: { type: integer }
-                    costUsd: { type: number }
                     wallClock: { type: integer, description: seconds }
       responses:
         '202':
@@ -2007,20 +2027,27 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     delete:
       operationId: cancelTurn
-      summary: Cancel a QUEUED async turn
+      summary: Cancel a queued or running async turn
       description: |
-        A queued turn flips to `cancelled` and the drain loop drops it when it would have claimed it.
-        A RUNNING turn is NOT interrupted and answers `409`: interrupting one needs
-        control-plane-to-worker machinery that does not exist, because interactive cancel rides the
-        turn's own connection and an async turn has none (ADR-0047 §4.5). Let it finish and read its
-        result.
+        A QUEUED turn flips to `cancelled` at once, and the drain loop drops it when it would have
+        claimed it.
+
+        A RUNNING turn is asked to stop (ADR-0047 §4.5, #391): the record keeps `state: "running"`
+        and gains `cancelRequested: true`, and the worker running it stops the leaf within a few
+        seconds, releasing its sandbox. The turn then reads `cancelled`, like a queued one. Poll
+        `GET …/turns/{turnId}` for that; this route does not wait.
+
+        Best-effort on purpose, which is why both answers are `202` rather than `200`: a leaf that
+        finishes first stays finished, with its own terminal state and its result intact.
+
+        Anything already terminal is `409`.
       security: [{ sessionToken: [] }]
       parameters:
         - { $ref: '#/components/parameters/sessionId' }
         - { $ref: '#/components/parameters/turnId' }
       responses:
         '202':
-          description: cancelled
+          description: cancelled (queued), or the cancel requested (running)
           content:
             application/json:
               schema:
@@ -2028,11 +2055,17 @@ paths:
                 required: [turnId, state]
                 properties:
                   turnId: { type: string }
-                  state: { type: string, enum: [cancelled] }
+                  state: { type: string, enum: [cancelled, running] }
+                  cancelRequested:
+                    type: boolean
+                    description: |
+                      `true` only in the running case, where the state is still `running`: the stop
+                      has been requested and not yet observed.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: '`turn_not_cancellable`: the turn is not queued. The message names its state.'
+          description: |
+            `turn_not_cancellable`: the turn is already terminal. The message names its state.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -4845,7 +4878,7 @@ paths:
         `MOCA_TENANCY=single` it returns the credential resolved from the record (`mode: direct` or
         `placeholder`). Under `multi` it returns MI1 §6.1 **grants** (`mode: grant`) and never a
         credential value: `anthropicAuthToken` is the inference grant, `anthropicBaseUrl` is the
-        deployment's inference listener, and `sandboxGrant` and `turnExp` come with them. Under
+        deployment's inference listener, and `sandboxGrant` comes with them. Under
         `multi` the deployment must configure the grant ring and the listener or the control plane
         refuses to boot -- which is what replaces M1's per-request `501` (ADR-0047).
 
@@ -4910,11 +4943,11 @@ paths:
                     type: object
                     description: |
                       the per-turn budget ceilings recorded at submission, returned so a worker can
-                      enforce them without re-reading the record. No worker enforces them yet
-                      (#391). Empty when the submission named none.
+                      enforce them without re-reading the record (#391). Empty when the submission
+                      named none. `tokens` is enforced inside the run; `wallClock` is not read by the
+                      worker at all -- it is already resolved into `turnExp` below.
                     properties:
                       tokens: { type: integer }
-                      costUsd: { type: number }
                       wallClock: { type: integer, description: seconds }
                   envelope:
                     type: object
@@ -4944,9 +4977,14 @@ paths:
                   turnExp:
                     type: integer
                     description: |
-                      unix seconds, present only in `grant` mode: the absolute end of this turn,
-                      anchored at the DEQUEUE and clamped to `min(caps.wallClock, MOCA_TURN_MAX_S)`.
-                      Both grants expire at it; no refresh extends past it.
+                      unix seconds: the absolute end of this turn, anchored at the DEQUEUE and
+                      clamped to `min(caps.wallClock, MOCA_TURN_MAX_S)`. In `grant` mode both grants
+                      expire at it and no refresh extends past it.
+
+                      Returned in EVERY mode since #391, because it is also the deadline the worker
+                      enforces: it stops the leaf at this instant and ends the turn `failed` with
+                      `result.reason: "budget"`. `caps.wallClock` is never re-resolved by the worker,
+                      so a mode that omitted this would have an unenforceable wall-clock cap.
                   configRef:
                     { type: string, description: present only when the turn named a config bundle }
                   sandboxTier:

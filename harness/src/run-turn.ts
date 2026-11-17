@@ -701,6 +701,12 @@ export interface TurnConfig {
    * `model` above is also read by /runs, which must not inherit an id pi's registry may not know.
    */
   sessionModel?: SessionModelSpec;
+  /**
+   * This turn's token cap -- an async turn's `caps.tokens`, carried through the dequeue exchange
+   * (#391). Takes precedence over SH_BUDGET_TOKENS: that is a deployment default, this is what the
+   * submitter asked for. Absent ⇒ the env var, as before.
+   */
+  budgetTokens?: number;
 }
 
 export interface ModelSelection {
@@ -951,6 +957,13 @@ export interface TurnResult {
   sandbox?: { id: string; tier: string; seed?: TurnSeed; workspaceReset?: WorkspaceReset };
   /** A templated session's workspace patch after the turn (session-templates spec §5.1). */
   workspace?: TurnWorkspace;
+  /**
+   * The token cap fired and tool calls were blocked (#391). `stopReason` is NOT 'error': pi's loop
+   * ends the turn normally when every call is refused, so without this field a turn that spent its
+   * whole budget and did nothing looks like a turn that chose to answer. A prompt leaf maps it to
+   * `failed: budget`; `/v1/turn` reports it and keeps the response it did get.
+   */
+  budgetExceeded?: boolean;
 }
 
 /**
@@ -1392,8 +1405,11 @@ async function executeTurnCore(
   // Opened by executeTurn ahead of the pool acquire, so a missing session 404s before any lease work.
   const { store, backend, sessionManager } = opened;
 
-  const budgetLimit = Number(process.env.SH_BUDGET_TOKENS);
+  // The TURN's own cap first (#391): `config.budgetTokens` is what this turn's submitter asked for,
+  // SH_BUDGET_TOKENS the deployment's default for turns that asked for nothing.
+  const budgetLimit = config?.budgetTokens ?? Number(process.env.SH_BUDGET_TOKENS);
   const budgetMargin = Number(process.env.SH_BUDGET_MARGIN);
+  let budgetExceeded = false;
   // acquireTurnSandbox (called by executeTurn, which owns the lease lifecycle) hands back exactly
   // k8sSandboxExtension's argument, and it is passed on untransformed below — so a leased
   // transport cannot be dropped by a field-by-field rebuild here.
@@ -1429,6 +1445,9 @@ async function executeTurnCore(
       budgetVoterExtension(sessionManager, {
         limit: budgetLimit,
         baseline: budgetBaseline,
+        onExceeded: () => {
+          budgetExceeded = true;
+        },
         ...(Number.isFinite(budgetMargin) && budgetMargin > 0 ? { margin: budgetMargin } : {}),
       }),
     );
@@ -1527,6 +1546,7 @@ async function executeTurnCore(
     stopReason,
     ...(errorMessage ? { errorMessage } : {}),
     ...(usage ? { usage } : {}),
+    ...(budgetExceeded ? { budgetExceeded: true } : {}),
   };
 }
 

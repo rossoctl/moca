@@ -2,6 +2,7 @@ import type { WorkQueue } from '@moca/work-queue';
 import { classifyOutcome } from './classify-outcome.js';
 import type { LeafEnvelope, LeafResult } from './run-leaf.js';
 import type { TurnConfig } from './run-turn.js';
+import { DEADLINE_ABORT } from './stop-reason.js';
 import { toResultRecord, writeResult, type RedisLike } from './leaf-result-store.js';
 
 /**
@@ -19,8 +20,18 @@ export interface ClaimedTurn {
    * It cannot be built once for the loop: every claim resolves its own credential, base url, tier
    * and model. Typed as the harness's own `TurnConfig` rather than `@moca/server`'s `TurnAuth`,
    * because this package is the one `@moca/server` depends on, not the other way round.
+   *
+   * It also carries the turn's token cap as `budgetTokens` (`caps.tokens`, #391), because that one
+   * is enforced INSIDE the leaf by the budget voter -- unlike the deadline below, which this file
+   * enforces from outside.
    */
   config: TurnConfig;
+  /**
+   * The turn's wall-clock deadline as unix SECONDS, anchored by the control plane at this dequeue
+   * (§5.4, #391): `caps.wallClock` clamped to MOCA_TURN_MAX_S, or that ceiling. Absent only from a
+   * control plane older than #391, and then the leaf runs to its grant's own expiry as before.
+   */
+  turnExp?: number;
 }
 
 export interface LeafJobDeps {
@@ -34,8 +45,20 @@ export interface LeafJobDeps {
    * every test of this function would otherwise need an HTTP server.
    */
   claimTurn: (turnId: string, deliveryCount: number) => Promise<ClaimedTurn | null>;
-  /** `runLeaf` itself in production; the second argument is the claim's own config. */
-  runLeaf: (env: LeafEnvelope, config: TurnConfig) => Promise<LeafResult>;
+  /**
+   * `runLeaf` itself in production; the second argument is the claim's own config. The third stops
+   * the leaf -- a cancel request, or the turn's deadline (#391).
+   */
+  runLeaf: (env: LeafEnvelope, config: TurnConfig, signal: AbortSignal) => Promise<LeafResult>;
+  /**
+   * Has the owner asked for this turn to stop (§4.5, #391)? One HGET on the turn record, polled
+   * while the leaf runs. Injected like `claimTurn` because the store is `@moca/server`'s to build;
+   * absent ⇒ no cancel polling, which is what every pre-#391 caller gets.
+   *
+   * A false answer and a throw are the same thing to the caller: the leaf keeps running. A Redis
+   * blip must not cancel a turn.
+   */
+  cancelRequested?: (turnId: string) => Promise<boolean>;
   /** Stamp the terminal state on the record. 'aborted' has no TurnState; the caller maps it. */
   finalize: (turnId: string, status: LeafResult['status']) => Promise<void>;
   /**
@@ -56,6 +79,12 @@ export interface LeafJobDeps {
    */
   blockMs?: number;
   heartbeatMs?: number;
+  /**
+   * How often the cancel/deadline watchdog ticks, in ms. Defaults to CANCEL_POLL_MS. Its own timer
+   * rather than a job for the heartbeat: the heartbeat's period is a third of `minIdleMs` (30 s),
+   * and §4.5's criterion is that a cancel releases the sandbox within 10 s.
+   */
+  cancelPollMs?: number;
   log?: (msg: string) => void;
   now?: () => string;
   setHeartbeat?: (fn: () => void, ms: number) => unknown;
@@ -81,6 +110,12 @@ export interface LeafJobDeps {
  * dead-letters or is refused is exactly the case that signal exists to show. Putting the flag only
  * on `completed` would hide the worst of them.
  */
+/**
+ * The watchdog's period (#391). Two seconds, not the heartbeat's thirty: §4.5 asks that a cancel
+ * release the sandbox within ten, and the poll it costs is one HGET per running leaf.
+ */
+export const CANCEL_POLL_MS = 2_000;
+
 export type ProcessOutcome =
   | { kind: 'idle' }
   | { kind: 'completed'; turnId: string; status: LeafResult['status']; reclaimed: boolean }
@@ -159,11 +194,47 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
       })
       .catch(() => undefined);
   }, heartbeatMs);
+  // The leaf's stop (#391). Aborted by the watchdog below on a cancel request or the turn's
+  // deadline; the REASON is what tells the two apart downstream -- `DEADLINE_ABORT` finalizes
+  // `failed: budget`, anything else `cancelled`.
+  const stop = new AbortController();
+  // The record can ALREADY carry the flag: a cancel that landed while the previous worker was dying
+  // leaves the turn `running` with `cancelRequested` set, and this delivery is the reclaim. Checked
+  // before the run so that turn never leases a sandbox at all.
+  if (await deps.cancelRequested?.(claimed.turnId).catch(() => false)) {
+    stop.abort('cancelled');
+  }
+  const deadlineMs = turn.turnExp ? turn.turnExp * 1000 : undefined;
+  if (deadlineMs !== undefined && deadlineMs <= Date.now()) stop.abort(DEADLINE_ABORT);
+
+  // Not armed when there is nothing for it to watch: a caller with no `cancelRequested` against a
+  // control plane that sends no `turnExp` (both pre-#391) would otherwise pay a timer per leaf for a
+  // tick that can never abort anything.
+  const watchdog =
+    stop.signal.aborted || (!deps.cancelRequested && deadlineMs === undefined)
+      ? undefined
+      : setHb(() => {
+          if (deadlineMs !== undefined && deadlineMs <= Date.now()) {
+            stop.abort(DEADLINE_ABORT);
+            return;
+          }
+          // Fire-and-forget for the heartbeat's reason: a rejection here must not become an
+          // unhandled rejection in a process also serving sync traffic. A failed poll just means
+          // the cancel is noticed on the next tick.
+          void deps
+            .cancelRequested?.(claimed.turnId)
+            .then((asked) => {
+              if (asked) stop.abort('cancelled');
+            })
+            .catch(() => undefined);
+        }, deps.cancelPollMs ?? CANCEL_POLL_MS);
+
   let result: LeafResult;
   try {
-    result = await deps.runLeaf(turn.envelope, turn.config);
+    result = await deps.runLeaf(turn.envelope, turn.config, stop.signal);
   } finally {
     clearHb(hb);
+    if (watchdog !== undefined) clearHb(watchdog);
   }
 
   // The turn belongs to whoever holds the entry, and that is no longer this worker: drop this run's

@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { processOne, type LeafJobDeps } from '../src/leaf-job-runner.js';
+import { processOne, type ClaimedTurn, type LeafJobDeps } from '../src/leaf-job-runner.js';
 import type { ClaimedEntry, WorkQueue } from '@moca/work-queue';
 import type { LeafEnvelope, LeafResult } from '../src/run-leaf.js';
 import type { TurnConfig } from '../src/run-turn.js';
+import { DEADLINE_ABORT } from '../src/stop-reason.js';
 
 const ENV = {
   sessionId: 'c0ffee00-0000-4000-8000-000000000001',
@@ -146,7 +147,7 @@ describe('processOne', () => {
     queue.next = entry();
     const runLeaf = vi.fn(async () => ({ status: 'done' }) as LeafResult);
     await processOne(deps({ runLeaf }));
-    expect(runLeaf).toHaveBeenCalledWith(ENV, CONFIG);
+    expect(runLeaf).toHaveBeenCalledWith(ENV, CONFIG, expect.any(AbortSignal));
   });
 
   it('dead-letters past maxAttempts without claiming a credential or running the leaf', async () => {
@@ -312,5 +313,138 @@ describe('processOne', () => {
     expect(clearHeartbeat).toHaveBeenCalledTimes(1);
     expect(queue.acked).toEqual([]);
     expect(store.size).toBe(0);
+  });
+
+  // The watchdog (#391). `heartbeats[0]` is the touch beat; `heartbeats[1]` is the watchdog, armed
+  // only when there is something for it to watch.
+  describe('cancel and deadline', () => {
+    const claimedWith =
+      (over: Partial<ClaimedTurn> = {}) =>
+      async () => ({
+        envelope: ENV,
+        sessionId: 'sess-1',
+        attempts: 1,
+        config: CONFIG,
+        ...over,
+      });
+
+    /** The real loop's tick, fired by hand, then its fire-and-forget poll flushed. */
+    const tick = async (i: number) => {
+      heartbeats[i]!();
+      for (let n = 0; n < 3; n++) await new Promise((r) => setImmediate(r));
+    };
+
+    it('arms no watchdog when nothing can abort the leaf', async () => {
+      queue.next = entry();
+      await processOne(deps());
+      expect(heartbeats).toHaveLength(1);
+    });
+
+    it('aborts the running leaf when a watchdog tick finds a cancel request', async () => {
+      queue.next = entry();
+      let asked = false; // false for the pre-run check, true from the first tick on
+      let seen: AbortSignal | undefined;
+      const out = await processOne(
+        deps({
+          cancelRequested: async () => asked,
+          runLeaf: async (_env, _config, signal) => {
+            seen = signal;
+            asked = true;
+            await tick(1);
+            return (signal.aborted ? { status: 'aborted' } : { status: 'done' }) as LeafResult;
+          },
+        }),
+      );
+      expect(seen!.reason).toBe('cancelled');
+      expect(out).toMatchObject({ kind: 'completed', status: 'aborted' });
+      // 'aborted' has no turn state of its own: `asyncFinalizeState` maps it to `cancelled`.
+      expect(finalized).toEqual([['t-1', 'aborted']]);
+      expect(queue.acked).toEqual(['1-0']);
+    });
+
+    it('aborts before the run when the record already carries the flag, and arms no watchdog', async () => {
+      queue.next = entry();
+      const runLeaf = vi.fn(async (_e: LeafEnvelope, _c: TurnConfig, signal: AbortSignal) => {
+        expect(signal.aborted).toBe(true);
+        expect(signal.reason).toBe('cancelled');
+        return { status: 'aborted' } as LeafResult;
+      });
+      await processOne(deps({ cancelRequested: async () => true, runLeaf }));
+      expect(runLeaf).toHaveBeenCalledTimes(1);
+      expect(heartbeats).toHaveLength(1); // already aborted: nothing left to watch for
+    });
+
+    it('keeps running when the cancel poll itself fails: a Redis blip must not cancel a turn', async () => {
+      queue.next = entry();
+      let seen: AbortSignal | undefined;
+      const out = await processOne(
+        deps({
+          cancelRequested: async () => {
+            throw new Error('ClientClosedError: The client is closed');
+          },
+          runLeaf: async (_env, _config, signal) => {
+            seen = signal;
+            await tick(1);
+            return { status: 'done' } as LeafResult;
+          },
+        }),
+      );
+      expect(seen!.aborted).toBe(false);
+      expect(out).toMatchObject({ kind: 'completed', status: 'done' });
+    });
+
+    it('aborts with the deadline reason once turnExp has passed, so the leaf fails budget not cancelled', async () => {
+      queue.next = entry();
+      const runLeaf = vi.fn(async (_e: LeafEnvelope, _c: TurnConfig, signal: AbortSignal) => {
+        expect(signal.reason).toBe(DEADLINE_ABORT);
+        return { status: 'failed', reason: 'budget' } as LeafResult;
+      });
+      const out = await processOne(
+        deps({ claimTurn: claimedWith({ turnExp: Math.floor(Date.now() / 1000) - 1 }), runLeaf }),
+      );
+      expect(runLeaf).toHaveBeenCalledTimes(1);
+      expect(out).toMatchObject({ kind: 'completed', status: 'failed' });
+      expect(finalized).toEqual([['t-1', 'failed']]);
+    });
+
+    it('aborts mid-leaf on the tick that crosses turnExp', async () => {
+      queue.next = entry();
+      let seen: AbortSignal | undefined;
+      // One second out: the pre-run check passes, so the watchdog is armed, and the tick below runs
+      // after the fake clock has moved past it.
+      const turnExp = Math.floor(Date.now() / 1000) + 1;
+      const nowSpy = vi.spyOn(Date, 'now');
+      try {
+        await processOne(
+          deps({
+            claimTurn: claimedWith({ turnExp }),
+            runLeaf: async (_env, _config, signal) => {
+              seen = signal;
+              nowSpy.mockReturnValue(turnExp * 1000 + 1);
+              await tick(1);
+              return { status: 'failed', reason: 'budget' } as LeafResult;
+            },
+          }),
+        );
+      } finally {
+        nowSpy.mockRestore();
+      }
+      expect(seen!.reason).toBe(DEADLINE_ABORT);
+    });
+
+    it('clears both timers when the leaf throws', async () => {
+      queue.next = entry();
+      const clearHeartbeat = vi.fn();
+      const d = deps({
+        cancelRequested: async () => false,
+        clearHeartbeat,
+        runLeaf: async () => {
+          throw new Error('sandbox gone');
+        },
+      });
+      await expect(processOne(d)).rejects.toThrow('sandbox gone');
+      expect(heartbeats).toHaveLength(2);
+      expect(clearHeartbeat).toHaveBeenCalledTimes(2);
+    });
   });
 });

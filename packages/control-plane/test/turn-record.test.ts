@@ -156,14 +156,26 @@ describe('parseTurnSubmission (spec §4.1)', () => {
       item,
       async: true,
       idempotencyKey: 'k1',
-      caps: { tokens: 1000, costUsd: 0.5, wallClock: 600 },
+      caps: { tokens: 1000, wallClock: 600 },
       workloadId: 'w-0123456789abcdef0123456789abcdef',
     });
     expect(p.idempotencyKey).toBe('k1');
-    expect(p.caps).toEqual({ tokens: 1000, costUsd: 0.5, wallClock: 600 });
+    expect(p.caps).toEqual({ tokens: 1000, wallClock: 600 });
     // The 501 is the HANDLER's (§4.2: before admission, before enqueue). Refusing it here would
     // put a route-shaped decision in a pure parser.
     expect(p.workloadId).toBe('w-0123456789abcdef0123456789abcdef');
+  });
+
+  // #391: the field was accepted and stored, and nothing anywhere can price a token, so the cap
+  // was silently ignored. Refusing is the honest answer -- a caller wanting a spend bound has
+  // `caps.tokens`, which the worker now enforces.
+  it('refuses caps.costUsd, naming the cap that is enforceable', () => {
+    expect(codeOf(() => parseTurnSubmission({ item, async: true, caps: { costUsd: 1 } }))).toBe(
+      'invalid_request',
+    );
+    expect(() => parseTurnSubmission({ item, async: true, caps: { costUsd: 1 } })).toThrow(
+      /caps\.tokens/,
+    );
   });
 
   it('refuses a non-positive or non-numeric cap rather than storing it', () => {

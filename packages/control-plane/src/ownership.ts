@@ -16,6 +16,12 @@ export interface CpRedisLike {
   /** Atomic +N on one hash field, for the runtime hash's counters (see RUNTIME_COUNTERS). */
   hIncrBy(key: string, field: string, by: number): Promise<number>;
   hGetAll(key: string): Promise<Record<string, string>>;
+  /**
+   * ONE hash field, or null when the field or the key is gone. The async worker polls a running
+   * turn's `cancelRequested` every couple of seconds per leaf (#391); `hGetAll` there would fetch
+   * the turn's whole envelope on every tick.
+   */
+  hGet(key: string, field: string): Promise<string | null | undefined>;
   zAdd(key: string, member: { score: number; value: string }): Promise<unknown>;
   zRem(key: string, member: string): Promise<unknown>;
   /**

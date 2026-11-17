@@ -59,10 +59,15 @@ export function sessionSpendTotal(ctx: ExtensionContext): number | null {
  * baseline would stay null and the voter would never fire. The caller computes the pre-turn
  * baseline from the loaded session (branchSpend) and passes it as opts.baseline, so a resumed
  * session's loaded-tail spend is excluded from this turn's cap. Defaults to 0 (fresh session).
+ *
+ * `onExceeded` is how a CALLER learns the cap fired (#391): blocking the tool call is invisible from
+ * outside -- pi's loop reports `end_turn` for a turn whose calls were all refused -- so an async
+ * turn over its `caps.tokens` would otherwise be reported as a normal completion. Called on every
+ * blocked call, not only the first; the callers set a flag, so the repeats are free.
  */
 export function budgetVoterExtension(
   sm: SessionManager,
-  opts: { limit: number; margin?: number; baseline?: number },
+  opts: { limit: number; margin?: number; baseline?: number; onExceeded?: () => void },
 ): ExtensionFactory {
   const baseline = opts.baseline ?? 0;
   return (pi) => {
@@ -73,6 +78,7 @@ export function budgetVoterExtension(
       const d = decideBudget({ spent, estimated: opts.margin ?? 0, limit: opts.limit });
       if (d.decision === 'abort') {
         sm.appendCustomEntry('abort', { reason: d.reason, spent, limit: opts.limit });
+        opts.onExceeded?.();
         return { block: true, reason: 'Session token budget exceeded' };
       }
       return {};

@@ -35,6 +35,17 @@ export interface DeadLetterDeps {
 const NOT_CLAIMABLE = new Set(['turn_not_found', 'turn_not_claimable', 'session_not_found']);
 
 /**
+ * A positive finite number off the exchange body, or undefined (#391).
+ *
+ * COERCED, not refused: `parseTurnSubmission` already rejected a non-positive `caps` at submission
+ * and `turnExp` is minted here, so anything odd means a control plane older or newer than this
+ * worker. Dropping it runs the turn uncapped, as before #391; throwing would make it unrunnable.
+ */
+function positive(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+/**
  * §5.4's claim handshake. Returns `null` when the turn must not run -- cancelled, already terminal,
  * or gone -- and THROWS when the call itself failed, because the two have opposite consequences:
  * `null` acks the entry, a throw leaves it pending for another worker.
@@ -107,6 +118,12 @@ export async function claimTurn(
   const marked = await deps.turns.markRunning(turnId, deliveryCount);
   if (marked === 'refused') return null;
 
+  // The turn's own caps (§4.3, #391). `tokens` rides into the leaf as `TurnConfig.budgetTokens`, so
+  // the budget voter inside the run enforces it; `wallClock` is not read here at all -- the control
+  // plane already clamped it into `turnExp` below, and a second copy of that arithmetic in the
+  // worker is a second place for the two numbers to disagree.
+  const caps = (body.caps ?? {}) as Record<string, unknown>;
+  const budgetTokens = positive(caps.tokens);
   const auth: TurnAuth = {
     subject: String(body.subject ?? ''),
     sessionId: body.sessionId,
@@ -124,6 +141,7 @@ export async function claimTurn(
     // queued or not (the dequeue exchange returns them as the session exchange does).
     ...templateAuth(resolved),
     ...(resolved.model ? { model: resolved.model } : {}),
+    ...(budgetTokens ? { budgetTokens } : {}),
   };
   // `buildConfig` never reads `auth.configRef` -- the sync path merges it into the envelope
   // (`server.ts:612`, `:743`) and `runLeaf` reads `configRef` off the envelope, not off `TurnConfig`
@@ -139,6 +157,10 @@ export async function claimTurn(
     envelope: envelopeWithConfig as unknown as LeafEnvelope,
     sessionId: body.sessionId,
     attempts: deliveryCount,
+    // The deadline the control plane anchored at THIS dequeue, enforced by the job runner's
+    // watchdog (#391). Not recomputed from `caps.wallClock`: the grants expire at this instant, so a
+    // leaf outrunning it would fail with 401s instead of a clean `failed: budget`.
+    ...(positive(body.turnExp) ? { turnExp: body.turnExp as number } : {}),
     // The SAME builder the sync `/turn` path uses, so an async leaf and a sync one differ in how
     // they were admitted and in nothing else.
     config: buildConfig(auth),
