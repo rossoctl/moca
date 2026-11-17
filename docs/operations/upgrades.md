@@ -106,6 +106,23 @@ mocactl doctor
 For releases that do not change bundle handling, skip all of this: the window is short and only affects sessions
 that use a promoted bundle.
 
+## Upgrade notes
+
+Changes that alter a default or what a re-run of `setup.sh` writes ([change policy](../reference/change-policy.md),
+rule 5).
+
+- **Login starts are bounded per client address (oidc only, [#716](https://github.com/rossoctl/moca/issues/716)).**
+  Besides the 10,000 live login states in total, one client address may now hold at most
+  `SH_OIDC_MAX_PENDING_PER_SOURCE` (default **20**); past that, that address gets `429 quota_exceeded` while other
+  addresses still log in. The address behind an OpenShift Route is the last `X-Forwarded-For` entry, so upgrade by
+  **re-running `setup.sh`** with the new `--image`: that run writes `SH_TRUSTED_PROXY_HOPS=1` to `moca-settings` and
+  pins `haproxy.router.openshift.io/set-forwarded-headers: append` on every Route to the control plane, and the
+  trust relies on both. An image changed any other way leaves the key unset, which means 0, and every login then
+  keys by the router's address: the deployment as a whole gets 20. Users behind one NAT address share one bucket;
+  raise the bound with `SH_OIDC_MAX_PENDING_PER_SOURCE` (sticky, `0` turns it off). GitHub logins are unchanged.
+  Outside `deploy/k8s`, if you enable oidc behind a proxy that appends to `X-Forwarded-For`, set
+  `SH_TRUSTED_PROXY_HOPS` to the number of such proxies.
+
 ## Rolling back
 
 No procedure is documented. Mechanically, re-running `setup.sh` with an older `--image` rolls the Deployments back,

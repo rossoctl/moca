@@ -50,13 +50,21 @@ spec:
           env:
             - { name: HOME, value: /tmp }
             - { name: SH_CONTROL_PLANE_PORT, value: '8080' }
-            # The client address for the per-source bound on login starts (#716): on OpenShift the
-            # Route's router APPENDS the address it saw to X-Forwarded-For, so the last entry is
-            # the client's. Without this every login would key by the router's address and share
-            # one bucket. A request with no header (kind, a port-forward) keys by the socket peer.
-            # Trusting the entry is safe because only the router and the supervisor may reach the
-            # pod (the NetworkPolicy below), and a port-forward is the operator's own.
-            - { name: SH_TRUSTED_PROXY_HOPS, value: '1' }
+            # The client address for the per-source bound on login starts (#716). On OpenShift the
+            # Route's router APPENDS the address it saw to X-Forwarded-For -- every Route that
+            # reaches this pod pins haproxy.router.openshift.io/set-forwarded-headers: append, so an
+            # IngressController's forwardedHeaderPolicy cannot change that -- and the last entry is
+            # then the client's. setup.sh writes 1 unless the operator sets another count. A request
+            # with no header (kind, a port-forward) keys by the socket peer. The trust holds because
+            # only the supervisor (the NetworkPolicy below) and, on OpenShift, the router (the
+            # overlays add it) reach the pod; the supervisor is trusted, since it can set any
+            # X-Forwarded-For it likes, and a port-forward is the operator's own.
+            - name: SH_TRUSTED_PROXY_HOPS
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: SH_TRUSTED_PROXY_HOPS, optional: true },
+                }
             - name: REDIS_URL
               valueFrom: { secretKeyRef: { name: moca-redis, key: REDIS_URL } }
             - { name: SH_CREDENTIAL_STORE, value: kubernetes }
@@ -102,6 +110,12 @@ spec:
             - name: SH_OIDC_SCOPE
               valueFrom:
                 { configMapKeyRef: { name: moca-settings, key: SH_OIDC_SCOPE, optional: true } }
+            - name: SH_OIDC_MAX_PENDING_PER_SOURCE
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: SH_OIDC_MAX_PENDING_PER_SOURCE, optional: true },
+                }
             # P6.3 sandbox tiers: written to moca-settings by setup.sh ONLY on a stack with both
             # tiers; optional, so a stack without them renders exactly as before (untiered).
             # Must match the supervisor's: one list validates a session, the other places its turns.

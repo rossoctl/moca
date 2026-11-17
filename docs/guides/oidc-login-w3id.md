@@ -84,10 +84,13 @@ because the login-start route is unauthenticated, each client address may hold a
 (`SH_OIDC_MAX_PENDING_PER_SOURCE`). A client looping starts then gets 429 from its own share while
 everyone else's logins still start; an abandoned start holds its slot for the state TTL (15
 minutes). The address is the socket peer, or, behind a proxy that appends to `X-Forwarded-For`,
-the entry `SH_TRUSTED_PROXY_HOPS` names: `deploy/k8s` sets it to 1 for the OpenShift Route. Set it
-wherever the control plane sits behind a proxy, or every login shares the proxy's address and the
-per-source bound caps the whole deployment; where every client arrives from one address anyway
-(an SSH tunnel), set `SH_OIDC_MAX_PENDING_PER_SOURCE=0`. A client with many addresses (an IPv6
+the entry `SH_TRUSTED_PROXY_HOPS` names. `deploy/k8s/setup.sh` writes 1 for the OpenShift Route
+(both settings are sticky `moca-settings` keys), and every Route to the control plane pins
+`haproxy.router.openshift.io/set-forwarded-headers: append`: the trust relies on the router
+appending, since one that passes a client's own header through would let it pick any address,
+a victim's included. Set the count wherever the control plane sits behind a proxy, or every login
+shares the proxy's address and the per-source bound caps the whole deployment; where every client
+arrives from one address anyway, set `SH_OIDC_MAX_PENDING_PER_SOURCE=0`. A client with many addresses (an IPv6
 prefix, a botnet) can still fill the total cap.
 
 ## Logging in

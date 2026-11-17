@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { parseAllDocuments } from 'yaml';
-import { K8S_DIR, NO_KUBECTL, render, type K8sObject } from './render.js';
+import { K8S_DIR, NO_KUBECTL, container, find, render, type K8sObject } from './render.js';
 
 /**
  * #716: the control plane keys unauthenticated login starts by the client's address, which behind
@@ -47,6 +47,19 @@ describe.skipIf(NO_KUBECTL)(
       // The Routes named are all of them: a new one must be added here, and pin append too.
       expect(routes.map((r) => r.metadata.name).sort()).toEqual([...names]);
       for (const r of routes) expect(r.metadata.annotations?.[ANNOTATION]).toBe('append');
+    });
+
+    it('reads both settings from moca-settings, optionally, so an operator can change them', () => {
+      const cp = container(
+        find(render('base'), 'Deployment', 'moca-control-plane', 'moca'),
+        'control-plane',
+      );
+      for (const key of ['SH_TRUSTED_PROXY_HOPS', 'SH_OIDC_MAX_PENDING_PER_SOURCE']) {
+        expect(cp.env.find((e: { name: string }) => e.name === key)).toEqual({
+          name: key,
+          valueFrom: { configMapKeyRef: { name: 'moca-settings', key, optional: true } },
+        });
+      }
     });
   },
 );
