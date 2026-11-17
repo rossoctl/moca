@@ -105,7 +105,7 @@ setting (templates, subjects, quotas, lifetimes) rolls the control plane alone, 
 carry on.
 
 **Moving to idle lifetimes (#770).** The first run of this `setup.sh` on an existing deployment
-changes every worker's idle from 216 h to 768 h, and starts idle lifetimes: the control plane counts
+changes every worker's idle from 216 h to 768 h at the defaults, and starts idle lifetimes: the control plane counts
 idle time only when `SH_SANDBOX_MAX_LIFETIME_SECONDS` is set, and keeps the old absolute lifetime
 otherwise. Until the hosts can be reinstalled, take this `setup.sh` with idle lifetimes off: it
 writes no `SH_SANDBOX_MAX_LIFETIME_SECONDS` and keeps every worker's idle at 216 h (at the defaults),
@@ -195,7 +195,8 @@ replacing `SBX_WORKER_BIN` and restarting the unit alone; if that happened, stop
 Two settings. `SBX_LIFETIME_DAYS` (default 7) is the default idle lifetime: a sandbox ends after
 that many days without use. `SBX_MAX_LIFETIME_DAYS` (default 30) is the longest an owner may pick,
 and each worker's idle reclaim, `SH_WORKSPACE_IDLE`, is that plus two days. The default must not
-exceed the maximum.
+exceed the maximum. `SBX_MAX_LIFETIME_DAYS=off` keeps idle lifetimes off, with the idle at
+`SBX_LIFETIME_DAYS` plus two days ([§2](#2-upgrading)).
 
 **Changing only `SBX_LIFETIME_DAYS`** touches no host: re-run `setup.sh` and the control plane rolls.
 
@@ -204,8 +205,8 @@ takes the new maximum at once, but a running worker keeps the idle it was instal
 `install-host.sh` is re-run on its host; after a raise, that idle can be shorter than a live
 sandbox's lifetime, and the worker would reclaim its workspace.
 
-So `setup.sh` refuses a maximum that changes the idle in the bundles it last wrote. Either
-reinstall every host first, with bundles made from the new value, or:
+So `setup.sh` refuses a maximum that raises the idle in the bundles it last wrote, unless
+acknowledged:
 
 ```bash
 SBX_ACK_HOSTS=1 deploy/sbx/setup.sh --env-file <env file>

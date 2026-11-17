@@ -122,8 +122,8 @@ default_egress_allow() {
     printf '%s\n' "$LEGACY_EGRESS_ALLOW"
   fi
 }
-# A bundle from deploy/sbx/setup.sh carries SH_WORKSPACE_IDLE (the sandbox lifetime plus two days,
-# spec §5.4), SH_WORKSPACE_IMAGE_MB and SH_LEASE_IDLE_CEILING_S (the control plane's
+# A bundle from deploy/sbx/setup.sh carries SH_WORKSPACE_IDLE (the maximum idle lifetime plus two
+# days, idle-lifetime spec §6.2), SH_WORKSPACE_IMAGE_MB and SH_LEASE_IDLE_CEILING_S (the control plane's
 # SH_SANDBOX_IDLE_CEILING_S, lease-mode spec §8.1). A bundle without the idle predates that rule and
 # is refused; the image size and the idle ceiling default to microvm-worker's own, which are also
 # setup.sh's (a bundle from before the lease policy came from a control plane on the same 1800 s).
@@ -597,7 +597,7 @@ validate_worker() {
   idle="$(env_value SH_WORKSPACE_IDLE "$env")"
   [[ -n "$idle" ]] ||
     die "$env has no SH_WORKSPACE_IDLE (a bundle from before increment 1b): re-run deploy/sbx/setup.sh and copy the new bundle"
-  [[ "$idle" =~ ^[1-9][0-9]*h$ ]] || die "SH_WORKSPACE_IDLE in $env must be whole hours, e.g. 216h"
+  [[ "$idle" =~ ^[1-9][0-9]*h$ ]] || die "SH_WORKSPACE_IDLE in $env must be whole hours, e.g. 768h"
   image_mb="$(env_value SH_WORKSPACE_IMAGE_MB "$env")"
   image_mb="${image_mb:-$DEFAULT_IMAGE_MB}"
   [[ "$image_mb" =~ ^[1-9][0-9]*$ ]] || die "SH_WORKSPACE_IMAGE_MB in $env must be a whole number of MiB"

@@ -127,9 +127,8 @@ next call, but an Exec in flight fails, and a direct client must fetch a new san
 takes the new maximum at once, but a running worker keeps the idle reclaim (`SH_WORKSPACE_IDLE`) it
 was installed with until `install-host.sh` is re-run on its host. After a raise, that idle can be
 shorter than a live sandbox's lifetime, and the worker would reclaim its workspace. So the run
-refuses a maximum that changes the idle in the bundles it last wrote, unless `SBX_ACK_HOSTS=1` is
-set. To raise it, ideally re-run `install-host.sh` on every host first, with bundles made from the
-new value; otherwise set `SBX_ACK_HOSTS=1` and reinstall every host right after the run, which names
+refuses a maximum that raises the idle in the bundles it last wrote, unless `SBX_ACK_HOSTS=1` is
+set. To raise it, set `SBX_ACK_HOSTS=1` and reinstall every host right after the run, which names
 them. The check reads the bundles in `deploy/sbx/.generated/workers/`: keep that directory between
 runs (it is gitignored), or the run cannot see the idle the hosts were given; without it, a run on
 an existing deployment that turns idle lifetimes on or changes the maximum is refused unless
