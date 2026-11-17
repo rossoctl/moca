@@ -102,3 +102,25 @@ describe('the P6 worker validates the sandbox tiers at boot (P6.3 spec §3.4)', 
     expect(r.ready).toBe(true);
   }, 30_000);
 });
+
+describe('the P6 worker validates the caching switches at boot (#754)', () => {
+  // The turn's stack reads them per turn too, so without a boot check a typo passes /health and
+  // fails every turn -- the same shape as the tier checks above.
+  it('exits 2 before ready on a value other than off/on, naming SH_PROMPT_CACHE', async () => {
+    const r = await bootWorker({ SH_PROMPT_CACHE: 'OFF' });
+    expect(r.stderr).toMatch(/SH_PROMPT_CACHE must be "off", "on" or unset/);
+    expect(r.status).toBe(2);
+    expect(r.ready).toBe(false);
+  }, 30_000);
+  it('exits 2 before ready on a value other than off/on, naming SH_GATEWAY_CACHE', async () => {
+    const r = await bootWorker({ SH_GATEWAY_CACHE: 'false' });
+    expect(r.stderr).toMatch(/SH_GATEWAY_CACHE must be "off", "on" or unset/);
+    expect(r.status).toBe(2);
+    expect(r.ready).toBe(false);
+  }, 30_000);
+  it('boots to ready with both switches off', async () => {
+    const r = await bootWorker({ SH_PROMPT_CACHE: 'off', SH_GATEWAY_CACHE: 'off' });
+    expect(r.stderr).toBe('');
+    expect(r.ready).toBe(true);
+  }, 30_000);
+});

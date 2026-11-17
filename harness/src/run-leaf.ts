@@ -47,6 +47,7 @@ import {
 import { BufferedRedisBackend } from './buffered-redis-backend.js';
 import { flushExtension } from './flush-extension.js';
 import { checkpointExtension } from './checkpoint-extension.js';
+import { promptCacheExtension } from './prompt-cache-extension.js';
 import {
   submitVerdictExtension,
   VERDICT_ENTRY_TYPE,
@@ -921,6 +922,8 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps)
         }),
         flushExtension(backend),
         checkpointExtension(store, sessionManager),
+        // A solve leaf's model requests honor the same caching switches as a turn's (#754).
+        promptCacheExtension(),
       ],
       ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
     });
@@ -1126,6 +1129,8 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
         flushExtension(backend),
         checkpointExtension(store, sessionManager),
         verdictTerminationExtension(capture, { maxTurns: env.maxTurns }),
+        // And so do a verdict leaf's (#754).
+        promptCacheExtension(),
       ],
     });
     const resourceLoader = new DefaultResourceLoader(loaderOptions as never);

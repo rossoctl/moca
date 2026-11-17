@@ -7,6 +7,8 @@ import { abortDetachedTurns, armRunReaper, handler } from './server.js';
 import { resolveDiscoverySource } from '@moca/harness/select-sandbox';
 // ...and of the sandbox tier settings (P6.3), likewise.
 import { parseSandboxTiers } from '@moca/harness/sandbox-affinity';
+// ...and of the two caching switches (#754), likewise.
+import { readCacheSwitches } from '@moca/harness/prompt-cache-extension';
 // Shared boot preparation (keyset validation, tenancy, ambient-credential scrub) -- this path has to
 // call it itself because it never goes through startServer. See its use below.
 import { prepareServerProcess } from './server-process.js';
@@ -348,10 +350,15 @@ if (isMainModule) {
   // SH_SANDBOX_TIERS / SH_SANDBOX_DEFAULT_TIER (P6.3 spec §3.4): the selection still reads them per
   // call (select-sandbox.ts, `parseSandboxTiers(env)` in selectPoolSandbox), but a typo must fail
   // the bring-up, not the first turn -- the same argument as the discovery check above.
+  //
+  // SH_PROMPT_CACHE / SH_GATEWAY_CACHE (#754): the turn's stack reads them again per turn, but
+  // a value other than `off`/`on` would otherwise boot cleanly and fail every turn -- the same
+  // argument again.
   try {
     prepareServerProcess(process.env);
     resolveDiscoverySource(process.env, process.env.SH_REMOTE_SANDBOX === '1');
     parseSandboxTiers(process.env);
+    readCacheSwitches(process.env);
   } catch (err) {
     console.error(String(err instanceof Error ? err.message : err));
     process.exit(2);
