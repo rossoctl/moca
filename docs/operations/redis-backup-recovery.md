@@ -61,8 +61,9 @@ behaviour is not verified.
 
 ## Secrets to back up separately
 
-`setup.sh` creates every row's Secrets but `moca-credentials` once and never rotates them; the per-user Secrets in `moca-credentials` are
-created by the control plane at runtime. On OpenShift and with P4 hosts it also creates `moca-relay-sandbox-tokens`
+`setup.sh` creates every Secret in the table except the `moca-credentials` ones (`moca-redis-provisioner` only with
+workload sandboxes on), once, and never rotates them; the per-user Secrets in `moca-credentials` are created by the
+control plane at runtime. On OpenShift and with P4 hosts it also creates `moca-relay-sandbox-tokens`
 and `moca-relay-tls`, which belong in the same backup.
 
 | Secret                               | Contents                                                                                                                    | If lost                                                                                                                                                                                                                              |

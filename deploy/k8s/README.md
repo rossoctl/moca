@@ -306,7 +306,8 @@ through the environment of the one `jq` that writes each Secret, and are applied
 | `moca-supervisor-tls`    | `moca` (OCP)   | `tls.crt`, `tls.key`                                                                                     | ghostunnel sidecar                                                                                                             |
 
 - The tokens and the Redis passwords are `openssl rand -hex 32`.
-- `REDIS_URL` and `redis.conf` are re-derived from `REDIS_PASSWORD` on every run, so the three never
+- `REDIS_URL` and `redis.conf` are re-derived from the Redis passwords on every run (`REDIS_PASSWORD`,
+  and with workload sandboxes on, `moca-redis-provisioner`'s too, for its user line), so they never
   disagree.
 - With workload sandboxes on, `moca-provisioner` reads Redis as a user of its own, never with
   `REDIS_PASSWORD` (#626). Its orphan sweep only reads workload records, so the user may run `GET` on
