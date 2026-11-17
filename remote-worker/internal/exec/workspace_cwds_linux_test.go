@@ -38,9 +38,16 @@ func TestProcCwdsSeesABackgroundChild(t *testing.T) {
 	}
 }
 
-// fakeProc is a /proc with pids 10 and 11, whose cwd and status reads return what the
-// test sets; pid 10's cwd is always readable.
-func fakeProc(t *testing.T, cwdErr, statusErr error, status string) (string, func(string) (string, error), func(string) ([]byte, error)) {
+// procFile is one fake /proc file: its content, or the error reading it returns.
+type procFile struct {
+	data string
+	err  error
+}
+
+// fakeProc is a /proc with pids 10 and 11 and self. Pid 10's cwd is always readable; pid
+// 11's cwd read fails with cwdErr, and its status and cgroup files, and self's cgroup,
+// read as given.
+func fakeProc(t *testing.T, cwdErr error, status, cgroup, selfCgroup procFile) (string, func(string) (string, error), func(string) ([]byte, error)) {
 	t.Helper()
 	proc := t.TempDir()
 	for _, pid := range []string{"10", "11", "self"} {
@@ -54,45 +61,78 @@ func fakeProc(t *testing.T, cwdErr, statusErr error, status string) (string, fun
 		}
 		return "", &fs.PathError{Op: "readlink", Path: p, Err: cwdErr}
 	}
+	files := map[string]procFile{
+		filepath.Join(proc, "11", "status"):   status,
+		filepath.Join(proc, "11", "cgroup"):   cgroup,
+		filepath.Join(proc, "self", "cgroup"): selfCgroup,
+	}
 	readFile := func(p string) ([]byte, error) {
-		if statusErr != nil {
-			return nil, &fs.PathError{Op: "open", Path: p, Err: statusErr}
+		f, ok := files[p]
+		if !ok {
+			return nil, &fs.PathError{Op: "open", Path: p, Err: syscall.ENOENT}
 		}
-		return []byte(status), nil
+		if f.err != nil {
+			return nil, &fs.PathError{Op: "open", Path: p, Err: f.err}
+		}
+		return []byte(f.data), nil
 	}
 	return proc, readlink, readFile
 }
 
 const ourUID = 1000
 
-func statusWithUID(real, eff int) string {
-	return fmt.Sprintf("Name:\tagent\nUmask:\t0022\nState:\tS (sleeping)\nUid:\t%d\t%d\t%d\t%d\nGid:\t0\t0\t0\t0\n",
-		real, eff, eff, eff)
+func statusWithUID(real, eff int) procFile {
+	return procFile{data: fmt.Sprintf("Name:\tagent\nUmask:\t0022\nState:\tS (sleeping)\nUid:\t%d\t%d\t%d\t%d\nGid:\t0\t0\t0\t0\n",
+		real, eff, eff, eff)}
 }
 
-// How an unreadable cwd link is treated, by cause: an exited process and another user's
-// process are skipped; a process of the worker's own uid (non-dumpable, so the link is
-// refused) fails the scan, which keeps every empty workspace; so does a refusal whose
-// owner cannot be read.
+// v2 is a cgroup v2 /proc/<pid>/cgroup file for path.
+func v2(path string) procFile { return procFile{data: "0::" + path + "\n"} }
+
+// v1 is a pure cgroup v1 file (no unified line) whose name=systemd path is path.
+func v1(path string) procFile {
+	return procFile{data: "12:memory:/other\n3:cpu,cpuacct:/other\n1:name=systemd:" + path + "\n"}
+}
+
+// How an unreadable cwd link is treated, by cause. Skipped: an exited process, another
+// user's process, and one of the worker's own uid outside the worker's cgroup subtree (no
+// session command can be there). Failing the scan, which keeps every empty workspace: one
+// of the worker's own uid (non-dumpable, so the link is refused) in the worker's cgroup
+// or below it, every such process when the worker's cgroup is its namespace's root, and
+// any refusal whose owner or cgroup cannot be read.
 func TestScanCwdsSplitsUnreadableLinksByCause(t *testing.T) {
+	own := statusWithUID(ourUID, ourUID)
+	self := v2("/kubepods/pod1/worker")
 	for name, tc := range map[string]struct {
-		cwdErr, statusErr error
-		status            string
-		wantErr           bool
+		cwdErr                    error
+		status, cgroup, selfGroup procFile
+		wantErr                   bool
 	}{
-		"exited (ENOENT)":                {cwdErr: syscall.ENOENT},
-		"exited (ESRCH)":                 {cwdErr: syscall.ESRCH},
-		"another uid (EACCES)":           {cwdErr: syscall.EACCES, status: statusWithUID(0, 0)},
-		"another uid (EPERM)":            {cwdErr: syscall.EPERM, status: statusWithUID(2000, 2000)},
-		"own uid, non-dumpable (EACCES)": {cwdErr: syscall.EACCES, status: statusWithUID(ourUID, ourUID), wantErr: true},
-		"own uid, non-dumpable (EPERM)":  {cwdErr: syscall.EPERM, status: statusWithUID(ourUID, ourUID), wantErr: true},
-		"own uid as effective only":      {cwdErr: syscall.EACCES, status: statusWithUID(0, ourUID), wantErr: true},
-		"exited before the status read":  {cwdErr: syscall.EACCES, statusErr: syscall.ENOENT},
-		"owner unreadable":               {cwdErr: syscall.EACCES, statusErr: syscall.EACCES, wantErr: true},
-		"status without a Uid line":      {cwdErr: syscall.EACCES, status: "Name:\tagent\n", wantErr: true},
+		"exited (ENOENT)":                      {cwdErr: syscall.ENOENT},
+		"exited (ESRCH)":                       {cwdErr: syscall.ESRCH},
+		"another uid (EACCES)":                 {cwdErr: syscall.EACCES, status: statusWithUID(0, 0)},
+		"another uid (EPERM)":                  {cwdErr: syscall.EPERM, status: statusWithUID(2000, 2000)},
+		"exited before the status read":        {cwdErr: syscall.EACCES, status: procFile{err: syscall.ENOENT}},
+		"owner unreadable":                     {cwdErr: syscall.EACCES, status: procFile{err: syscall.EACCES}, wantErr: true},
+		"status without a Uid line":            {cwdErr: syscall.EACCES, status: procFile{data: "Name:\tagent\n"}, wantErr: true},
+		"own uid, same cgroup (EACCES)":        {cwdErr: syscall.EACCES, status: own, cgroup: self, selfGroup: self, wantErr: true},
+		"own uid, same cgroup (EPERM)":         {cwdErr: syscall.EPERM, status: own, cgroup: self, selfGroup: self, wantErr: true},
+		"own uid as effective only":            {cwdErr: syscall.EACCES, status: statusWithUID(0, ourUID), cgroup: self, selfGroup: self, wantErr: true},
+		"own uid, below the worker's cgroup":   {cwdErr: syscall.EACCES, status: own, cgroup: v2("/kubepods/pod1/worker/sub"), selfGroup: self, wantErr: true},
+		"own uid, outside (a sibling)":         {cwdErr: syscall.EACCES, status: own, cgroup: v2("/kubepods/pod1/agent"), selfGroup: self},
+		"own uid, outside (a name prefix)":     {cwdErr: syscall.EACCES, status: own, cgroup: v2("/kubepods/pod1/worker2"), selfGroup: self},
+		"own uid, outside (host daemon)":       {cwdErr: syscall.EACCES, status: own, cgroup: v2("/system.slice/agent.service"), selfGroup: v2("/system.slice/runner.service")},
+		"own uid, worker at namespace root":    {cwdErr: syscall.EACCES, status: own, cgroup: v2("/anything"), selfGroup: v2("/"), wantErr: true},
+		"own uid, outside the namespace (/..)": {cwdErr: syscall.EACCES, status: own, cgroup: v2("/../host.slice/agent"), selfGroup: v2("/")},
+		"own uid, v1 host, same cgroup":        {cwdErr: syscall.EACCES, status: own, cgroup: v1("/user.slice/worker"), selfGroup: v1("/user.slice/worker"), wantErr: true},
+		"own uid, v1 host, outside":            {cwdErr: syscall.EACCES, status: own, cgroup: v1("/system.slice/agent"), selfGroup: v1("/user.slice/worker")},
+		"own uid, exited before cgroup read":   {cwdErr: syscall.EACCES, status: own, cgroup: procFile{err: syscall.ENOENT}, selfGroup: self},
+		"own uid, cgroup unreadable":           {cwdErr: syscall.EACCES, status: own, cgroup: procFile{err: syscall.EACCES}, selfGroup: self, wantErr: true},
+		"own uid, cgroup unparseable":          {cwdErr: syscall.EACCES, status: own, cgroup: procFile{data: "garbage\n"}, selfGroup: self, wantErr: true},
+		"own uid, worker's cgroup unreadable":  {cwdErr: syscall.EACCES, status: own, cgroup: v2("/elsewhere"), selfGroup: procFile{err: syscall.EACCES}, wantErr: true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			proc, readlink, readFile := fakeProc(t, tc.cwdErr, tc.statusErr, tc.status)
+			proc, readlink, readFile := fakeProc(t, tc.cwdErr, tc.status, tc.cgroup, tc.selfGroup)
 			cwds, err := scanCwds(proc, readlink, readFile, ourUID)
 			if tc.wantErr {
 				if err == nil {
@@ -110,9 +150,48 @@ func TestScanCwdsSplitsUnreadableLinksByCause(t *testing.T) {
 	}
 }
 
+// The error a namespace-root worker fails the scan with says why, since it is what an
+// operator sees in the log when no empty workspace is reclaimed early.
+func TestScanCwdsNamesTheNamespaceRootCase(t *testing.T) {
+	proc, readlink, readFile := fakeProc(t, syscall.EACCES, statusWithUID(ourUID, ourUID), v2("/x"), v2("/"))
+	_, err := scanCwds(proc, readlink, readFile, ourUID)
+	if err == nil || !strings.Contains(err.Error(), "root of its cgroup namespace") {
+		t.Fatalf("err = %v; want it to name the cgroup namespace root", err)
+	}
+}
+
+// cgroupPath prefers the unified line, falls back to name=systemd on a pure v1 host, and
+// agrees with the kernel: a child started now is in this process's cgroup.
+func TestCgroupPathReadsV2AndV1(t *testing.T) {
+	for data, want := range map[string]string{
+		"0::/a/b\n": "/a/b",
+		"12:memory:/m\n1:name=systemd:/s\n0::/u\n": "/u",
+		"12:memory:/m\n1:name=systemd:/s\n":        "/s",
+	} {
+		got, err := cgroupPath(func(string) ([]byte, error) { return []byte(data), nil }, "cgroup")
+		if err != nil || got != want {
+			t.Errorf("cgroupPath(%q) = %q, %v; want %q", data, got, err, want)
+		}
+	}
+	self, err := cgroupPath(os.ReadFile, "/proc/self/cgroup")
+	if err != nil {
+		t.Skipf("no usable /proc/self/cgroup here: %v", err)
+	}
+	child := exec.Command("sleep", "30")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
+	got, err := cgroupPath(os.ReadFile, fmt.Sprintf("/proc/%d/cgroup", child.Process.Pid))
+	if err != nil || !inCgroupSubtree(got, self) {
+		t.Fatalf("child's cgroup %q, %v; want it in this process's %q", got, err, self)
+	}
+}
+
 // A real same-uid non-dumpable process: the test binary re-executed as a helper that
 // calls prctl(PR_SET_DUMPABLE, 0) and waits in a directory. Its cwd link is refused
-// (the worker holds no CAP_SYS_PTRACE), so procCwds must fail rather than skip it.
+// (the worker holds no CAP_SYS_PTRACE) and it is in the worker's (this test's) cgroup, so
+// it could be a session's child, and procCwds must fail rather than skip it.
 func TestProcCwdsFailsOnASameUIDNonDumpableProcess(t *testing.T) {
 	if os.Getenv("MOCA_TEST_NONDUMPABLE_HELPER") == "1" {
 		const prSetDumpable = 4
