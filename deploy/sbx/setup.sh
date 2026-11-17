@@ -34,8 +34,8 @@
 #                           you reinstall the hosts
 #   SBX_LOWER_WORKSPACE_IDLE optional; unset or 1: write the shorter idle of a lowered maximum into
 #                           the bundles (a host change: SBX_ACK_HOSTS=1). Set it only once the old
-#                           maximum has passed since the run that lowered SBX_MAX_LIFETIME_DAYS (or
-#                           set it to off). Pass it on the command line for that one run; do not
+#                           maximum has passed since the run that lowered SBX_MAX_LIFETIME_DAYS or
+#                           turned it off. Pass it on the command line for that one run; do not
 #                           keep it in the env file (sourced with set -a): kept there, a later
 #                           lowering skips the "kept" step and, with SBX_ACK_HOSTS=1 also in the
 #                           file, writes the shorter idle at once
@@ -406,7 +406,7 @@ host_key() { printf 'SH_HOST_TOKEN_%s' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')";
 # host change, so acknowledged as any other). Runs in preflight, after read_live_max.
 bundle_idle() { (grep -E '^SH_WORKSPACE_IDLE=' "$1" || true) | tail -1 | cut -d= -f2-; }
 check_host_idle() {
-  local env id old changed='' olds='' high=0 h
+  local env id old changed='' olds='' high=0 h bundled=0
   for env in "$GEN"/workers/*/worker.env; do
     [[ -f "$env" ]] || continue
     id="$(basename "$(dirname "$env")")"
@@ -416,6 +416,7 @@ check_host_idle() {
     h=$((10#${old%h}))
     ((h <= high)) || high=$h
   done
+  bundled=$high
   # The live maximum (read_live_max) floors it too: with deploy/sbx/.generated lost there are no
   # bundles to read, and sandboxes may hold deadlines up to it. The higher of the two wins.
   if [[ -n "$LIVE_MAX_S" ]]; then
@@ -429,6 +430,12 @@ check_host_idle() {
     [[ -n "$MAX_LIFETIME_S" ]] || IDLE_LOWERED_BY='the run that turned idle lifetimes off'
     if [[ "${SBX_LOWER_WORKSPACE_IDLE:-}" == 1 ]]; then
       IDLE_LOWERED_FROM_DAYS=$old_days
+    elif ((bundled < high)); then
+      # The floor comes from the live sbx-settings, not from the bundles (which hold less, or are
+      # gone): nothing in them drops; raising them to it is a host change the check below names.
+      log "SH_WORKSPACE_IDLE is set to ${high}h, not ${WORKSPACE_IDLE_H}h: the live sbx-settings allows deadlines up to ${old_days} days, which sandboxes may still hold; set SBX_LOWER_WORKSPACE_IDLE=1 for one run only once ${old_days} days have passed since ${IDLE_LOWERED_BY}"
+      WORKSPACE_IDLE_H=$high
+      IDLE_KEPT=1
     elif [[ -z "$MAX_LIFETIME_S" ]]; then
       log "SH_WORKSPACE_IDLE stays at ${high}h: idle lifetimes are off now, but sandboxes may still hold deadlines set under the previous maximum (${old_days} days); set SBX_LOWER_WORKSPACE_IDLE=1 for one run only once ${old_days} days have passed since ${IDLE_LOWERED_BY}"
       WORKSPACE_IDLE_H=$high

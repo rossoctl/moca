@@ -145,6 +145,10 @@ says so. Once the old maximum has passed since that run, re-run with `SBX_LOWER_
 `install-host.sh` is next run on them. Pass `SBX_LOWER_WORKSPACE_IDLE=1` on the command line for
 that one run; do not keep it in the env file (sourced with `set -a`): kept there, a later lowering
 skips the "kept" step and, with `SBX_ACK_HOSTS=1` also in the file, writes the shorter idle at once.
+Keep `deploy/sbx/.generated/workers/` until the old maximum has passed: the kept idle lives only in
+those bundles. The live `sbx-settings` already holds the lower maximum, so a run with the directory
+lost floors the idle at that lower maximum and cannot see the deadlines set under the old one; if it
+is lost in that window, do not reinstall any host until the old maximum has passed.
 
 **The first run of this `setup.sh` on an existing deployment** both raises every worker's idle
 (216 h to 768 h at the defaults) and turns idle lifetimes on: the control plane counts idle time

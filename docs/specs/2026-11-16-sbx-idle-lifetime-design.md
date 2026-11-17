@@ -1,7 +1,13 @@
 # SBX0 — A sandbox's lifetime counts idle time, not time since creation — Design
 
-Version: 0.1 — November 16, 2026 (draft for review)
-Status: Design. Approved (2026-11-16). Not built.
+Version: 0.2 — November 17, 2026
+Status: Implemented: the control plane (#837), the clients (#842) and `deploy/sbx` (#843). Ships in
+v0.11.0, where it is tested; not yet deployed on SBX0.
+v0.2 records what the build decided: the control plane slides deadlines only once
+`SH_SANDBOX_MAX_LIFETIME_SECONDS` is set (§6.1); `doctor`'s check command counts as use (§3.1);
+`sbx env` mints without activity, `sbx token` and `--renew-every` with it (§3.1);
+`SBX_MAX_LIFETIME_DAYS=off`, and a lowered maximum that keeps the workers' idle until
+`SBX_LOWER_WORKSPACE_IDLE=1` (§6.1).
 Milestone: **Idle lifetime**, an increment of
 [SBX0](2026-10-15-sbx0-internal-sandbox-service-design.md), registered in
 [the milestone registry](README.md).
@@ -145,6 +151,9 @@ sandbox alive, within the owner's quota, or lets it expire sooner.
 
 A command that only reads the record (`mocactl sbx ls`, `get` on a per-exec sandbox) does not mint
 and does not extend the lifetime. `doctor` runs a check command (`true`) on the sandbox, so its mint counts as use.
+`sbx env` mints with `activity: false`: it runs no command and prints no token. `sbx token` and
+`--renew-every` mint with activity, because a direct client's Execs run on those tokens; a client
+that keeps minting without running commands keeps its sandbox alive, with §7's margin.
 
 ## 4. The rule, and where it runs
 
@@ -272,7 +281,13 @@ the write when the extension would be under 60 s.
   would let the control plane's deadline outrun the worker's reclaim and reset the workspace
   silently. `setup.sh` writes the key together with `SH_WORKSPACE_IDLE` = maximum + 48 h, so the
   key's presence is the signal that the workers were sized for sliding.
-- `setup.sh`: `SBX_MAX_LIFETIME_DAYS` is 1–30, default 30, and must be at least `SBX_LIFETIME_DAYS`.
+- `setup.sh`: `SBX_MAX_LIFETIME_DAYS` is 1–30, default 30, and must be at least `SBX_LIFETIME_DAYS`;
+  or `off`: no `SH_SANDBOX_MAX_LIFETIME_SECONDS` (no sliding) and the idle of before, that is
+  `SBX_LIFETIME_DAYS` × 24 + 48 h (216 h at 7 days), which lets an existing deployment take this
+  `setup.sh` before its hosts can be reinstalled.
+- **A lowered maximum never lowers the workers' idle by itself**: deadlines set under the old maximum
+  stand, so `setup.sh` keeps the highest idle the bundles (or the live `sbx-settings`) call for until
+  a run passes `SBX_LOWER_WORKSPACE_IDLE=1`, once the old maximum has passed (`deploy/sbx/README.md`).
 
 ### 6.2 The worker's idle reclaim
 

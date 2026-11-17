@@ -476,7 +476,7 @@ grep -q 'install-host.sh is next run' "$TMP/out" || fail 'the lowering refusal d
 grep -q 'after the old maximum (30 days) has passed' "$TMP/out" || fail 'the lowering refusal does not say to wait out the old maximum'
 grep -q 'SBX_ACK_HOSTS=1' "$TMP/out" || fail 'the lowering refusal does not say how to acknowledge'
 grep -q 'sbx_default sbx_py312' "$TMP/out" || fail 'the lowering refusal does not name the workers'
-! grep -qE 'right after| now|first' "$TMP/out" || fail 'the lowering refusal advises reinstalling now'
+! grep -qE 'right after| now|hosts? first' "$TMP/out" || fail 'the lowering refusal advises reinstalling now'
 ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the lowering refusal changed something first'
 grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'the refused lowering rewrote a bundle'
 pass 'SBX_LOWER_WORKSPACE_IDLE=1 is refused without SBX_ACK_HOSTS=1, with no advice to reinstall now'
@@ -488,7 +488,7 @@ run_setup export SBX_MAX_LIFETIME_DAYS=20 SBX_LOWER_WORKSPACE_IDLE=1 SBX_MAX_INF
 grep -q 'WARNING: SH_WORKSPACE_IDLE is lowered from 768h to 528h' "$TMP/out" || fail 'the acknowledged lowering does not warn'
 grep -q 'WARNING: SH_WORKSPACE_IDLE changed, with a lower SH_WORKSPACE_IDLE: re-run deploy/sbx/install-host.sh on the host of each of: sbx_default sbx_py312 only after the old maximum (30 days) has passed' "$TMP/out" ||
   fail 'the acknowledged lowering does not end by naming the hosts'
-! grep -E 'WARNING' "$TMP/out" | grep -qE 'right after| now|first' || fail 'the acknowledged lowering advises reinstalling now'
+! grep -E 'WARNING' "$TMP/out" | grep -qE 'right after| now|hosts? first' || fail 'the acknowledged lowering advises reinstalling now'
 [[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 1728000 && "$(cm sbx-settings SH_SANDBOX_MAX_INFLIGHT)" == 4 ]] ||
   fail 'maximum lifetime or in-flight cap not written'
 grep -qx 'SH_WORKSPACE_IDLE=528h' "$GEN/workers/sbx_default/worker.env" || fail 'the acknowledged lowering did not write 528h'
@@ -508,7 +508,7 @@ grep -q 'SBX_ACK_HOSTS=1' "$TMP/out" || fail 'the refusal does not say how to ac
 grep -q 're-run install-host.sh with the new bundles on every host right after' "$TMP/out" ||
   fail 'the refusal does not say to reinstall every host right after the acknowledged run'
 # A refused run writes no bundles, so there is nothing to reinstall first.
-! grep -q 'first' "$TMP/out" || fail 'the raise refusal offers reinstalling the hosts first'
+! grep -q 'install-host.sh on every host first' "$TMP/out" || fail 'the raise refusal offers reinstalling the hosts first'
 grep -q 'sbx_default sbx_py312' "$TMP/out" || fail 'the refusal does not name the workers'
 ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the maximum refusal changed something first'
 [[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 1728000 ]] || fail 'the refused maximum reached sbx-settings'
@@ -661,7 +661,8 @@ for w in sbx_default sbx_py312; do
 done
 ! jq -e '.data | has("SH_SANDBOX_MAX_LIFETIME_SECONDS")' "$MOCK_STATE/configmap-sbx-settings.json" >/dev/null ||
   fail 'off with no bundles wrote SH_SANDBOX_MAX_LIFETIME_SECONDS'
-grep -q 'SH_WORKSPACE_IDLE stays at 768h' "$TMP/out" || fail 'off with no bundles does not say the idle stays at 768h'
+grep -q 'SH_WORKSPACE_IDLE is set to 768h, not 216h: the live sbx-settings allows deadlines up to 30 days' "$TMP/out" ||
+  fail 'off with no bundles does not say the live maximum sets the idle at 768h'
 ! grep -qE 'install-host.sh now|right after' "$TMP/out" || fail 'off with no bundles says to reinstall the hosts now'
 pass 'with no worker bundles, off under a live 30 d maximum keeps 768h bundles and drops the key'
 
@@ -672,9 +673,27 @@ for w in sbx_default sbx_py312; do
   grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/$w/worker.env" || fail "a lowered maximum with no bundles wrote the $w bundle below 768h"
 done
 [[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 1728000 ]] || fail 'the lowered maximum with no bundles did not reach sbx-settings'
-grep -q 'kept at 768h until SBX_LOWER_WORKSPACE_IDLE=1' "$TMP/out" || fail 'a lowered maximum with no bundles does not name SBX_LOWER_WORKSPACE_IDLE'
+grep -q 'SH_WORKSPACE_IDLE is set to 768h, not 528h: the live sbx-settings allows deadlines up to 30 days' "$TMP/out" ||
+  fail 'a lowered maximum with no bundles does not say the live maximum sets the idle at 768h'
+grep -q 'SBX_LOWER_WORKSPACE_IDLE=1' "$TMP/out" || fail 'a lowered maximum with no bundles does not name SBX_LOWER_WORKSPACE_IDLE'
 ! grep -qE 'install-host.sh now|right after' "$TMP/out" || fail 'a lowered maximum with no bundles says to reinstall the hosts now'
 pass 'with no worker bundles, a lowered maximum (acknowledged) keeps 768h bundles and says nothing about reinstalling now'
+
+# Bundles below the live maximum's idle (216h under a live 30 d), with a lowered maximum: the floor
+# comes from the live sbx-settings, so the run raises the bundles (refused unless acked) and never
+# says the idle "would drop" (nothing in the bundles drops).
+set_max 2592000
+for e in "$GEN"/workers/*/worker.env; do
+  sed 's/^SH_WORKSPACE_IDLE=.*/SH_WORKSPACE_IDLE=216h/' "$e" >"$TMP/worker.env.old" && cp "$TMP/worker.env.old" "$e"
+done
+: >"$MOCK_LOG"
+! run_setup export SBX_MAX_LIFETIME_DAYS=20 || fail '216h bundles under a live 30 d maximum were raised unacknowledged'
+grep -q 'SH_WORKSPACE_IDLE is set to 768h, not 528h: the live sbx-settings allows deadlines up to 30 days' "$TMP/out" ||
+  fail 'the run does not say the live maximum sets the idle'
+grep -q 'changes from 216h to 768h' "$TMP/out" || fail 'the raise refusal does not name 216h and 768h'
+! grep -q 'would drop from' "$TMP/out" || fail 'the run says the idle would drop while it raises the bundles'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the raise refusal under a live maximum changed something first'
+pass 'bundles below the live maximum: one consistent message, refused as a raise unless acked'
 
 rm -rf "$GEN/workers"
 set_max 2592000
