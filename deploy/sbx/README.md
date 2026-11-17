@@ -45,6 +45,7 @@ Optional inputs:
 | `SBX_REDIS_IMAGE`                      | the base's Valkey 9 | `repository[:tag]@sha256:<digest>`: the image Redis runs. Set it to Redis 7 for a namespace whose data a Redis 7.4 wrote: Valkey 9 cannot read RDB format 12, and its load aborts ([runbook §2](RUNBOOK.md#2-upgrading)). Unset, `setup.sh` refuses to run on a namespace whose `redis` StatefulSet runs an image other than Valkey |
 | `SBX_LIFETIME_DAYS`                    | 7                   | 1-30, at most `SBX_MAX_LIFETIME_DAYS`: the default idle lifetime. A sandbox ends after this many days without use (`SH_SANDBOX_LIFETIME_SECONDS`)                                                                                                                                                                                   |
 | `SBX_MAX_LIFETIME_DAYS`                | 30                  | 1-30: the longest idle lifetime an owner may pick (`mocactl sbx create --lifetime`); each worker's idle reclaim is set to this plus two days (below)                                                                                                                                                                                |
+| `SBX_LOWER_WORKSPACE_IDLE`             | unset               | `1`: after a lowered `SBX_MAX_LIFETIME_DAYS`, write the shorter idle reclaim into the bundles (with `SBX_ACK_HOSTS=1`); set it only once the old maximum has passed (below)                                                                                                                                                         |
 | `SBX_TOKEN_TTL_MINUTES`                | 15                  | 5-60: a sandbox token's lifetime, the longest command, and the delete delay                                                                                                                                                                                                                                                         |
 | `SBX_RETENTION_DAYS`                   | 14                  | 1-90: how long a deleted or expired sandbox stays in `mocactl sbx ls`                                                                                                                                                                                                                                                               |
 | `SBX_MAX_PER_SUBJECT`, `SBX_MAX_TOTAL` | 3, 40               | live sandboxes per user, and in all                                                                                                                                                                                                                                                                                                 |
@@ -134,10 +135,12 @@ runs (it is gitignored), or the run cannot see the idle the hosts were given. Ch
 `SBX_LIFETIME_DAYS`, within the maximum, touches no host. `status.sh` shows each worker's idle
 against the maximum and warns when it is not above it.
 
-**Lowering the maximum** also needs `SBX_ACK_HOSTS=1`, but reinstall the hosts only once the old
-maximum has passed since the run. Sandboxes keep the deadlines they were given under the old
-maximum (the control plane never shortens a deadline), and a worker with a shorter idle would
-reclaim their workspaces.
+**Lowering the maximum** touches no host at first. Sandboxes keep the deadlines they were given
+under the old maximum (the control plane never shortens a deadline), and a worker with a shorter
+idle would reclaim their workspaces, so the run keeps the bundles' idle at the highest they hold and
+says so. Once the old maximum has passed since that run, re-run with `SBX_LOWER_WORKSPACE_IDLE=1`
+(and `SBX_ACK_HOSTS=1`, as for any host change) to write the shorter idle; the hosts take it when
+`install-host.sh` is next run on them.
 
 **The first run of this `setup.sh` on an existing deployment** both raises every worker's idle
 (216 h to 768 h at the defaults) and turns idle lifetimes on: the control plane counts idle time

@@ -24,7 +24,12 @@
 #                           lifetimes on in the control plane. Each worker's idle reclaim
 #                           (SH_WORKSPACE_IDLE) is set to it plus two days; a change means
 #                           reinstalling every host's workers (install-host.sh), and the run
-#                           refuses unless SBX_ACK_HOSTS=1
+#                           refuses unless SBX_ACK_HOSTS=1. A lowered maximum keeps the workers'
+#                           idle at the highest the bundles hold (sandboxes keep the deadlines set
+#                           under the old maximum) until SBX_LOWER_WORKSPACE_IDLE=1
+#   SBX_LOWER_WORKSPACE_IDLE optional; unset or 1: write the shorter idle of a lowered maximum into
+#                           the bundles (a host change: SBX_ACK_HOSTS=1). Set it only once the old
+#                           maximum has passed since the run that lowered SBX_MAX_LIFETIME_DAYS
 #   SBX_TOKEN_TTL_MINUTES   optional; 5-60, default 15: the sandbox token's lifetime
 #   SBX_RETENTION_DAYS      optional; 1-90, default 14: how long a terminated sandbox stays listed
 #   SBX_MAX_PER_SUBJECT, SBX_MAX_TOTAL   optional; live-sandbox quotas, default 3 and 40
@@ -115,6 +120,7 @@ OVERLAY_REL=../../k8s/overlays/ocp-sbx # from $GEN; ocp-combined with SBX_PROFIL
 API_ROUTE='sbx-api'
 HOSTS_TO_REINSTALL='' # workers whose SH_WORKSPACE_IDLE or SH_LEASE_IDLE_CEILING_S this run changes
 REINSTALL_SETTINGS='' # which of the two changed, for write_bundles' last warning (check_host_*)
+IDLE_LOWERED_FROM_DAYS='' # set when this run lowers SH_WORKSPACE_IDLE: the old maximum, in days (check_host_idle)
 
 log() { printf '==> %s\n' "$*" >&2; }
 die() { echo "deploy/sbx/setup.sh: $*" >&2; exit 1; }
@@ -181,6 +187,8 @@ validate() {
   [[ "$SBX_LIFETIME_DAYS" =~ ^([1-9]|[12][0-9]|30)$ ]] || die 'SBX_LIFETIME_DAYS must be a whole number of days, 1-30'
   [[ "$SBX_MAX_LIFETIME_DAYS" =~ ^([1-9]|[12][0-9]|30)$ ]] || die 'SBX_MAX_LIFETIME_DAYS must be a whole number of days, 1-30'
   ((SBX_LIFETIME_DAYS <= SBX_MAX_LIFETIME_DAYS)) || die 'SBX_LIFETIME_DAYS must not exceed SBX_MAX_LIFETIME_DAYS'
+  [[ -z "${SBX_LOWER_WORKSPACE_IDLE:-}" || "$SBX_LOWER_WORKSPACE_IDLE" == 1 ]] ||
+    die 'SBX_LOWER_WORKSPACE_IDLE must be unset or 1'
   [[ "$SBX_TOKEN_TTL_MINUTES" =~ ^([5-9]|[1-5][0-9]|60)$ ]] || die 'SBX_TOKEN_TTL_MINUTES must be a whole number of minutes, 5-60'
   [[ "$SBX_RETENTION_DAYS" =~ ^([1-9]|[1-8][0-9]|90)$ ]] || die 'SBX_RETENTION_DAYS must be a whole number of days, 1-90'
   TOKEN_TTL_S=$((SBX_TOKEN_TTL_MINUTES * 60))
@@ -371,13 +379,38 @@ host_key() { printf 'SH_HOST_TOKEN_%s' "$(printf '%s' "$1" | tr 'a-z-' 'A-Z_')";
 # maximum past that idle would let a worker reclaim a live sandbox's workspace (SBX0 §5.4), so a
 # change against the bundles last written (the proxy for what the hosts run) is refused, before
 # anything is applied, unless the operator acknowledges it with SBX_ACK_HOSTS=1.
+# A lowered maximum never lowers the idle by itself: the control plane never shortens a deadline, so
+# sandboxes keep those set under the old maximum until they pass, and a shorter idle would reclaim
+# their workspaces. The bundles keep the highest idle they hold until SBX_LOWER_WORKSPACE_IDLE=1, which
+# the operator sets once the old maximum has passed since the run that lowered it (a host change,
+# so acknowledged as any other).
+bundle_idle() { (grep -E '^SH_WORKSPACE_IDLE=' "$1" || true) | tail -1 | cut -d= -f2-; }
 check_host_idle() {
-  local env id old changed='' olds=''
+  local env id old changed='' olds='' high=0 h
+  for env in "$GEN"/workers/*/worker.env; do
+    [[ -f "$env" ]] || continue
+    id="$(basename "$(dirname "$env")")"
+    [[ " $SBX_WORKERS " == *" $id "* ]] || continue
+    old="$(bundle_idle "$env")"
+    [[ "$old" =~ ^[1-9][0-9]{0,5}h$ ]] || continue
+    h=$((10#${old%h}))
+    ((h <= high)) || high=$h
+  done
+  if ((high > WORKSPACE_IDLE_H)); then
+    # The old maximum, in days, rounded up: the idle is that plus two days.
+    local old_days=$(((high - 48 + 23) / 24))
+    if [[ "${SBX_LOWER_WORKSPACE_IDLE:-}" != 1 ]]; then
+      log "SH_WORKSPACE_IDLE would drop from ${high}h to ${WORKSPACE_IDLE_H}h with the lower maximum: kept at ${high}h until SBX_LOWER_WORKSPACE_IDLE=1 is set, which is safe only once the old maximum (${old_days} days) has passed since the run that lowered SBX_MAX_LIFETIME_DAYS (sandboxes keep the deadlines set under it)"
+      WORKSPACE_IDLE_H=$high
+    else
+      IDLE_LOWERED_FROM_DAYS=$old_days
+    fi
+  fi
   for env in "$GEN"/workers/*/worker.env; do
     [[ -f "$env" ]] || continue
     id="$(basename "$(dirname "$env")")"
     [[ " $SBX_WORKERS " == *" $id "* ]] || continue # dropped: its token is revoked, it cannot attach
-    old="$( (grep -E '^SH_WORKSPACE_IDLE=' "$env" || true) | tail -1 | cut -d= -f2-)"
+    old="$(bundle_idle "$env")"
     [[ "$old" != "${WORKSPACE_IDLE_H}h" ]] || continue
     changed+=" $id"
     [[ " $olds " == *" ${old:-unset} "* ]] || olds+=" ${old:-unset}"
@@ -385,6 +418,13 @@ check_host_idle() {
   [[ -n "$changed" ]] || return 0
   HOSTS_TO_REINSTALL="${changed# }"
   REINSTALL_SETTINGS=SH_WORKSPACE_IDLE
+  if [[ -n "$IDLE_LOWERED_FROM_DAYS" ]]; then
+    local when="the hosts take the shorter idle when deploy/sbx/install-host.sh is next run on them, which must be after the old maximum (${IDLE_LOWERED_FROM_DAYS} days) has passed since the run that lowered SBX_MAX_LIFETIME_DAYS: sandboxes keep the deadlines set under it"
+    [[ "${SBX_ACK_HOSTS:-}" == 1 ]] ||
+      die "SH_WORKSPACE_IDLE is lowered from${olds} to ${WORKSPACE_IDLE_H}h for worker(s) ${HOSTS_TO_REINSTALL} (SBX_LOWER_WORKSPACE_IDLE=1), and ${when}. Set SBX_ACK_HOSTS=1 to write the shorter idle into the bundles"
+    log "WARNING: SH_WORKSPACE_IDLE is lowered from${olds} to ${WORKSPACE_IDLE_H}h (SBX_LOWER_WORKSPACE_IDLE=1, SBX_ACK_HOSTS=1) for worker(s) ${HOSTS_TO_REINSTALL}: ${when}"
+    return 0
+  fi
   local cause="SBX_MAX_LIFETIME_DAYS changed, or this deployment's idle now follows it"
   [[ " $olds " != *" unset "* ]] || cause='a bundle from before increment 1b carries none'
   if [[ "${SBX_ACK_HOSTS:-}" != 1 ]]; then
@@ -1023,8 +1063,11 @@ write_bundles() {
   write_store_bundles
   log "worker bundles: $GEN/workers/<id>  (copy to the KVM host, run deploy/sbx/install-host.sh, delete the copy)"
   log "janitor bundle: $GEN/janitor  (copy to every KVM host, run deploy/sbx/install-host.sh --janitor, delete the copy)"
-  [[ -z "${HOSTS_TO_REINSTALL:-}" ]] ||
+  [[ -z "${HOSTS_TO_REINSTALL:-}" ]] || if [[ -n "$IDLE_LOWERED_FROM_DAYS" ]]; then
+    log "WARNING: $REINSTALL_SETTINGS changed, with a lower SH_WORKSPACE_IDLE: re-run deploy/sbx/install-host.sh on the host of each of: $HOSTS_TO_REINSTALL only after the old maximum ($IDLE_LOWERED_FROM_DAYS days) has passed since the run that lowered SBX_MAX_LIFETIME_DAYS"
+  else
     log "WARNING: $REINSTALL_SETTINGS changed: re-run deploy/sbx/install-host.sh now on the host of each of: $HOSTS_TO_REINSTALL"
+  fi
 }
 
 # The host janitor's bundle (spec §8.1, §8.3): janitor.env (the API URL and the wait, in seconds;

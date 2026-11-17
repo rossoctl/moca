@@ -204,9 +204,18 @@ SBX_ACK_HOSTS=1 deploy/sbx/setup.sh --env-file <env file>
 
 and then, right after, re-run `install-host.sh` with the new bundle for each worker the run names.
 
-**Lowering the maximum:** run with `SBX_ACK_HOSTS=1`, but reinstall the hosts only once the old
-maximum has passed since the run. Sandboxes keep the deadlines set under the old maximum (the
-control plane never shortens a deadline), and a shorter idle would reclaim their workspaces.
+**Lowering the maximum** needs no ack and touches no host: sandboxes keep the deadlines set under
+the old maximum (the control plane never shortens a deadline), and a shorter idle would reclaim
+their workspaces, so the run keeps the bundles' idle and logs `kept at <old>h until
+SBX_LOWER_WORKSPACE_IDLE=1`. Once the old maximum has passed since that run:
+
+```bash
+SBX_LOWER_WORKSPACE_IDLE=1 SBX_ACK_HOSTS=1 deploy/sbx/setup.sh --env-file <env file>
+```
+
+writes the shorter idle into the bundles; the hosts take it when `install-host.sh` is next run on
+them. Never set `SBX_LOWER_WORKSPACE_IDLE=1` before the old maximum has passed: a routine reinstall
+would then give the hosts the shorter idle early.
 
 `status.sh` prints `worker idle <id>: ...` for each host and a WARNING when a worker's idle does
 not exceed the maximum.
