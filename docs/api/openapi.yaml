@@ -511,7 +511,8 @@ components:
             reads and lists do not move it. Unset, it stays fixed at create. The maximum caps each
             extension, not the sandbox's age: one with activity inside every idle lifetime does not
             expire. Expiry is computed: past it, the sandbox reads as terminated / expired
-            everywhere and refuses to mint (SBX0 §5.2; idle-lifetime spec §3).
+            everywhere and refuses to mint (SBX0 §5.2; idle-lifetime spec §3); an activity after the
+            deadline is refused and does not revive it.
         terminatedAt:
           type: [integer, 'null']
           description: epoch seconds; the delete time or expiresAt; null while ready
