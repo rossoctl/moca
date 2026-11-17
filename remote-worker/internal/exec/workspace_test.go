@@ -251,8 +251,8 @@ func TestSweepKeepsAWorkspaceWithFilesUntilIdle(t *testing.T) {
 	}
 }
 
-// The reviewed must-fix: a background child still in an empty workspace (a server started
-// with `nohup … &`, a delayed write) keeps it, however long ago the last Exec ended.
+// A background child still in an empty workspace (a server started with `nohup … &`, a
+// delayed write) keeps it, however long ago the last Exec ended (#551).
 // Driven through the Cwds seam so it runs on every platform; the Linux scan itself is
 // TestProcCwdsSeesABackgroundChild.
 func TestSweepKeepsAnEmptyWorkspaceThatIsAProcessCwd(t *testing.T) {
@@ -287,8 +287,8 @@ func TestSweepKeepsEmptyWorkspacesWhenTheScanFails(t *testing.T) {
 	}
 }
 
-// Nit (2): a regular file that took the directory's place is not the session's empty
-// workspace; the empty-path removal must not delete it (os.Remove would: it unlinks first).
+// A regular file that took the directory's place is not the session's empty workspace,
+// and the empty-directory removal leaves it alone (os.Remove would not: it unlinks first).
 func TestSweepLeavesAFileThatReplacedTheWorkspace(t *testing.T) {
 	w, clock := newWorkspaceRunner(t, wexec.BashRunner{})
 	w.Cwds = noCwds

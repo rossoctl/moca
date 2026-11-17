@@ -100,6 +100,8 @@ type WorkspaceRunner struct {
 
 	mu   sync.Mutex
 	runs map[string]*workspaceRun
+	// cwdsErr is the last process-scan error, so a scan that fails every sweep is logged once.
+	cwdsErr string
 }
 
 type workspaceRun struct {
@@ -262,8 +264,17 @@ func (w *WorkspaceRunner) Sweep() []Reclaimed {
 			if !scanned {
 				cwds, cwdsErr = w.cwds()
 				scanned = true
+				// Logged when the error changes, not every sweep: a long-lived process
+				// with an unreadable cwd (procCwds) fails every scan for as long as it runs.
+				msg := ""
 				if cwdsErr != nil {
-					log.Printf("worker: workspace sweep: list process cwds: %v; keeping empty workspaces", cwdsErr)
+					msg = cwdsErr.Error()
+				}
+				if msg != w.cwdsErr {
+					w.cwdsErr = msg
+					if cwdsErr != nil {
+						log.Printf("worker: workspace sweep: list process cwds: %v; keeping empty workspaces until Idle", cwdsErr)
+					}
 				}
 			}
 			if cwdsErr != nil || inUse(cwds, dir) {

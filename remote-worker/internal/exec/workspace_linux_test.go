@@ -13,8 +13,8 @@ import (
 	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
 )
 
-// The reviewed scenario end to end, with the real /proc scan: an Exec backgrounds a child
-// in a still-empty workspace and returns. Past EmptyIdle the directory stays while the
+// A background child keeps an empty workspace, end to end with the real /proc scan
+// (#551): an Exec backgrounds a child in a still-empty workspace and returns. Past EmptyIdle the directory stays while the
 // child runs, and goes once it has exited.
 func TestSweepKeepsAnEmptyWorkspaceWithABackgroundChild(t *testing.T) {
 	w, clock := newWorkspaceRunner(t, wexec.BashRunner{})

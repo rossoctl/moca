@@ -59,6 +59,9 @@ empty `SH_WORKSPACE_EMPTY_IDLE` (15 minutes by default) after its last command i
 re-creates it. The limit: a background process that is not in the directory when the sweep runs (one
 that changes into it later), and on a worker not running on Linux, where it cannot see process working
 directories, any background process, is left in a deleted directory, so its later writes there fail.
+While a process of the worker's own user hides its working directory (a non-dumpable one, such as an
+ssh-agent style daemon), no empty directory is removed early: each waits for `SH_WORKSPACE_IDLE`, and
+the worker logs why.
 A session moved to another sandbox gets a fresh workspace, and that turn reports `workspace_reset`.
 
 ## What the sandbox can reach
