@@ -537,8 +537,15 @@ components:
         expiresAt:
           type: integer
           description: |
-            epoch seconds, fixed at create (no extension in SBX0). Expiry is computed: past it, the
-            sandbox reads as terminated / expired everywhere and refuses to mint (SBX0 §5.2).
+            epoch seconds: now plus `idleLifetimeS` at create. When
+            SH_SANDBOX_MAX_LIFETIME_SECONDS is configured, it slides with activity: each activity
+            mint (POST .../token and POST .../mode-token, unless the body says `activity: false`)
+            and each PUT .../mode moves it to at least now plus `idleLifetimeS`, never backwards;
+            reads and lists do not move it. Unset, it stays fixed at create. The maximum caps each
+            extension, not the sandbox's age: one with activity inside every idle lifetime does not
+            expire. Expiry is computed: past it, the sandbox reads as terminated / expired
+            everywhere and refuses to mint (SBX0 §5.2; idle-lifetime spec §3); an activity after the
+            deadline is refused and does not revive it.
         terminatedAt:
           type: [integer, 'null']
           description: epoch seconds; the delete time or expiresAt; null while ready
@@ -569,9 +576,10 @@ components:
           type: integer
           minimum: 3600
           description: |
-            how long the sandbox lives past its last activity, in seconds: each token mint that
-            counts as activity moves `expiresAt` to at least now plus this. Never above
-            SH_SANDBOX_MAX_LIFETIME_SECONDS as it is now; a sandbox made before idle lifetimes
+            how long the sandbox lives past its last activity, in seconds: each mint or mode change
+            that counts as activity moves `expiresAt` to at least now plus this, when
+            SH_SANDBOX_MAX_LIFETIME_SECONDS is configured (unset, `expiresAt` stays fixed). Never
+            above SH_SANDBOX_MAX_LIFETIME_SECONDS as it is now; a sandbox made before idle lifetimes
             shows SH_SANDBOX_LIFETIME_SECONDS
     Template:
       type: object
@@ -4514,7 +4522,9 @@ paths:
         tokens minted afterwards carry the new mode and epoch. The response's `setModeToken` signs
         that mode and epoch for the client's `LeaseControl set_mode`, through which a downgrade takes
         effect at once (lease-mode spec §8.2). A mode change always counts as activity and slides the
-        sandbox's deadline; a body naming `activity` is refused (400).
+        sandbox's deadline to at least now plus its `idleLifetimeS` (only when
+        SH_SANDBOX_MAX_LIFETIME_SECONDS is configured, as for the token mint); a body naming
+        `activity` is refused (400).
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sandboxId' }]
       requestBody:
@@ -4585,7 +4595,8 @@ paths:
         `per-exec` at the next epoch, as the sandbox token mint does (§8.1). The `idle_timeout_s`
         claim is clamped to SH_SANDBOX_IDLE_CEILING_S. Like the token mint it slides the sandbox's
         deadline to at least now plus its `idleLifetimeS`, unless the body says `activity: false`
-        (a non-boolean `activity` is refused, 400).
+        (a non-boolean `activity` is refused, 400); as there, the deadline moves only when
+        SH_SANDBOX_MAX_LIFETIME_SECONDS is configured.
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sandboxId' }]
       requestBody:
