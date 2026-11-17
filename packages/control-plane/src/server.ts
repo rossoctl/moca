@@ -51,9 +51,21 @@ const bearer = (req: IncomingMessage): string | undefined => {
   return value.length > 0 ? value : undefined;
 };
 
-/** `::ffff:192.0.2.1` and `192.0.2.1` are one client: a dual-stack socket reports the former. */
-const unmapped = (addr: string): string =>
-  addr.toLowerCase().startsWith('::ffff:') && isIP(addr.slice(7)) === 4 ? addr.slice(7) : addr;
+/**
+ * One spelling per client address, so one client is one bucket: `::ffff:192.0.2.1` (a dual-stack
+ * socket's view) is `192.0.2.1`, and an IPv6 address takes its canonical RFC 5952 text (the URL
+ * parser's: lower case, zeros compressed), so `2001:DB8:0::1` and `2001:db8::1` are one source.
+ * A form the URL parser refuses (a zone id) stands as given.
+ */
+function canonicalAddress(addr: string): string {
+  if (addr.toLowerCase().startsWith('::ffff:') && isIP(addr.slice(7)) === 4) return addr.slice(7);
+  if (isIP(addr) !== 6) return addr;
+  try {
+    return new URL(`http://[${addr}]/`).hostname.slice(1, -1);
+  } catch {
+    return addr;
+  }
+}
 
 /**
  * The client's address, for bounds on unauthenticated work (RequestCtx.source). With no trusted
@@ -71,14 +83,14 @@ const unmapped = (addr: string): string =>
  */
 export function clientSource(req: IncomingMessage, hops: number): string | undefined {
   const peer = req.socket.remoteAddress;
-  const fallback = peer === undefined ? undefined : unmapped(peer);
+  const fallback = peer === undefined ? undefined : canonicalAddress(peer);
   if (hops <= 0) return fallback;
   const raw = req.headers['x-forwarded-for'];
   const header = Array.isArray(raw) ? raw.join(',') : raw;
   if (!header) return fallback;
   const entries = header.split(',').map((e) => e.trim());
   const picked = entries[Math.max(0, entries.length - hops)]!;
-  return isIP(picked) !== 0 ? unmapped(picked) : fallback;
+  return isIP(picked) !== 0 ? canonicalAddress(picked) : fallback;
 }
 
 /**

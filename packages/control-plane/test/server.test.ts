@@ -415,6 +415,9 @@ describe('the client source (#716)', () => {
     // A dual-stack socket's IPv4-mapped form is the same client as the plain one.
     expect(clientSource(req('::ffff:192.0.2.7'), 0)).toBe('192.0.2.7');
     expect(clientSource(req('2001:db8::1'), 0)).toBe('2001:db8::1');
+    // One IPv6 address, one spelling: the canonical text, whatever form arrived.
+    expect(clientSource(req('2001:DB8:0:0::1'), 0)).toBe('2001:db8::1');
+    expect(clientSource(req('10.0.0.2', '2001:0db8:0000::0001'), 1)).toBe('2001:db8::1');
   });
 
   it('is the entry the outermost trusted proxy appended, never one the client wrote', () => {
