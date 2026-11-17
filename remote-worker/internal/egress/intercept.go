@@ -178,11 +178,26 @@ func (c *icConn) refuse(e Event, base Event) bool {
 		base.Credential = e.Credential
 	}
 	c.pc.emit(base, true)
+	// The guest TLS writes through the idle clock's wrapper: stop the clock
+	// first, or the write's own refresh replaces this drain deadline with the
+	// idle one.
+	c.k.stop()
 	_ = c.gtls.SetWriteDeadline(time.Now().Add(drainTimeout))
-	_, _ = c.gtls.Write(refusalBytes(e.Status, e.Decision, c.t.host))
+	if _, err := c.gtls.Write(refusalBytes(e.Status, e.Decision, c.t.host)); err != nil {
+		// The guest did not take the refusal within drainTimeout, so it will
+		// not take a close_notify either: tls.Conn's close_notify write sets
+		// its own five-second deadline, which would hold the conn that much
+		// longer, once here and once more in serve's deferred Close. Closing
+		// the socket under the TLS makes both fail at once.
+		_ = c.pc.c.Close()
+		return false
+	}
+	// Armed before CloseWrite, so the close_notify write is inside the same
+	// bound as the drain: a guest that read the refusal and then stopped
+	// reading cannot stretch it to tls.Conn's five seconds.
+	t := time.AfterFunc(drainTimeout, func() { _ = c.pc.c.Close() })
 	_ = c.gtls.CloseWrite()
 	// Let a client that already sent its request see the refusal, not an RST.
-	t := time.AfterFunc(drainTimeout, func() { _ = c.pc.c.Close() })
 	_, _ = io.Copy(io.Discard, io.LimitReader(c.gtls, drainLimit))
 	t.Stop()
 	return false

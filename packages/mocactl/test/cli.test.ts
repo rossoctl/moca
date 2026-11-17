@@ -34,6 +34,45 @@ describe('main', () => {
     expect(o.outs.join('')).toContain(USAGE);
   });
 
+  it('COMMAND --help prints only that command, with the flags every command takes', async () => {
+    const help = async (...argv: string[]) => {
+      const o = io();
+      const build = vi.fn(fakeBuild);
+      expect(await main([...argv, '--help'], {}, o, { buildRuntime: build })).toBe(0);
+      expect(build).not.toHaveBeenCalled();
+      return o.outs.join('');
+    };
+    const creds = await help('credentials');
+    expect(creds).toContain('mocactl credentials add NAME');
+    expect(creds).toContain('[--endpoint URL] [--json]'); // a wrapped head stays with its entry
+    expect(creds).toContain('mocactl credentials delete NAME');
+    expect(creds).not.toContain('mocactl sessions');
+    expect(creds).toContain('flags for every command: --control-plane-url URL');
+    expect(creds).toContain('mocactl --help');
+    const add = await help('credentials', 'add');
+    expect(add).toContain('mocactl credentials add NAME');
+    expect(add).not.toContain('mocactl credentials delete');
+    // A prompt is not a subcommand: every run form.
+    const run = await help('run', 'hello');
+    expect(run).toContain('mocactl run "prompt" --record F');
+    expect(run).not.toContain('mocactl spawn');
+    // Nothing named: the whole usage.
+    expect(await help('nonsense')).toContain(USAGE);
+  });
+
+  it("a usage error shows the failed command's help, not every command's", async () => {
+    const o = io();
+    expect(await main(['credentials', '--jsn'], {}, o, { buildRuntime: fakeBuild })).toBe(2);
+    expect(o.errs.join('\n')).toMatch(/--jsn/);
+    expect(o.errs.join('\n')).toContain('mocactl credentials add NAME');
+    expect(o.errs.join('\n')).not.toContain('mocactl sessions');
+    const o2 = io();
+    expect(await main(['sessions', 'bogus'], {}, o2, { buildRuntime: fakeBuild })).toBe(2);
+    expect(o2.errs.join('\n')).toContain('unknown sessions command "bogus"');
+    expect(o2.errs.join('\n')).toContain('mocactl sessions delete ID');
+    expect(o2.errs.join('\n')).not.toContain('mocactl credentials');
+  });
+
   it('prints the version for --version and -V, reading no config and no network', async () => {
     for (const flag of ['--version', '-V']) {
       const o = io();

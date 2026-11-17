@@ -236,19 +236,22 @@ func TestWaitForHeldJailsWaitsForAKilledVMMToLetGoOfItsSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	closed := make(chan struct{})
+	// closing is signalled before the Close, so a closer descheduled between the two
+	// cannot make a correct return look early.
+	closing, closed := make(chan struct{}), make(chan struct{})
 	go func() {
 		time.Sleep(300 * time.Millisecond)
+		close(closing)
 		_ = ln.Close()
 		close(closed)
 	}()
 	t.Cleanup(func() { <-closed })
 
-	if held := WaitForHeldJails(lc, 5*time.Second); len(held) != 0 {
+	if held := WaitForHeldJails(lc, testWaitBound); len(held) != 0 {
 		t.Fatalf("WaitForHeldJails = %v, want none: the listener closed well inside the bound", held)
 	}
 	select {
-	case <-closed:
+	case <-closing:
 	default:
 		t.Fatal("WaitForHeldJails returned while vm-1's API socket still had a listener — Probe would collide with it")
 	}
@@ -297,7 +300,7 @@ func TestWaitForHeldJailsIsANoOpForALauncherWithNoJails(t *testing.T) {
 // spawned must be dead when Restore returns, or a failed probe leaves a VMM of its own behind
 // for the next start to sweep. The fake jailer records its pid and then stays alive without
 // ever binding the socket, as a VMM that hangs before its API comes up would; a cancelled
-// context ends the socket wait early instead of after its 5 s.
+// context ends the socket wait early.
 func TestRestoreKillsTheJailerItStartedWhenTheAPISocketNeverAppears(t *testing.T) {
 	base := shortdir.New(t, "fcpk", len("/firecracker/vm-1/root/run/firecracker.socket"))
 	pidFile := filepath.Join(base, "jailer.pid")
@@ -333,15 +336,17 @@ func TestRestoreKillsTheJailerItStartedWhenTheAPISocketNeverAppears(t *testing.T
 
 	// Cancelled once the jailer has recorded its pid, not after a fixed delay: under load a
 	// fixed delay can end the wait before the shell has run at all, and then there is nothing
-	// to assert on. If the pid never appears, the socket wait's own 5 s bound ends Restore.
+	// to assert on. The socket wait is raised to match, so it cannot end Restore first.
+	prevWait := apiSocketWait
+	apiSocketWait = testWaitBound
+	t.Cleanup(func() { apiSocketWait = prevWait })
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
-		for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-			if b, err := os.ReadFile(pidFile); err == nil && strings.HasSuffix(string(b), "\n") {
-				break
-			}
-		}
+		pollUntil(testWaitBound, func() bool {
+			b, err := os.ReadFile(pidFile)
+			return err == nil && strings.HasSuffix(string(b), "\n")
+		})
 		cancel()
 	}()
 	_, err = lc.Restore(ctx, RestoreRequest{

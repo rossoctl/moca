@@ -260,6 +260,44 @@ describe('lookupEgressCredential', () => {
     );
   });
 
+  // A 500 is the lookup refusing what it found, not finding nothing: it is audited as a refusal
+  // with its code, so "why did this host get a 500" is answerable from the audit alone (#653).
+  it('audits a credential_unsafe refusal by name and code, never the value', async () => {
+    const s = (await d.credentials.get(ALICE, 'svc'))!;
+    await d.credentials.put(ALICE, { ...s, secret: { token: 'unsafe-fixture\r\nX-Evil: 1' } }); // notsecret
+    expect(await codeOf(() => call(d, KVM, { sandbox: sbxA, host: 'svc.corp' }))).toBe(
+      'credential_unsafe',
+    );
+    expect(d.logLines).toContainEqual(
+      expect.objectContaining({
+        decision: 'egress_credential_refused',
+        reason: 'credential_unsafe',
+        credential: 'svc',
+        subject: ALICE,
+        sandboxId: sbxA,
+        destination: 'svc.corp',
+        egressHost: 'kvm',
+      }),
+    );
+    expect(JSON.stringify(d.logLines)).not.toContain('unsafe-fixture');
+  });
+
+  it('audits a destination_ambiguous refusal with the colliding names', async () => {
+    await d.credentials.put(ALICE, cred('gh2', 'bearer', ['github.com'], { token: 'x' })); // notsecret
+    expect(await codeOf(() => call(d, KVM, { sandbox: sbxA, host: 'github.com' }))).toBe(
+      'destination_ambiguous',
+    );
+    expect(d.logLines).toContainEqual(
+      expect.objectContaining({
+        decision: 'egress_credential_refused',
+        reason: 'destination_ambiguous',
+        credential: 'gh,gh2',
+        destination: 'github.com',
+        egressHost: 'kvm',
+      }),
+    );
+  });
+
   it('refuses two elements with one (port, prefix), reached only by a write race', async () => {
     await d.credentials.put(ALICE, cred('gh2', 'bearer', ['github.com'], { token: 'x' })); // notsecret
     expect(await codeOf(() => call(d, KVM, { sandbox: sbxA, host: 'github.com' }))).toBe(

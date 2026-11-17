@@ -545,7 +545,14 @@ that is not bound here.
   egress reaches nothing. A package installs only from a registry on the allowlist: the default
   one carries the common registries (PyPI, npm, crates.io, the Go module proxy), but your operator
   may have changed it. The templates carry the toolchains: `mocactl sbx templates` lists them, with
-  their tools, and `mocactl sbx policy` lists each profile's egress.
+  their tools, and `mocactl sbx policy` lists each profile's egress. A refused request's body says
+  that the host is not on the sandbox's egress allowlist; retrying does not help. That body shows
+  only for plain-HTTP requests and clients that print it: an HTTPS request is refused at its
+  `CONNECT`, so most clients (curl, git, pip) show just `403` or `CONNECT tunnel failed`, and the
+  agent learns the rule from its sandbox instructions instead. To have a host
+  added, ask your operator and name the host: `mocactl sbx egress` lists the hosts your sandbox
+  reached and the ones it was refused. The service's own URL, opened in a browser or with `curl`,
+  says the same and how to get `mocactl`.
 - **One command at a time per sandbox.** The sandbox runs one call at a time, so batch the work:
   read several files in one call, run the whole test suite in one call. The agent's tools refuse a
   call that would wait more than 30 s behind another one with `sandbox busy: … retry later`, and
@@ -806,7 +813,9 @@ prints, for the bound sandbox, `export` lines for a client: `SBX_ADDR`, `SBX_TLS
 `SBX_SANDBOX_ID`, `SBX_WORKSPACE_KEY`, `SBX_TOKEN_CMD` and, when the endpoint's certificate is
 self-issued, `SBX_CA_FILE`. `mocactl sbx token` prints a fresh token; `mocactl sbx token
 --renew-every 600` prints a new one every 600 seconds, one line each, until stopped, for a
-long-lived client that reads its next token from a pipe. Each token printed counts as use of the
+long-lived client that reads its next token from a pipe. With `--json`, each line is an object
+with the `token`, its `expiresAt` and the sandbox's `sandboxExpiresAt` (epoch seconds, as the
+control plane returns them; a control plane from before `sandboxExpiresAt` leaves it out). Each token printed counts as use of the
 sandbox, so a `--renew-every` pump keeps it alive whether or not its client runs commands. See
 [the direct-client guide](../api/sandbox-v1-direct-client.md) for what a client sends.
 

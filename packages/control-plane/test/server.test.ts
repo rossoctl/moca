@@ -66,6 +66,15 @@ describe('probes', () => {
     expect((await request('GET', '/readyz')).status).toBe(200);
   });
 
+  it('answers GET / with a plain-text page, not a 404, and echoes nothing of the request (#779)', async () => {
+    const res = await request('GET', '/', { headers: { host: 'cp.example.invalid' } });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatch(/^This is a Moca control plane/);
+    expect(res.body).not.toContain('cp.example.invalid');
+    // Only the exact root: anything else stays the unknown-path 404.
+    expect((await request('GET', '/index.html')).status).toBe(404);
+  });
+
   it('serves /v1/discovery unauthenticated, advertising no harness by default', async () => {
     const res = await request('GET', '/v1/discovery');
     expect(res.status).toBe(200);

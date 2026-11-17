@@ -8,14 +8,14 @@ that shipped it ("The data plane's twin … goes to"):
 
 | `harness-openapi.yaml` | Shipped with                   |
 | ---------------------- | ------------------------------ |
-| 1.5.0                  | [1.29.0](#1290)                |
+| 1.5.0                  | [1.28.0](#1280)                |
 | 1.4.0                  | [1.26.0](#1260)                |
 | 1.3.0                  | [1.17.0](#1170)                |
 | 1.2.0                  | [1.16.0](#1160)                |
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
-## 1.29.0
+## 1.28.0
 
 A config bundle's format version, checked where a bundle is stored and where it is applied
 ([#510](https://github.com/rossoctl/moca/issues/510)), per the
@@ -31,6 +31,17 @@ answers `422 config_bundle_unsupported` when the session's bundle is stored and 
 format the harness does not read, with the reason and what to upgrade in `message`, on the sync
 path and before the first SSE frame alike; after it, the terminal `error` frame carries the same
 reason.
+
+## 1.27.0
+
+The base URL says what it is ([#779](https://github.com/rossoctl/moca/issues/779)). Additive on the
+wire.
+
+- `GET /` answers `200` with a short `text/plain` page on every profile: that this is a Moca control
+  plane, where its API is (`/v1`, and `GET /v1/discovery`), how to install `mocactl` and log in, and
+  that a sandbox's egress is an allowlist the operator extends. Before, it was the unknown-path
+  `404 not_found`. The page names no URL of the deployment and echoes nothing of the request. Its
+  wording is not a contract: a client reads `/v1/discovery`.
 
 ## 1.26.0
 

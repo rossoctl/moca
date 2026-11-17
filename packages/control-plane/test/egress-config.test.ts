@@ -67,6 +67,14 @@ describe('egressConfigFromEnv (SBX0.2b)', () => {
     ['short token', { SH_EGRESS_TOKEN_KVM: 'abc' }, /SH_EGRESS_TOKEN_KVM/],
     ['TTL 4', { SH_EGRESS_CREDENTIAL_TTL_SECONDS: '4' }, /5.*300/],
     ['TTL 301', { SH_EGRESS_CREDENTIAL_TTL_SECONDS: '301' }, /5.*300/],
+    // Number() alone would take each of these: a unit suffix, a fraction, an exponent, hex, a sign.
+    ['a TTL with a unit', { SH_EGRESS_CREDENTIAL_TTL_SECONDS: '60s' }, /integer from 5 to 300/],
+    ['a fractional TTL', { SH_EGRESS_CREDENTIAL_TTL_SECONDS: '60.5' }, /integer from 5 to 300/],
+    ['an exponent TTL', { SH_EGRESS_CREDENTIAL_TTL_SECONDS: '6e1' }, /integer from 5 to 300/],
+    ['a hex TTL', { SH_EGRESS_CREDENTIAL_TTL_SECONDS: '0x3c' }, /integer from 5 to 300/],
+    ['a signed TTL', { SH_EGRESS_CREDENTIAL_TTL_SECONDS: '+60' }, /integer from 5 to 300/],
+    // The rule is lowercase hex, as setup.sh's rand_hex writes and install-host.sh checks.
+    ['an uppercase-hex token', { SH_EGRESS_TOKEN_KVM: T('A') }, /64 lowercase hex/],
   ])('refuses %s, never echoing a token', (_n, over, re) => {
     let msg = '';
     try {
@@ -96,6 +104,18 @@ describe('egressConfigFromEnv (SBX0.2b)', () => {
     }
     expect(msg).toMatch(/SH_EGRESS_TOKEN_A and SH_EGRESS_TOKEN_B hold the same token/);
     expect(msg).not.toContain(T('c'));
+  });
+
+  // A KEK rotation leaves a ring, newest first (setup.sh never rewrites one): egress must accept it,
+  // and a ring with one bad entry is refused naming that entry.
+  it('accepts a multi-entry KEK ring and refuses one with a bad entry', () => {
+    const k = (b: number) => Buffer.alloc(32, b).toString('base64'); // notsecret
+    expect(
+      egressConfigFromEnv({ ...on, SH_CREDENTIAL_KEK: `${k(2)},${k(1)}` }, templates)?.hosts,
+    ).toHaveLength(1);
+    expect(() =>
+      egressConfigFromEnv({ ...on, SH_CREDENTIAL_KEK: `${k(2)},c2hvcnQ=` }, templates),
+    ).toThrow(/SH_CREDENTIAL_KEK entry 2/);
   });
 
   it('maps a host id to its token variable', () =>

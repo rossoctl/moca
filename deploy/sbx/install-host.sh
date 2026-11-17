@@ -284,10 +284,13 @@ install_egress() {
   fi
   install -d -m 0755 "$SBX_UNIT_DIR"
   install -d -m 0700 "$SBX_ENV_DIR"
+  # Every exit after the mktemp removes the file: under `set -e` a bare failing step would end the
+  # script with the temp file left behind.
   tmp="$(mktemp)"
-  egress_unit_text >"$tmp"
+  egress_unit_text >"$tmp" ||
+    { rm -f "$tmp"; die "cannot read the moca-egress unit source $SCRIPT_DIR/../microvm/moca-egress.service: install-host.sh runs from a full checkout"; }
   if ! cmp -s "$tmp" "$unit" 2>/dev/null; then
-    install -m 0644 "$tmp" "$unit"
+    install -m 0644 "$tmp" "$unit" || { rm -f "$tmp"; die "cannot install $unit"; }
     changed=1
   fi
   rm -f "$tmp"
@@ -328,7 +331,7 @@ ca_fingerprint() {
   local der
   der="$(mktemp)"
   openssl x509 -in "$1" -outform DER >"$der" || { rm -f "$der"; die "cannot read the certificate $1"; }
-  sha256_of "$der"
+  sha256_of "$der" || { rm -f "$der"; die "cannot hash the certificate $1"; }
   rm -f "$der"
 }
 
@@ -467,9 +470,23 @@ warn_untrusting_workers() {
 }
 
 # remove_credential_file PATH: the drop-in, token and api CA go; the host CA stays (snapshots carry it).
+# PATH comes from the manifest, which is a file and not proof that the path is this script's: only the
+# drop-in and the files directly in the credential directory are ever removed. Anything else (an edited
+# or corrupted manifest line) is kept and named, never deleted as root.
 remove_credential_file() {
+  local d name
+  d="$(EGRESS_CRED_DIR)"
   case "$1" in
-  "$(EGRESS_CRED_DIR)/ca.crt" | "$(EGRESS_CRED_DIR)/ca.key") log "kept for the snapshot: $1 (it was built with this CA)"; return 1 ;;
+  "$d/ca.crt" | "$d/ca.key") log "kept for the snapshot: $1 (it was built with this CA)"; return 1 ;;
+  "$(egress_dropin)") ;;
+  "$d"/*)
+    name="${1#"$d"/}"
+    if [[ -z "$name" || "$name" == */* || "$name" == . || "$name" == .. ]]; then
+      log "kept $1 (not a credential file of this script)"
+      return 1
+    fi
+    ;;
+  *) log "kept $1 (not a credential file of this script)"; return 1 ;;
   esac
   rm -f "$1"
   rmdir "$(dirname "$1")" 2>/dev/null || true
