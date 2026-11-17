@@ -9,6 +9,7 @@ import { makeDeps, NOW_MS, type TestDeps } from './helpers/deps.js';
 // SBX0 §4.1: the sandbox control plane mounts the login routes and its own, NOTHING else -- by an
 // allow list per profile, so a route added later is unmounted under `sandbox` until someone lists it.
 const SHARED = [
+  'GET /',
   'GET /healthz',
   'GET /readyz',
   'GET /v1/discovery',

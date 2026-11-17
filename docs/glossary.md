@@ -33,9 +33,9 @@ treats `session_id` as opaque and holds no separate "run" identity.
 `run` survives only:
 
 - As an English verb ("run to completion" vs. "one turn").
-- In the frozen, legacy data-plane route names `POST /runs` and its deprecated alias
-  `POST /run-leaf` (`packages/server/src/server.ts`) — kept as-is; a second rename
-  cycle isn't worth the churn.
+- In the data-plane route names `POST /v1/runs`, its supported, frozen alias `POST /runs` and
+  the deprecated `POST /run-leaf` (`packages/server/src/server.ts`) — kept as-is; a second
+  rename cycle isn't worth the churn.
 
 If a genuine grouping identity is ever needed inside the harness (e.g. parent/child lineage for a
 leaf dispatching a child leaf), it should be named `parentSessionId`, not `runId`.

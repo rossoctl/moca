@@ -1,5 +1,5 @@
 import { closeSync, constants as fsConstants, fstatSync, openSync, readFileSync } from 'node:fs';
-import { parseArgs } from 'node:util';
+import { parseArgs, type ParseArgsConfig } from 'node:util';
 import { parseOptionFlags } from './core/session-options.js';
 import type { CredentialConsumer } from './api/types.js';
 import {
@@ -33,6 +33,7 @@ import {
   cmdWorkloadList,
 } from './workloads.js';
 import { versionLine } from './version.js';
+import { commandUsage, typedWords } from './core/usage.js';
 
 export const USAGE = `usage:
   mocactl [--setup] [--no-animation]             interactive terminal UI
@@ -91,13 +92,24 @@ flags for every command: --control-plane-url URL
 
 const CREDENTIAL_FLAGS = ['kind', 'consumer', 'host', 'endpoint'] as const;
 
-function usage(io: Io): number {
-  io.err(USAGE);
+/**
+ * The usage for what was typed: `mocactl COMMAND [SUB...]`'s own entries (commandUsage) with the
+ * flags every command takes, or the whole usage when no command is named or known.
+ */
+export function usageFor(words: string[]): string {
+  const own = commandUsage(USAGE, '  mocactl ', words);
+  if (own === undefined) return USAGE;
+  const everyCommand = USAGE.slice(USAGE.lastIndexOf('\nflags for every command') + 1);
+  return `usage:\n${own}\n${everyCommand}\nRun \`mocactl --help\` for the list of all commands.`;
+}
+
+function usage(io: Io, text: string): number {
+  io.err(text);
   return 2;
 }
 
-function unknown(io: Io, command: string, sub: string): number {
-  io.err(`unknown ${command} command "${sub}"\n${USAGE}`);
+function unknown(io: Io, command: string, sub: string, text: string): number {
+  io.err(`unknown ${command} command "${sub}"\n${text}`);
   return 2;
 }
 
@@ -143,6 +155,43 @@ export async function main(
   }
 }
 
+/** mocactl's flags (all but `mocactl sbx`'s): one table, for the parse and for typedWords. */
+const OPTIONS = {
+  'control-plane-url': { type: 'string' },
+  'harness-url': { type: 'string' },
+  session: { type: 'string' },
+  'test-user': { type: 'string' },
+  new: { type: 'boolean' },
+  option: { type: 'string', multiple: true },
+  json: { type: 'boolean' },
+  'show-tools': { type: 'boolean' },
+  kind: { type: 'string' },
+  consumer: { type: 'string' },
+  host: { type: 'string', multiple: true },
+  endpoint: { type: 'string' },
+  config: { type: 'string' },
+  all: { type: 'boolean' },
+  'no-browser': { type: 'boolean' },
+  setup: { type: 'boolean' },
+  'no-animation': { type: 'boolean' },
+  'dry-run': { type: 'boolean' },
+  repo: { type: 'string' },
+  ref: { type: 'string' },
+  tag: { type: 'string' },
+  label: { type: 'string' },
+  out: { type: 'string' },
+  workload: { type: 'string' },
+  writable: { type: 'boolean' },
+  context: { type: 'string' },
+  name: { type: 'string' },
+  sandboxes: { type: 'string' },
+  mount: { type: 'string' },
+  'prompt-file': { type: 'string' },
+  record: { type: 'string' },
+  help: { type: 'boolean', short: 'h' },
+  version: { type: 'boolean', short: 'V' },
+} satisfies ParseArgsConfig['options'];
+
 async function mainWith(
   argv: string[],
   env: NodeJS.ProcessEnv,
@@ -162,50 +211,18 @@ async function mainWith(
       loginHelpers: deps.loginHelpers,
     });
   }
+  // A usage error shows the help of the command it is about, as --help does.
+  const help = usageFor(typedWords(argv, OPTIONS));
   let parsed;
   try {
     parsed = parseArgs({
       args: argv,
       allowPositionals: true,
       strict: true,
-      options: {
-        'control-plane-url': { type: 'string' },
-        'harness-url': { type: 'string' },
-        session: { type: 'string' },
-        'test-user': { type: 'string' },
-        new: { type: 'boolean' },
-        option: { type: 'string', multiple: true },
-        json: { type: 'boolean' },
-        'show-tools': { type: 'boolean' },
-        kind: { type: 'string' },
-        consumer: { type: 'string' },
-        host: { type: 'string', multiple: true },
-        endpoint: { type: 'string' },
-        config: { type: 'string' },
-        all: { type: 'boolean' },
-        'no-browser': { type: 'boolean' },
-        setup: { type: 'boolean' },
-        'no-animation': { type: 'boolean' },
-        'dry-run': { type: 'boolean' },
-        repo: { type: 'string' },
-        ref: { type: 'string' },
-        tag: { type: 'string' },
-        label: { type: 'string' },
-        out: { type: 'string' },
-        workload: { type: 'string' },
-        writable: { type: 'boolean' },
-        context: { type: 'string' },
-        name: { type: 'string' },
-        sandboxes: { type: 'string' },
-        mount: { type: 'string' },
-        'prompt-file': { type: 'string' },
-        record: { type: 'string' },
-        help: { type: 'boolean', short: 'h' },
-        version: { type: 'boolean', short: 'V' },
-      },
+      options: OPTIONS,
     });
   } catch (err) {
-    io.err(`${(err as Error).message}\n${USAGE}`);
+    io.err(`${(err as Error).message}\n${help}`);
     return 2;
   }
   const { values, positionals } = parsed;
@@ -214,7 +231,8 @@ async function mainWith(
     return 0;
   }
   if (values.help) {
-    io.out(USAGE + '\n');
+    // `mocactl COMMAND --help`: that command's syntax, not every command's.
+    io.out(help + '\n');
     return 0;
   }
 
@@ -223,9 +241,7 @@ async function mainWith(
   let fetchImpl = deps.fetchImpl ?? fetch;
   if (values.record !== undefined) {
     if (positionals[0] !== 'run') {
-      io.err(
-        `--record only applies to \`mocactl run\` (and to \`mocactl sbx\` commands)\n${USAGE}`,
-      );
+      io.err(`--record only applies to \`mocactl run\` (and to \`mocactl sbx\` commands)\n${help}`);
       return 2;
     }
     const r = openCallRecord(values.record, 'run', Date.now, { lengthFields: RUN_LENGTH_FIELDS });
@@ -261,56 +277,56 @@ async function mainWith(
       (f) => values[f] !== undefined,
     );
     if (stray) {
-      io.err(`--${stray} only applies to \`mocactl credentials add\`\n${USAGE}`);
+      io.err(`--${stray} only applies to \`mocactl credentials add\`\n${help}`);
       return 2;
     }
   }
   if (values.config !== undefined && command !== 'run' && command !== 'spawn') {
-    io.err(`--config only applies to \`mocactl run\` and \`mocactl spawn\`\n${USAGE}`);
+    io.err(`--config only applies to \`mocactl run\` and \`mocactl spawn\`\n${help}`);
     return 2;
   }
   if (values.all !== undefined && command !== 'logout') {
-    io.err(`--all only applies to \`mocactl logout\`\n${USAGE}`);
+    io.err(`--all only applies to \`mocactl logout\`\n${help}`);
     return 2;
   }
   if (values['no-browser'] !== undefined && command !== 'login') {
-    io.err(`--no-browser only applies to \`mocactl login\`\n${USAGE}`);
+    io.err(`--no-browser only applies to \`mocactl login\`\n${help}`);
     return 2;
   }
   if (values['test-user'] !== undefined && command !== 'login') {
-    io.err(`--test-user only applies to \`mocactl login\`\n${USAGE}`);
+    io.err(`--test-user only applies to \`mocactl login\`\n${help}`);
     return 2;
   }
   if ((values.repo !== undefined || values.ref !== undefined) && command !== 'spawn') {
-    io.err(`--repo and --ref only apply to \`mocactl spawn\`\n${USAGE}`);
+    io.err(`--repo and --ref only apply to \`mocactl spawn\`\n${help}`);
     return 2;
   }
   if (values.tag !== undefined && command !== 'spawn' && command !== 'subagents') {
-    io.err(`--tag only applies to \`mocactl spawn\` and \`mocactl subagents\`\n${USAGE}`);
+    io.err(`--tag only applies to \`mocactl spawn\` and \`mocactl subagents\`\n${help}`);
     return 2;
   }
   if (values.label !== undefined && command !== 'spawn') {
-    io.err(`--label only applies to \`mocactl spawn\`\n${USAGE}`);
+    io.err(`--label only applies to \`mocactl spawn\`\n${help}`);
     return 2;
   }
   if (values.out !== undefined && command !== 'get') {
-    io.err(`--out only applies to \`mocactl get\`\n${USAGE}`);
+    io.err(`--out only applies to \`mocactl get\`\n${help}`);
     return 2;
   }
   if (values.workload !== undefined && command !== 'spawn') {
-    io.err(`--workload only applies to \`mocactl spawn\`\n${USAGE}`);
+    io.err(`--workload only applies to \`mocactl spawn\`\n${help}`);
     return 2;
   }
   if (values.writable !== undefined && command !== 'spawn') {
-    io.err(`--writable only applies to \`mocactl spawn\`\n${USAGE}`);
+    io.err(`--writable only applies to \`mocactl spawn\`\n${help}`);
     return 2;
   }
   if (values['prompt-file'] !== undefined && command !== 'spawn') {
-    io.err(`--prompt-file only applies to \`mocactl spawn\`\n${USAGE}`);
+    io.err(`--prompt-file only applies to \`mocactl spawn\`\n${help}`);
     return 2;
   }
   if (values.writable && values.workload === undefined) {
-    io.err(`--writable needs --workload ID: only a workload's context is copied\n${USAGE}`);
+    io.err(`--writable needs --workload ID: only a workload's context is copied\n${help}`);
     return 2;
   }
   const workloadsCreate = command === 'workloads' && rest[0] === 'create';
@@ -318,7 +334,7 @@ async function mainWith(
     (f) => values[f] !== undefined,
   );
   if (createOnly && !workloadsCreate) {
-    io.err(`--${createOnly} only applies to \`mocactl workloads create\`\n${USAGE}`);
+    io.err(`--${createOnly} only applies to \`mocactl workloads create\`\n${help}`);
     return 2;
   }
   // B14: refresh an expired API token once, up front, so every command's login check -- and the
@@ -341,18 +357,19 @@ async function mainWith(
       }
       // Validated before any network call, so a typo costs nothing and reports as usage.
       if (!/^[0-9]+$/.test(raw) || Number(raw) < 1) {
-        io.err(`--test-user needs a whole number from 1 (got ${JSON.stringify(raw)})\n${USAGE}`);
+        io.err(`--test-user needs a whole number from 1 (got ${JSON.stringify(raw)})\n${help}`);
         return 2;
       }
       return cmdLoginTestUser(rt, io, Number(raw), process.env);
     }
     case 'logout':
-      if (rest.length > 0) return usage(io);
+      if (rest.length > 0) return usage(io, help);
       return cmdLogout(rt, io, { all: values.all === true });
     case 'auth': {
       const [sub, ...extra] = rest;
-      if (sub !== 'token') return sub === undefined ? usage(io) : unknown(io, 'auth', sub);
-      if (extra.length > 0) return usage(io);
+      if (sub !== 'token')
+        return sub === undefined ? usage(io, help) : unknown(io, 'auth', sub, help);
+      if (extra.length > 0) return usage(io, help);
       return cmdAuthToken(rt, io, json);
     }
     case 'doctor':
@@ -360,31 +377,29 @@ async function mainWith(
     case 'run': {
       const prompt = rest.join(' ').trim();
       if (!prompt) {
-        io.err(USAGE);
+        io.err(help);
         return 2;
       }
       // A new session is the default without --session; --new only says so explicitly.
       if (values.new && values.session !== undefined) {
-        io.err(`--new and --session cannot be used together\n${USAGE}`);
+        io.err(`--new and --session cannot be used together\n${help}`);
         return 2;
       }
       if (values.config !== undefined && values.session !== undefined) {
         io.err(
-          `--config applies only to a new session; a session's bundle is fixed when it is created\n${USAGE}`,
+          `--config applies only to a new session; a session's bundle is fixed when it is created\n${help}`,
         );
         return 2;
       }
       if (values.config !== undefined && values.config.trim() === '') {
-        io.err(`--config needs a bundle digest (sha256:…); omit it to run without one\n${USAGE}`);
+        io.err(`--config needs a bundle digest (sha256:…); omit it to run without one\n${help}`);
         return 2;
       }
       // Refused rather than ignored: --json already emits every tool_use and tool_result frame, so
       // --show-tools asks for nothing it does not have, and silently dropping a flag in a script is
       // worse than saying so (#419).
       if (values['show-tools'] === true && json) {
-        io.err(
-          `--show-tools is redundant with --json, which already streams tool frames\n${USAGE}`,
-        );
+        io.err(`--show-tools is redundant with --json, which already streams tool frames\n${help}`);
         return 2;
       }
       let options: Record<string, string>;
@@ -405,32 +420,33 @@ async function mainWith(
       });
     }
     case 'promote': {
-      if (rest.length !== 1) return usage(io);
+      if (rest.length !== 1) return usage(io, help);
       return cmdPromote(rt, io, { dir: rest[0]!, json, dryRun: values['dry-run'] === true });
     }
     case 'bundles': {
       const [sub, digest, ...extra] = rest;
       if (sub === 'list') {
         // Takes no digest: the point of the listing is to find one (rossoctl/moca#559).
-        if (digest !== undefined) return usage(io);
+        if (digest !== undefined) return usage(io, help);
         return cmdBundleList(rt, io, { json, signal });
       }
-      if (sub !== 'delete') return sub === undefined ? usage(io) : unknown(io, 'bundles', sub);
-      if (digest === undefined || extra.length > 0) return usage(io);
+      if (sub !== 'delete')
+        return sub === undefined ? usage(io, help) : unknown(io, 'bundles', sub, help);
+      if (digest === undefined || extra.length > 0) return usage(io, help);
       return cmdBundleDelete(rt, io, { digest, json, signal });
     }
     case 'sessions': {
       const [sub, id, ...extra] = rest;
       if (sub === undefined) return cmdSessions(rt, io, { json, signal });
-      if (sub !== 'delete') return unknown(io, 'sessions', sub);
-      if (id === undefined || extra.length > 0) return usage(io);
+      if (sub !== 'delete') return unknown(io, 'sessions', sub, help);
+      if (id === undefined || extra.length > 0) return usage(io, help);
       return cmdSessionDelete(rt, io, { id, json, signal });
     }
     case 'credentials': {
       const [sub, name, ...extra] = rest;
       if (sub === undefined) return cmdCredentials(rt, io, { json, signal });
-      if (sub !== 'add' && sub !== 'delete') return unknown(io, 'credentials', sub);
-      if (name === undefined || extra.length > 0) return usage(io);
+      if (sub !== 'add' && sub !== 'delete') return unknown(io, 'credentials', sub, help);
+      if (name === undefined || extra.length > 0) return usage(io, help);
       if (sub === 'delete') return cmdCredentialDelete(rt, io, { name, json, signal });
       const { readStdin } = deps;
       if (!readStdin) {
@@ -457,7 +473,7 @@ async function mainWith(
       let prompt: string;
       if (promptFile !== undefined) {
         if (rest.length > 0) {
-          io.err(`--prompt-file and an inline prompt cannot be used together\n${USAGE}`);
+          io.err(`--prompt-file and an inline prompt cannot be used together\n${help}`);
           return 2;
         }
         // Open once, stat and read the same fd. O_NOFOLLOW refuses symlinks so a swapped
@@ -499,17 +515,17 @@ async function mainWith(
       } else {
         prompt = rest.join(' ').trim();
         if (!prompt) {
-          io.err(`spawn needs a prompt\n${USAGE}`);
+          io.err(`spawn needs a prompt\n${help}`);
           return 2;
         }
       }
       const kind = values.kind;
       if (kind !== 'prompt' && kind !== 'solve') {
-        io.err(`--kind must be prompt or solve\n${USAGE}`);
+        io.err(`--kind must be prompt or solve\n${help}`);
         return 2;
       }
       if (values.config !== undefined && values.config.trim() === '') {
-        io.err(`--config needs a bundle digest (sha256:…); omit it to run without one\n${USAGE}`);
+        io.err(`--config needs a bundle digest (sha256:…); omit it to run without one\n${help}`);
         return 2;
       }
       return cmdSpawn(rt, io, {
@@ -526,29 +542,29 @@ async function mainWith(
       });
     }
     case 'subagents': {
-      if (rest.length > 0) return usage(io);
+      if (rest.length > 0) return usage(io, help);
       return cmdSubagents(rt, io, { tag: values.tag, json, signal });
     }
     case 'get': {
       const [sid, ...extra] = rest;
-      if (sid === undefined || extra.length > 0) return usage(io);
+      if (sid === undefined || extra.length > 0) return usage(io, help);
       return cmdGet(rt, io, { sessionId: sid, outDir: values.out, json, signal });
     }
     case 'workloads': {
       const [sub, id, ...extra] = rest;
       if (sub === undefined) {
-        io.err(`mocactl workloads needs create, list, get or delete\n${USAGE}`);
+        io.err(`mocactl workloads needs create, list, get or delete\n${help}`);
         return 2;
       }
       if (sub === 'list') {
         // Takes no id: the point of the listing is to find one (#552).
-        if (id !== undefined) return usage(io);
+        if (id !== undefined) return usage(io, help);
         return cmdWorkloadList(rt, io, { json, signal });
       }
       if (sub === 'create') {
-        if (id !== undefined) return usage(io);
+        if (id !== undefined) return usage(io, help);
         if (!values.context) {
-          io.err(`workloads create needs --context FILE\n${USAGE}`);
+          io.err(`workloads create needs --context FILE\n${help}`);
           return 2;
         }
         let sandboxes: number | undefined;
@@ -557,13 +573,13 @@ async function mainWith(
             ? Number(values.sandboxes)
             : undefined;
           if (sandboxes === undefined) {
-            io.err(`--sandboxes must be a whole number of at least 1\n${USAGE}`);
+            io.err(`--sandboxes must be a whole number of at least 1\n${help}`);
             return 2;
           }
         }
         const mount = values.mount;
         if (mount !== undefined && !(WORKLOAD_MOUNTS as readonly string[]).includes(mount)) {
-          io.err(`--mount must be read-only or writable\n${USAGE}`);
+          io.err(`--mount must be read-only or writable\n${help}`);
           return 2;
         }
         return cmdWorkloadCreate(rt, io, {
@@ -575,8 +591,8 @@ async function mainWith(
           signal,
         });
       }
-      if (sub !== 'get' && sub !== 'delete') return unknown(io, 'workloads', sub);
-      if (id === undefined || extra.length > 0) return usage(io);
+      if (sub !== 'get' && sub !== 'delete') return unknown(io, 'workloads', sub, help);
+      if (id === undefined || extra.length > 0) return usage(io, help);
       return sub === 'get'
         ? cmdWorkloadGet(rt, io, { id, json, signal })
         : cmdWorkloadDelete(rt, io, { id, json, signal });
@@ -601,7 +617,7 @@ async function mainWith(
         noAnimation: values['no-animation'] === true,
       });
     default:
-      io.err(`unknown command "${command}"\n${USAGE}`);
+      io.err(`unknown command "${command}"\n${help}`);
       return 2;
   }
 }

@@ -10,7 +10,13 @@
  * `surface` is the product boundary: 'client' entries are documented in
  * docs/api/harness-openapi.yaml and pinned there by the contract test; 'internal' entries are
  * served but are not a client contract — the context-service workload lifecycle, and the
- * pre-/v1 wire paths kept as aliases (issue #37).
+ * deprecated pre-rename paths (/run-leaf*, issue #37) until they are removed.
+ *
+ * The unprefixed /turn and /runs are 'client': supported, frozen aliases of /v1/turn and /v1/runs
+ * that are kept indefinitely (docs/reference/change-policy.md, decision 3; #507). They run the
+ * same handler as the /v1 route, so the document describes them with that route's contract; new
+ * features are added under /v1 only. Each has its own operationId because OpenAPI requires the
+ * ids to be unique in a document.
  */
 
 export type RouteAuth =
@@ -33,7 +39,7 @@ export interface RouteSpec {
   auth: RouteAuth;
   surface: 'client' | 'internal';
   summary: string;
-  /** Set on a pre-rename wire path; names the canonical route it duplicates. */
+  /** Set on an alias path; names the canonical route it duplicates (same handler, same auth). */
   aliasOf?: string;
   /** Deprecated aliases warn once per path and are removed in a later release (issue #37). */
   deprecated?: boolean;
@@ -59,11 +65,11 @@ export const ROUTES: RouteSpec[] = [
   {
     method: 'POST',
     path: '/turn',
-    operationId: 'createTurn',
+    operationId: 'createTurnUnversioned',
     auth: 'session',
-    surface: 'internal',
+    surface: 'client',
     aliasOf: '/v1/turn',
-    summary: 'Pre-/v1 wire path for POST /v1/turn',
+    summary: 'Supported unversioned alias of POST /v1/turn',
   },
   // Detachable turns (#471). No pre-/v1 aliases: these routes were born under /v1.
   {
@@ -93,11 +99,11 @@ export const ROUTES: RouteSpec[] = [
   {
     method: 'POST',
     path: '/runs',
-    operationId: 'createRun',
+    operationId: 'createRunUnversioned',
     auth: 'session',
-    surface: 'internal',
+    surface: 'client',
     aliasOf: '/v1/runs',
-    summary: 'Pre-/v1 wire path for POST /v1/runs',
+    summary: 'Supported unversioned alias of POST /v1/runs',
   },
   {
     method: 'POST',

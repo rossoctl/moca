@@ -65,7 +65,7 @@ function httpCause(err: ApiError, said: string): string {
  * The control-plane URL as configured, but never its userinfo, query or fragment: a URL typed
  * with `user:password@` must not put the password on the screen.
  */
-function displayUrl(raw: string): string {
+export function displayUrl(raw: string): string {
   try {
     const u = new URL(raw);
     u.username = '';

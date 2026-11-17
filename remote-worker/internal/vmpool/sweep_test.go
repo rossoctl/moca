@@ -29,8 +29,8 @@ func TestTheTickerSweepsWithNoFurtherExec(t *testing.T) {
 	primed(t, p, clk, "run-a")
 	// No further Exec of any kind from here on.
 	clk.Advance(DefaultStandbyIdle + DefaultStandbyIdle/4 + time.Second)
-	waitFor(t, func() bool { return p.Stats().StandbysResident == 0 })
-	waitFor(t, func() bool { return lc.liveCount() == 0 })
+	waitForValue(t, `p.Stats().StandbysResident`, func() int { return p.Stats().StandbysResident }, 0)
+	waitForValue(t, `lc.liveCount()`, func() int { return lc.liveCount() }, 0)
 	if s := p.Stats(); s.ParkedRuns != 1 {
 		t.Fatalf("ParkedRuns = %d, want 1 — the run is RunParked, not gone", s.ParkedRuns)
 	}
@@ -53,7 +53,7 @@ func TestStandbyIdleDropsStandbysAndKeepsTheWorkspace(t *testing.T) {
 	}
 
 	clk.Advance(DefaultStandbyIdle + DefaultStandbyIdle/4 + time.Second)
-	waitFor(t, func() bool { return p.Stats().StandbysResident == 0 })
+	waitForValue(t, `p.Stats().StandbysResident`, func() int { return p.Stats().StandbysResident }, 0)
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("workspace %s gone at StandbyIdle: %v — RAM is urgent, disk is not (spec §4.4)", dir, err)
 	}
@@ -102,7 +102,7 @@ func TestAFinalExecMintsItsReplacementWhichStandbyIdleThenAgesOut(t *testing.T) 
 	}
 	// And StandbyIdle ages them out within one ReclaimScanInterval.
 	clk.Advance(DefaultStandbyIdle/2 + DefaultStandbyIdle/4 + time.Second)
-	waitFor(t, func() bool { return p.Stats().StandbysResident == 0 })
+	waitForValue(t, `p.Stats().StandbysResident`, func() int { return p.Stats().StandbysResident }, 0)
 	if got := p.Stats().IdleStandbyResidency; got != 0 {
 		t.Fatalf("IdleStandbyResidency = %d after the sweep, want 0", got)
 	}
@@ -135,11 +135,11 @@ func TestASweepDestroysAtMostMaxReclaimsPerScan(t *testing.T) {
 	interval := cfg.ReclaimScanIntervalForTest()
 	clk.Advance(DefaultStandbyIdle + time.Second) // now every run is over StandbyIdle
 	// First tick after the threshold: exactly 2 go.
-	waitFor(t, func() bool { return p.Stats().StandbysResident == 4 })
+	waitForValue(t, `p.Stats().StandbysResident`, func() int { return p.Stats().StandbysResident }, 4)
 	clk.Advance(interval)
-	waitFor(t, func() bool { return p.Stats().StandbysResident == 2 })
+	waitForValue(t, `p.Stats().StandbysResident`, func() int { return p.Stats().StandbysResident }, 2)
 	clk.Advance(interval)
-	waitFor(t, func() bool { return p.Stats().StandbysResident == 0 })
+	waitForValue(t, `p.Stats().StandbysResident`, func() int { return p.Stats().StandbysResident }, 0)
 }
 
 // Spec §4.4: WorkspaceIdle is the ONLY thing that ever deletes a workspace on the VM
@@ -155,7 +155,7 @@ func TestWorkspaceIdleDeletesTheWorkspaceAndTheKeyCanBeReused(t *testing.T) {
 	}
 
 	clk.Advance(DefaultWorkspaceIdle + DefaultStandbyIdle/4 + time.Second)
-	waitFor(t, func() bool { _, err := os.Stat(dir); return os.IsNotExist(err) })
+	waitFor(t, "the workspace tree removed", func() bool { _, err := os.Stat(dir); return os.IsNotExist(err) })
 	if s := p.Stats(); s.ActiveRuns != 0 || s.ParkedRuns != 0 {
 		t.Fatalf("Stats = %+v, want the run gone entirely (RunAbsent)", s)
 	}
@@ -334,7 +334,7 @@ func TestReclaimDropsStandbysAndTheWorkspace(t *testing.T) {
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("workspace %s survived Reclaim: err=%v", dir, err)
 	}
-	waitFor(t, func() bool { return lc.liveCount() == 0 })
+	waitForValue(t, `lc.liveCount()`, func() int { return lc.liveCount() }, 0)
 	// Idempotent: reclaiming an unknown key is not an error.
 	if err := p.Reclaim(context.Background(), "run-zzz"); err != nil {
 		t.Fatalf("Reclaim of an unknown key: %v", err)

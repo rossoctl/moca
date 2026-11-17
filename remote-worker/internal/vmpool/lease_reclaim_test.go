@@ -160,7 +160,7 @@ func TestReclaimOnLowMemAvailable(t *testing.T) {
 	// One byte below the target: the idle-longest lease goes, and one is enough.
 	avail.Store(p.cfg.LeaseReclaimFreeBytes - 1)
 	tickLeases(p, clk)
-	waitFor(t, func() bool { return !keyLeased(p, "a") && lc.liveCount() == 2 })
+	waitFor(t, `!keyLeased(p, "a") && lc.liveCount() == 2`, func() bool { return !keyLeased(p, "a") && lc.liveCount() == 2 })
 	if !keyLeased(p, "b") || !keyLeased(p, "c") {
 		t.Fatalf("after the first reclaim: b leased %v, c leased %v; want both", keyLeased(p, "b"), keyLeased(p, "c"))
 	}
@@ -179,7 +179,7 @@ func TestReclaimOnLowMemAvailable(t *testing.T) {
 
 	// Still below: the reclaim repeats on the next tick, again idle-longest first.
 	tickLeases(p, clk)
-	waitFor(t, func() bool { return !keyLeased(p, "b") && lc.liveCount() == 1 })
+	waitFor(t, `!keyLeased(p, "b") && lc.liveCount() == 1`, func() bool { return !keyLeased(p, "b") && lc.liveCount() == 1 })
 
 	// Back at the target: nothing more is reclaimed.
 	avail.Store(p.cfg.LeaseReclaimFreeBytes)
@@ -205,13 +205,13 @@ func TestReclaimTakesAtMostMaxReclaimsPerScan(t *testing.T) {
 	leasesOn(t, p, clk, "a", "b", "c")
 	avail.Store(0) // far below: every lease would be needed
 	tickLeases(p, clk)
-	waitFor(t, func() bool { return lc.liveCount() == 1 })
+	waitForValue(t, `lc.liveCount()`, func() int { return lc.liveCount() }, 1)
 	if keyLeased(p, "a") || keyLeased(p, "b") || !keyLeased(p, "c") {
 		t.Fatalf("after one tick: a %v, b %v, c %v; want the two idle-longest taken, c kept",
 			keyLeased(p, "a"), keyLeased(p, "b"), keyLeased(p, "c"))
 	}
 	tickLeases(p, clk)
-	waitFor(t, func() bool { return lc.liveCount() == 0 && !keyLeased(p, "c") })
+	waitFor(t, `lc.liveCount() == 0 && !keyLeased(p, "c")`, func() bool { return lc.liveCount() == 0 && !keyLeased(p, "c") })
 }
 
 // Review Focus 4: reclaim picks the idle-longest lease, but takes it only if its gate is
@@ -226,7 +226,7 @@ func TestReclaimSkipsALeaseWhoseGateIsHeld(t *testing.T) {
 
 		avail.Store(0)
 		tickLeases(p, clk)
-		waitFor(t, func() bool { return !keyLeased(p, "b") && lc.liveCount() == 1 })
+		waitFor(t, `!keyLeased(p, "b") && lc.liveCount() == 1`, func() bool { return !keyLeased(p, "b") && lc.liveCount() == 1 })
 		if l := liveLease(p, "a"); l == nil {
 			t.Fatal("a's lease, with an Exec in flight, was reclaimed")
 		}
@@ -248,14 +248,14 @@ func TestReclaimSkipsALeaseWhoseGateIsHeld(t *testing.T) {
 
 		avail.Store(p.cfg.LeaseReclaimFreeBytes - 1)
 		tickLeases(p, clk) // must not block on a's gate
-		waitFor(t, func() bool { return !keyLeased(p, "b") && lc.liveCount() == 1 })
+		waitFor(t, `!keyLeased(p, "b") && lc.liveCount() == 1`, func() bool { return !keyLeased(p, "b") && lc.liveCount() == 1 })
 		if !keyLeased(p, "a") {
 			t.Fatal("a's lease, its gate held, was reclaimed")
 		}
 
 		<-gate
 		tickLeases(p, clk) // still below the target, and a's gate is free now
-		waitFor(t, func() bool { return !keyLeased(p, "a") && lc.liveCount() == 0 })
+		waitFor(t, `!keyLeased(p, "a") && lc.liveCount() == 0`, func() bool { return !keyLeased(p, "a") && lc.liveCount() == 0 })
 		if s := loadLeaseState(p.cfg.WorkspaceRoot, "a"); s.Pending == nil || s.Pending.Reason != LeaseEndMemoryReclaim {
 			t.Fatalf("a's state = %+v, want pending %s", s, LeaseEndMemoryReclaim)
 		}
@@ -279,7 +279,7 @@ func TestAdmissionReclaimsIdleLeasesThenRefuses(t *testing.T) {
 	if s := loadLeaseState(p.cfg.WorkspaceRoot, "b"); s.Pending == nil || s.Pending.Reason != LeaseEndMemoryReclaim {
 		t.Fatalf("b's state = %+v, want pending %s", s, LeaseEndMemoryReclaim)
 	}
-	waitFor(t, func() bool { return lc.liveCount() == 3 })
+	waitForValue(t, `lc.liveCount()`, func() int { return lc.liveCount() }, 3)
 
 	// a and c run, so d is the one idle lease, and the next new lease takes it.
 	entered, release := blockRuns(lc)
@@ -336,7 +336,7 @@ func TestStandbysEvictedBeforeLeases(t *testing.T) {
 		t.Fatalf("BudgetEvictions %d, LeaseEnds[memory_reclaim] %d; want one standby and no lease",
 			s.BudgetEvictions, s.LeaseEnds[LeaseEndMemoryReclaim])
 	}
-	waitFor(t, func() bool { return lc.destroyedFor("standby") == 2 }) // its Exec VM, and one standby
+	waitForValue(t, `lc.destroyedFor("standby")`, func() int { return lc.destroyedFor("standby") }, 2) // its Exec VM, and one standby
 }
 
 // PR #763 review (F4): the lease tick sheds in the order an admission does. Measured lease
@@ -356,7 +356,7 @@ func TestLeaseTickShedsStandbysBeforeLeases(t *testing.T) {
 	// budget by less than one standby.
 	lc.setLeaseBytes((DefaultLeaseStartBytes + 100<<20) * 4 / 5) // x LeaseHeadroom 1.25
 	tickLeases(p, clk)
-	waitFor(t, func() bool { return lc.destroyedFor("standby") == 2 }) // its Exec VM, and one standby
+	waitForValue(t, `lc.destroyedFor("standby")`, func() int { return lc.destroyedFor("standby") }, 2) // its Exec VM, and one standby
 	if !keyLeased(p, "lease") {
 		t.Fatal("the tick ended the idle lease while a standby could cover the overshoot")
 	}
@@ -393,7 +393,7 @@ func TestLeaseSweepEndsAtMostMaxReclaimsPerScan(t *testing.T) {
 	if n := leased(); n != 0 {
 		t.Fatalf("leases after the next tick = %d, want 0", n)
 	}
-	waitFor(t, func() bool { return lc.liveCount() == 0 })
+	waitForValue(t, `lc.liveCount()`, func() int { return lc.liveCount() }, 0)
 	if n := p.Stats().LeaseEnds[LeaseEndIdle]; n != 3 {
 		t.Fatalf("LeaseEnds[idle] = %d, want 3", n)
 	}

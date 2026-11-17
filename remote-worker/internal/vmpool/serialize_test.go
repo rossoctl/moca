@@ -66,7 +66,7 @@ func TestExecSerializesRunsPerKeyWhenLauncherRequiresIt(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("first entrant saw inFlight=%d, want 1", n)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("first Exec never entered Run")
 	}
 
@@ -96,7 +96,7 @@ func TestExecSerializesRunsPerKeyWhenLauncherRequiresIt(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("second entrant saw inFlight=%d, want 1 — it overlapped another Run for the same key", n)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("second Exec for the same key never entered Run after the first was released")
 	}
 	release <- struct{}{}
@@ -136,7 +136,7 @@ func TestAnExecWaitingOnTheRunGateCanStillBeCancelled(t *testing.T) {
 		}()
 		select {
 		case <-entered:
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWaitBound):
 			t.Fatal("the first Exec never entered Run")
 		}
 		return func() { close(gate) }
@@ -172,13 +172,13 @@ func TestAnExecWaitingOnTheRunGateCanStillBeCancelled(t *testing.T) {
 			if !errors.Is(err, ErrAborted) {
 				t.Fatalf("err = %v, want ErrAborted", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWaitBound):
 			t.Fatal("a cancelled Exec never unwound from the gate — it is still queued behind a guest that will not answer")
 		}
 		// Its VM and its budget charge are released, not held until the wedged guest
 		// finishes: the first Exec's VM is the only one that may still be alive.
-		waitFor(t, func() bool { return lc.liveCount() == 1 })
-		waitFor(t, func() bool { return p.Stats().InFlight == 1 })
+		waitForValue(t, `lc.liveCount()`, func() int { return lc.liveCount() }, 1)
+		waitForValue(t, `p.Stats().InFlight`, func() int { return p.Stats().InFlight }, 1)
 	})
 
 	t.Run("timeout", func(t *testing.T) {
@@ -208,11 +208,11 @@ func TestAnExecWaitingOnTheRunGateCanStillBeCancelled(t *testing.T) {
 			if !errors.Is(err, ErrTimeout) {
 				t.Fatalf("err = %v, want ErrTimeout", err)
 			}
-		case <-time.After(5 * time.Second):
+		case <-time.After(testWaitBound):
 			t.Fatal("a timed-out Exec never unwound from the gate")
 		}
-		waitFor(t, func() bool { return lc.liveCount() == 1 })
-		waitFor(t, func() bool { return p.Stats().InFlight == 1 })
+		waitForValue(t, `lc.liveCount()`, func() int { return lc.liveCount() }, 1)
+		waitForValue(t, `p.Stats().InFlight`, func() int { return p.Stats().InFlight }, 1)
 	})
 }
 
@@ -246,7 +246,7 @@ func TestExecDoesNotSerializeAcrossDifferentKeys(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		select {
 		case <-entered:
-		case <-time.After(2 * time.Second):
+		case <-time.After(testWaitBound):
 			t.Fatalf("only %d of 2 different-key Execs entered Run concurrently", i)
 		}
 	}

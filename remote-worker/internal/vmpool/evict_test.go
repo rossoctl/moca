@@ -56,7 +56,7 @@ func TestABudgetRefusalShedsAStandbyInsteadOfFailing(t *testing.T) {
 	// reclaimLoop calls Destroy off the hot path, so the destroy lands AFTER Exec
 	// returns. BudgetEvictions above is incremented under p.mu and is therefore safe to
 	// read synchronously; this counter is the launcher's, on the far side of the queue.
-	waitFor(t, func() bool { return lc.destroyedFor("run-a") == 2 })
+	waitForValue(t, `lc.destroyedFor("run-a")`, func() int { return lc.destroyedFor("run-a") }, 2)
 	if n := lc.destroyedFor("run-a"); n != 2 {
 		t.Fatalf("run-a destroys = %d, want 2 (its own exec VM, plus the ONE evicted standby)", n)
 	}
@@ -82,7 +82,7 @@ func TestEvictionTakesTheLeastRecentlyUsedRun(t *testing.T) {
 	// also what makes the negative half below meaningful: once the evicted VM has been
 	// destroyed the reclaim queue has drained past this eviction, so a zero for run-new is
 	// "run-new was not the victim" rather than "the reclaim loop has not got there yet".
-	waitFor(t, func() bool { return lc.destroyedFor("run-old")-oldBefore == 1 })
+	waitForValue(t, `lc.destroyedFor("run-old") - oldBefore`, func() int { return lc.destroyedFor("run-old") - oldBefore }, 1)
 	if got := lc.destroyedFor("run-old") - oldBefore; got != 1 {
 		t.Fatalf("run-old lost %d standbys, want 1 — the coldest run is the victim", got)
 	}
@@ -122,7 +122,7 @@ func TestEvictionKeepsTheWorkspaceOnDisk(t *testing.T) {
 	// p.mu, but the teardown that COULD have taken the workspace runs on the reclaim loop —
 	// so checking the marker while that is still queued would assert "not deleted yet"
 	// instead of "never deleted".
-	waitFor(t, func() bool { return lc.destroyedFor("run-a") == 2 })
+	waitForValue(t, `lc.destroyedFor("run-a")`, func() int { return lc.destroyedFor("run-a") }, 2)
 
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("stat %s after run-a was evicted: %v — eviction costs the victim a cold acquire, never its workspace", marker, err)
