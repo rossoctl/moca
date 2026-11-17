@@ -55,7 +55,7 @@ once contrasted with has been removed (ADR-0041).
 refuses to boot without `MOCA_RELAY_EXEC_TOKEN`, which `git pull && systemctl restart
 sh-relay.service` never creates. `sudo ./deploy/vm/setup-vm.sh` generates it, migrates `relay.env`
 and `supervisor.env` together to the loopback exec listener, installs the sandbox network and
-firewall, and restarts what it owns (step 3 below).
+firewall, and restarts what it owns (step 8 below, and the paragraph after it).
 
 Since #366 a re-run also installs the control plane. It writes `control-plane.env`, installs
 `sh-control-plane.service`, generates the MU1 secrets once into
