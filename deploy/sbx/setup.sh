@@ -22,8 +22,9 @@
 #                           in SBX_ALLOWED_SUBJECTS and SBX_ADMIN_SUBJECTS are then oidc:<provider
 #                           sub> entries, per the control plane's subject grammar; a mixed list is
 #                           accepted, so a GitHub enrollment survives the switch
-#   SBX_ALLOWED_SUBJECTS    required; comma-separated github:<numeric id>, who may log in
-#   SBX_ADMIN_SUBJECTS      optional; comma-separated github:<numeric id>
+#   SBX_ALLOWED_SUBJECTS    required; comma-separated github:<numeric id> or oidc:<provider sub>,
+#                           who may log in
+#   SBX_ADMIN_SUBJECTS      optional; comma-separated github:<numeric id> or oidc:<provider sub>
 #   SBX_TEMPLATES_FILE      required; JSON list [{id, worker, description, tools}], every worker in
 #                           SBX_WORKERS
 #   SBX_WORKSPACE_FS_GIB    required; the KVM host's workspace filesystem size, for the disk check
@@ -154,8 +155,10 @@ USAGE='setup.sh [--env-file FILE]'
 
 # The control plane's MEMBER_SUBJECT_RE (packages/control-plane/src/identity.ts): github:<numeric
 # id> or oidc:<provider sub>, the sub per OIDC_SUB_PATTERN. A comma list of either form, no spaces.
-GITHUB_SUBJECT='github:[0-9]+'
-OIDC_SUBJECT='oidc:[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}'
+# Locale-proof classes, not [0-9]/[A-Za-z0-9] ranges: the same UTF-8-collation bug class as the
+# [!-~] fix below (a range can misbehave where a POSIX class cannot).
+GITHUB_SUBJECT='github:[[:digit:]]+'
+OIDC_SUBJECT='oidc:[[:alnum:]][[:alnum:]._@+-]{0,127}'
 SUBJECTS_RE="^($GITHUB_SUBJECT|$OIDC_SUBJECT)(,($GITHUB_SUBJECT|$OIDC_SUBJECT))*$"
 # Positive whole numbers. The disk check multiplies SBX_MAX_TOTAL x SBX_WORKSPACE_IMAGE_MB x 10 and
 # SBX_WORKSPACE_FS_GIB x 1024 x 8 in 64-bit shell arithmetic: six digits for the factors of the first

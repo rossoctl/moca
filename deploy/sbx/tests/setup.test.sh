@@ -1012,6 +1012,16 @@ jq -e '.data | has("SH_GITHUB_CLIENT_ID") and (.SH_GITHUB_CLIENT_ID == "")' "$MO
 render
 oidc_cp_hash="$(pod_hash moca-control-plane)"
 [[ "$oidc_cp_hash" =~ ^[0-9a-f]{16}$ ]] || fail 'the oidc run stamps no settings hash'
+# Every non-optional configMapKeyRef the rendered control plane reads must exist in what setup.sh
+# wrote (review #851: the empty SH_GITHUB_CLIENT_ID bug was exactly a key the base reads
+# unconditionally that the oidc path did not write; this would have caught it).
+KUBECONFIG=/dev/null "$REAL_KUBECTL" label --local -f "$TMP/render.yaml" sbx-render- -o json 2>/dev/null | jq -s . >"$TMP/render.json"
+for ref in $(jq -r '.[] | select(.kind == "Deployment" and .metadata.name == "moca-control-plane")
+    | .spec.template.spec.containers[].env[]?.valueFrom.configMapKeyRef // empty
+    | select((.optional // false) | not) | "\(.name)/\(.key)"' "$TMP/render.json" | sort -u); do
+  jq -e --arg k "${ref#*/}" '.data | has($k)' "$MOCK_STATE/configmap-${ref%/*}.json" >/dev/null ||
+    fail "the control plane reads $ref non-optionally, but setup.sh wrote no such key"
+done
 pass 'an oidc deployment writes the identity settings, oidc: subjects and no GitHub client id'
 
 # 14a. Off is byte-identical: the generated kustomization.yaml, both ConfigMaps, the applied object
