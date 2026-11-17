@@ -432,6 +432,15 @@ They are ordinary files in your working tree, so `git status` shows them. Leave 
 committed, they would point every teammate's agents at a sandbox and deny their local tools.
 `mocactl sbx up --no-agent-config` creates and pushes without touching them.
 
+**Whether they reach the sandbox is up to your `.gitignore`.** `up` writes them after its push, so
+the first push never carries them. From then on, `up` and `push` treat them like any other file:
+one that is tracked, or untracked and not ignored, is pushed; an untracked one your ignore rules
+match is left out. `.sbx/` is never pushed. The sandbox needs none of them, since the agent there
+gets its instructions from the MCP server, so ignoring them (as the Moca repository's own
+`.gitignore` does for `.mcp.json`, `opencode.json`, `.bob/` and `AGENTS.md`) only keeps them on
+your machine. The decision is recorded in
+[ADR-0049](../adrs/0049-sbx-push-agent-config-follows-gitignore.md).
+
 ### Loading your project's `CLAUDE.md`: `sbx up --cortex`
 
 The `Read` deny in `.claude/settings.json` also stops Claude Code loading your project's own
@@ -686,7 +695,9 @@ supported. Two of your credentials cannot hold the identical destination (`409 d
     excluded directory comes back as a bare delete, and a `push` replaces the agent's new files
     there without warning, since they never count as unpulled;
   - new files under a directory your own `.gitignore` ignores are not protected: they may not come
-    back, and a `push` can replace them.
+    back, and a `push` can replace them. The same holds for an ignored file: in a repository that
+    ignores `AGENTS.md`, a hand-written one is not pushed, and one the agent writes may not come
+    back. Commit it (`git add -f AGENTS.md`) to have it pushed and pulled (§4); a pulled `AGENTS.md` comes back with a warning.
 - **Pull --apply needs a recent git.** When your files have moved on since the push, the patch is
   merged 3-way; that uses `git apply --3way --cached`, which git accepts from version 2.32
   ([git 2.32 release notes](https://github.com/git/git/blob/master/Documentation/RelNotes/2.32.0.adoc)).

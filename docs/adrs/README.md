@@ -59,6 +59,7 @@ spec). Chronological by the spec's date; numbers are permanent.
 | [0046](0046-sbx-egress-credentials-owner-lookup.md)       | Inject SBX egress credentials at `moca-egress`: owner lookup (phase 1), sandbox token (phase 2)  | Accepted                                                        |
 | [0047](0047-p6-async-fan-out-in-worker-drain.md)          | P6 async fan-out as a drain loop inside the turn worker, sharing its admission budget            | Accepted                                                        |
 | [0048](0048-sbx-lease-mode.md)                            | Opt-in SBX lease mode: a warm guest between Execs; process survival as a separate explicit level | Accepted                                                        |
+| [0049](0049-sbx-push-agent-config-follows-gitignore.md)   | `sbx push` has no rule for `up`'s agent configuration: the repository's ignore rules decide      | Proposed                                                        |
 
 ## What an ADR is (and isn't)
 
