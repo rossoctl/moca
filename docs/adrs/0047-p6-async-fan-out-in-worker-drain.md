@@ -216,6 +216,16 @@ never-submitted and reaped-as-lost.
   Knative-specific — plain Redis Streams behind a `WorkQueue` interface. Rewriting re-derives the same
   calls with fresh bugs.
 - **Scale-to-zero by some other mechanism.** Out of scope: ADR-0041 traded it away deliberately.
+- **A batch resource (`/v1/batches`).** Deferred by #279 until "a real batch" appeared, and
+  **rejected in #537** now that a working fan-out exists to measure a caller-side loop against: a
+  fan-out is N sessions each holding one async turn, submitted in a loop. Bounded concurrency is
+  admission (the slot cap and the per-owner queued quota), not a submission field free to disagree
+  with them; per-item state, retry and cancel are per-turn already; and a group identity, when one is
+  needed, is #279's `parentSessionId` tree under #401 rather than a flat batch, whose API is that
+  tree's degenerate case. One call instead of N is the only thing a batch adds, and leaf runtime
+  dominates N round trips. The real residual is collecting N results without N polls, which is #392's
+  owner-scoped event stream. Spec §4.4's closing amendment records the evidence and what the loop
+  costs a caller.
 
 ## Consequences
 
@@ -260,10 +270,9 @@ never-submitted and reaped-as-lost.
   leaf may extend once — the §6.2 heartbeat is what such an extension would key off, since it
   already proves liveness. Also owed: cancelling a running leaf; result retention beyond 24 h and
   richer artifacts; per-class concurrency caps, for which `async_claim_denied_full` against
-  interactive `429`s is the measurement that would justify them; `/v1/batches` (#537) once a working
-  fan-out exists to measure against; the documentation updates in #690 (ADR-0041's "Still owed" note,
-  the Archetype A row, the `async_removed` entry); and the wording amendment where MU1 §4.2 and MI1
-  §6.5/§10 still say "owned `/v1/runs`" against #279's resolution.
+  interactive `429`s is the measurement that would justify them; the documentation updates in #690
+  (ADR-0041's "Still owed" note, the Archetype A row, the `async_removed` entry); and the wording
+  amendment where MU1 §4.2 and MI1 §6.5/§10 still say "owned `/v1/runs`" against #279's resolution.
 
 ---
 

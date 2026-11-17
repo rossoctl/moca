@@ -16,8 +16,9 @@ measured, and what proves it. Covers all three P6 deployments (`deploy/k8s`, `de
 `deploy/compose`).
 
 > **What this is not.** Not the cron on-ramp (Archetype C, #536), though §11 states what that design
-> inherits from this one. Not batch execution (`/v1/batches`, #537), which is decided once a working
-> fan-out exists to measure. Synchronous `POST /v1/runs` and interactive `POST /v1/turn` keep their
+> inherits from this one. Not batch execution: #537 asked whether `/v1/batches` was needed once a
+> working fan-out existed to measure against, and §4.4's closing amendment records the answer — no, a
+> fan-out is the caller's loop. Synchronous `POST /v1/runs` and interactive `POST /v1/turn` keep their
 > current contracts, with one deliberate exception recorded in §5.3.
 
 ---
@@ -229,8 +230,9 @@ GET /v1/sessions/{sessionId}/turns/{turnId}/artifacts/{kind}      # kind: patch
 
 Authenticated and owner-scoped, like §4.1. The turn record is the **single source of truth for
 state**; `result` is the artifact from `leaf-result-store`, present once the leaf has written one.
-Goal 4 is satisfied by N of these — one per leaf — which is also the measurement #537 needs before
-`/v1/batches` can be judged worth building.
+Goal 4 is satisfied by N of these — one per leaf — which was also the measurement #537 waited on
+before `/v1/batches` could be judged worth building. The amendment at the end of this section
+records that it decided against one.
 
 > **Amended in #390: the status read is bounded and the output has its own route.** The shape above
 > is the current one. The first cut returned the stored record verbatim, which meant a 4 MiB patch
@@ -276,6 +278,42 @@ Goal 4 is satisfied by N of these — one per leaf — which is also the measure
 
 So the two routes coexist with one source of truth each: `/runs/status` serves synchronous callers
 from the result store as it always has, and the route above serves async callers from the record.
+
+> **Decided by #537: a fan-out is the caller's loop, and there is no `/v1/batches`.** The measurement
+> this document said the decision waited on now exists, and it came out against a batch noun. N
+> leaves are N sessions, each holding one async turn, submitted in a loop and collected by N reads of
+> the route above. Everything a batch resource would own is already owned somewhere better:
+>
+> - **Bounded concurrency** is admission, not a submission parameter: §5.3's slot cap sizes the drain
+>   and §4.3's `MOCA_ASYNC_QUEUED_PER_OWNER` bounds one owner's queue. A `concurrency` field on a
+>   batch would be a third number free to disagree with those two.
+> - **Per-item state, retry and cancel** are per-turn already: §5.1's record, §6.1's at-least-once
+>   delivery with dead-lettering, and §4.5's cancel.
+> - **Grouping identity**, when a caller needs one, is #279's `parentSessionId` — a tree, which
+>   #401's declarative continuations own. A flat batch is that graph's degenerate case, so shipping
+>   it first would commit the API to the special case of a general shape nobody has designed.
+> - **One call instead of N** is what remains, and it is a convenience: the caller already holds the
+>   N items it chose, and leaf runtime dominates N submission round trips.
+>
+> The evidence beyond this design: #279's resolution left `/v1/batches` conditional on "a real batch"
+> appearing; the #490 migration responses named no batch dependency (nor an async fan-out one at
+> all); and the archetype requirements already assign batching by rule or class, batch size and
+> locality grouping to the external orchestrator
+> ([`2026-06-26-pipeline-archetypes-requirements.md`](2026-06-26-pipeline-archetypes-requirements.md)
+> §7.3).
+>
+> **What the loop costs, stated so a caller can size it.** A session create per leaf, because
+> `idempotencyKey` defaults to the session id and a session therefore holds one async turn in flight;
+> a `429` `async_quota_exhausted` at `MOCA_ASYNC_QUEUED_PER_OWNER` non-terminal turns, which the loop
+> answers by waiting for one to finish rather than by retrying; a fan-out width of `SH_WORKERS` ×
+> replicas, raised by hand since §10 dropped queue-depth scaling; and collection inside
+> `LEAF_RESULT_TTL_SECONDS`, after which the result is gone and only the record's terminal state
+> remains.
+>
+> **The one real gap is collecting N results without N polls**, and its answer is the owner-scoped
+> event stream (#392), not a batch resource. What would reopen this: a group-level operation that
+> cannot be written as a loop — one cancel for the group, or one read of every result — or a caller
+> whose wall clock is set by submission round trips rather than by leaf runtime.
 
 ### 4.5 Cancellation: queued only
 
@@ -605,8 +643,8 @@ same line, with the same comment: "a queued run is a server turn too."
 Retention beyond 24 h and richer artifacts are out of scope here; §12 lists them as owed. (#390
 delivered both: seven-day retention, and a base commit plus a diffstat on every captured patch.)
 
-The caller polls the turn record for state, and the result store for the artifact. Whether N-way
-collection needs `/v1/batches` is #537, decided once this is measurable.
+The caller polls the turn record for state, and the result store for the artifact. N-way collection
+needs no `/v1/batches`: §4.4's closing amendment records #537's decision and what the loop costs.
 
 **What this retires: #380's interim contract.** A synchronous `/runs` leaf keeps running after its
 client disconnects, and #380 pinned that accident as a tested interim contract explicitly "until
@@ -1126,7 +1164,10 @@ it adds is the schedule. Its design should cite this document for both.
 - Per-class concurrency caps (archetypes §2) — §10 drops them for now; a global slot cap is what M1
   delivers. §7's `async_claim_denied_full` against interactive `429`s is the measurement that would
   justify adding them.
-- `/v1/batches` (#537), once a working fan-out exists to measure a client-side loop against.
+- ~~`/v1/batches` (#537), once a working fan-out exists to measure a client-side loop against.~~
+  **Decided in #537: not building it.** §4.4's closing amendment holds the reasoning and the loop's
+  limits; the one gap it names, collecting N results without N polls, belongs to #392's event
+  stream.
 - Documentation: ADR-0041's "Still owed" note, the Archetype A row and section of
   `dispatch-archetypes.md`, and the `async_removed` entry in `docs/reference/http-api.md` (#690).
   `MOCA_ASYNC_QUEUED_PER_OWNER` (§4.3) joins `docs/reference/configuration.md`'s table with the code
