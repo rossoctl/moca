@@ -125,10 +125,31 @@ func TestWorkspaceRunnerConfig(t *testing.T) {
 	if err != nil || w.Root != "/srv/ws" || w.Idle != 8*time.Hour {
 		t.Fatalf("overrides: root=%q idle=%s err=%v", w.Root, w.Idle, err)
 	}
+	if w.EmptyIdle != 0 {
+		t.Fatalf("defaults: EmptyIdle=%s, want 0 (the runner's %s)", w.EmptyIdle, wexec.DefaultWorkspaceEmptyIdle)
+	}
+	for env, want := range map[[2]string]time.Duration{
+		{"", "5m"}:    5 * time.Minute,
+		{"", "30m"}:   30 * time.Minute, // equal to the default Idle
+		{"8h", "2h"}:  2 * time.Hour,
+		{"8h", "15m"}: 15 * time.Minute,
+	} {
+		w, err = workspaceRunner(get(map[string]string{"SH_WORKSPACE_IDLE": env[0], "SH_WORKSPACE_EMPTY_IDLE": env[1]}))
+		if err != nil {
+			t.Errorf("idle=%q empty=%q: %v", env[0], env[1], err)
+		} else if w.EmptyIdle != want {
+			t.Errorf("idle=%q empty=%q: EmptyIdle=%s, want %s", env[0], env[1], w.EmptyIdle, want)
+		}
+	}
 	for _, bad := range []map[string]string{
 		{"SH_WORKSPACE_IDLE": "8"},
 		{"SH_WORKSPACE_IDLE": "-1h"},
 		{"SH_WORKSPACE_ROOT": "workspace"},
+		{"SH_WORKSPACE_EMPTY_IDLE": "15"},
+		{"SH_WORKSPACE_EMPTY_IDLE": "0s"},
+		{"SH_WORKSPACE_EMPTY_IDLE": "-1m"},
+		{"SH_WORKSPACE_EMPTY_IDLE": "31m"}, // above the default Idle
+		{"SH_WORKSPACE_IDLE": "10m", "SH_WORKSPACE_EMPTY_IDLE": "15m"},
 	} {
 		if _, err := workspaceRunner(get(bad)); err == nil {
 			t.Errorf("%v accepted; want an error", bad)

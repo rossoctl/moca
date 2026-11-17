@@ -146,19 +146,19 @@ for k in SH_SANDBOX_MODES_ALLOWED SH_SANDBOX_IDLE_CEILING_S; do
   [[ "$(cp_env "$k" | jq -r .valueFrom.configMapKeyRef.optional)" == true ]] ||
     fail "$k must be optional (the control plane defaults it)"
 done
-[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.secret) | {s: .secret.secretName, k: [.secret.items[]?.key]}]' <<<"$CP")" == '[{"s":"moca-mu1","k":["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN"]}]' ]] ||
-  fail "the control plane mounts more or less than its signing key and the janitor token: $(jq -c '[.spec.template.spec.volumes[] | select(.secret)]' <<<"$CP")"
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.projected) | {s: [.projected.sources[] | .secret.name], o: [.projected.sources[] | .secret.optional], k: [.projected.sources[] | .secret.items[]?.key]}]' <<<"$CP")" == '[{"s":["moca-mu1","moca-oidc"],"o":[null,true],"k":["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN","SH_OIDC_CLIENT_SECRET"]}]' ]] ||
+  fail "the control plane mounts more or less than its signing key, the janitor token and the optional oidc client secret: $(jq -c '[.spec.template.spec.volumes[] | select(.projected)]' <<<"$CP")"
 [[ "$(jq -r .spec.template.spec.automountServiceAccountToken <<<"$CP")" == false ]] || fail 'the control plane still mounts a service account token'
 # Exactly ONE source type per volume. The base makes `credentials` a projected volume (ADR-0045);
-# volumes merge by name, so an overlay that supplies `secret:` without nulling `projected:` renders
+# volumes merge by name, so an overlay that supplies `secret:` without replacing `projected:` renders
 # BOTH -- which the API server refuses, and which would re-mount the KEK and exchange token this
-# profile removes. The assertion above cannot see that: `select(.secret)` matches either way.
+# profile removes. The assertion above cannot see that: `select(.projected)` matches either way.
 VOL_TYPES="$(jq -c '[.spec.template.spec.volumes[] | {name, types: ([to_entries[] | select(.key != "name") | .key] | sort)}]' <<<"$CP")"
 [[ "$(jq -c '[.[] | select((.types | length) != 1)]' <<<"$VOL_TYPES")" == '[]' ]] ||
   fail "a volume declares more than one source type: $(jq -c '[.[] | select((.types | length) != 1)]' <<<"$VOL_TYPES")"
-[[ "$(jq -r '.[] | select(.name == "credentials") | .types[0]' <<<"$VOL_TYPES")" == secret ]] ||
-  fail "the credentials volume is not a plain secret volume here: $(jq -c '.[] | select(.name == "credentials")' <<<"$VOL_TYPES")"
-pass 'the control plane runs the sandbox profile with only its signing key and the janitor token mounted'
+[[ "$(jq -r '.[] | select(.name == "credentials") | .types[0]' <<<"$VOL_TYPES")" == projected ]] ||
+  fail "the credentials volume is not a projected volume here: $(jq -c '.[] | select(.name == "credentials")' <<<"$VOL_TYPES")"
+pass 'the control plane runs the sandbox profile with only its signing key, the janitor token and the optional oidc secret mounted'
 
 # The control plane's own policy admits nothing (the base's supervisor ingress is reset).
 [[ "$(obj NetworkPolicy moca-control-plane | jq -c '.spec.ingress')" == '[]' ]] ||
@@ -240,9 +240,10 @@ vol="$(jq -r '.spec.template.spec.volumes[] | select(.persistentVolumeClaim) | .
 [[ "$(cp_env SH_CREDENTIAL_DIR | jq -r .value)" == /var/lib/moca/credentials ]] || fail 'SH_CREDENTIAL_DIR is not /var/lib/moca/credentials'
 [[ "$(cp_env CREDENTIALS_DIRECTORY | jq -r .value)" == /run/credentials ]] || fail 'CREDENTIALS_DIRECTORY moved'
 [[ "$(jq -r .spec.template.spec.automountServiceAccountToken <<<"$CP")" == false ]] || fail 'egress on mounts a service account token'
-# The credentials volume: still moca-mu1's two items, plus every key of sbx-egress as a file beside them.
-[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[] | {s: (.secret.name), k: [.secret.items[]?.key]}]' <<<"$CP")" == '[{"s":"moca-mu1","k":["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN"]},{"s":"sbx-egress","k":[]}]' ]] ||
-  fail "the credentials volume is not moca-mu1's items plus sbx-egress: $(jq -c '.spec.template.spec.volumes[] | select(.name == "credentials")' <<<"$CP")"
+# The credentials volume: still moca-mu1's two items, the optional moca-oidc source, plus every key
+# of sbx-egress as a file beside them.
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[] | {s: (.secret.name), k: [.secret.items[]?.key]}]' <<<"$CP")" == '[{"s":"moca-mu1","k":["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN"]},{"s":"moca-oidc","k":["SH_OIDC_CLIENT_SECRET"]},{"s":"sbx-egress","k":[]}]' ]] ||
+  fail "the credentials volume is not moca-mu1's items, moca-oidc and sbx-egress: $(jq -c '.spec.template.spec.volumes[] | select(.name == "credentials")' <<<"$CP")"
 [[ "$(jq -r '.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.defaultMode' <<<"$CP")" == 256 ]] || fail 'the projected credentials are not 0400'
 [[ "$(jq -r '.spec.template.spec.containers[] | select(.name == "control-plane") | .volumeMounts[] | select(.name == "credentials") | "\(.mountPath) \(.readOnly)"' <<<"$CP")" == '/run/credentials true' ]] ||
   fail 'the credentials volume is not mounted read-only at /run/credentials'
@@ -276,11 +277,11 @@ vol="$(jq -r '.spec.template.spec.volumes[] | select(.persistentVolumeClaim.clai
   fail 'the store PVC is not mounted at /var/lib/moca/templates'
 [[ "$(cp_env SH_PROVENANCE_DIR | jq -r .value)" == /var/lib/moca/templates ]] || fail 'SH_PROVENANCE_DIR is not /var/lib/moca/templates'
 [[ "$(jq -r .spec.strategy.type <<<"$CP")" == Recreate && "$(jq -r '.spec.strategy.rollingUpdate // "none"' <<<"$CP")" == none ]] || fail 'the control plane is not strategy Recreate (store on)'
-# The host agents' tokens (spec §6.1): sbx-template-hosts projected beside moca-mu1's two items, and
-# sbx-egress restated as optional (a strategic merge replaces the source list, and egress may be off);
-# SH_TEMPLATE_HOSTS from sbx-settings, optional. No egress store.
-[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[]?.secret | [.name, (.optional // false)]]' <<<"$CP")" == '[["moca-mu1",false],["sbx-egress",true],["sbx-template-hosts",false]]' ]] ||
-  fail "store on: the credentials volume is not moca-mu1, sbx-egress (optional) and sbx-template-hosts: $(jq -c '.spec.template.spec.volumes[] | select(.name == "credentials")' <<<"$CP")"
+# The host agents' tokens (spec §6.1): sbx-template-hosts projected beside moca-mu1's two items, the
+# optional moca-oidc source, and sbx-egress restated as optional (a strategic merge replaces the
+# source list, and egress may be off); SH_TEMPLATE_HOSTS from sbx-settings, optional. No egress store.
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[]?.secret | [.name, (.optional // false)]]' <<<"$CP")" == '[["moca-mu1",false],["moca-oidc",true],["sbx-egress",true],["sbx-template-hosts",false]]' ]] ||
+  fail "store on: the credentials volume is not moca-mu1, moca-oidc (optional), sbx-egress (optional) and sbx-template-hosts: $(jq -c '.spec.template.spec.volumes[] | select(.name == "credentials")' <<<"$CP")"
 [[ "$(jq -c '[.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[0].secret.items[].key]' <<<"$CP")" == '["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN"]' ]] ||
   fail "store on changed moca-mu1's items in the credentials volume"
 [[ "$(cp_env SH_TEMPLATE_HOSTS | jq -c .valueFrom.configMapKeyRef)" == '{"key":"SH_TEMPLATE_HOSTS","name":"sbx-settings","optional":true}' ]] ||

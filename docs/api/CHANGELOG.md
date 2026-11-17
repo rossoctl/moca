@@ -8,7 +8,7 @@ that shipped it ("The data plane's twin … goes to"):
 
 | `harness-openapi.yaml` | Shipped with                   |
 | ---------------------- | ------------------------------ |
-| 1.6.0                  | [1.29.0](#1290)                |
+| 1.6.0                  | [1.30.0](#1300)                |
 | 1.5.0                  | [1.28.0](#1280)                |
 | 1.4.0                  | [1.26.0](#1260)                |
 | 1.3.0                  | [1.17.0](#1170)                |
@@ -16,7 +16,7 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
-## 1.29.0
+## 1.30.0
 
 Per-turn budgets, and cancelling a turn that is already running
 ([#391](https://github.com/rossoctl/moca/issues/391)), per the
@@ -59,6 +59,23 @@ because that is what Preview requires.
 - `POST /internal/turn-credentials` returns `turnExp` in **every** tenancy mode, not only `grant`:
   it is the deadline the worker enforces, so a single-tenant deployment got an unenforceable
   `caps.wallClock` without it. `caps.costUsd` is gone from that body too.
+
+## 1.29.0
+
+A per-source bound on login starts ([#716](https://github.com/rossoctl/moca/issues/716)).
+Additive.
+
+- `POST /v1/auth/device` now documents its `429 quota_exceeded`, which the oidc provider has
+  answered since it shipped (the 10,000-state total cap) and which now has a second cause: one
+  client address holding `SH_OIDC_MAX_PENDING_PER_SOURCE` (default 20) live login states. The
+  message tells the two apart ("...from this address"); the code and the status are the same. The
+  address is the socket peer, or the X-Forwarded-For entry `SH_TRUSTED_PROXY_HOPS` names (the
+  socket peer when the header holds fewer entries than that). The GitHub provider is unchanged.
+- For a deployment with its own `PendingAuthStore` (the control plane's extension point for a
+  shared pending-login store): `put` now answers which bound refused the entry (`'parked'`,
+  `'full'` or `'source_full'`) instead of a boolean. A store still answering the boolean keeps
+  working: `true` reads as parked and `false` as the total cap's refusal. To enforce the
+  per-source bound, a store answers `'source_full'`.
 
 ## 1.28.0
 

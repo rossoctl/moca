@@ -28,7 +28,8 @@ export type Target =
   | 'overlays/kind-ci'
   | 'overlays/ocp'
   | 'overlays/ocp-single'
-  | 'overlays/ocp-sbx';
+  | 'overlays/ocp-sbx'
+  | 'overlays/ocp-combined';
 
 export function haveKubectl(): boolean {
   try {

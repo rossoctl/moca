@@ -139,6 +139,8 @@ export {
   OidcProvider,
   type PendingAuthStore,
   type PendingOidcAuth,
+  type PendingOidcPatch,
+  type PendingPutOutcome,
 } from './oidc.js';
 export {
   HANDLERS,

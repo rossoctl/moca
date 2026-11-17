@@ -69,15 +69,41 @@ export interface PendingOidcAuth {
   wrongCodes?: number;
   /** Set when the provider or the user refused: the poll reports it. */
   denial?: string;
+  /**
+   * The client address that started this login (RequestCtx.source), counted against the store's
+   * per-source bound. Absent when the caller has none to give, and then only the total cap applies.
+   */
+  source?: string;
 }
+
+/**
+ * What `settle` may change: never the key, the TTL, or the source -- the per-source index is
+ * written at `put` and would no longer match an entry whose source moved.
+ */
+export type PendingOidcPatch = Partial<Omit<PendingOidcAuth, 'state' | 'expiresAtMs' | 'source'>>;
+
+/**
+ * A put's outcome. Both refusals answer the client the same way (429 quota_exceeded); they are
+ * told apart only so the message can say which bound was hit.
+ *
+ * Before #716 `put` answered a boolean (true parked, false refused). The store is an extension
+ * point, so the provider still accepts that from an out-of-tree store: `true` reads as `parked`
+ * and `false` as `full` (see PendingAuthStore.put). In-tree stores answer the outcome.
+ */
+export type PendingPutOutcome = 'parked' | 'full' | 'source_full';
 
 /**
  * Where pending logins live. Memory is the default and is correct for a single-replica control
  * plane; a deployment whose ingress load-balances across replicas must back it with the shared
  * store (Redis), or a callback landing on pod B never meets the state pod A issued.
  *
- * `put` refuses (returns false) once the store holds `maxEntries` live entries: the login-start
- * route is unauthenticated, so nothing else bounds the memory a loop of anonymous POSTs can park.
+ * `put` refuses once the store holds `maxEntries` live entries (`full`): the login-start route is
+ * unauthenticated, so nothing else bounds the memory a loop of anonymous POSTs can park. It also
+ * refuses once one SOURCE holds `maxPerSource` live entries (`source_full`): the total cap alone is
+ * not fair, because one client looping starts fills it with live 15-minute states and every real
+ * user then gets 429 for the rest of the TTL, which no sweep can shorten (nothing has expired).
+ * The per-source bound keeps such a client to its own share and leaves the rest of the cap to
+ * everyone else (#716).
  * `settle` is write-once per outcome: a `principal` is never replaced (a second code exchange
  * must not swap who a parked login belongs to), and a `denial` is terminal. A denial landing on a
  * parked entry IS allowed -- that is the confirm path's designated transition (too many wrong
@@ -85,25 +111,41 @@ export interface PendingOidcAuth {
  * already succeeded past the provider (see settleProviderDenial).
  */
 export interface PendingAuthStore {
-  /** False when the store is at its cap; the caller refuses the login start. */
-  put(entry: PendingOidcAuth): Promise<boolean>;
+  /**
+   * Anything but `parked` means a bound was hit; the caller refuses the login start. A boolean is
+   * the pre-#716 contract, still accepted so a store written against it keeps starting logins
+   * after an upgrade (`true` is `parked`, `false` is `full`); a new store answers the outcome.
+   */
+  put(entry: PendingOidcAuth): Promise<PendingPutOutcome | boolean>;
   get(state: string): Promise<PendingOidcAuth | undefined>;
   /** Record the callback's outcome; false when no live entry holds that state, or it is settled. */
-  settle(
-    state: string,
-    patch: Partial<Omit<PendingOidcAuth, 'state' | 'expiresAtMs'>>,
-  ): Promise<boolean>;
+  settle(state: string, patch: PendingOidcPatch): Promise<boolean>;
   delete(state: string): Promise<void>;
 }
 
 /** Live pending logins one control plane holds; past this, login starts are refused (429). */
 export const MAX_PENDING_LOGINS = 10_000;
 
+/**
+ * Live pending logins one source may hold (SH_OIDC_MAX_PENDING_PER_SOURCE's default). A person
+ * needs one at a time, and an abandoned start (a Ctrl-C) holds its slot for the state TTL, so this
+ * leaves room for a few retries each from the users sharing one address (an office behind NAT),
+ * while a looping client fills only 20 of the 10,000.
+ */
+export const MAX_PENDING_LOGINS_PER_SOURCE = 20;
+
 export class MemoryPendingAuthStore implements PendingAuthStore {
   private readonly entries = new Map<string, PendingOidcAuth>();
+  /** The states each source holds: the per-source count, and what to sweep when it is full. */
+  private readonly bySource = new Map<string, Set<string>>();
+  /**
+   * `maxPerSource` 0 turns the per-source bound off (a deployment whose clients all arrive from
+   * one address, e.g. through an SSH tunnel, where it would only shrink the total cap).
+   */
   constructor(
     private readonly now: () => number,
     private readonly maxEntries: number = MAX_PENDING_LOGINS,
+    private readonly maxPerSource: number = MAX_PENDING_LOGINS_PER_SOURCE,
   ) {}
 
   /**
@@ -112,23 +154,50 @@ export class MemoryPendingAuthStore implements PendingAuthStore {
    * otherwise be refused. That keeps the common path O(1) instead of walking the map per request.
    */
   private sweep(): void {
-    for (const [k, e] of this.entries) if (e.expiresAtMs <= this.now()) this.entries.delete(k);
+    for (const [k, e] of this.entries) if (e.expiresAtMs <= this.now()) this.remove(k);
   }
 
-  async put(entry: PendingOidcAuth): Promise<boolean> {
+  /** The same discipline per source: walk only that source's states, and only when it is full. */
+  private sweepSource(states: Set<string>): void {
+    for (const k of states) {
+      const e = this.entries.get(k);
+      if (!e || e.expiresAtMs <= this.now()) this.remove(k);
+    }
+  }
+
+  private remove(state: string): void {
+    const e = this.entries.get(state);
+    this.entries.delete(state);
+    if (e?.source === undefined) return;
+    const states = this.bySource.get(e.source);
+    states?.delete(state);
+    // An empty set is dropped, so the index holds only sources with a live login: it is bounded by
+    // the total cap, however many distinct addresses have ever started one.
+    if (states?.size === 0) this.bySource.delete(e.source);
+  }
+
+  async put(entry: PendingOidcAuth): Promise<PendingPutOutcome> {
+    const states = entry.source === undefined ? undefined : this.bySource.get(entry.source);
+    if (states && this.maxPerSource > 0 && states.size >= this.maxPerSource) {
+      this.sweepSource(states);
+      if (states.size >= this.maxPerSource) return 'source_full';
+    }
     if (this.entries.size >= this.maxEntries) this.sweep();
-    if (this.entries.size >= this.maxEntries) return false;
+    if (this.entries.size >= this.maxEntries) return 'full';
     this.entries.set(entry.state, entry);
-    return true;
+    if (entry.source !== undefined) {
+      // Re-read: a sweep above may have dropped this source's (emptied) set.
+      const set = this.bySource.get(entry.source) ?? new Set<string>();
+      set.add(entry.state);
+      this.bySource.set(entry.source, set);
+    }
+    return 'parked';
   }
   async get(state: string): Promise<PendingOidcAuth | undefined> {
     const e = this.entries.get(state);
     return e && e.expiresAtMs > this.now() ? e : undefined;
   }
-  async settle(
-    state: string,
-    patch: Partial<Omit<PendingOidcAuth, 'state' | 'expiresAtMs'>>,
-  ): Promise<boolean> {
+  async settle(state: string, patch: PendingOidcPatch): Promise<boolean> {
     const e = await this.get(state);
     if (!e) return false;
     // Write-once per outcome (see the interface): terminal once denied, principal never replaced.
@@ -139,7 +208,7 @@ export class MemoryPendingAuthStore implements PendingAuthStore {
     return true;
   }
   async delete(state: string): Promise<void> {
-    this.entries.delete(state);
+    this.remove(state);
   }
 }
 
@@ -222,6 +291,8 @@ export class OidcProvider implements IdentityProvider {
     fetch?: FetchLike;
     now?: () => number;
     store?: PendingAuthStore;
+    /** The default store's per-source bound (SH_OIDC_MAX_PENDING_PER_SOURCE); 0 is off. */
+    maxPendingPerSource?: number;
     stateTtlS?: number;
     clockSkewS?: number;
   }) {
@@ -240,7 +311,13 @@ export class OidcProvider implements IdentityProvider {
     this.scope = opts.scope ?? 'openid email profile';
     this.fetchImpl = opts.fetch ?? (globalThis.fetch as unknown as FetchLike);
     this.now = opts.now ?? (() => Date.now());
-    this.store = opts.store ?? new MemoryPendingAuthStore(this.now);
+    this.store =
+      opts.store ??
+      new MemoryPendingAuthStore(
+        this.now,
+        MAX_PENDING_LOGINS,
+        opts.maxPendingPerSource ?? MAX_PENDING_LOGINS_PER_SOURCE,
+      );
     this.stateTtlS = opts.stateTtlS ?? 900;
     this.clockSkewS = opts.clockSkewS ?? 60;
   }
@@ -279,7 +356,7 @@ export class OidcProvider implements IdentityProvider {
     return d;
   }
 
-  async startDeviceAuth(): Promise<DeviceStart> {
+  async startDeviceAuth(source?: string): Promise<DeviceStart> {
     const d = await this.discover();
     // 32 random bytes, base64url: the state is the capability the client polls with, so it is
     // unguessable for the same reason a device code or refresh token is.
@@ -287,12 +364,25 @@ export class OidcProvider implements IdentityProvider {
     // The terminal's half of the binding: short, human-typable, and NEVER in the authorize URL --
     // the URL is the piece a victim can be handed, the code is not.
     const confirmCode = mintConfirmCode();
-    const parked = await this.store.put({
+    const answered = await this.store.put({
       state,
       confirmCode,
       expiresAtMs: this.now() + this.stateTtlS * 1000,
+      ...(source !== undefined ? { source } : {}),
     });
-    if (!parked) {
+    // A store written against the boolean contract (see PendingAuthStore.put) must not 429 every
+    // start after an upgrade: its true is a parked entry, its false the total cap's refusal.
+    const parked: PendingPutOutcome =
+      answered === true ? 'parked' : answered === false ? 'full' : answered;
+    if (parked === 'source_full') {
+      // The same refusal as the total cap's, scoped to the one address: its other users wait out
+      // their own abandoned starts, and everyone else's logins still start (#716).
+      throw new CpError(
+        'quota_exceeded',
+        'too many sign-ins are waiting from this address; try again in a moment',
+      );
+    }
+    if (parked !== 'parked') {
       // The route is unauthenticated, so the cap is the only bound on anonymous memory; refusing
       // the START (429) is the client's signal to back off, and expired entries were swept first.
       throw new CpError('quota_exceeded', 'too many sign-ins are waiting; try again in a moment');

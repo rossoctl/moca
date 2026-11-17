@@ -25,6 +25,7 @@ type fakeLauncher struct {
 
 	restoreErr    error
 	beforeRestore func(RestoreRequest)
+	beforeDestroy func() // runs once per VM, after it is marked destroyed and before it leaves live; outside l.mu, so it may block
 	runFn         func(*fakeVM, Command, Sink) (Result, error)
 	resumeFn      func(*fakeVM, context.Context) error
 	destroyErr    error
@@ -83,6 +84,12 @@ func (l *fakeLauncher) setRestoreErr(err error) { l.mu.Lock(); l.restoreErr = er
 func (l *fakeLauncher) setBeforeRestore(f func(RestoreRequest)) {
 	l.mu.Lock()
 	l.beforeRestore = f
+	l.mu.Unlock()
+}
+
+func (l *fakeLauncher) setBeforeDestroy(f func()) {
+	l.mu.Lock()
+	l.beforeDestroy = f
 	l.mu.Unlock()
 }
 
@@ -232,6 +239,12 @@ func (v *fakeVM) Destroy() error {
 	}
 	v.destroyed = true
 	v.mu.Unlock()
+	v.lc.mu.Lock()
+	hook := v.lc.beforeDestroy
+	v.lc.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	v.lc.mu.Lock()
 	defer v.lc.mu.Unlock()
 	delete(v.lc.live, v.id)

@@ -10,6 +10,9 @@ metadata:
   namespace: moca
   annotations:
     haproxy.router.openshift.io/hsts_header: max-age=31536000
+    # #716: the control plane trusts the LAST X-Forwarded-For entry (SH_TRUSTED_PROXY_HOPS=1), so
+    # the router must append, whatever the IngressController's forwardedHeaderPolicy says.
+    haproxy.router.openshift.io/set-forwarded-headers: append
 spec:
   host: sbx-api.apps.example.invalid
   to: { kind: Service, name: moca-control-plane }

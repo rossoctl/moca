@@ -35,7 +35,13 @@ export interface DeviceStart {
 }
 
 export interface IdentityProvider {
-  startDeviceAuth(): Promise<DeviceStart>;
+  /**
+   * `source` is the requesting client's address (RequestCtx.source). The login-start route is
+   * unauthenticated, so a provider that parks state per start (oidc.ts) bounds what one source may
+   * hold; a provider that parks nothing (GitHub's device flow, where GitHub holds the state)
+   * ignores it.
+   */
+  startDeviceAuth(source?: string): Promise<DeviceStart>;
   /**
    * Throws `authorization_pending` (428) while the user has not yet approved, and
    * `device_code_expired` (410) once the code has lapsed unapproved.

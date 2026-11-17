@@ -9,7 +9,9 @@
 # Environment: KIND_CLUSTER (kind only: the cluster name, default moca), SH_GITHUB_CLIENT_ID,
 # SH_ADMIN_SUBJECTS, SH_ALLOW_OPERATOR_FALLBACK (default false), SH_IDENTITY_PROVIDER (github, the
 # default, or oidc; with oidc: SH_OIDC_ISSUER, SH_OIDC_CLIENT_ID, SH_OIDC_REDIRECT_URI and optional
-# SH_OIDC_SCOPE are written to moca-settings, and the client secret must already sit in a Secret
+# SH_OIDC_SCOPE and SH_OIDC_MAX_PENDING_PER_SOURCE (live login starts per client address; empty
+# means the control plane's default, 20; 0 is off) are written to moca-settings, and the client
+# secret must already sit in a Secret
 # named moca-oidc, key SH_OIDC_CLIENT_SECRET -- setup.sh never touches it; see
 # docs/guides/oidc-login-w3id.md),
 # SH_SANDBOX_COUNT (default 2, at most 4 digits; 0 runs no container sandboxes), SH_WAIT_SECONDS
@@ -41,7 +43,9 @@
 # empty; async fan-out spec §9.2), LEAF_RESULT_TTL_SECONDS (every target: how long a leaf result is
 # kept, whole seconds; empty means the default, 604800 (7 days) -- read by BOTH the control plane and the
 # supervisor from this one key, so the async turn record and the result it describes expire
-# together), SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
+# together), SH_TRUSTED_PROXY_HOPS (every target: how many proxies in front of the control plane
+# append to X-Forwarded-For; empty means 1, the Route's router, whose Routes pin append; 0 keys
+# every client by the socket peer; #716), SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
 # setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT, SH_P4_SANDBOX_IDS,
@@ -257,6 +261,12 @@ parse_args() {
   # must be refused here instead of crashlooping it after the apply.
   valid_catalog_hosts "${SH_MODEL_CATALOG_HOSTS-}" ||
     die "SH_MODEL_CATALOG_HOSTS='${SH_MODEL_CATALOG_HOSTS-}' must be comma-separated bare hostnames (no scheme, port or path), or empty"
+  # The per-source login bound and the proxy hop count (#716): the control plane refuses to BOOT on
+  # anything but a whole number, so a typo is refused here; a stored one is checked in write_settings.
+  local count
+  for count in SH_OIDC_MAX_PENDING_PER_SOURCE SH_TRUSTED_PROXY_HOPS; do
+    valid_count "${!count-}" || die "$count='${!count}' must be a whole number, 0 to 6 digits (empty: the default)"
+  done
   WORKLOAD_SANDBOXES_GIVEN="${SH_WORKLOAD_SANDBOXES+x}"
   case "${SH_WORKLOAD_SANDBOXES-}" in
   '' | 1) WORKLOAD_SANDBOXES="${SH_WORKLOAD_SANDBOXES-}" ;;
@@ -275,6 +285,10 @@ parse_args() {
 # most 8 digits (over three years): the control plane silently takes its default for anything it
 # cannot read as a positive number, so a typo must be refused here instead.
 valid_ttl() { [[ -z "$1" || "$1" =~ ^[1-9][0-9]{0,7}$ ]]; }
+
+# valid_count VALUE: empty (the default) or a whole number, 0 included, at most 6 digits. Mirrors
+# main.ts countEnv, which refuses to boot on anything else.
+valid_count() { [[ -z "$1" || "$1" =~ ^(0|[1-9][0-9]{0,5})$ ]]; }
 
 # valid_catalog_hosts VALUE: empty (the control plane's default, no extra hosts) or comma-separated
 # bare hostnames. Mirrors main.ts catalogHostsEnv, which trims, lower-cases and skips empty entries
@@ -1124,7 +1138,7 @@ hand_patched_catalog_hosts() {
 # SH_ASYNC_DRAIN the async drain off.
 write_settings() {
   local before after admins fb api_ttl session_ttl catalog_hosts catalog_src url
-  local idp oidc_issuer oidc_client_id oidc_redirect oidc_scope drain result_ttl
+  local idp oidc_issuer oidc_client_id oidc_redirect oidc_scope oidc_per_source hops drain result_ttl
   before="$(configmap_json moca-settings)"
   if [[ -n "${SH_GITHUB_CLIENT_ID+x}" ]]; then
     CLIENT_ID="$SH_GITHUB_CLIENT_ID"
@@ -1144,6 +1158,7 @@ write_settings() {
   if [[ -n "${SH_OIDC_CLIENT_ID+x}" ]]; then oidc_client_id="$SH_OIDC_CLIENT_ID"; else oidc_client_id="$(cm_value "$before" SH_OIDC_CLIENT_ID)"; fi
   if [[ -n "${SH_OIDC_REDIRECT_URI+x}" ]]; then oidc_redirect="$SH_OIDC_REDIRECT_URI"; else oidc_redirect="$(cm_value "$before" SH_OIDC_REDIRECT_URI)"; fi
   if [[ -n "${SH_OIDC_SCOPE+x}" ]]; then oidc_scope="$SH_OIDC_SCOPE"; else oidc_scope="$(cm_value "$before" SH_OIDC_SCOPE)"; fi
+  if [[ -n "${SH_OIDC_MAX_PENDING_PER_SOURCE+x}" ]]; then oidc_per_source="$SH_OIDC_MAX_PENDING_PER_SOURCE"; else oidc_per_source="$(cm_value "$before" SH_OIDC_MAX_PENDING_PER_SOURCE)"; fi
   idp="${idp:-github}"
   [[ "$idp" == github || "$idp" == oidc ]] ||
     die "SH_IDENTITY_PROVIDER must be exactly 'github' or 'oidc' (got '$idp')"
@@ -1152,10 +1167,21 @@ write_settings() {
     [[ -n "$oidc_client_id" ]] || die 'SH_IDENTITY_PROVIDER=oidc needs SH_OIDC_CLIENT_ID'
     [[ -n "$oidc_redirect" ]] || die 'SH_IDENTITY_PROVIDER=oidc needs SH_OIDC_REDIRECT_URI (the control plane callback URL registered with the provider)'
     [[ -n "$oidc_scope" ]] || oidc_scope='openid email profile'
-    # The five keys travel together; OIDC_ISSUER feeds write_overlay's replica decision.
+    # The oidc keys travel together; OIDC_ISSUER feeds write_overlay's replica decision. An empty
+    # per-source bound stays empty: the control plane's default (20).
+    valid_count "$oidc_per_source" ||
+      die "moca-settings holds SH_OIDC_MAX_PENDING_PER_SOURCE='$oidc_per_source': re-run with it set to a whole number (0 is off), or set but empty (SH_OIDC_MAX_PENDING_PER_SOURCE=) for the default"
   else
-    oidc_issuer='' oidc_client_id='' oidc_redirect='' oidc_scope=''
+    oidc_issuer='' oidc_client_id='' oidc_redirect='' oidc_scope='' oidc_per_source=''
   fi
+  # The client address behind the Route (#716), same sticky convention. Empty means 1, not the
+  # control plane's 0: every target reaches the control plane through the router (its Routes pin
+  # set-forwarded-headers: append) or a port-forward (no header, so the socket peer), and 0 behind
+  # the router would key every login by the router's address.
+  if [[ -n "${SH_TRUSTED_PROXY_HOPS+x}" ]]; then hops="$SH_TRUSTED_PROXY_HOPS"; else hops="$(cm_value "$before" SH_TRUSTED_PROXY_HOPS)"; fi
+  valid_count "$hops" ||
+    die "moca-settings holds SH_TRUSTED_PROXY_HOPS='$hops': re-run with it set to a whole number, or set but empty (SH_TRUSTED_PROXY_HOPS=) for the default"
+  hops="${hops:-1}"
   OIDC_ISSUER="$oidc_issuer"
   if [[ -z "$CLIENT_ID" && "$TARGET" == kind-ci ]]; then
     # The CI smoke mints its own API tokens; no login ever runs, but the control plane needs a value.
@@ -1214,6 +1240,7 @@ write_settings() {
     --arg catalog_hosts "$catalog_hosts" --arg test_users "$TEST_USERS" \
     --arg idp "$idp" --arg oidc_issuer "$oidc_issuer" --arg oidc_client_id "$oidc_client_id" \
     --arg oidc_redirect "$oidc_redirect" --arg oidc_scope "$oidc_scope" \
+    --arg oidc_per_source "$oidc_per_source" --arg hops "$hops" \
     --arg drain "$drain" --arg result_ttl "$result_ttl" \
     '{SH_GITHUB_CLIENT_ID: $id, SH_ADMIN_SUBJECTS: $admins, SH_PUBLIC_HARNESS_URL: $url, SH_ALLOW_OPERATOR_FALLBACK: $fb,
       SH_SANDBOX_TIERS: $tiers, SH_SANDBOX_DEFAULT_TIER: $dtier,
@@ -1221,6 +1248,7 @@ write_settings() {
       SH_MODEL_CATALOG_HOSTS: $catalog_hosts, SH_TEST_USERS: $test_users,
       SH_IDENTITY_PROVIDER: $idp, SH_OIDC_ISSUER: $oidc_issuer, SH_OIDC_CLIENT_ID: $oidc_client_id,
       SH_OIDC_REDIRECT_URI: $oidc_redirect, SH_OIDC_SCOPE: $oidc_scope,
+      SH_OIDC_MAX_PENDING_PER_SOURCE: $oidc_per_source, SH_TRUSTED_PROXY_HOPS: $hops,
       SH_ASYNC_DRAIN: $drain, LEAF_RESULT_TTL_SECONDS: $result_ttl}')"
   jq -n --arg ns "$NS" --argjson data "$after" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-settings", namespace: $ns}, data: $data}' |

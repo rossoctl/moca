@@ -61,10 +61,13 @@ func invalidateMemAvailableCache() {
 //
 // /proc/meminfo reports kB columns (kernel KBYTES, i.e. 1024-byte units) with no
 // suffix on the value itself, e.g. "MemAvailable:  1503232 kB".
-func readHostMemAvailable() (int64, error) {
-	b, err := os.ReadFile("/proc/meminfo")
+func readHostMemAvailable() (int64, error) { return readMemAvailableFrom("/proc/meminfo") }
+
+// readMemAvailableFrom is readHostMemAvailable against a meminfo file at path.
+func readMemAvailableFrom(path string) (int64, error) {
+	b, err := os.ReadFile(path)
 	if err != nil {
-		return 0, fmt.Errorf("vmpool: reading /proc/meminfo: %w", err)
+		return 0, fmt.Errorf("vmpool: reading %s: %w", path, err)
 	}
 	for _, line := range strings.Split(string(b), "\n") {
 		rest, ok := strings.CutPrefix(line, "MemAvailable:")
@@ -81,5 +84,5 @@ func readHostMemAvailable() (int64, error) {
 		}
 		return kb * 1024, nil
 	}
-	return 0, fmt.Errorf("vmpool: no MemAvailable line in /proc/meminfo")
+	return 0, fmt.Errorf("vmpool: no MemAvailable line in %s", path)
 }
