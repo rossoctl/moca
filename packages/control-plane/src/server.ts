@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { isIP } from 'node:net';
 import { CpError, writeError } from './errors.js';
 import type { EgressHost } from './egress-config.js';
 import { checkExchangeAuth, checkStaticBearer } from './exchange.js';
@@ -49,6 +50,50 @@ const bearer = (req: IncomingMessage): string | undefined => {
   const value = rest.join(' ').trim();
   return value.length > 0 ? value : undefined;
 };
+
+/**
+ * One spelling per client address, so one client is one bucket: `::ffff:192.0.2.1` (a dual-stack
+ * socket's view) is `192.0.2.1`, and an IPv6 address takes its canonical RFC 5952 text (the URL
+ * parser's: lower case, zeros compressed), so `2001:DB8:0::1` and `2001:db8::1` are one source.
+ * A form the URL parser refuses (a zone id) stands as given.
+ */
+function canonicalAddress(addr: string): string {
+  if (addr.toLowerCase().startsWith('::ffff:') && isIP(addr.slice(7)) === 4) return addr.slice(7);
+  if (isIP(addr) !== 6) return addr;
+  try {
+    return new URL(`http://[${addr}]/`).hostname.slice(1, -1);
+  } catch {
+    return addr;
+  }
+}
+
+/**
+ * The client's address, for bounds on unauthenticated work (RequestCtx.source). With no trusted
+ * proxy it is the socket peer. Behind `hops` reverse proxies that each APPEND the address they saw
+ * to X-Forwarded-For (an OpenShift Route's default), the last `hops` entries were written by those
+ * proxies and everything left of them by the client, so the entry `hops` from the right is the
+ * one the outermost trusted proxy saw -- the express `trust proxy = <count>` rule. Fewer entries
+ * than hops means the request skipped a proxy, so no entry is known to be a trusted proxy's: every
+ * one may be the client's own, and the socket peer stands instead (as express answers).
+ *
+ * The count is a deployment setting because a caller that reaches the control plane AROUND the
+ * proxies writes the trusted entry itself: it can then pick its own bucket, or fill another
+ * address's, for the state TTL (the total cap still holds). Through the proxies it cannot, since
+ * they append after whatever it wrote. An entry that is not an IP address falls back to the socket
+ * peer, which also keeps a header-sized string from becoming a map key.
+ */
+export function clientSource(req: IncomingMessage, hops: number): string | undefined {
+  const peer = req.socket.remoteAddress;
+  const fallback = peer === undefined ? undefined : canonicalAddress(peer);
+  if (hops <= 0) return fallback;
+  const raw = req.headers['x-forwarded-for'];
+  const header = Array.isArray(raw) ? raw.join(',') : raw;
+  if (!header) return fallback;
+  const entries = header.split(',').map((e) => e.trim());
+  if (entries.length < hops) return fallback;
+  const picked = entries[entries.length - hops]!;
+  return isIP(picked) !== 0 ? canonicalAddress(picked) : fallback;
+}
 
 /**
  * Authenticate per the ROUTE's declared kind, not per handler. The router is the only layer that sees
@@ -166,7 +211,13 @@ export function buildHandler(deps: CpDeps): (req: IncomingMessage, res: ServerRe
         return;
       }
       const url = new URL(req.url ?? '/', 'http://localhost');
-      const ctx: RequestCtx = { params: matched.params, query: url.searchParams, body: undefined };
+      const source = clientSource(req, deps.config.trustedProxyHops ?? 0);
+      const ctx: RequestCtx = {
+        params: matched.params,
+        query: url.searchParams,
+        body: undefined,
+        ...(source !== undefined ? { source } : {}),
+      };
 
       // AUTHENTICATION FIRST, then the body. `authorize` reads only headers, so the order is free --
       // and with it reversed an unauthenticated `PUT /v1/credentials/x` carrying malformed JSON got

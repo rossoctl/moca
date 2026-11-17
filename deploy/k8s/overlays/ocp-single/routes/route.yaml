@@ -23,6 +23,10 @@ kind: Route
 metadata:
   name: moca-control-plane
   namespace: moca-single
+  annotations:
+    # #716: the control plane trusts the LAST X-Forwarded-For entry (SH_TRUSTED_PROXY_HOPS=1), so
+    # the router must append, whatever the IngressController's forwardedHeaderPolicy says.
+    haproxy.router.openshift.io/set-forwarded-headers: append
 spec:
   host: moca-control-plane.apps.example.invalid
   to:

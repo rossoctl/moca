@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import http from 'node:http';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
-import { buildHandler, startControlPlane } from '../src/server.js';
+import { buildHandler, clientSource, startControlPlane } from '../src/server.js';
 import { GRANT_TYP } from '../src/grant.js';
 import { makeSigner, publicKeyFromBase64 } from '../src/token.js';
 import { TestUserProvider } from '../src/identity.js';
@@ -408,6 +408,92 @@ describe('error hygiene', () => {
       headers: { Authorization: `Bearer ${await apiToken()}` },
     });
     expect(res.status).toBe(400);
+  });
+});
+
+describe('the client source (#716)', () => {
+  /** A request as clientSource reads it: the socket peer and the headers, nothing else. */
+  const req = (peer: string | undefined, xff?: string | string[]) =>
+    ({
+      socket: { remoteAddress: peer },
+      headers: xff === undefined ? {} : { 'x-forwarded-for': xff },
+    }) as unknown as http.IncomingMessage;
+
+  it('is the socket peer, X-Forwarded-For ignored, with no trusted proxy', () => {
+    expect(clientSource(req('192.0.2.7', '198.51.100.1'), 0)).toBe('192.0.2.7');
+    // A dual-stack socket's IPv4-mapped form is the same client as the plain one.
+    expect(clientSource(req('::ffff:192.0.2.7'), 0)).toBe('192.0.2.7');
+    expect(clientSource(req('2001:db8::1'), 0)).toBe('2001:db8::1');
+    // One IPv6 address, one spelling: the canonical text, whatever form arrived.
+    expect(clientSource(req('2001:DB8:0:0::1'), 0)).toBe('2001:db8::1');
+    expect(clientSource(req('10.0.0.2', '2001:0db8:0000::0001'), 1)).toBe('2001:db8::1');
+  });
+
+  it('is the entry the outermost trusted proxy appended, never one the client wrote', () => {
+    // The client wrote 203.0.113.9 itself; the one proxy appended the address it saw.
+    expect(clientSource(req('10.0.0.2', '203.0.113.9, 198.51.100.1'), 1)).toBe('198.51.100.1');
+    expect(clientSource(req('10.0.0.2', '203.0.113.9, 198.51.100.1, 10.0.0.3'), 2)).toBe(
+      '198.51.100.1',
+    );
+    // Repeated headers count as one list, in order.
+    expect(clientSource(req('10.0.0.2', ['203.0.113.9', '198.51.100.1']), 1)).toBe('198.51.100.1');
+    // Exactly hops entries: the hops-th from the right is the leftmost, a trusted proxy's.
+    expect(clientSource(req('10.0.0.2', '198.51.100.1, 10.0.0.3'), 2)).toBe('198.51.100.1');
+  });
+
+  it('is the socket peer when the header holds fewer entries than hops', () => {
+    // The request skipped a proxy, so the one entry may be the client's own: it never stands,
+    // or a client reaching around the proxies could pick its bucket, or fill a victim's.
+    expect(clientSource(req('10.0.0.2', '198.51.100.1'), 2)).toBe('10.0.0.2');
+    expect(clientSource(req('10.0.0.2', '203.0.113.9, 198.51.100.1'), 3)).toBe('10.0.0.2');
+  });
+
+  it('falls back to the socket peer when the header is absent or its entry is not an address', () => {
+    expect(clientSource(req('10.0.0.2'), 1)).toBe('10.0.0.2');
+    expect(clientSource(req('10.0.0.2', 'x'.repeat(4096)), 1)).toBe('10.0.0.2');
+    expect(clientSource(req('10.0.0.2', '198.51.100.1, '), 1)).toBe('10.0.0.2');
+  });
+
+  it('reaches the login start over real HTTP', async () => {
+    const seen: (string | undefined)[] = [];
+    const deps = makeDeps({
+      config: { trustedProxyHops: 1 },
+      identity: {
+        startDeviceAuth: async (source?: string) => {
+          seen.push(source);
+          return {
+            deviceCode: 'dc',
+            verificationUri: 'https://x.invalid',
+            interval: 5,
+            expiresIn: 900,
+          };
+        },
+        completeDeviceAuth: async () => {
+          throw new Error('unused');
+        },
+      } as never,
+    });
+    const srv = startControlPlane(deps, 0);
+    await new Promise<void>((r) => srv.once('listening', () => r()));
+    const port = (srv.address() as { port: number }).port;
+    const post = (headers: Record<string, string>) =>
+      new Promise<number>((resolve, reject) => {
+        const r = http.request(
+          { host: '127.0.0.1', port, path: '/v1/auth/device', method: 'POST', headers },
+          (res) => {
+            res.resume();
+            res.on('end', () => resolve(res.statusCode ?? 0));
+          },
+        );
+        r.on('error', reject);
+        r.end();
+      });
+    expect(await post({ 'X-Forwarded-For': '203.0.113.9, 198.51.100.1' })).toBe(200);
+    expect(await post({})).toBe(200);
+    srv.close();
+    expect(seen[0]).toBe('198.51.100.1');
+    // No header: the socket peer (loopback, in whichever form the stack reports it).
+    expect(seen[1]).toMatch(/^(127\.0\.0\.1|::1)$/);
   });
 });
 

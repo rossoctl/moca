@@ -15,6 +15,23 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
+## 1.29.0
+
+A per-source bound on login starts ([#716](https://github.com/rossoctl/moca/issues/716)).
+Additive.
+
+- `POST /v1/auth/device` now documents its `429 quota_exceeded`, which the oidc provider has
+  answered since it shipped (the 10,000-state total cap) and which now has a second cause: one
+  client address holding `SH_OIDC_MAX_PENDING_PER_SOURCE` (default 20) live login states. The
+  message tells the two apart ("...from this address"); the code and the status are the same. The
+  address is the socket peer, or the X-Forwarded-For entry `SH_TRUSTED_PROXY_HOPS` names (the
+  socket peer when the header holds fewer entries than that). The GitHub provider is unchanged.
+- For a deployment with its own `PendingAuthStore` (the control plane's extension point for a
+  shared pending-login store): `put` now answers which bound refused the entry (`'parked'`,
+  `'full'` or `'source_full'`) instead of a boolean. A store still answering the boolean keeps
+  working: `true` reads as parked and `false` as the total cap's refusal. To enforce the
+  per-source bound, a store answers `'source_full'`.
+
 ## 1.28.0
 
 A config bundle's format version, checked where a bundle is stored and where it is applied

@@ -2,6 +2,7 @@ import { createSign, generateKeyPairSync } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { CpError } from '../src/errors.js';
 import { MemoryPendingAuthStore, OidcProvider } from '../src/oidc.js';
+import type { PendingAuthStore } from '../src/oidc.js';
 import type { FetchLike } from '../src/identity.js';
 import type { DeviceStart, OidcCallbackResult } from '../src/identity.js';
 import { makeDeps, ctx } from './helpers/deps.js';
@@ -521,6 +522,125 @@ describe('the callback route', () => {
       now.ms += 901 * 1000;
       const again = await provider.startDeviceAuth();
       expect(again.deviceCode).toMatch(/^[\w-]+$/);
+    });
+
+    it('still accepts a store answering the pre-#716 boolean put (true parked, false full)', async () => {
+      // An out-of-tree store written when put answered a boolean: it must keep starting logins
+      // after an upgrade, not 429 every one. It wraps the memory store, with a total cap of one.
+      const now = { ms: NOW_MS };
+      const inner = new MemoryPendingAuthStore(() => now.ms, 1);
+      const legacy: PendingAuthStore = {
+        put: async (e) => (await inner.put(e)) === 'parked',
+        get: (s) => inner.get(s),
+        settle: (s, p) => inner.settle(s, p),
+        delete: (s) => inner.delete(s),
+      };
+      const fetch: FetchLike = async (url: string) => {
+        if (url.includes('openid-configuration'))
+          return { status: 200, text: async () => JSON.stringify(DISCOVERY) };
+        throw new Error('unscripted ' + url);
+      };
+      const provider = new OidcProvider({
+        issuer: ISSUER,
+        clientId: CLIENT_ID,
+        clientSecret: CLIENT_SECRET,
+        redirectUri: REDIRECT_URI,
+        fetch,
+        now: () => now.ms,
+        store: legacy,
+      });
+      // true: parked, and the login is live (the poll waits on it rather than refusing it).
+      const start = await provider.startDeviceAuth();
+      expect(await inner.get(start.deviceCode)).toBeDefined();
+      expect((await errOf(() => provider.completeDeviceAuth(start.deviceCode))).code).toBe(
+        'authorization_pending',
+      );
+      // false: the total cap's refusal, not the per-source one.
+      const refused = await errOf(() => provider.startDeviceAuth());
+      expect(refused.code).toBe('quota_exceeded');
+      expect(refused.message).not.toContain('from this address');
+    });
+
+    describe('the per-source bound (#716)', () => {
+      /** A provider over a store with the given total cap and per-source bound. */
+      function capped(maxEntries: number, maxPerSource: number) {
+        const now = { ms: NOW_MS };
+        const fetch: FetchLike = async (url: string) => {
+          if (url.includes('openid-configuration'))
+            return { status: 200, text: async () => JSON.stringify(DISCOVERY) };
+          throw new Error('unscripted ' + url);
+        };
+        const provider = new OidcProvider({
+          issuer: ISSUER,
+          clientId: CLIENT_ID,
+          clientSecret: CLIENT_SECRET,
+          redirectUri: REDIRECT_URI,
+          fetch,
+          now: () => now.ms,
+          store: new MemoryPendingAuthStore(() => now.ms, maxEntries, maxPerSource),
+        });
+        return { provider, now };
+      }
+      const A = '198.51.100.1';
+      const B = '203.0.113.9';
+
+      it('refuses one source past its bound while another source still starts', async () => {
+        const { provider } = capped(100, 2);
+        await provider.startDeviceAuth(A);
+        await provider.startDeviceAuth(A);
+        const refused = await errOf(() => provider.startDeviceAuth(A));
+        // The total cap's error shape: 429 quota_exceeded, the client's signal to back off.
+        expect(refused.code).toBe('quota_exceeded');
+        expect(refused.message).toContain('from this address');
+        // A looping client fills its own share, not the whole store.
+        expect((await provider.startDeviceAuth(B)).deviceCode).toMatch(/^[\w-]+$/);
+        expect((await provider.startDeviceAuth(B)).deviceCode).toMatch(/^[\w-]+$/);
+      });
+
+      it('still applies the total cap across sources', async () => {
+        const { provider } = capped(3, 2);
+        await provider.startDeviceAuth(A);
+        await provider.startDeviceAuth(A);
+        await provider.startDeviceAuth(B);
+        const refused = await errOf(() => provider.startDeviceAuth('192.0.2.1'));
+        expect(refused.code).toBe('quota_exceeded');
+        expect(refused.message).not.toContain('from this address');
+        // A start with no source (a caller with none to give) is bounded by the total alone.
+        expect((await errOf(() => provider.startDeviceAuth())).code).toBe('quota_exceeded');
+      });
+
+      it("frees a source's slots as its entries expire", async () => {
+        const { provider, now } = capped(100, 2);
+        await provider.startDeviceAuth(A);
+        now.ms += 600 * 1000;
+        await provider.startDeviceAuth(A);
+        expect((await errOf(() => provider.startDeviceAuth(A))).code).toBe('quota_exceeded');
+        // The first start's TTL (900 s) runs out; its slot is the source's again.
+        now.ms += 301 * 1000;
+        await provider.startDeviceAuth(A);
+        expect((await errOf(() => provider.startDeviceAuth(A))).code).toBe('quota_exceeded');
+      });
+
+      it('frees a slot when the login is deleted (collected), not only at expiry', async () => {
+        const store = new MemoryPendingAuthStore(() => NOW_MS, 100, 1);
+        const entry = (state: string) => ({
+          state,
+          confirmCode: 'ABCD-EFGH',
+          expiresAtMs: NOW_MS + 900_000,
+          source: A,
+        });
+        expect(await store.put(entry('s1'))).toBe('parked');
+        expect(await store.put(entry('s2'))).toBe('source_full');
+        await store.delete('s1');
+        expect(await store.put(entry('s2'))).toBe('parked');
+      });
+
+      it('0 turns the per-source bound off, leaving the total cap', async () => {
+        const { provider } = capped(3, 0);
+        for (let i = 0; i < 3; i++) await provider.startDeviceAuth(A);
+        const refused = await errOf(() => provider.startDeviceAuth(A));
+        expect(refused.message).not.toContain('from this address');
+      });
     });
 
     it('a malformed confirmation does not burn a try', async () => {

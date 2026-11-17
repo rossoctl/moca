@@ -440,12 +440,12 @@ grep -q "^kubectl --context kind-moca apply -k $REPO/deploy/k8s/.generated/kind\
 grep -q '^  - ../../overlays/kind$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'the generated overlay does not build on overlays/kind'
 [[ "$(setting SH_PUBLIC_HARNESS_URL)" == http://127.0.0.1:8080 ]] || fail 'kind advertises the wrong harness URL'
 # The control plane's configMapKeyRefs are not optional, bar the two tier keys, the catalog
-# allow-list and the two async keys: a missing key stops the pod opaquely. Those and the token
-# lifetimes are written on every run too ('' when untiered, defaulted or empty, as here), so the
-# hash input is the same seventeen keys on every stack (SH_TEST_USERS is '0' unless an operator asked
-# for test users, ADR-0045).
-[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__ConfigMap__moca-settings.json")" == '["LEAF_RESULT_TTL_SECONDS","SH_ADMIN_SUBJECTS","SH_ALLOW_OPERATOR_FALLBACK","SH_API_TOKEN_TTL_SECONDS","SH_ASYNC_DRAIN","SH_GITHUB_CLIENT_ID","SH_IDENTITY_PROVIDER","SH_MODEL_CATALOG_HOSTS","SH_OIDC_CLIENT_ID","SH_OIDC_ISSUER","SH_OIDC_REDIRECT_URI","SH_OIDC_SCOPE","SH_PUBLIC_HARNESS_URL","SH_SANDBOX_DEFAULT_TIER","SH_SANDBOX_TIERS","SH_SESSION_TOKEN_TTL_SECONDS","SH_TEST_USERS"]' ]] ||
-  fail 'moca-settings must hold exactly the seventeen keys the control plane and the supervisor reference'
+# allow-list, the two async keys and the two #716 keys: a missing key stops the pod opaquely. Those
+# and the token lifetimes are written on every run too ('' when untiered, defaulted or empty, as
+# here), so the hash input is the same nineteen keys on every stack (SH_TEST_USERS is '0' unless an
+# operator asked for test users, ADR-0045; SH_TRUSTED_PROXY_HOPS is '1' unless one set another).
+[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__ConfigMap__moca-settings.json")" == '["LEAF_RESULT_TTL_SECONDS","SH_ADMIN_SUBJECTS","SH_ALLOW_OPERATOR_FALLBACK","SH_API_TOKEN_TTL_SECONDS","SH_ASYNC_DRAIN","SH_GITHUB_CLIENT_ID","SH_IDENTITY_PROVIDER","SH_MODEL_CATALOG_HOSTS","SH_OIDC_CLIENT_ID","SH_OIDC_ISSUER","SH_OIDC_MAX_PENDING_PER_SOURCE","SH_OIDC_REDIRECT_URI","SH_OIDC_SCOPE","SH_PUBLIC_HARNESS_URL","SH_SANDBOX_DEFAULT_TIER","SH_SANDBOX_TIERS","SH_SESSION_TOKEN_TTL_SECONDS","SH_TEST_USERS","SH_TRUSTED_PROXY_HOPS"]' ]] ||
+  fail 'moca-settings must hold exactly the nineteen keys the control plane and the supervisor reference'
 [[ -z "$(setting SH_SANDBOX_TIERS)" && -z "$(setting SH_SANDBOX_DEFAULT_TIER)" ]] || fail 'kind is never tiered'
 expect_out 'port-forward svc/moca-supervisor 8080:8080'
 pass 'kind: generated overlay applied; control plane held at 0 without a client id; access printed'
@@ -468,6 +468,25 @@ pass 'oidc: settings written, scope defaulted'
   fail 'a re-run without the oidc variables dropped the stored block'
 [[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.gh ]] || fail 'a re-run dropped the stored github client id'
 pass 'oidc: sticky on re-run'
+
+# #716: the per-source login bound and the proxy hop count. The bound defaults to '' (the control
+# plane's 20) and travels with the oidc block; the hop count defaults to 1 (the Route's router).
+[[ -z "$(setting SH_OIDC_MAX_PENDING_PER_SOURCE)" ]] || fail 'the per-source bound must default to empty'
+[[ "$(setting SH_TRUSTED_PROXY_HOPS)" == 1 ]] || fail 'the hop count must default to 1'
+(export SH_OIDC_MAX_PENDING_PER_SOURCE=0 SH_TRUSTED_PROXY_HOPS=2; expect_ok --target ocp)
+[[ "$(setting SH_OIDC_MAX_PENDING_PER_SOURCE)" == 0 && "$(setting SH_TRUSTED_PROXY_HOPS)" == 2 ]] ||
+  fail 'the per-source bound or the hop count did not land'
+(expect_ok --target ocp)
+[[ "$(setting SH_OIDC_MAX_PENDING_PER_SOURCE)" == 0 && "$(setting SH_TRUSTED_PROXY_HOPS)" == 2 ]] ||
+  fail 'a re-run dropped the stored per-source bound or hop count'
+(export SH_OIDC_MAX_PENDING_PER_SOURCE='' SH_TRUSTED_PROXY_HOPS=''; expect_ok --target ocp)
+[[ -z "$(setting SH_OIDC_MAX_PENDING_PER_SOURCE)" && "$(setting SH_TRUSTED_PROXY_HOPS)" == 1 ]] ||
+  fail 'set-but-empty did not clear the per-source bound and the hop count to their defaults'
+(export SH_TRUSTED_PROXY_HOPS=one; expect_fail --target ocp)
+expect_out "SH_TRUSTED_PROXY_HOPS='one' must be a whole number"
+(export SH_OIDC_MAX_PENDING_PER_SOURCE=-1; expect_fail --target ocp)
+expect_out "SH_OIDC_MAX_PENDING_PER_SOURCE='-1' must be a whole number"
+pass 'oidc: the per-source bound and the hop count are sticky, clearable and validated (#716)'
 
 # Set-but-empty SH_IDENTITY_PROVIDER clears back to github and empties the block.
 reset_state
@@ -1338,8 +1357,8 @@ jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace
 for k in SH_SINGLE_NAMESPACE SH_ROUTE_DOMAIN SH_TLS_SECRET SH_SANDBOX_DEFAULT_TIER SH_SANDBOX_COUNT; do
   setup_cm moca-single | jq -e --arg k "$k" '.data | has($k)' >/dev/null || fail "ocp-single with Routes: moca-setup lacks $k"
 done
-[[ "$(jq -r '.data | keys | length' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == 17 ]] ||
-  fail 'ocp-single with Routes: moca-settings does not hold exactly seventeen keys'
+[[ "$(jq -r '.data | keys | length' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == 19 ]] ||
+  fail 'ocp-single with Routes: moca-settings does not hold exactly nineteen keys'
 [[ "$(jq -r '.data.SH_PUBLIC_HARNESS_URL' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == https://moca.example.test ]] ||
   fail 'ocp-single with Routes: SH_PUBLIC_HARNESS_URL is not the supervisor Route'
 [[ "$(annotation_adds moca-control-plane)" == 1 && "$(annotation_adds moca-supervisor)" == 1 ]] ||
