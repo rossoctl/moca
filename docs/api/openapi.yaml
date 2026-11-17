@@ -313,8 +313,10 @@ components:
             BOUNDED: this is a projection of the stored result, not the result itself. The turn's
             OUTPUT -- a solve leaf's patch, a prompt leaf's assistant text -- is never inlined here,
             because this route is polled; `summary` describes it and `artifacts` says what can be
-            fetched from `GET …/turns/{turnId}/artifacts/{kind}`. Everything else the leaf recorded
-            is passed through unchanged.
+            fetched from `GET …/turns/{turnId}/artifacts/{kind}`. The other MODEL-written strings --
+            `verdict.reason`, `gate.summary`, `gate.proposed_action` -- are clipped to the same
+            MOCA_TURN_SUMMARY_BYTES cap, with the same trailing `…[truncated]`. Everything else the
+            leaf recorded is passed through unchanged.
           required: [status]
           properties:
             status:
@@ -326,7 +328,8 @@ components:
                 one bounded line about the turn: the assistant's text, or a gate's summary, or the
                 patch's diffstat (`"3 files, +120 -4"`), or the failure's reason -- whichever this
                 result has, in that order. Clipped to MOCA_TURN_SUMMARY_BYTES (default 2048) with a
-                trailing `…[truncated]`; absent when the result has none of the four.
+                trailing `…[truncated]`; absent when the result has none of the four, and absent
+                altogether when that cap is `0`.
             artifacts:
               type: array
               description: |
@@ -2041,7 +2044,10 @@ paths:
 
         The body is the diff exactly as the leaf produced it -- never truncated, and byte-exact for a
         diff that is not valid UTF-8 (the worker stores such a capture base64 and this route decodes
-        it). `ETag` is the sha256 of the bytes served, so a client can skip a re-fetch.
+        it). `ETag` is a sha256 of the bytes served, so a client can skip a re-fetch; it is the
+        capture's own digest, which is the same value `TurnStatus.result.artifacts[].sha256`
+        advertises (and so carries that field's `sha256:` prefix), or a bare hex digest for a result
+        that recorded none.
 
         Everything absent is `404`, with a message naming which: an unknown kind, a turn that is
         still queued or running, a terminal turn whose leaf stored no result, and a capture refused
@@ -2061,7 +2067,7 @@ paths:
           description: the artifact's bytes
           headers:
             ETag:
-              description: the sha256 of the bytes served, in quotes
+              description: a sha256 of the bytes served, in quotes — the capture's own when it has one
               schema: { type: string }
           content:
             text/x-diff:

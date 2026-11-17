@@ -223,7 +223,7 @@ GET /v1/sessions/{sessionId}/turns/{turnId}
   → 404 unknown turn
 
 GET /v1/sessions/{sessionId}/turns/{turnId}/artifacts/{kind}      # kind: patch
-  → 200 <bytes>   Content-Type: text/x-diff, ETag: "<sha256 of the bytes>"
+  → 200 <bytes>   Content-Type: text/x-diff, ETag: "<capture's sha256 of those bytes>"
   → 404 unknown kind | not terminal | no result | capture refused for size
 ```
 
@@ -241,6 +241,11 @@ Goal 4 is satisfied by N of these — one per leaf — which is also the measure
 >   failure's reason, in that order; `MOCA_TURN_SUMMARY_BYTES`, default 2048 **bytes** — bytes, not
 >   tokens, like every other bound in this repo), `workspace` keeps the patch's descriptor without
 >   its bytes, and `artifacts: [{kind, bytes, sha256?}]` names what can be fetched.
+> - Every **model-written** string in that body is held to the same cap, not just `summary`:
+>   `verdict.reason` and the gate's `summary` and `proposed_action` are capped nowhere upstream
+>   (`validateVerdict` checks the shape, not the length), so unclipped they would keep a `done`
+>   turn's body unbounded — exactly the cost this amendment removes. A cap of `0` means no model
+>   prose at all: no `summary` key, and the other three clipped to the marker.
 > - `result.patch` and `result.text` are **gone** from that body. A narrowing, permitted because
 >   `/v1` is Preview, and listed in the API changelog (1.26.0) because that is what Preview requires.
 > - The artifact route serves the bytes whole — never truncated, and byte-exact for a diff that is
@@ -991,6 +996,15 @@ is the whole keyspace per session delete, not the matches.
 > at every terminal transition, so it never expires before a record it would have to reach. It is
 > deliberately NOT a `dataKeys` entry in `ownership.ts`: `deleteSession` cascades before it calls
 > `deleteSessionTurns`, so the index would be gone before the walk could read it.
+>
+> The walk is **two passes, not one union**, because the index spans the retention window: thousands
+> of ids for a busy session, where the owner set is capped by the open-turn quota. The owner-set pass
+> stays per-turn — each member's record is the only thing that says which session it belongs to, and
+> an open turn holds a quota slot and an idempotency claim that only its record can release. The
+> indexed remainder needs none of that: those turns are this session's by construction and already
+> terminal, so `toTerminal` has freed both, and the pass is a bulk `del` of their keys in chunks of 500. That bound matters because the walk is **one-shot** — the cascade tombstones the session
+> first, so a retried `DELETE` answers `session_not_found` and never re-enters the walk, and anything
+> a cut walk leaves is reclaimed only by the index's own TTL.
 
 **Deferred, with the reason on the record.** #389's scope item 5 — retire #380's interim
 sync-disconnect contract — is **not** in M1. §5.5 already argues the condition is a supported

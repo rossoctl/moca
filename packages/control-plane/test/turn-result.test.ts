@@ -80,6 +80,50 @@ describe('projectLeafResult (#390)', () => {
     expect(out.summary).toBe('x'.repeat(16) + '…[truncated]');
   });
 
+  it('omits the summary entirely at a cap of 0, which is what "no summary" means', () => {
+    // Not `summary: '…[truncated]'`: a key holding nothing but the marker is not "no summary", and
+    // `configuration.md` promises the key is gone.
+    expect(projectLeafResult({ status: 'responded', text: 'x'.repeat(5000) }, 0)).toEqual({
+      status: 'responded',
+    });
+  });
+
+  it('clips the OTHER model-written strings too: a verdict s reason and a gate s two lines', () => {
+    // `validateVerdict` caps `reason` nowhere, so without this a `done` turn's body is as unbounded
+    // as the patch this projection exists to remove -- on every poll.
+    const out = projectLeafResult(
+      {
+        status: 'done',
+        verdict: { item_id: 'i-1', verdict: 'FLAGGED', reason: 'y'.repeat(5000) },
+        gate: { gateId: 1, summary: 'g'.repeat(5000), proposed_action: 'p'.repeat(5000) },
+      },
+      16,
+    );
+    expect(out.verdict).toEqual({
+      item_id: 'i-1',
+      verdict: 'FLAGGED',
+      reason: 'y'.repeat(16) + '…[truncated]',
+    });
+    expect(out.gate).toEqual({
+      gateId: 1,
+      summary: 'g'.repeat(16) + '…[truncated]',
+      proposed_action: 'p'.repeat(16) + '…[truncated]',
+    });
+    // The whole body, not just the three fields: nothing else smuggled the full strings through.
+    expect(JSON.stringify(out)).not.toContain('yyyyyyyyyyyyyyyyy');
+    expect(JSON.stringify(out)).not.toContain('ggggggggggggggggg');
+  });
+
+  it('leaves a null verdict and a null gate exactly as they were', () => {
+    // `toResultRecord` writes both as null on most branches, and a client reads `verdict === null`
+    // as "no verdict": clipping must not turn either into an object.
+    expect(projectLeafResult({ status: 'failed', verdict: null, gate: null }, 2048)).toEqual({
+      status: 'failed',
+      verdict: null,
+      gate: null,
+    });
+  });
+
   it('offers no artifact for a capture refused for size, and keeps the refusal visible', () => {
     const out = projectLeafResult(
       {
@@ -140,6 +184,18 @@ describe('pickArtifact (#390)', () => {
     expect(
       pickArtifact({ workspace: { patchBase64: raw.toString('base64') } }, 'patch')?.bytes,
     ).toEqual(raw);
+  });
+
+  it('carries the capture s digest out, so the route need not re-hash the bytes', () => {
+    // The same value `artifacts[].sha256` advertises: the two must agree by construction, not by
+    // two independent hashes that happen to match.
+    const ws = { patch: 'diff b\n', patchSha256: `sha256:${'a'.repeat(64)}` };
+    expect(pickArtifact({ workspace: ws }, 'patch')?.sha256).toBe(`sha256:${'a'.repeat(64)}`);
+    expect(projectLeafResult({ workspace: ws }, 2048).artifacts).toEqual([
+      { kind: 'patch', bytes: 7, sha256: `sha256:${'a'.repeat(64)}` },
+    ]);
+    // A record that recorded none says so, and the route hashes instead.
+    expect(pickArtifact({ patch: 'diff a\n' }, 'patch')?.sha256).toBeUndefined();
   });
 
   it('has nothing for an unknown kind, an empty patch, or a refused capture', () => {

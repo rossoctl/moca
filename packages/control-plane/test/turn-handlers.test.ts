@@ -642,6 +642,29 @@ describe('getTurnArtifact (#390)', () => {
     );
   });
 
+  it('answers with the CAPTURE s digest when it has one, and never hashes the bytes twice', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    const patch = 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n';
+    const sha = `sha256:${createHash('sha256').update(patch).digest('hex')}`;
+    const turnId = await solvedTurn(d, sid, {
+      status: 'solved',
+      patch,
+      sessionId: sid,
+      workspace: { baseline: 'a'.repeat(40), patchSha256: sha, patchBytes: patch.length },
+    });
+    const res = await artifact(d, sid, turnId);
+    // The ETag is exactly what the status read advertised: one digest, two routes, no second hash
+    // of a possibly multi-megabyte buffer per fetch.
+    const status = (
+      await HANDLERS.getTurn!(ctx({ principal: alice, params: { id: sid, turnId } }), d)
+    ).body as { result: { artifacts: unknown[] } };
+    expect(status.result.artifacts).toEqual([
+      { kind: 'patch', bytes: Buffer.byteLength(patch), sha256: sha },
+    ]);
+    expect(res.headers?.ETag).toBe(`"${sha}"`);
+  });
+
   it('decodes a binary-safe capture, so the bytes are not a lossy string round trip', async () => {
     const d = turnDeps();
     const sid = await session(d);

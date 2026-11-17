@@ -71,6 +71,12 @@ export interface TurnArtifact {
 export interface ArtifactBody {
   bytes: Buffer;
   contentType: string;
+  /**
+   * The CAPTURE's digest of exactly these bytes, when the record carries one — so the route can
+   * answer with an `ETag` without hashing a multi-megabyte buffer on the event loop per request.
+   * It is the same value `artifacts[].sha256` advertises, so the two cannot disagree.
+   */
+  sha256?: string;
 }
 
 /** Unified diffs, the only artifact kind in M1. `text/x-diff` is what git's own tooling serves. */
@@ -89,12 +95,20 @@ export function projectLeafResult(
   summaryBytes: number,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  // Drop the two unbounded fields and keep the rest as-is: `status`, `verdict`, `gate`, `reason`,
-  // `usage`, `seed`, `sessionId` and `ts` are all bounded by construction, and a caller that reads
-  // one of them today must keep reading it.
+  // Drop the two big fields and keep the rest: `status`, `reason`, `usage`, `seed`, `sessionId` and
+  // `ts` are bounded by construction (a short enum, counters, two ids, a timestamp), and a caller
+  // that reads one of them today must keep reading it.
   for (const [k, v] of Object.entries(raw)) {
     if (k !== 'patch' && k !== 'text' && k !== 'workspace') out[k] = v;
   }
+  // `verdict.reason` and the gate's two strings are the exception: they are MODEL-written and
+  // capped nowhere (`validateVerdict` checks the shape, not the length), so unclipped they ride
+  // every poll -- the cost this projection exists to remove. Clipped rather than moved out: there
+  // is no artifact route for them, so this body is all a caller gets.
+  const verdict = obj(raw.verdict);
+  if (verdict) out.verdict = clipFields(verdict, ['reason'], summaryBytes);
+  const gate = obj(raw.gate);
+  if (gate) out.gate = clipFields(gate, ['summary', 'proposed_action'], summaryBytes);
   const ws = obj(raw.workspace);
   if (ws) {
     // The DESCRIPTOR survives (baseline, patchSha256, patchBytes, diffstat, patchRefused, error);
@@ -102,10 +116,27 @@ export function projectLeafResult(
     const { patch: _p, patchBase64: _b, ...kept } = ws;
     out.workspace = kept;
   }
-  const summary = summarize(raw, ws);
+  // At a cap of 0 the summary is OMITTED rather than clipped to the bare marker: 0 is how an
+  // operator asks for no summary (docs/reference/configuration.md), and a `summary` key holding
+  // nothing but `…[truncated]` is not that.
+  const summary = summaryBytes > 0 ? summarize(raw, ws) : null;
   if (summary) out.summary = clip(summary, summaryBytes);
   const artifacts = describeArtifacts(raw, ws);
   if (artifacts.length > 0) out.artifacts = artifacts;
+  return out;
+}
+
+/** A copy of `src` with the named string fields clipped; anything else passes through untouched. */
+function clipFields(
+  src: Record<string, unknown>,
+  fields: readonly string[],
+  maxBytes: number,
+): Record<string, unknown> {
+  const out = { ...src };
+  for (const f of fields) {
+    const s = str(out[f]);
+    if (s) out[f] = clip(s, maxBytes);
+  }
   return out;
 }
 
@@ -178,14 +209,24 @@ export function pickArtifact(raw: Record<string, unknown>, kind: string): Artifa
  * A solve leaf's patch lives in `patch` (the result IS the diff); a prompt leaf's in
  * `workspace.patch`, or `workspace.patchBase64` when the diff was not valid UTF-8 — which is why
  * this returns a Buffer and not a string.
+ *
+ * `patchSha256` covers whichever of the three the record has: `describePatch` hashes the same
+ * string `runSolveLeaf` puts in `patch`, and `captureTurnPatch` hashes the raw buffer it then
+ * stores as `patch` or `patchBase64`. So it is carried out as the digest OF THESE BYTES.
  */
 function patchBody(
   raw: Record<string, unknown>,
   ws: Record<string, unknown> | null,
 ): ArtifactBody | null {
+  const sha = ws ? str(ws.patchSha256) : null;
+  const of = (bytes: Buffer): ArtifactBody => ({
+    bytes,
+    contentType: PATCH_CONTENT_TYPE,
+    ...(sha ? { sha256: sha } : {}),
+  });
   const text = str(raw.patch) ?? (ws ? str(ws.patch) : null);
-  if (text) return { bytes: Buffer.from(text, 'utf8'), contentType: PATCH_CONTENT_TYPE };
+  if (text) return of(Buffer.from(text, 'utf8'));
   const b64 = ws ? str(ws.patchBase64) : null;
-  if (b64) return { bytes: Buffer.from(b64, 'base64'), contentType: PATCH_CONTENT_TYPE };
+  if (b64) return of(Buffer.from(b64, 'base64'));
   return null;
 }

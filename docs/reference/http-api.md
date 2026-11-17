@@ -173,7 +173,8 @@ is the leaf result; both are specified in [Leaf envelope and result](leaf-and-en
   inference listener configured — it refuses to boot without them. Poll
   `GET /v1/sessions/{id}/turns/{turnId}` for state and result. That body is **bounded**: the turn's
   output is not inlined, because the route is polled — `result.summary` is one clipped line
-  (`MOCA_TURN_SUMMARY_BYTES`, default 2048), `result.workspace` describes the patch (baseline,
+  (`MOCA_TURN_SUMMARY_BYTES`, default 2048, which also caps `result.verdict.reason` and the gate's
+  two lines, the body's other model-written strings), `result.workspace` describes the patch (baseline,
   sha256, size, diffstat) and `result.artifacts` names what
   `GET /v1/sessions/{id}/turns/{turnId}/artifacts/patch` will serve whole, with an `ETag`. See
   [dispatch archetypes](../concepts/dispatch-archetypes.md) for the operator steps.

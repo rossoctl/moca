@@ -245,13 +245,16 @@ export const TURN_HANDLERS: Record<string, Handler> = {
     if (!result) throw new CpError('not_found', 'this turn stored no result');
     const artifact = pickArtifact(result, kind);
     if (!artifact) throw new CpError('not_found', `this turn has no '${kind}' artifact`);
+    // The CAPTURE's digest of these same bytes, which is also what the status read advertises as
+    // `artifacts[].sha256` -- so the ETag and that field cannot disagree, and an 8 MiB patch is not
+    // re-hashed on the single event loop once per fetch. Hashed here only for a record that carries
+    // no digest (an older worker's, or a solve whose baseline was never captured).
+    const etag = artifact.sha256 ?? createHash('sha256').update(artifact.bytes).digest('hex');
     return {
       status: 200,
       body: artifact.bytes,
       contentType: artifact.contentType,
-      // Of the bytes actually served, so a client that caches by ETag cannot be handed a body that
-      // disagrees with it (a record may carry no `patchSha256` at all).
-      headers: { ETag: `"${createHash('sha256').update(artifact.bytes).digest('hex')}"` },
+      headers: { ETag: `"${etag}"` },
     };
   },
 

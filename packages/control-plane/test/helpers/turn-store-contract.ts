@@ -324,6 +324,27 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       await done();
     });
 
+    it('sweeps more turns than one DEL chunk holds (§9.2)', async () => {
+      const { store, now, sessionId, putResult, hasResult, done } = await make();
+      // 251 turns is 502 keys, which is one full chunk of 500 plus a remainder: the boundary where
+      // a chunking loop that stops one iteration early leaves the last turn's bytes behind, with
+      // every single-turn assertion above still green.
+      const ids = Array.from({ length: 251 }, (_, i) => `t-bulk-${i}`);
+      for (const turnId of ids) {
+        await store.create(rec({ turnId, sessionId, idempotencyKey: turnId }));
+        await putResult(sessionId, turnId, '{"status":"done"}');
+        expect(await store.finalize(turnId, 'done', now)).toBe('ok');
+      }
+
+      await store.deleteSessionTurns(sessionId, 'github:1234');
+
+      for (const turnId of [ids[0]!, ids[249]!, ids[250]!]) {
+        expect(await store.get(turnId)).toBeNull();
+        expect(await hasResult(sessionId, turnId)).toBe(false);
+      }
+      await done();
+    });
+
     it('keeps the session index alive at least as long as the record it points at (§9.2)', async () => {
       const {
         store,

@@ -53,6 +53,13 @@ return 1
 const OPEN_STATES: readonly TurnState[] = TURN_STATES.filter((s) => !isTerminalState(s));
 
 /**
+ * Keys per DEL in `deleteSessionTurns` (two per turn, so 250 turns). Bulk, because the walk spans
+ * the whole retention window; bounded, because one DEL of a hundred thousand keys blocks the
+ * single-threaded server for everybody else.
+ */
+const DELETE_CHUNK = 500;
+
+/**
  * The async turn record's only writer (async fan-out spec §5.1). Written against the STRUCTURAL
  * CpRedisLike, so one implementation serves the in-memory fake and real Redis
  * (test/helpers/turn-store-contract.ts runs it against both).
@@ -259,7 +266,7 @@ export class TurnStore {
    * Delete every one of `sessionId`'s turns -- record, stored result and quota slot -- for
    * `OwnershipIndex.cascadeDelete` (F2).
    *
-   * Two enumerations, unioned, and both are needed:
+   * Two enumerations, two passes, and both are needed:
    *
    * - The SESSION index (§9.2), which holds finished turns as well as open ones. It is what makes a
    *   finished turn's record and result go away with its session rather than linger for the result
@@ -277,8 +284,16 @@ export class TurnStore {
    *
    * Open-set member removed BEFORE the hash: a crash between the two steps must leave the quota
    * slot freed (the bug this method exists to fix) even if the orphaned hash itself lingers, which
-   * matches `get`'s existing rule that a member with no hash reads as "already gone". The index
-   * itself goes last, so a retried DELETE re-walks whatever the first attempt did not reach.
+   * matches `get`'s existing rule that a member with no hash reads as "already gone".
+   *
+   * ONE-SHOT, and it has to finish: `deleteSession` (handlers.ts) tombstones the session through
+   * `cascadeDelete` BEFORE calling this, so a second `DELETE` stops in `assertOwner` with
+   * `session_not_found` and never re-enters here. Whatever a crash mid-walk leaves behind is
+   * reclaimed only by the index's own TTL, which is why the per-turn work below is batched into a
+   * fixed handful of round trips instead of three or four per turn: seven days of a busy session's
+   * turns is thousands of them, and a walk that outlives its HTTP request is a walk that gets cut.
+   * The index key itself goes last, so a cut walk at least leaves the route to the stragglers
+   * visible to an operator.
    */
   async deleteSessionTurns(sessionId: string, owner: string): Promise<void> {
     const byRecency = { BY: 'SCORE', REV: true } as const;
@@ -290,12 +305,16 @@ export class TurnStore {
     const open = await this.guard(() =>
       this.redis.zRange(this.ownerKey(owner), '+inf', '-inf', byRecency),
     );
-    for (const turnId of new Set([...indexed, ...open])) {
+    const openSet = new Set(open);
+    // The OPEN pass, one turn at a time, and it must stay that way: the owner set spans every
+    // session of the subject, so each member's record is the only thing that says whose turn it is,
+    // and a still-open turn holds both a quota slot and an idempotency claim that only its own
+    // record can release. Bounded by the open-turn quota (§4.3), not by the retention window.
+    for (const turnId of open) {
       const rec = await this.get(turnId);
-      // A record naming another session is that session's turn, reached through the shared owner
-      // set. One that is ABSENT is only this session's to clean up when the index says so: the
-      // owner set spans a subject's sessions, so a missing record there says nothing about who the
-      // turn belonged to, and its hash is not this delete's to remove.
+      // A record naming another session is that session's turn. One that is ABSENT is only this
+      // session's to clean up when the index says so: a missing record in the owner set says
+      // nothing about who the turn belonged to, and its hash is not this delete's to remove.
       if (rec ? rec.sessionId !== sessionId : !indexed.has(turnId)) continue;
       await this.guard(() => this.redis.zRem(this.ownerKey(owner), turnId));
       // The record AND this turn's result key, which `cascadeDelete`'s `dataKeys` cannot name: the
@@ -304,6 +323,19 @@ export class TurnStore {
       // Only with a record in hand: the release compares against the holder, and without the
       // record's own `idempotencyKey` there is nothing to compare.
       if (rec) await this.releaseIdempotencyKeyIf(owner, rec.idempotencyKey, turnId);
+    }
+    // The INDEXED pass: everything the index names that the open set did not. Every one of them is
+    // this session's by construction (`create` adds to this session's key alone) and no longer
+    // open, because `toTerminal` is what removed it from the owner set -- and the same step already
+    // released its idempotency key and removed its quota slot. So there is nothing left to read per
+    // turn, and no reason to spend a round trip reading it: just the keys, deleted in bulk.
+    const keys: string[] = [];
+    for (const turnId of indexed) {
+      if (openSet.has(turnId)) continue;
+      keys.push(this.key(turnId), leafResultKey(sessionId, turnId));
+    }
+    for (let i = 0; i < keys.length; i += DELETE_CHUNK) {
+      await this.guard(() => this.redis.del(keys.slice(i, i + DELETE_CHUNK)));
     }
     await this.guard(() => this.redis.del([this.sessionKey(sessionId)]));
   }

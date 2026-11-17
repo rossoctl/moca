@@ -30,9 +30,16 @@ because that is what Preview requires.
   default 2048 bytes), `result.artifacts` (`[{kind, bytes, sha256?}]`) and `result.workspace` on a
   solve result as well as a `responded` one. The synchronous `POST /v1/runs` and `GET /runs/status`
   bodies are untouched — they still carry `patch` and `text` in full.
+- The same cap now holds every **model-written** string in that body, not just `summary`:
+  `result.verdict.reason` and `result.gate.summary`/`proposed_action` are clipped to
+  `MOCA_TURN_SUMMARY_BYTES` with the same trailing `…[truncated]`. Nothing upstream caps them, so
+  unclipped they kept a `done` turn's polled body unbounded. `MOCA_TURN_SUMMARY_BYTES=0` omits
+  `result.summary` entirely rather than returning a bare marker.
 - `GET /v1/sessions/{id}/turns/{turnId}/artifacts/{kind}` serves the output whole: bytes, with
-  `text/x-diff` and an `ETag` of the bytes served. `patch` is the only kind. Every absence is 404
-  (unknown kind, a turn not yet terminal, no stored result, a capture refused for size).
+  `text/x-diff` and an `ETag` — the capture's own digest of those bytes, the same value
+  `result.artifacts[].sha256` carries (so with its `sha256:` prefix), or a bare hex digest for a
+  result that recorded none. `patch` is the only kind. Every absence is 404 (unknown kind, a turn
+  not yet terminal, no stored result, a capture refused for size).
 - The data plane's `TurnWorkspace` gains `diffstat` (`{files, insertions, deletions}`), counted from
   the diff's hunks and present even when `patchRefused` left the bytes behind; `LeafResult`'s
   `solved` branch gains `workspace`, the descriptor (`baseline`, `patchSha256`, `patchBytes`,
