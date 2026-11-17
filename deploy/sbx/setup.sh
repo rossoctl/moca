@@ -507,6 +507,32 @@ preflight() {
   kc get configmaps -n "$NS" -o name >/dev/null 2>&1 ||
     die "namespace $NS must already exist and be readable (this script creates nothing cluster-scoped)"
   check_redis_image
+  check_unknown_bundles
+}
+
+# check_host_idle compares against the bundles last written; with none (deploy/sbx/.generated lost,
+# or a run from another checkout) it has nothing to compare, and the hosts may run any idle (216h,
+# from before idle lifetimes). So on an existing deployment (sbx-settings exists), a run that turns
+# idle lifetimes on or changes the maximum is refused, before anything is applied, unless
+# SBX_ACK_HOSTS=1; a fresh namespace, off, and the maximum sbx-settings already holds pass.
+check_unknown_bundles() {
+  [[ -n "$MAX_LIFETIME_S" ]] || return 0
+  local w json live
+  for w in $SBX_WORKERS; do
+    [[ ! -f "$GEN/workers/$w/worker.env" ]] || return 0
+  done
+  # Captured first (errexit), as in check_redis_image: a failing get must not read as "fresh".
+  json="$(kc get configmap sbx-settings -n "$NS" --ignore-not-found -o json)"
+  [[ -n "$json" ]] || return 0
+  live="$(jq -r '.data.SH_SANDBOX_MAX_LIFETIME_SECONDS // empty' <<<"$json")"
+  [[ "$live" != "$MAX_LIFETIME_S" ]] || return 0
+  HOSTS_TO_REINSTALL="$SBX_WORKERS"
+  REINSTALL_SETTINGS=SH_WORKSPACE_IDLE
+  local gen="deploy/sbx/${GEN##*/}/workers"
+  if [[ "${SBX_ACK_HOSTS:-}" != 1 ]]; then
+    die "the bundles the hosts run are unknown (no $gen), and sbx-settings holds SH_SANDBOX_MAX_LIFETIME_SECONDS=${live:-unset} where this run writes $MAX_LIFETIME_S: turning idle lifetimes on, or changing the maximum, needs every host's workers reinstalled (deploy/sbx/install-host.sh) with this run's bundles (SH_WORKSPACE_IDLE=${WORKSPACE_IDLE_H}h). Set SBX_ACK_HOSTS=1 and reinstall every host with the new bundles, or set SBX_MAX_LIFETIME_DAYS=off to keep idle lifetimes off"
+  fi
+  log "WARNING: the bundles the hosts run are unknown (no $gen) and SH_SANDBOX_MAX_LIFETIME_SECONDS changes from ${live:-unset} to $MAX_LIFETIME_S (SBX_ACK_HOSTS=1): re-run deploy/sbx/install-host.sh with the new bundle on the host of each of: $HOSTS_TO_REINSTALL"
 }
 
 # Without SBX_REDIS_IMAGE the overlay runs the base's Valkey 9, which cannot read RDB format 12 (what

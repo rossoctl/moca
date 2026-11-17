@@ -44,6 +44,11 @@ case "$1 $2" in
     { echo 'Error from server (InternalError): etcdserver: request timed out' >&2; exit 1; }
   if [[ -f "$f" && "$3" == "${MOCK_BLANK_GET:-}" ]]; then jq -c 'del(.data)' "$f"; elif [[ -f "$f" ]]; then cat "$f"; fi
   exit 0 ;;
+'get configmap')
+  # A ConfigMap as last applied (none on a fresh namespace).
+  f="$MOCK_STATE/configmap-$3.json"
+  [[ ! -f "$f" ]] || cat "$f"
+  exit 0 ;;
 'get statefulset')
   # A StatefulSet in MOCK_STATE/statefulset-NAME.json (none by default: a fresh namespace).
   [[ "$3" != "${MOCK_FAIL_GET:-}" ]] || { echo 'Error from server (InternalError): etcdserver: request timed out' >&2; exit 1; }
@@ -570,6 +575,36 @@ grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 
 [[ -z "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" ]] || fail 'off at 30 d wrote a maximum'
 run_setup true || fail 'the run back to the defaults failed'
 pass 'SBX_MAX_LIFETIME_DAYS=off rejects no SBX_LIFETIME_DAYS of 1-30'
+
+# With no worker bundles (.generated/ lost) the hosts' idle is unknown: on an existing deployment,
+# turning idle lifetimes on or changing the maximum is refused before anything is applied, unless
+# acknowledged; off, or the maximum the ConfigMap already holds, is not.
+drop_max() { jq 'del(.data.SH_SANDBOX_MAX_LIFETIME_SECONDS)' "$MOCK_STATE/configmap-sbx-settings.json" >"$TMP/cm.json" && mv "$TMP/cm.json" "$MOCK_STATE/configmap-sbx-settings.json"; }
+rm -rf "$GEN/workers"
+drop_max
+: >"$MOCK_LOG"
+! run_setup true || fail 'turned idle lifetimes on with no worker bundles to compare'
+grep -q 'the bundles the hosts run are unknown (no deploy/sbx/.generated/workers)' "$TMP/out" || fail 'the refusal does not say the bundles are unknown'
+grep -q 'SBX_ACK_HOSTS=1' "$TMP/out" && grep -q 'SBX_MAX_LIFETIME_DAYS=off' "$TMP/out" || fail 'the refusal does not name SBX_ACK_HOSTS=1 and off'
+grep -q 'install-host.sh' "$TMP/out" || fail 'the refusal does not say to reinstall the hosts'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the unknown-bundles refusal changed something first'
+[[ ! -d "$GEN/workers" ]] || fail 'the refused run wrote bundles'
+[[ -z "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" ]] || fail 'the refused run wrote the maximum'
+run_setup export SBX_MAX_LIFETIME_DAYS=off || fail 'SBX_MAX_LIFETIME_DAYS=off with no worker bundles was refused'
+grep -qx 'SH_WORKSPACE_IDLE=216h' "$GEN/workers/sbx_default/worker.env" || fail 'off with no bundles did not write 216h'
+rm -rf "$GEN/workers"
+run_setup export SBX_ACK_HOSTS=1 || fail 'the acknowledged run with no worker bundles failed'
+grep -q 'WARNING: SH_WORKSPACE_IDLE changed: re-run deploy/sbx/install-host.sh now on the host of each of: sbx_default sbx_py312' "$TMP/out" ||
+  fail 'the acknowledged run with no worker bundles does not name the hosts to reinstall'
+[[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 2592000 ]] || fail 'the acknowledged run did not write the maximum'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'the acknowledged run did not write 768h'
+rm -rf "$GEN/workers"
+: >"$MOCK_LOG"
+! run_setup export SBX_MAX_LIFETIME_DAYS=20 || fail 'changed the maximum with no worker bundles to compare'
+grep -q 'the bundles the hosts run are unknown' "$TMP/out" || fail 'a changed maximum with no bundles is not refused as unknown'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the changed-maximum refusal changed something first'
+run_setup true || fail 'the maximum sbx-settings already holds was refused with no worker bundles'
+pass 'with no worker bundles, turning idle lifetimes on or changing the maximum is refused unless acknowledged; off and an unchanged maximum apply'
 
 # 4b'. A template, subject or quota change is the control plane's alone: it rolls the control plane
 # and not the relay, so running Execs survive it (RUNBOOK §5).

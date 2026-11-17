@@ -131,7 +131,9 @@ refuses a maximum that changes the idle in the bundles it last wrote, unless `SB
 set. To raise it, ideally re-run `install-host.sh` on every host first, with bundles made from the
 new value; otherwise set `SBX_ACK_HOSTS=1` and reinstall every host right after the run, which names
 them. The check reads the bundles in `deploy/sbx/.generated/workers/`: keep that directory between
-runs (it is gitignored), or the run cannot see the idle the hosts were given. Changing only
+runs (it is gitignored), or the run cannot see the idle the hosts were given; without it, a run on
+an existing deployment that turns idle lifetimes on or changes the maximum is refused unless
+`SBX_ACK_HOSTS=1` (then reinstall every host) or `SBX_MAX_LIFETIME_DAYS=off`. Changing only
 `SBX_LIFETIME_DAYS`, within the maximum, touches no host. `status.sh` shows each worker's idle
 against the maximum and warns when it is not above it.
 
