@@ -85,7 +85,7 @@ func TestMaxRunsDoesNotCountParkedRuns(t *testing.T) {
 	// Past StandbyIdle both runs are RunParked: workspace on disk, zero VMs, zero bytes
 	// committed. The ceiling is a VM/RAM backstop, so it must not bind on these.
 	clk.Advance(DefaultStandbyIdle + DefaultStandbyIdle/4 + time.Second)
-	waitFor(t, func() bool {
+	waitFor(t, "both runs parked with no standby resident", func() bool {
 		s := p.Stats()
 		return s.ParkedRuns == 2 && s.StandbysResident == 0
 	})
@@ -216,7 +216,7 @@ func TestAColdAcquireIsChargedOnceNotTwice(t *testing.T) {
 	case <-restoring:
 	case err := <-second:
 		t.Fatalf("the second cold acquire never reached Restore: %v — a two-VM budget must admit two concurrent cold acquires", err)
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("the second cold acquire neither reached Restore nor returned")
 	}
 	if got := p.Stats().CommittedBytes; got != 2*perVM {

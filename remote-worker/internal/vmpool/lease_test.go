@@ -715,8 +715,8 @@ func recvWithin[T any](t *testing.T, c <-chan T, what string) T {
 	select {
 	case v := <-c:
 		return v
-	case <-time.After(5 * time.Second):
-		t.Fatalf("%s: not within 5s", what)
+	case <-time.After(testWaitBound):
+		t.Fatalf("%s: not within %s", what, testWaitBound)
 	}
 	var zero T
 	return zero
@@ -733,7 +733,7 @@ func leaseExecIdle(cmd string, idle time.Duration) Exec {
 // recorded end reason.
 func leaseEnded(t *testing.T, p *pool, lc *leaseLauncher, reason LeaseEndReason) {
 	t.Helper()
-	waitFor(t, func() bool { return liveLease(p, "k") == nil && lc.liveCount() == 0 })
+	waitFor(t, `liveLease(p, "k") == nil && lc.liveCount() == 0`, func() bool { return liveLease(p, "k") == nil && lc.liveCount() == 0 })
 	assertEnded(t, p, lc, reason)
 }
 
@@ -1023,7 +1023,7 @@ func TestWorkspaceIdleNeverReclaimsALeasedRun(t *testing.T) {
 		t.Fatalf("workspace reclaimed %v after the lease end, before WorkspaceIdle: %v", 100*time.Second, err)
 	}
 	clk.Advance(60 * time.Second)
-	waitFor(t, func() bool {
+	waitFor(t, "the workspace tree removed", func() bool {
 		_, err := os.Stat(dir)
 		return errors.Is(err, os.ErrNotExist)
 	})
@@ -1104,7 +1104,7 @@ func TestWorkspaceReclaimRetiresTheStateFile(t *testing.T) {
 	}{
 		{"workspace idle", func(t *testing.T, p *pool, clk *fakeClock) {
 			clk.Advance(5 * time.Minute)
-			waitFor(t, func() bool {
+			waitFor(t, `p.runs["k"] == nil`, func() bool {
 				p.mu.Lock()
 				defer p.mu.Unlock()
 				return p.runs["k"] == nil
@@ -1200,7 +1200,7 @@ func TestPerExecOnlyWorkerLeavesTheStateFileAlone(t *testing.T) {
 	}{
 		{"workspace idle", func(t *testing.T, p *pool, clk *fakeClock) {
 			clk.Advance(5 * time.Minute)
-			waitFor(t, func() bool {
+			waitFor(t, `p.runs["k"] == nil`, func() bool {
 				p.mu.Lock()
 				defer p.mu.Unlock()
 				return p.runs["k"] == nil

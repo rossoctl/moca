@@ -29,8 +29,8 @@ func mustReturn(t *testing.T, done <-chan error, what string) error {
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(5 * time.Second):
-		t.Fatalf("%s: still running 5s after its bound should have fired — nothing is bounding it", what)
+	case <-time.After(testWaitBound):
+		t.Fatalf("%s: still running %s after its bound should have fired — nothing is bounding it", what, testWaitBound)
 		return nil
 	}
 }

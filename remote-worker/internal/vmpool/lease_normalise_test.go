@@ -143,7 +143,7 @@ func TestLeaseNormaliseFailureFailsTheLeaseStart(t *testing.T) {
 			mustSetMode(t, p, "k", ModeLease, 1)
 			lc.setNormaliseFn(tc.step)
 			errc := execAsync(p, "k", Exec{Command: "one", TimeoutS: 30, Mode: ModeLease, ModeEpoch: 1})
-			waitFor(t, func() bool { return len(lc.normaliseCommands()) == 1 })
+			waitForValue(t, `len(lc.normaliseCommands())`, func() int { return len(lc.normaliseCommands()) }, 1)
 			if tc.wait > 0 {
 				clk.Advance(tc.wait - time.Millisecond)
 				select {
@@ -236,7 +236,7 @@ func TestLeaseEndDuringTheNormaliseStepCancelsIt(t *testing.T) {
 	setc := make(chan error, 1)
 	deadline := clk.Now().Add(p.cfg.LeaseGraceLimit)
 	go func() { setc <- setModeErr(p, "k", ModePerExec, 2) }()
-	waitFor(t, func() bool { return timerArmed(clk, deadline) })
+	waitFor(t, `timerArmed(clk, deadline)`, func() bool { return timerArmed(clk, deadline) })
 	clk.Advance(p.cfg.LeaseGraceLimit)
 	if err := recvWithin(t, setc, "the SetMode"); err != nil {
 		t.Fatalf("SetMode: %v", err)

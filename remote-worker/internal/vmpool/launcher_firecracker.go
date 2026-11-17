@@ -603,8 +603,10 @@ func (l *firecrackerLauncher) Restore(ctx context.Context, req RestoreRequest) (
 	if boundary != nil {
 		observe = boundary.observe
 	}
-	if err := waitForUnixSocketObserved(ctx, apiSockHost, 5*time.Second, observe); err != nil {
-		return nil, errors.Join(fmt.Errorf("firecracker: restore %s: API socket never appeared: %w (jailer output: %s)", req.ID, err, jailerOut.String()), cleanup())
+	if err := waitForUnixSocketObserved(ctx, apiSockHost, apiSocketWait, observe); err != nil {
+		// cleanup's cmd.Wait drains the output pipes, so the tail is complete only after it.
+		cerr := cleanup()
+		return nil, errors.Join(fmt.Errorf("firecracker: restore %s: API socket never appeared: %w (jailer output: %s)", req.ID, err, jailerOut.String()), cerr)
 	}
 
 	phSock = time.Since(phaseStart) - phPrep - phWsImg - phSpawn
@@ -916,6 +918,10 @@ const (
 	socketPollGrowthNum = 3
 	socketPollGrowthDen = 2
 )
+
+// apiSocketWait bounds Restore's wait for Firecracker's API socket. A variable so tests whose
+// fake jailer never binds one can wait on the jailer itself rather than race this bound.
+var apiSocketWait = 5 * time.Second
 
 // socketProbe is how waitForUnixSocket asks whether anything answers. A variable so a test can
 // count attempts and thereby pin the backoff schedule itself -- wall-clock assertions cannot:

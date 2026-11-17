@@ -526,7 +526,7 @@ func TestGateParkedThenResumed(t *testing.T) {
 	}
 
 	clk.Advance(DefaultStandbyIdle + DefaultStandbyIdle/4 + time.Second)
-	waitFor(t, func() bool { return p.Stats().StandbysResident == 0 })
+	waitForValue(t, `p.Stats().StandbysResident`, func() int { return p.Stats().StandbysResident }, 0)
 	if _, err := os.Stat(dir); err != nil {
 		t.Fatalf("workspace %s gone at StandbyIdle: %v — parking drops standbys, not the workspace", dir, err)
 	}
@@ -563,7 +563,7 @@ func TestGateReclaimThenRedispatch(t *testing.T) {
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("workspace %s survived Reclaim: err=%v", dir, err)
 	}
-	waitFor(t, func() bool { return lc.liveCount() == 0 })
+	waitForValue(t, `lc.liveCount()`, func() int { return lc.liveCount() }, 0)
 
 	var out capturingSink
 	if _, err := p.Exec(context.Background(), "gate-reclaim", Exec{Command: "redispatched"}, &out); err != nil {

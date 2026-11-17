@@ -148,16 +148,21 @@ func TestWaitFDsGoneReturnsAsSoonAsTheDescriptorsAreClosed(t *testing.T) {
 // never claim an observation it does not have. pool.destroy turns !ok into the old synchronous
 // ordering, which is the only safe fallback.
 func TestWaitFDsGoneGivesUpRatherThanHoldingTheGateForever(t *testing.T) {
+	probes := 0
 	restoreExitProbes(t,
-		func(int) (int, bool) { return 3, true }, // never drains
+		func(int) (int, bool) { probes++; return 3, true }, // never drains
 		func(int) (int, bool) { return 1, true },
 	)
-	start := time.Now()
-	if _, ok := fcWaitFDsGone(1234, 60*time.Millisecond); ok {
+	const budget = 60 * time.Millisecond
+	okc := make(chan bool, 1)
+	go func() { _, ok := fcWaitFDsGone(1234, budget); okc <- ok }()
+	if recvWithin(t, okc, "a barrier wait with a 60ms budget") {
 		t.Fatal("ok=true for a barrier that never arrived")
 	}
-	if el := time.Since(start); el > 2*time.Second {
-		t.Fatalf("took %v to give up on a 60ms budget", el)
+	// Each probe is followed by at least one poll interval of sleep, so a wait that honours
+	// its budget makes at most this many however loaded the host is.
+	if most := int(budget/fcExitBarrierPoll) + 2; probes > most {
+		t.Fatalf("%d probes before giving up on a %v budget, want at most %d", probes, budget, most)
 	}
 }
 

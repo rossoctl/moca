@@ -334,7 +334,7 @@ func TestLeaseEndDoesNotRecreateARemovedStateFile(t *testing.T) {
 		}},
 		{"idle", func(t *testing.T, p *pool, clk *fakeClock) {
 			clk.Advance(31 * time.Second)
-			waitFor(t, func() bool { return liveLease(p, "k") == nil })
+			waitFor(t, `liveLease(p, "k") == nil`, func() bool { return liveLease(p, "k") == nil })
 		}},
 	} {
 		t.Run(end.name, func(t *testing.T) {

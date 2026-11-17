@@ -97,7 +97,7 @@ func TestCloseStillReturnsWhenNoWarmIsInFlight(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(testWaitBound):
 		t.Fatal("Close did not return with no warm in flight — it is waiting on something that will never settle")
 	}
 	if n := lc.liveCount(); n != 0 {
