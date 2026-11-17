@@ -726,10 +726,12 @@ else
       [[ "${async_states[$i]%% *}" == responded ]] ||
         bad="$bad ${async_tids[$i]}=${async_states[$i]:-unreadable}"
     done
-    # One result read in full: `responded` says the agent loop finished, the text says the leaf's
-    # tool actually ran. /runs/status would answer `queued` here forever -- this is the turn route.
+    # One result read: `responded` says the agent loop finished, the summary says the leaf's tool
+    # actually ran. /runs/status would answer `queued` here forever -- this is the turn route.
+    # `summary`, not `text`: the status read no longer inlines the output (spec §4.4, B5), and for a
+    # prompt leaf the summary IS that text, clipped at MOCA_TURN_SUMMARY_BYTES.
     text="$(curl -s --max-time 20 -H @"$OUT/api.hdr" "$CP/v1/sessions/${async_sids[0]}/turns/${async_tids[0]}" |
-      jq -r '.result.text // empty' 2>/dev/null || true)"
+      jq -r '.result.summary // empty' 2>/dev/null || true)"
     grep -q async-leaf-ok <<<"$text" ||
       bad="$bad (${async_tids[0]} returned no tool output: '${text:0:200}')"
   fi

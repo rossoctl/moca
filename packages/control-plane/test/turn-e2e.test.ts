@@ -41,14 +41,26 @@ function request(
   method: string,
   path: string,
   opts: { body?: unknown; headers?: Record<string, string> } = {},
-): Promise<{ status: number; json(): any }> {
+): Promise<{
+  status: number;
+  json(): any;
+  /** The raw body and headers, for the one route that answers with bytes (#390's artifact fetch). */
+  bytes: Buffer;
+  headers: http.IncomingHttpHeaders;
+}> {
   return new Promise((resolve, reject) => {
     const req = http.request(new URL(path, base), { method, headers: opts.headers }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (c: Buffer) => chunks.push(c));
       res.on('end', () => {
-        const body = Buffer.concat(chunks).toString();
-        resolve({ status: res.statusCode ?? 0, json: () => (body ? JSON.parse(body) : undefined) });
+        const raw = Buffer.concat(chunks);
+        const body = raw.toString();
+        resolve({
+          status: res.statusCode ?? 0,
+          json: () => (body ? JSON.parse(body) : undefined),
+          bytes: raw,
+          headers: res.headers,
+        });
       });
     });
     req.on('error', reject);
@@ -344,8 +356,29 @@ describe('async turn, end to end (#387 acceptance)', () => {
       turnId,
       state: 'solved',
       attempts: 1,
-      result: { status: 'solved', patch: 'diff --git a/x b/x' },
+      // The patch is NAMED here and fetched below (#390); the fakeWorker above stored it whole.
+      result: { status: 'solved', artifacts: [{ kind: 'patch', bytes: 18 }] },
     });
+    expect(JSON.stringify(done.json())).not.toContain('diff --git');
+
+    // The artifact route, over the same real HTTP: bytes, not JSON. This is the only test that
+    // exercises server.ts's Buffer branch end to end -- without it the diff would go out as
+    // `{"type":"Buffer","data":[...]}` and every assertion above would still pass.
+    const art = await request('GET', `/v1/sessions/${sid}/turns/${turnId}/artifacts/patch`, {
+      headers: auth(ALICE),
+    });
+    expect(art.status).toBe(200);
+    expect(art.bytes).toEqual(Buffer.from('diff --git a/x b/x'));
+    expect(art.headers['content-type']).toBe('text/x-diff');
+    expect(art.headers['content-length']).toBe('18');
+    // `sha256:`-prefixed whether the record carried a digest or not: one grammar, so a client's
+    // stored ETag still compares against a later fetch of the same bytes.
+    expect(art.headers.etag).toMatch(/^"sha256:[0-9a-f]{64}"$/);
+
+    const nope = await request('GET', `/v1/sessions/${sid}/turns/${turnId}/artifacts/transcript`, {
+      headers: auth(ALICE),
+    });
+    expect(nope.status).toBe(404);
   });
 
   it('leaves the record unexpiring while the turn is live, and expires it only at the end', async () => {

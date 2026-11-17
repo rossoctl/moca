@@ -14,7 +14,7 @@
 openapi: 3.1.0
 info:
   title: MOCA harness (data plane)
-  version: 1.3.0
+  version: 1.4.0
   description: |
     The agent execution tier: HTTP server and P6 workers that run turns and jobs against sandboxed
     workspaces. It is a separate deployable from the control plane, and a client that knows only
@@ -727,6 +727,18 @@ components:
           type: string
           description: '`sha256:<hex>` of the diff bytes.'
         patchBytes: { type: integer, description: The diff's length in bytes. }
+        diffstat:
+          type: object
+          description: |
+            What the diff changes, so a caller can judge it without fetching it. Counted from the
+            diff's hunks, so a binary-only change reports its file count with no changed lines.
+            Present whenever the capture succeeded, `patchRefused` included — there it is the only
+            description of the patch a caller gets.
+          required: [files, insertions, deletions]
+          properties:
+            files: { type: integer }
+            insertions: { type: integer }
+            deletions: { type: integer }
         patchRefused:
           type: string
           enum: [too_large]
@@ -980,6 +992,13 @@ components:
             status: { type: string, enum: [solved] }
             patch: { type: string }
             usage: { $ref: '#/components/schemas/LeafUsage' }
+            workspace:
+              description: |
+                A descriptor of the patch in `patch` — `baseline`, `patchSha256`, `patchBytes`,
+                `diffstat` — so a caller can apply it against the commit it was taken from.
+                Absent when the capture printed no baseline. The bytes stay in `patch`; this
+                never repeats them.
+              $ref: '#/components/schemas/TurnWorkspace'
         - type: object
           required: [status, text]
           properties:

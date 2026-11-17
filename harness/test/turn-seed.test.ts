@@ -7,6 +7,8 @@ import { createHash } from 'node:crypto';
 import {
   buildPatchCaptureScript,
   captureTurnPatch,
+  describePatch,
+  diffstat,
   DEFAULT_PATCH_MAX_BYTES,
   patchMaxBytes,
   SandboxSeedError,
@@ -411,6 +413,10 @@ describe('the seed baseline and the patch capture (session-templates spec §5.1)
     expect(w.patch).toBeUndefined();
     expect(w.patchBytes).toBeGreaterThan(1000);
     expect(w.patchSha256).toMatch(/^sha256:[0-9a-f]{64}$/);
+    // The diffstat survives the refusal (#390): here it is the ONLY thing the caller learns about
+    // a patch it cannot have. One file, one very long added line (big.txt has no trailing newline,
+    // so the `\ No newline` marker must not count as a second).
+    expect(w.diffstat).toEqual({ files: 1, insertions: 1, deletions: 0 });
   });
 
   it('a binary change is carried whole, as base64 when it is not UTF-8', async () => {
@@ -422,6 +428,9 @@ describe('the seed baseline and the patch capture (session-templates spec §5.1)
     expect(w.patch ?? Buffer.from(w.patchBase64!, 'base64').toString('latin1')).toContain(
       'GIT binary patch',
     );
+    // One file, no counted lines: the base85 payload is not changed lines, and counting it would
+    // report a one-byte image as hundreds of insertions.
+    expect(w.diffstat).toEqual({ files: 1, insertions: 0, deletions: 0 });
   });
 
   it('no repository, a failed exec or a truncated output is reported, never thrown', async () => {
@@ -627,5 +636,45 @@ describe('withWorkspacePatch: which turns carry a patch', () => {
       await withWorkspacePatch(result, { leased: true, sandbox: null }, 'example-repo', {}),
     ).toBe(result);
     expect(commands).toEqual([]);
+  });
+});
+
+describe('diffstat (#390)', () => {
+  it('counts files and in-hunk lines, and nothing else', () => {
+    const patch = [
+      'diff --git a/a.txt b/a.txt',
+      'index 1111111..2222222 100644',
+      '--- a/a.txt',
+      '+++ b/a.txt',
+      '@@ -1,2 +1,2 @@',
+      ' kept',
+      '-gone',
+      '+added',
+      'diff --git a/b.txt b/b.txt',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/b.txt',
+      '@@ -0,0 +1 @@',
+      '+one',
+      '\\ No newline at end of file',
+      '',
+    ].join('\n');
+    // The `---`/`+++` headers are NOT changed lines, and neither is the `\ No newline` marker:
+    // counting them would overstate every patch by two per file.
+    expect(diffstat(patch)).toEqual({ files: 2, insertions: 2, deletions: 1 });
+  });
+
+  it('reports zeroes for an empty patch', () => {
+    expect(diffstat('')).toEqual({ files: 0, insertions: 0, deletions: 0 });
+  });
+
+  it('describes a patch without copying it', () => {
+    const patch = 'diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n';
+    expect(describePatch('f'.repeat(40), patch)).toEqual({
+      baseline: 'f'.repeat(40),
+      patchSha256: 'sha256:' + createHash('sha256').update(patch, 'utf8').digest('hex'),
+      patchBytes: Buffer.byteLength(patch, 'utf8'),
+      diffstat: { files: 1, insertions: 1, deletions: 1 },
+    });
   });
 });

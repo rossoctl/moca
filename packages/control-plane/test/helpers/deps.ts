@@ -68,6 +68,7 @@ export function makeDeps(
     asyncQueuedPerOwner: 50,
     tenancy: 'single',
     turnRecordTtlSeconds: 86_400 + 3_600,
+    turnSummaryBytes: 2048,
     grantTtlS: 300,
     turnMaxS: 1800,
     sandbox: {

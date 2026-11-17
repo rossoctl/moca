@@ -73,7 +73,8 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
 - **The turn record outlives its result.** Its TTL is `LEAF_RESULT_TTL_SECONDS` plus a margin, set
   when the turn goes terminal, not at creation; a non-terminal record carries no TTL and the
   reaper's `lost` transition is what guarantees every record eventually becomes terminal. Deriving
-  the record's TTL from the result's keeps one knob: raising retention moves both. The inverse
+  the record's TTL from the result's keeps one knob: raising retention moves both — which #390 then
+  did, to seven days, adding the per-session turn index to the same clock. The inverse
   ordering would reintroduce the queued/never-submitted conflation this record rejects elsewhere —
   a succeeded turn answering `404` because its record expired first.
 - **On drain, abandon without acking.** The loop stops claiming, the in-flight leaf is left pending
@@ -85,6 +86,18 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   — no record answers `{status:'queued'}` — which conflates all three, and extending it would change
   a live route's responses on top of the admission change below. Two routes, one source of truth
   each.
+
+  **Amended by #390: that read is BOUNDED, and the output moved to its own route.** The first cut
+  handed back the stored result verbatim, so a 4 MiB patch rode every poll of a route whose whole
+  purpose is to be polled. The status body now carries a projection — the record's own fields, a
+  `summary` clipped to `MOCA_TURN_SUMMARY_BYTES`, the patch's descriptor and an `artifacts` list —
+  and `GET …/turns/{turnId}/artifacts/{kind}` serves the bytes whole. The projection is read-time
+  only: nothing extra is stored, so there is no second writer and no migration, and an older
+  worker's record projects the same way. `result.patch` and `result.text` leaving that body is a
+  NARROWING of a response, permitted because `/v1` is Preview, and recorded in the API changelog
+  because that is what Preview requires. The synchronous `/v1/runs` and `/runs/status` bodies are
+  deliberately untouched: nothing polls them.
+
 - **Cancellation covers `queued` turns only.** `DELETE` on the turn flips a queued record to
   `cancelled` and the drain loop skips it at claim; a `running` leaf runs to completion and the call
   answers `409`. Interrupting a running leaf needs a cancel signal addressed to one specific worker,
@@ -155,7 +168,7 @@ instead of once per turn.
 | Exit-0-when-idle drain semantics                        | **Replaced** by the supervisor's `drain` signal                                      |
 | `XAUTOCLAIM` reaper (#17)                               | **Kept.** Crash recovery depends on it                                               |
 | Dead-letter past `maxAttempts`                          | **Kept**, mapped to a `lost` turn state                                              |
-| `LEAF_RESULT_TTL_SECONDS` (86400)                       | **Kept** as-is; longer retention is owed                                             |
+| `LEAF_RESULT_TTL_SECONDS` (86400)                       | **Kept** as-is in M1; raised to 604800 by #390, on the one knob                      |
 | At-least-once delivery                                  | **Kept.** The claim/ack cycle is unchanged                                           |
 | `runLeaf` idempotency on the session id                 | **Kept**, and promoted to the submission-time `idempotencyKey` default               |
 | `classifyOutcome` retry classes                         | **Kept and already in tree** — `harness/src/classify-outcome.ts` survived #691       |

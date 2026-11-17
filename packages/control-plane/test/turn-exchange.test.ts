@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { HANDLERS } from '../src/handlers.js';
 import { AUDIT_STREAM, OwnershipIndex, sessionKey } from '../src/ownership.js';
-import type { TurnRecord, TurnState } from '../src/turn-record.js';
+import { turnKey, type TurnRecord, type TurnState } from '../src/turn-record.js';
 import { TurnStore } from '../src/turn-store.js';
 import { exchangeCredential } from '../src/exchange.js';
 import { exchangeTurnCredential } from '../src/turn-exchange.js';
@@ -138,8 +138,10 @@ describe('exchangeTurnCredential (async spec §5.4)', () => {
     expect(after?.state).toBe('queued');
     expect(after?.attempts).toBe(0);
     // ...and no TTL either. A non-terminal record carries none (§5.1), and `expires` is the fake's
-    // record of every EXPIRE issued, so this fails if the exchange ever starts a clock on the record.
-    expect(d.fake.expires).toEqual([]);
+    // record of every EXPIRE issued, so this fails if the exchange ever starts a clock on the
+    // record. Filtered to the record's own key: the session turn index (§9.2) is armed when the
+    // turn is submitted, which is before this call and nothing to do with it.
+    expect(d.fake.expires.filter((e) => e.key === turnKey(turnId))).toEqual([]);
   });
 
   it('404s a turn id with no record, and an empty one', async () => {

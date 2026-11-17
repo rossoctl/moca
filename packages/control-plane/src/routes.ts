@@ -305,6 +305,16 @@ export const ROUTES: readonly RouteSpec[] = [
     operationId: 'getTurn',
   },
   {
+    // The output getTurn's projection leaves out (#390). One kind in M1, `patch`; the handler
+    // decides what a kind means, so a new one needs no route.
+    method: 'GET',
+    path: '/v1/sessions/{id}/turns/{turnId}/artifacts/{kind}',
+    auth: 'api',
+    sessionScoped: true,
+    profiles: HARNESS,
+    operationId: 'getTurnArtifact',
+  },
+  {
     method: 'DELETE',
     path: '/v1/sessions/{id}/turns/{turnId}',
     auth: 'api',

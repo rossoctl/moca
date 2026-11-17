@@ -1,10 +1,11 @@
+import { createHash } from 'node:crypto';
 import { countAsync } from './counters.js';
 import { CpError } from './errors.js';
 import { auditBestEffort } from './handler-util.js';
 import { assertOwner, type CpDeps, type Handler, type RequestCtx } from './handlers.js';
 import type { SessionRecord } from './ownership.js';
 import { isTerminalState, parseTurnSubmission, type TurnRecord } from './turn-record.js';
-import { readLeafResult } from './turn-result.js';
+import { pickArtifact, projectLeafResult, readLeafResult } from './turn-result.js';
 import type { TurnQueue } from './turn-queue.js';
 import type { TurnStore } from './turn-store.js';
 
@@ -215,8 +216,51 @@ export const TURN_HANDLERS: Record<string, Handler> = {
         turnId: turn.turnId,
         state: turn.state,
         attempts: turn.attempts,
-        ...(result ? { result } : {}),
+        // PROJECTED, not the stored record (#390): the patch and the assistant text are fetched as
+        // artifacts instead, so the RESPONSE is bounded whatever the leaf produced.
+        //
+        // The READ is not: `readLeafResult` still GETs and JSON.parses the whole stored record, so a
+        // four-megabyte patch is still fetched from Redis and parsed per poll -- only not serialised
+        // back out. Bounding that too means storing the descriptor under its own key, a second writer
+        // in the harness; §4.4 records it as the known limit rather than pretending it is closed.
+        ...(result ? { result: projectLeafResult(result, deps.config.turnSummaryBytes) } : {}),
       },
+    };
+  },
+
+  /**
+   * GET /v1/sessions/{id}/turns/{turnId}/artifacts/{kind} (§4.4, B5): the output the status read
+   * leaves out, served whole and with its own content type. One kind in M1, `patch`.
+   *
+   * Every absence is 404 -- unknown kind, a turn still running, a terminal turn with no result,
+   * a capture refused for size -- with a message naming which. `turn_not_found` is NOT reused: that
+   * code belongs to the dequeue exchange (errors.ts), where it means something else entirely.
+   */
+  getTurnArtifact: async (ctx, deps) => {
+    const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
+    const turn = await turnOnSession(ctx, deps, rec);
+    const kind = ctx.params.kind ?? '';
+    if (!isTerminalState(turn.state)) {
+      throw new CpError('not_found', `this turn is '${turn.state}'; it has no artifacts yet`);
+    }
+    const result = deps.leafResults
+      ? await readLeafResult(deps.leafResults, turn.sessionId, turn.turnId)
+      : null;
+    if (!result) throw new CpError('not_found', 'this turn stored no result');
+    const artifact = pickArtifact(result, kind);
+    if (!artifact) throw new CpError('not_found', `this turn has no '${kind}' artifact`);
+    // The CAPTURE's digest of these same bytes, which is also what the status read advertises as
+    // `artifacts[].sha256` -- so the ETag and that field cannot disagree, and an 8 MiB patch is not
+    // re-hashed on the single event loop once per fetch. Hashed here only for a record that carries
+    // no digest (an older worker's, or a solve whose baseline was never captured), and carrying the
+    // same `sha256:` prefix the capture writes, so a client comparing the two never has to strip one.
+    const etag =
+      artifact.sha256 ?? `sha256:${createHash('sha256').update(artifact.bytes).digest('hex')}`;
+    return {
+      status: 200,
+      body: artifact.bytes,
+      contentType: artifact.contentType,
+      headers: { ETag: `"${etag}"` },
     };
   },
 

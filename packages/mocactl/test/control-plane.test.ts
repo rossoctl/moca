@@ -281,17 +281,19 @@ describe('async turns (ADR-0047)', () => {
     expect(calls[0]!.url).toBe('http://cp/v1/sessions/s1/turns/t%2F9');
   });
 
+  // The BOUNDED shape the route answers with since #390: a summary and an artifact descriptor, no
+  // patch bytes. The fixture is the server's body, so it has to be the body the server sends --
+  // asserting pass-through of `{patch: 'd'}` proved the client copied a field nothing returns.
   it('returns the result once present', async () => {
-    const { fetch } = scriptedFetch(
-      json({
-        turnId: 't1',
-        state: 'solved',
-        attempts: 1,
-        result: { status: 'solved', patch: 'd' },
-      }),
-    );
+    const result = {
+      status: 'solved',
+      summary: '1 files, +2 -0',
+      artifacts: [{ kind: 'patch', bytes: 42, sha256: 'sha256:abc' }],
+      workspace: { baseline: 'c0ffee', patchBytes: 42 },
+    };
+    const { fetch } = scriptedFetch(json({ turnId: 't1', state: 'solved', attempts: 1, result }));
     const c = client(fetch);
-    expect((await c.getTurn('s1', 't1')).result).toEqual({ status: 'solved', patch: 'd' });
+    expect((await c.getTurn('s1', 't1')).result).toEqual(result);
   });
 
   it('cancels a queued turn and surfaces the 409 as a typed error', async () => {

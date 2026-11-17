@@ -8,10 +8,48 @@ that shipped it ("The data plane's twin … goes to"):
 
 | `harness-openapi.yaml` | Shipped with                   |
 | ---------------------- | ------------------------------ |
+| 1.4.0                  | [1.26.0](#1260)                |
 | 1.3.0                  | [1.17.0](#1170)                |
 | 1.2.0                  | [1.16.0](#1160)                |
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
+
+## 1.26.0
+
+Per-turn artifacts and a bounded status read
+([#390](https://github.com/rossoctl/moca/issues/390)), per the
+[async fan-out spec](../specs/2026-11-05-p6-async-fan-out-design.md) §4.4 and §9.2. The data plane's
+twin goes to **1.4.0** with it. One **narrowing** on the wire, deliberate and named below — allowed
+because `/v1` is Preview ([maturity](../reference/maturity-and-lifecycle.md)), and recorded here
+because that is what Preview requires.
+
+- `GET /v1/sessions/{id}/turns/{turnId}` no longer inlines the turn's OUTPUT. `result.patch` and
+  `result.text` are **removed** from that body: the route is polled, and a 4 MiB patch rode every
+  poll. In their place, additively: `result.summary` (one line — the assistant's text, a gate's
+  summary, the patch's diffstat or the failure's reason — clipped to `MOCA_TURN_SUMMARY_BYTES`,
+  default 2048 bytes), `result.artifacts` (`[{kind, bytes, sha256?}]`) and `result.workspace` on a
+  solve result as well as a `responded` one. The synchronous `POST /v1/runs` and `GET /runs/status`
+  bodies are untouched — they still carry `patch` and `text` in full.
+- The same cap now holds every **model-written** string in that body, not just `summary`:
+  `result.verdict.reason` and `result.gate.summary`/`proposed_action` are clipped to
+  `MOCA_TURN_SUMMARY_BYTES` with the same trailing `…[truncated]`. Nothing upstream caps them, so
+  unclipped they kept a `done` turn's polled body unbounded. The cap bounds each string's CONTENT,
+  so a clipped one is `MOCA_TURN_SUMMARY_BYTES` plus that 14-byte marker. `MOCA_TURN_SUMMARY_BYTES=0`
+  omits all four keys rather than returning a bare marker; `verdict` and `gate` keep their shaped
+  fields (`item_id`, `verdict`, `gateId`), so a client can still branch on them.
+- `GET /v1/sessions/{id}/turns/{turnId}/artifacts/{kind}` serves the output whole: bytes, with
+  `text/x-diff` and an `ETag` — always `"sha256:<hex>"`, the one format
+  `result.artifacts[].sha256` uses: the capture's own digest when the record carries one, else a
+  digest of the bytes served. `If-None-Match` is not honoured, so the ETag is for comparison, not
+  for skipping a fetch. `patch` is the only kind. Every absence is 404 (unknown kind, a turn
+  not yet terminal, no stored result, a capture refused for size).
+- The data plane's `TurnWorkspace` gains `diffstat` (`{files, insertions, deletions}`), counted from
+  the diff's hunks and present even when `patchRefused` left the bytes behind; `LeafResult`'s
+  `solved` branch gains `workspace`, the descriptor (`baseline`, `patchSha256`, `patchBytes`,
+  `diffstat`) for the patch in `patch`. `RunStatus`'s `solved` branch is unchanged.
+- Async results and turn records are kept for **7 days** by default, up from 24 h
+  (`LEAF_RESULT_TTL_SECONDS` `604800`), so a Friday turn is still readable on Monday. Not a wire
+  change; it is what makes the two routes above worth polling.
 
 ## 1.25.0
 

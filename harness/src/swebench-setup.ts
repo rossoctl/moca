@@ -1,5 +1,5 @@
 import type { SandboxTransport } from '@moca/k8s-sandbox';
-import { leafWorkspaceRef } from './converge.js';
+import { leafWorkspaceRef, splitBaseline, type WorkspaceDiff } from './converge.js';
 
 function sq(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
@@ -48,9 +48,22 @@ export function buildSwebenchSetupScript(a: {
   ].join('\n');
 }
 
-export function buildSwebenchDiffScript(sessionId: string): string {
+/**
+ * Baseline first, then the diff — see `buildDiffCaptureScript`, which this mirrors.
+ *
+ * `baseCommit` is the sha the setup script checked out, so unlike the converge path this one needs
+ * no file to remember it. Diffed AGAINST it rather than against the checkout's HEAD: an agent that
+ * committed its fix would otherwise name a sandbox-local sha as the baseline and hand back a patch
+ * with the committed work missing.
+ */
+export function buildSwebenchDiffScript(sessionId: string, baseCommit: string): string {
   const CO = swebenchCheckoutDir(sessionId);
-  return [`set -eu`, `git -C ${sq(CO)} add -A`, `git -C ${sq(CO)} diff --cached`].join('\n');
+  return [
+    `set -eu`,
+    `printf '%s\\n' ${sq(baseCommit)}`,
+    `git -C ${sq(CO)} add -A`,
+    `git -C ${sq(CO)} diff --cached ${sq(baseCommit)}`,
+  ].join('\n');
 }
 export function buildSwebenchCleanupScript(sessionId: string): string {
   // Also clear /workspace/leaves/<sid>: the SWE-bench path uses /workspace/co-<sid> and
@@ -102,17 +115,22 @@ export async function setupSwebenchWorkspace(
   if (exitCode !== 0) throw new Error(`swebench setup failed (exit ${exitCode})`);
   return stdout.toString().trim() || swebenchCheckoutDir(a.sessionId);
 }
-export async function captureSwebenchDiff(t: SandboxTransport, sessionId: string): Promise<string> {
-  const { stdout, exitCode, truncated } = await t.exec(buildSwebenchDiffScript(sessionId), {
-    timeout: 120,
-  });
+export async function captureSwebenchDiff(
+  t: SandboxTransport,
+  sessionId: string,
+  baseCommit: string,
+): Promise<WorkspaceDiff> {
+  const { stdout, exitCode, truncated } = await t.exec(
+    buildSwebenchDiffScript(sessionId, baseCommit),
+    { timeout: 120 },
+  );
   if (truncated) {
     throw new Error(
       `swebench diff capture exceeded the sandbox output cap (diff too large): ${sessionId}`,
     );
   }
   if (exitCode !== 0) throw new Error(`swebench diff capture failed (exit ${exitCode})`);
-  return stdout.toString();
+  return splitBaseline(stdout.toString());
 }
 export async function cleanupSwebench(t: SandboxTransport, sessionId: string): Promise<void> {
   try {

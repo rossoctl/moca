@@ -184,6 +184,12 @@ export interface CpConfig {
    */
   turnRecordTtlSeconds: number;
   /**
+   * `MOCA_TURN_SUMMARY_BYTES`, default 2048 (#390): the byte cap on the `summary` an async status
+   * read carries. Mirrors the worker's SH_TURN_STREAM_TOOL_RESULT_PREVIEW_BYTES, for the same
+   * reason -- a polled route must not return whatever a model happened to write.
+   */
+  turnSummaryBytes: number;
+  /**
    * `MOCA_GRANT_TTL_S`, default 300 (MI1 §15): how long a session grant lives before the worker
    * must refresh it. Short on purpose -- with no revocation list, this IS the revocation latency.
    */

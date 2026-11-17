@@ -29,6 +29,14 @@ export interface CpRedisLike {
     min: number | string,
     opts?: { BY?: 'SCORE'; REV?: boolean; LIMIT?: { offset: number; count: number } },
   ): Promise<string[]>;
+  /**
+   * Drop every member scored in [min, max]. The per-session turn index (§9.2) is the one index here
+   * that keeps a member after its turn finished, so it is the one that needs trimming: without this
+   * a session that runs turns for a year carries a year of ids, every one of them past the
+   * retention window, and the delete walk would enumerate all of them. Same bound, same call, as
+   * `bundle-budget.ts`'s expiry sweep.
+   */
+  zRemRangeByScore(key: string, min: number | string, max: number | string): Promise<unknown>;
   del(keys: string[]): Promise<unknown>;
   xAdd(
     key: string,

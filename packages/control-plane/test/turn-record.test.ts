@@ -189,10 +189,12 @@ describe('parseTurnSubmission (spec §4.1)', () => {
 });
 
 describe('resultTtlSeconds', () => {
-  it('defaults when unset or blank', () => {
-    expect(resultTtlSeconds({})).toBe(86_400);
-    expect(resultTtlSeconds({ LEAF_RESULT_TTL_SECONDS: '' })).toBe(86_400);
-    expect(resultTtlSeconds({ LEAF_RESULT_TTL_SECONDS: '  ' })).toBe(86_400);
+  // Seven days (#390): an async turn is submitted because nobody is waiting, so a Friday
+  // afternoon result must still be readable on Monday -- B5's own 72 h acceptance criterion.
+  it('defaults to seven days when unset or blank', () => {
+    expect(resultTtlSeconds({})).toBe(604_800);
+    expect(resultTtlSeconds({ LEAF_RESULT_TTL_SECONDS: '' })).toBe(604_800);
+    expect(resultTtlSeconds({ LEAF_RESULT_TTL_SECONDS: '  ' })).toBe(604_800);
   });
 
   it('reads a positive integer', () => {

@@ -52,8 +52,10 @@ MOCK
 # t1, t2, ... and remembers the prompt; a GET of one answers `queued` (or `running`, for claim 14's
 # K8S-SMOKE-ASYNC-SLOW leaf) on its FIRST read and the final state after that, so a poll that waits
 # for a state change gets one. MOCK_ASYNC_STATE / MOCK_ASYNC_TEXT (claim 13) and MOCK_ASYNC_SLOW_STATE
-# / MOCK_ASYNC_ATTEMPTS (claim 14) set that final state, its result text and the delivery it finished
-# on. Everything else is a refused connection.
+# / MOCK_ASYNC_ATTEMPTS (claim 14) set that final state, its result summary and the delivery it
+# finished on. `summary`, not `text`: the status read stopped inlining the output in 1.25.0 (#390),
+# so a mock that still served `text` would let smoke.sh read a field no stack returns.
+# Everything else is a refused connection.
 cat >"$TMP/bin/curl" <<'MOCK'
 #!/usr/bin/env bash
 url='' data='' prev='' ofile='' wfmt=''
@@ -100,7 +102,7 @@ case "$url" in
   esac
   [[ "$r" -gt 1 ]] || st="$first"
   jq -nc --arg s "$st" --argjson a "$att" --arg t "$text" \
-    '{state: $s, attempts: $a} + (if $s == "queued" or $s == "running" then {} else {result: {text: $t}} end)' ;;
+    '{state: $s, attempts: $a} + (if $s == "queued" or $s == "running" then {} else {result: {summary: $t}} end)' ;;
 */v1/sessions/*)
   [[ "${MOCK_SESSIONS-}" == 1 ]] || exit 7
   printf '%s\n' "$data" >>"$MOCK_STATE/patches.log"

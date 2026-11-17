@@ -56,7 +56,15 @@ export function toResultRecord(
   };
   if (result.status === 'done') return { ...base, status: 'done', verdict: result.verdict };
   if (result.status === 'solved')
-    return { ...base, status: 'solved', patch: result.patch, usage: result.usage ?? null };
+    return {
+      ...base,
+      status: 'solved',
+      patch: result.patch,
+      usage: result.usage ?? null,
+      // The descriptor, so the baseline and diffstat survive into the stored result an async
+      // status read projects (#390). Carried exactly as the `responded` branch carries its own.
+      ...(result.workspace ? { workspace: result.workspace } : {}),
+    };
   if (result.status === 'responded')
     return {
       ...base,

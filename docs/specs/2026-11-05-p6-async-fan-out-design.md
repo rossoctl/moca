@@ -152,9 +152,11 @@ rather than incidental:
   — that is exactly what M1 ships (§9.1) — so the unauthenticated route has no niche left to fill.
   What `single` changes is whose credential runs the leaf, not whether a caller must present one.
 - **`LEAF_RESULT_TTL_SECONDS`.** Unchanged, and shared. The result store is keyed by
-  `leafSessionId` (§5.5) and knows nothing about which route submitted the work, so the 24 h
+  `leafSessionId` (§5.5) and knows nothing about which route submitted the work, so the same
   retention applies identically to async turns. There is no second _result_ store to reconcile; §10
-  keeps the value as-is and §12 owns the longer-retention question. The turn record has a TTL of its
+  keeps the value as-is and §12 owns the longer-retention question. (**Amended by #390:** the
+  default is now 604800 — seven days — and the record and the per-session turn index derive from it,
+  so it is still one knob.) The turn record has a TTL of its
   own, derived from this one rather than tuned separately (§5.1).
 - **The rule refusing async workload runs.** This one is a real behavioural carry-over, and the
   pre-removal code shows why it was ordered the way it was: `if (parsed.workloadId !== undefined)
@@ -216,14 +218,50 @@ Two consequences of that default, stated because each could be read the other wa
 
 ```
 GET /v1/sessions/{sessionId}/turns/{turnId}
-  → 200 { turnId, state, attempts, result?: { status, patch? | text? | gate? | reason? } }
+  → 200 { turnId, state, attempts,
+          result?: { status, summary?, artifacts?, workspace?, gate? | reason?, usage?, seed? } }
   → 404 unknown turn
+
+GET /v1/sessions/{sessionId}/turns/{turnId}/artifacts/{kind}      # kind: patch
+  → 200 <bytes>   Content-Type: text/x-diff, ETag: "<capture's sha256 of those bytes>"
+  → 404 unknown kind | not terminal | no result | capture refused for size
 ```
 
 Authenticated and owner-scoped, like §4.1. The turn record is the **single source of truth for
 state**; `result` is the artifact from `leaf-result-store`, present once the leaf has written one.
 Goal 4 is satisfied by N of these — one per leaf — which is also the measurement #537 needs before
 `/v1/batches` can be judged worth building.
+
+> **Amended in #390: the status read is bounded and the output has its own route.** The shape above
+> is the current one. The first cut returned the stored record verbatim, which meant a 4 MiB patch
+> on **every poll** of the one route designed to be polled. So:
+>
+> - The status body carries a **projection**: the record's own bounded fields pass through, `summary`
+>   is one clipped line (the assistant's text, a gate's summary, the patch's `diffstat`, or the
+>   failure's reason, in that order; `MOCA_TURN_SUMMARY_BYTES`, default 2048 **bytes** — bytes, not
+>   tokens, like every other bound in this repo), `workspace` keeps the patch's descriptor without
+>   its bytes, and `artifacts: [{kind, bytes, sha256?}]` names what can be fetched.
+> - Every **model-written** string in that body is held to the same cap, not just `summary`:
+>   `verdict.reason` and the gate's `summary` and `proposed_action` are capped nowhere upstream
+>   (`validateVerdict` checks the shape, not the length), so unclipped they would keep a `done`
+>   turn's body unbounded — exactly the cost this amendment removes. The cap bounds each string's
+>   content, so a clipped one is the cap plus the 14-byte `…[truncated]` marker. A cap of `0` means
+>   no model prose at all: all four keys are omitted, while `verdict` and `gate` keep their shaped
+>   fields so a client can still branch on them.
+> - `result.patch` and `result.text` are **gone** from that body. A narrowing, permitted because
+>   `/v1` is Preview, and listed in the API changelog (1.26.0) because that is what Preview requires.
+> - The artifact route serves the bytes whole — never truncated, and byte-exact for a diff that is
+>   not valid UTF-8 (stored base64 by the binary-safe capture). A capture refused for size has **no**
+>   artifact by design: those bytes never left the sandbox, so the descriptor is the whole answer.
+> - The projection is **read-time only**. Nothing extra is stored, so there is no second writer, no
+>   migration, and a record written before #390 projects exactly like one written after it.
+> - **Known limit: the RESPONSE is bounded, the READ is not.** `readLeafResult` still `GET`s the
+>   whole stored value and `JSON.parse`s it, so a 4 MiB patch is still moved from Redis and parsed on
+>   the event loop once per poll — the projection only keeps it off the wire. Closing that needs the
+>   writer to split the record (a small status value beside the bytes), which is a stored-format
+>   change and a migration for every result written before it. Recorded here rather than pretended
+>   closed; the trigger to do it is a poll rate where that parse shows up in the control plane's
+>   event-loop lag, not a patch size.
 
 **`GET /runs/status` is deliberately left exactly as it is.** It already exists
 (`server.ts:1237-1240`) and infers status _from the result store_: no record answers
@@ -362,8 +400,8 @@ object (mind #361).
 **The record's TTL, which item 2 asks for and which is not the result TTL.** Two different lifetimes
 get confused here, so both are named:
 
-- The **result** lives in `leaf-result-store` under `LEAF_RESULT_TTL_SECONDS` (86400). Unchanged
-  (§5.5).
+- The **result** lives in `leaf-result-store` under `LEAF_RESULT_TTL_SECONDS` (86400; 604800 since
+  #390). Unchanged (§5.5).
 - The **turn record** is the thing §4.4 reads `state` from, so it must outlive the result or a
   caller polling a finished turn would get `404` — "never submitted" — for a turn that in fact
   succeeded. That is the same conflation §4.4 rejects in `/runs/status`, reintroduced by a TTL
@@ -377,7 +415,9 @@ ordering is the invariant worth testing: **a record must never expire while its 
 must never outlive its own result by more than the margin.**
 
 §12 notes that if #390 raises result retention to 7 days, this TTL follows it rather than being
-re-decided — one knob, with the record's margin derived from it.
+re-decided — one knob, with the record's margin derived from it. #390 did exactly that: the default
+is 604800, and the per-session turn index §9.2 asked for now exists (`sh:cp:session:<sid>:turns`),
+armed off the same sum as the record so it cannot expire before one.
 
 ### 5.2 Where the consumer runs
 
@@ -556,12 +596,14 @@ heartbeat in §6.2 is what a future extension would key off, since it already pr
 
 Unchanged, and deliberately so. `runLeaf` builds the `pi-coding-agent` session, converges the
 workspace, selects a sandbox, runs the turn and captures the diff; `leaf-result-store` writes one
-record per leaf keyed by `leafSessionId` under `LEAF_RESULT_TTL_SECONDS` (86400 default). The
+record per leaf keyed by `leafSessionId` under `LEAF_RESULT_TTL_SECONDS` (86400 default; 604800
+since #390). The
 consumer calls `prepareServerProcess(process.env)` at boot for the tenancy, keyset and
 credential-scrub invariants (MI1 §5 R2), exactly as the HTTP path does — the removed drainer had the
 same line, with the same comment: "a queued run is a server turn too."
 
-Retention beyond 24 h and richer artifacts are out of scope here; §12 lists them as owed.
+Retention beyond 24 h and richer artifacts are out of scope here; §12 lists them as owed. (#390
+delivered both: seven-day retention, and a base commit plus a diffstat on every captured patch.)
 
 The caller polls the turn record for state, and the result store for the artifact. Whether N-way
 collection needs `/v1/batches` is #537, decided once this is measurable.
@@ -940,7 +982,8 @@ key now carries a turn id (`leaf:result:<sid>:<turnId>`), only an enumeration of
 reaches it, and the only enumeration there is — `TurnStore.deleteSessionTurns`, walking the owner's
 open set — sees **open turns only**: `toTerminal` removes a finished turn from that set to free its
 quota slot. So a finished async turn's result survives `DELETE /v1/sessions/{id}` and expires on
-`LEAF_RESULT_TTL_SECONDS` (24 h by default). This is **not new with the per-turn key**: the finished
+`LEAF_RESULT_TTL_SECONDS` (24 h by default when this was written; seven days since #390, which is
+why the note below closes it). This is **not new with the per-turn key**: the finished
 turn's RECORD — which carries the envelope, so the same class of caller content — has always
 survived that delete on the same clock, which §5.1 chose deliberately when it made the terminal TTL
 the record's only expiry. The result now expires on `resultTtl` and the record on
@@ -951,6 +994,37 @@ have — a per-session turn set, written at submission and walked here, covering
 well as open ones — which also changes §5.1's terminal-record rule. M2 owns that, with the record
 and the result deleted by the same walk; a `SCAN MATCH` is not the alternative, because SCAN's cost
 is the whole keyspace per session delete, not the matches.
+
+> **Closed in #390**, because that issue raised the default to seven days and a week of a deleted
+> session's bytes is a different proposition from a day of them. The index is
+> `sh:cp:session:<sid>:turns`, scored by `createdAt`, written by `TurnStore.create` and walked by
+> `deleteSessionTurns` — **unioned** with the owner-set pass, which stays: a record written before
+> the index has no entry in it, and an open record carries no TTL at all, so the owner set is the
+> only thing that reaches one. The index is armed at `resultTtlSeconds + ttlMarginSeconds` — the
+> terminal record's own sum, §5.1's rule reused rather than changed — at `create` and re-armed last
+> at every terminal transition, so it never expires before a record it would have to reach. It is
+> deliberately NOT a `dataKeys` entry in `ownership.ts`: `deleteSession` cascades before it calls
+> `deleteSessionTurns`, so the index would be gone before the walk could read it.
+>
+> The walk is **two passes, not one union**, because the index spans the retention window: thousands
+> of ids for a busy session, where the owner set is capped by the open-turn quota. The owner-set pass
+> stays per-turn — each member's record is the only thing that says which session it belongs to, and
+> an open turn holds a quota slot and an idempotency claim that only its record can release. The
+> indexed remainder needs none of that: those turns are this session's by construction and already
+> terminal, so `toTerminal` has freed both, and the pass is a bulk `del` of their keys in chunks of 500. That bound matters because the walk is **one-shot** — the cascade tombstones the session
+> first, so a retried `DELETE` answers `session_not_found` and never re-enters the walk, and anything
+> a cut walk leaves is reclaimed only by the index's own TTL.
+>
+> The index is also **trimmed by score on every `create`**, dropping members past the retention
+> window (`ZREMRANGEBYSCORE -inf <createdAt − window>`, the sweep `bundle-budget.ts` already uses for
+> expired bundles). Without it the key's size is unbounded in a way its TTL does not catch: every
+> `create` re-arms the expiry, so a session submitting turns for a year holds a year of ids, all but
+> the last week of them naming keys Redis has already expired, and the walk above enumerates and
+> `DEL`s every one. What makes trimming safe is the **re-score**: `toTerminal` rewrites a member's
+> score to the moment the turn finished, which is when its record's and result's own TTLs start — so
+> "older than the window" means "its keys are gone", not "it was submitted a long time ago". A turn
+> that outlived the window while still open is reached by the owner-set pass, which never consults
+> this index.
 
 **Deferred, with the reason on the record.** #389's scope item 5 — retire #380's interim
 sync-disconnect contract — is **not** in M1. §5.5 already argues the condition is a supported
@@ -994,7 +1068,7 @@ can be closed against it rather than against a subset:
 | Exit-0-when-idle drain semantics                        | **Replaced** by the `drain` signal (§6.3)                                                               |
 | `XAUTOCLAIM` reaper (#17)                               | **Kept.** §6.2 depends on it                                                                            |
 | Dead-letter past `maxAttempts`                          | **Kept**, mapped to the `lost` state (§5.1)                                                             |
-| `LEAF_RESULT_TTL_SECONDS` (86400)                       | **Kept** as-is; longer retention is owed (§12)                                                          |
+| `LEAF_RESULT_TTL_SECONDS` (86400)                       | **Kept** as-is in M1; raised to 604800 by #390, still one knob (§5.1)                                   |
 | At-least-once delivery                                  | **Kept.** §6.1: the claim/ack cycle is unchanged, so a leaf can run twice                               |
 | `runLeaf` idempotency on the session id                 | **Kept, and now the submission default too** — §4.3 defaults `idempotencyKey` to `sessionId`            |
 | `classifyOutcome` retry classes                         | **Kept, and already present** — it survived #691 in `harness/src/classify-outcome.ts`; see below        |
@@ -1043,9 +1117,12 @@ it adds is the schedule. Its design should cite this document for both.
   it — new control-plane-to-worker machinery, since interactive cancel (ADR-0040) rides the turn's own
   connection and async has none. The §4.3 caps bound how long a leaf runs meanwhile, so this is a
   latency improvement rather than a missing containment property.
-- Result retention beyond 24 h, and richer artifacts than the current patch/text/summary. The turn
-  record's TTL is derived from `LEAF_RESULT_TTL_SECONDS` (§5.1), so raising retention moves one knob
-  and the record follows — not two values to keep in step.
+- ~~Result retention beyond 24 h, and richer artifacts than the current patch/text/summary.~~
+  **Done in #390**: seven days by default, moved on the one knob §5.1 describes, plus a base commit
+  and a diffstat on every captured patch and a `GET …/turns/{turnId}/artifacts/{kind}` route so a
+  large patch is fetched once rather than carried by every poll. A frame-level transcript for an
+  async leaf is still owed: ADR-0040's frame log is wired to `/v1/turn` streaming only, and
+  `runLeaf` emits no frames, so the status read carries a bounded summary instead.
 - Per-class concurrency caps (archetypes §2) — §10 drops them for now; a global slot cap is what M1
   delivers. §7's `async_claim_denied_full` against interactive `429`s is the measurement that would
   justify adding them.
