@@ -727,8 +727,58 @@ async function oidcCallbackImpl(
   }
 }
 
+const INSTALL_MOCACTL =
+  'curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | sh';
+const GUIDE = 'https://github.com/rossoctl/moca/blob/main/docs';
+
+/**
+ * GET /'s text (#779): what this URL is, where its API is, how to get the client, and whom to ask
+ * for more egress. Plain text, so `curl` reads it as well as a browser does. It names no URL of the
+ * deployment: the page is the same wherever it is served or pasted, and echoing the request's Host
+ * would hand a caller its own input back. The URLs it does name are the project's public ones.
+ */
+export function indexPage(profile: RouteProfile, version?: string): string {
+  const sandbox = profile !== 'harness';
+  const harness = profile !== 'sandbox';
+  const what = profile === 'sandbox' ? ' (the sandbox service)' : '';
+  const lines = [
+    `This is a Moca control plane${what}${version ? `, version ${version}` : ''}.`,
+    '',
+    "It is Moca's API, not a website. Its routes are under /v1 at this URL, and",
+    'GET /v1/discovery (public, JSON) describes this deployment.',
+    '',
+    "Use mocactl, Moca's client. To install it:",
+    `  ${INSTALL_MOCACTL}`,
+    ...(sandbox
+      ? [
+          'For sandboxes, log in with:',
+          '  mocactl sbx login --control-plane-url <this URL>',
+          `  (guide: ${GUIDE}/sbx/user-guide.md)`,
+        ]
+      : []),
+    ...(harness
+      ? [
+          'For sessions, log in with:',
+          '  SH_CONTROL_PLANE_URL=<this URL> mocactl login',
+          `  (guide: ${GUIDE}/guides/manage-multi-user-sessions.md)`,
+        ]
+      : []),
+    '',
+    'A sandbox reaches only the hosts on its egress allowlist; any other host answers',
+    '403 destination_denied. To have a host added, or your account enrolled,',
+    'ask the operator of this deployment.',
+  ];
+  return lines.join('\n') + '\n';
+}
+
 export const HANDLERS: Record<string, Handler> = {
   healthz: async () => ({ status: 200, body: 'ok' }),
+
+  getIndex: async (_ctx, deps) => ({
+    status: 200,
+    body: indexPage(deps.config.routeProfile ?? 'harness', deps.config.version),
+    contentType: 'text/plain; charset=utf-8',
+  }),
 
   /**
    * §7's `async_quota_refusals`. Process-local and reset by a restart, like every count in the
