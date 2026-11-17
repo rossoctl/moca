@@ -1579,3 +1579,23 @@ type fakeSink struct {
 
 func (f *fakeSink) Stdout(b []byte) { f.stdout = append(f.stdout, b...) }
 func (f *fakeSink) Stderr(b []byte) { f.stderr = append(f.stderr, b...) }
+
+func TestChvScopeCgroupDir(t *testing.T) {
+	if got := chvScopeCgroupDir("", "vm-7"); got != "" {
+		t.Fatalf("chvScopeCgroupDir with no parent = %q, want empty", got)
+	}
+	for _, parent := range []string{DefaultParentCgroup, "custom.slice", "/" + DefaultParentCgroup + "/"} {
+		dir := chvScopeCgroupDir(parent, "vm-7")
+		if filepath.Dir(dir) != ParentCgroupPath(parent) {
+			t.Errorf("parent %q: dir %q is not a child of %q", parent, dir, ParentCgroupPath(parent))
+		}
+		// The orphan sweep must recognise the directory the reader looks in.
+		if base := filepath.Base(dir); !isPoolVMCgroupDirName(base) {
+			t.Errorf("parent %q: the sweep does not recognise %q", parent, base)
+		}
+	}
+	if got, want := chvScopeCgroupDir(DefaultParentCgroup, "vm-7"),
+		"/sys/fs/cgroup/microvm.slice/microvm-vms.slice/vm-vm-7.scope"; got != want {
+		t.Fatalf("chvScopeCgroupDir = %q, want %q", got, want)
+	}
+}
