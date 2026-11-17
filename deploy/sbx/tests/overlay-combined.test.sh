@@ -52,6 +52,8 @@ done
 [[ "$(env_of Deployment moca-control-plane control-plane SH_CREDENTIAL_STORE)" == file ]] || fail 'the harness credential store is not the file store'
 [[ "$(q '[.[] | select(.kind == "Role" or .kind == "RoleBinding")] | length')" == 0 ]] || fail 'a Role over the namespace is rendered'
 [[ "$(obj Deployment moca-control-plane | jq -r '.spec.template.spec.automountServiceAccountToken')" == false ]] || fail 'the control plane mounts a service account token'
+[[ "$(obj Deployment moca-control-plane | jq -r '.spec.template.spec.containers[] | select(.name == "control-plane") | .env[]? | select(.name == "SH_SANDBOX_MAX_LIFETIME_SECONDS") | .valueFrom.configMapKeyRef | "\(.name)/\(.key)/\(.optional)"')" == sbx-settings/SH_SANDBOX_MAX_LIFETIME_SECONDS/true ]] ||
+  fail 'the control plane does not read SH_SANDBOX_MAX_LIFETIME_SECONDS (optional) from sbx-settings'
 pass 'puts the control plane on the combined profile, with both profiles'"'"' settings and credentials, files only: no Role, no API token'
 
 [[ "$(env_of Deployment sandbox-relay sandbox-relay MOCA_RELAY_EXEC_TOKEN)" == '<ref>' ]] || fail 'the relay lost the harness exec token'

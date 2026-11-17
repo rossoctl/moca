@@ -35,6 +35,11 @@ spec:
             - name: SH_SANDBOX_LIFETIME_SECONDS
               valueFrom:
                 { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_LIFETIME_SECONDS } }
+            # absent: the absolute lifetime of SBX0 (no sliding) and no lifetime above SH_SANDBOX_LIFETIME_SECONDS
+            - name: SH_SANDBOX_MAX_LIFETIME_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  { name: sbx-settings, key: SH_SANDBOX_MAX_LIFETIME_SECONDS, optional: true }
             - name: SH_SANDBOX_TOKEN_TTL_SECONDS
               valueFrom:
                 { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TOKEN_TTL_SECONDS } }

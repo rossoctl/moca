@@ -44,6 +44,11 @@ case "$1 $2" in
     { echo 'Error from server (InternalError): etcdserver: request timed out' >&2; exit 1; }
   if [[ -f "$f" && "$3" == "${MOCK_BLANK_GET:-}" ]]; then jq -c 'del(.data)' "$f"; elif [[ -f "$f" ]]; then cat "$f"; fi
   exit 0 ;;
+'get configmap')
+  # A ConfigMap as last applied (none on a fresh namespace).
+  f="$MOCK_STATE/configmap-$3.json"
+  [[ ! -f "$f" ]] || cat "$f"
+  exit 0 ;;
 'get statefulset')
   # A StatefulSet in MOCK_STATE/statefulset-NAME.json (none by default: a fresh namespace).
   [[ "$3" != "${MOCK_FAIL_GET:-}" ]] || { echo 'Error from server (InternalError): etcdserver: request timed out' >&2; exit 1; }
@@ -194,6 +199,11 @@ refusals=(
   'export SBX_WORKSPACE_FS_GIB=10 => exceeds 80% of SBX_WORKSPACE_FS_GIB'
   'export SBX_LIFETIME_DAYS=31 => SBX_LIFETIME_DAYS must be'
   'export SBX_LIFETIME_DAYS=0 => SBX_LIFETIME_DAYS must be'
+  'export SBX_MAX_LIFETIME_DAYS=31 => SBX_MAX_LIFETIME_DAYS must be'
+  'export SBX_MAX_LIFETIME_DAYS=0 => SBX_MAX_LIFETIME_DAYS must be'
+  'export SBX_LIFETIME_DAYS=10 SBX_MAX_LIFETIME_DAYS=5 => SBX_LIFETIME_DAYS must not exceed SBX_MAX_LIFETIME_DAYS'
+  'export SBX_LOWER_WORKSPACE_IDLE=yes => SBX_LOWER_WORKSPACE_IDLE must be unset or 1'
+  'export SBX_MAX_LIFETIME_DAYS=of => SBX_MAX_LIFETIME_DAYS must be a whole number of days, 1-30, or off'
   'export SBX_MAX_TOTAL=0 => SBX_MAX_TOTAL must be a positive whole number'
   'export SBX_MAX_PER_SUBJECT=x => SBX_MAX_PER_SUBJECT must be a positive whole number'
   'export SBX_TOKEN_TTL_MINUTES=4 => SBX_TOKEN_TTL_MINUTES must be a whole number of minutes, 5-60'
@@ -341,6 +351,7 @@ fi
 
 [[ "$(cm sbx-settings SH_SANDBOX_EXEC_ENDPOINT)" == 'sbx-exec.apps.example.invalid:443' ]] || fail 'exec endpoint'
 [[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 604800 ]] || fail 'lifetime'
+[[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 2592000 ]] || fail 'maximum lifetime (30 d)'
 [[ "$(cm sbx-settings SH_SANDBOX_MAX_PER_SUBJECT)" == 3 && "$(cm sbx-settings SH_SANDBOX_MAX_TOTAL)" == 40 ]] || fail 'quotas'
 [[ "$(cm sbx-settings SH_SANDBOX_MAX_INFLIGHT)" == 2 ]] || fail 'in-flight cap'
 [[ "$(cm sbx-settings SH_SANDBOX_MODES_ALLOWED)" == per-exec ]] || fail 'lease is not off by default (SH_SANDBOX_MODES_ALLOWED)'
@@ -374,7 +385,7 @@ W="$GEN/workers/sbx_py312"
 grep -qx 'RELAY_ADDR=sbx-attach.apps.example.invalid:443' "$W/worker.env" || fail 'worker bundle RELAY_ADDR'
 grep -qx 'RELAY_TLS=true' "$W/worker.env" || fail 'worker bundle RELAY_TLS'
 grep -qx "SANDBOX_TOKEN=$(secret_val moca-relay-sandbox-tokens sbx_py312)" "$W/worker.env" || fail 'worker bundle token'
-grep -qx 'SH_WORKSPACE_IDLE=216h' "$W/worker.env" || fail 'worker bundle idle is not lifetime + 2 days'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$W/worker.env" || fail 'worker bundle idle is not the maximum lifetime + 2 days'
 grep -qx 'SH_WORKSPACE_IMAGE_MB=2048' "$W/worker.env" || fail 'worker bundle image size'
 grep -qx 'SH_LEASE_IDLE_CEILING_S=1800' "$W/worker.env" || fail 'worker bundle idle ceiling is not the default 1800'
 [[ -f "$W/relay-ca.crt" ]] || fail 'self-signed attach certificate not shipped in the worker bundle'
@@ -434,53 +445,259 @@ render
 [[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the settings hash moved with only the list separators'
 pass 'a newline- or tab-separated SBX_WORKERS keeps every token, and the settings hash is stable'
 
-# 4b. A lifetime change alters the workers' SH_WORKSPACE_IDLE, which a running worker keeps until
-# install-host.sh is re-run on its host: refused before anything is applied, unless acknowledged.
+# 4b. The default lifetime within the maximum touches no host: the workers' idle follows the maximum.
 : >"$MOCK_LOG"
-! run_setup export SBX_LIFETIME_DAYS=10 || fail 'a lifetime change was applied without SBX_ACK_HOSTS=1'
-grep -q 'SH_WORKSPACE_IDLE changes from 216h to 288h' "$TMP/out" || fail 'the refusal does not name SH_WORKSPACE_IDLE and both values'
-grep -q 'install-host.sh' "$TMP/out" || fail 'the refusal does not say to re-run install-host.sh'
-grep -q 'SBX_ACK_HOSTS=1' "$TMP/out" || fail 'the refusal does not say how to acknowledge (SBX_ACK_HOSTS=1)'
-grep -q 'sbx_default sbx_py312' "$TMP/out" || fail 'the refusal does not name the workers'
-! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the lifetime refusal changed something first'
-[[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 604800 ]] || fail 'the refused lifetime reached sbx-settings'
-grep -qx 'SH_WORKSPACE_IDLE=216h' "$GEN/workers/sbx_default/worker.env" || fail 'the refused run rewrote a bundle'
-pass 'refuses a lifetime change that alters SH_WORKSPACE_IDLE without SBX_ACK_HOSTS=1, naming it and install-host.sh'
+run_setup export SBX_LIFETIME_DAYS=10 || fail 'a default-lifetime change within the maximum was refused'
+! grep -q 'WARNING: SH_WORKSPACE_IDLE' "$TMP/out" || fail 'a default-lifetime change warns about SH_WORKSPACE_IDLE'
+[[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 864000 ]] || fail 'the default lifetime was not written'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'the bundle idle moved with the default lifetime'
+pass 'a default-lifetime change within the maximum touches no host'
 
-# Acknowledged: applied, with the hosts to reinstall named. The in-flight cap is the relay's too, so
-# it moves the hash on both pods (the apply rolls them); the idle follows.
-run_setup export SBX_LIFETIME_DAYS=10 SBX_MAX_INFLIGHT=4 SBX_ACK_HOSTS=1 || fail 'an acknowledged longer lifetime failed'
-grep -q 'WARNING: SH_WORKSPACE_IDLE changes from 216h to 288h' "$TMP/out" || fail 'the acknowledged run does not warn'
-grep -q 're-run deploy/sbx/install-host.sh now on the host of each of: sbx_default sbx_py312' "$TMP/out" ||
-  fail 'the acknowledged run does not end by naming the hosts to reinstall'
-[[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 864000 && "$(cm sbx-settings SH_SANDBOX_MAX_INFLIGHT)" == 4 ]] ||
-  fail 'lifetime or in-flight cap not written'
-grep -qx 'SH_WORKSPACE_IDLE=288h' "$GEN/workers/sbx_default/worker.env" || fail 'the idle does not follow the lifetime (10 d -> 288h)'
+# A lowered maximum never lowers the workers' idle by itself: sandboxes keep the deadlines set under
+# the old maximum (the control plane never shortens one), so the bundles keep the highest idle they
+# hold until SBX_LOWER_WORKSPACE_IDLE=1. No host changes, so no ack is needed.
+: >"$MOCK_LOG"
+run_setup export SBX_MAX_LIFETIME_DAYS=20 || fail 'a lowered maximum without SBX_LOWER_WORKSPACE_IDLE was refused'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" && grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_py312/worker.env" ||
+  fail 'a lowered maximum lowered the bundles idle without SBX_LOWER_WORKSPACE_IDLE=1'
+[[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 1728000 ]] || fail 'the lowered maximum did not reach sbx-settings'
+grep -q 'kept at 768h until SBX_LOWER_WORKSPACE_IDLE=1' "$TMP/out" || fail 'the run does not say the idle is kept until SBX_LOWER_WORKSPACE_IDLE=1'
+grep -q 'old maximum (30 days)' "$TMP/out" || fail 'the run does not name the old maximum (30 days)'
+! grep -q 'WARNING: SH_WORKSPACE_IDLE' "$TMP/out" || fail 'a kept idle warns about a host change'
+! grep -q 're-run deploy/sbx/install-host.sh' "$TMP/out" || fail 'a kept idle names hosts to reinstall'
+pass 'a lowered maximum keeps the bundles idle (768h), applies with no ack, and names SBX_LOWER_WORKSPACE_IDLE'
+
+# SBX_LOWER_WORKSPACE_IDLE=1 writes the lower idle: a host change, refused unless acknowledged, with
+# no advice to reinstall now (the hosts must keep the old idle until the old maximum has passed).
+: >"$MOCK_LOG"
+! run_setup export SBX_MAX_LIFETIME_DAYS=20 SBX_LOWER_WORKSPACE_IDLE=1 || fail 'a lowered idle was applied without SBX_ACK_HOSTS=1'
+grep -q 'SH_WORKSPACE_IDLE is lowered from 768h to 528h' "$TMP/out" || fail 'the lowering refusal does not name SH_WORKSPACE_IDLE and both values'
+grep -q 'install-host.sh is next run' "$TMP/out" || fail 'the lowering refusal does not say the hosts take it at the next install-host.sh'
+grep -q 'after the old maximum (30 days) has passed' "$TMP/out" || fail 'the lowering refusal does not say to wait out the old maximum'
+grep -q 'SBX_ACK_HOSTS=1' "$TMP/out" || fail 'the lowering refusal does not say how to acknowledge'
+grep -q 'sbx_default sbx_py312' "$TMP/out" || fail 'the lowering refusal does not name the workers'
+! grep -qE 'right after| now|first' "$TMP/out" || fail 'the lowering refusal advises reinstalling now'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the lowering refusal changed something first'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'the refused lowering rewrote a bundle'
+pass 'SBX_LOWER_WORKSPACE_IDLE=1 is refused without SBX_ACK_HOSTS=1, with no advice to reinstall now'
+
+# Acknowledged: the lower idle is written. The in-flight cap is the relay's too, so it moves the hash
+# on both pods (the apply rolls them).
+run_setup export SBX_MAX_LIFETIME_DAYS=20 SBX_LOWER_WORKSPACE_IDLE=1 SBX_MAX_INFLIGHT=4 SBX_ACK_HOSTS=1 ||
+  fail 'an acknowledged lowered idle failed'
+grep -q 'WARNING: SH_WORKSPACE_IDLE is lowered from 768h to 528h' "$TMP/out" || fail 'the acknowledged lowering does not warn'
+grep -q 'WARNING: SH_WORKSPACE_IDLE changed, with a lower SH_WORKSPACE_IDLE: re-run deploy/sbx/install-host.sh on the host of each of: sbx_default sbx_py312 only after the old maximum (30 days) has passed' "$TMP/out" ||
+  fail 'the acknowledged lowering does not end by naming the hosts'
+! grep -E 'WARNING' "$TMP/out" | grep -qE 'right after| now|first' || fail 'the acknowledged lowering advises reinstalling now'
+[[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 1728000 && "$(cm sbx-settings SH_SANDBOX_MAX_INFLIGHT)" == 4 ]] ||
+  fail 'maximum lifetime or in-flight cap not written'
+grep -qx 'SH_WORKSPACE_IDLE=528h' "$GEN/workers/sbx_default/worker.env" || fail 'the acknowledged lowering did not write 528h'
 render
 [[ "$(pod_hash moca-control-plane)" != "$cp_hash" && "$(pod_hash sandbox-relay)" != "$relay_hash" ]] ||
   fail 'a change to the in-flight cap did not move the hash on both pods'
-pass 'with SBX_ACK_HOSTS=1 a lifetime change applies, warns, and the idle and the hash follow'
+pass 'with SBX_LOWER_WORKSPACE_IDLE=1 and SBX_ACK_HOSTS=1 the lower idle (528h) is written, and the hash follows'
 
-# A bundle from 1a carries no SH_WORKSPACE_IDLE: the refusal says that, not "SBX_LIFETIME_DAYS changed".
+# A raise alters the workers' SH_WORKSPACE_IDLE, which a running worker keeps until install-host.sh
+# is re-run on its host: refused before anything is applied, unless acknowledged.
+: >"$MOCK_LOG"
+! run_setup export SBX_MAX_INFLIGHT=4 || fail 'a raised maximum was applied without SBX_ACK_HOSTS=1'
+grep -q 'SH_WORKSPACE_IDLE changes from 528h to 768h' "$TMP/out" || fail 'the refusal does not name SH_WORKSPACE_IDLE and both values'
+grep -q 'SBX_MAX_LIFETIME_DAYS changed' "$TMP/out" || fail 'the refusal does not name SBX_MAX_LIFETIME_DAYS as the cause'
+grep -q 'install-host.sh' "$TMP/out" || fail 'the refusal does not say to re-run install-host.sh'
+grep -q 'SBX_ACK_HOSTS=1' "$TMP/out" || fail 'the refusal does not say how to acknowledge (SBX_ACK_HOSTS=1)'
+grep -q 're-run install-host.sh with the new bundles on every host right after' "$TMP/out" ||
+  fail 'the refusal does not say to reinstall every host right after the acknowledged run'
+# A refused run writes no bundles, so there is nothing to reinstall first.
+! grep -q 'first' "$TMP/out" || fail 'the raise refusal offers reinstalling the hosts first'
+grep -q 'sbx_default sbx_py312' "$TMP/out" || fail 'the refusal does not name the workers'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the maximum refusal changed something first'
+[[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 1728000 ]] || fail 'the refused maximum reached sbx-settings'
+grep -qx 'SH_WORKSPACE_IDLE=528h' "$GEN/workers/sbx_default/worker.env" || fail 'the refused run rewrote a bundle'
+pass 'refuses a raised maximum that alters SH_WORKSPACE_IDLE without SBX_ACK_HOSTS=1, naming it and install-host.sh'
+
+# A bundle from 1a carries no SH_WORKSPACE_IDLE: the refusal says that, not "SBX_MAX_LIFETIME_DAYS changed".
 cp "$GEN/workers/sbx_default/worker.env" "$TMP/worker.env.keep"
 grep -v '^SH_WORKSPACE_IDLE=' "$TMP/worker.env.keep" >"$GEN/workers/sbx_default/worker.env"
-! run_setup export SBX_LIFETIME_DAYS=10 SBX_MAX_INFLIGHT=4 || fail 'a 1a bundle was overwritten without SBX_ACK_HOSTS=1'
-grep -q 'changes from unset to 288h' "$TMP/out" && grep -q 'a bundle from before increment 1b' "$TMP/out" ||
+! run_setup export SBX_MAX_LIFETIME_DAYS=20 SBX_MAX_INFLIGHT=4 || fail 'a 1a bundle was overwritten without SBX_ACK_HOSTS=1'
+grep -q 'changes from unset to 528h' "$TMP/out" && grep -q 'a bundle from before increment 1b' "$TMP/out" ||
   fail 'the refusal over a 1a bundle does not say the bundle predates 1b'
-! grep -q 'SBX_LIFETIME_DAYS changed' "$TMP/out" || fail 'the refusal over a 1a bundle blames the lifetime'
+! grep -q 'SBX_MAX_LIFETIME_DAYS changed' "$TMP/out" || fail 'the refusal over a 1a bundle blames the maximum'
 cp "$TMP/worker.env.keep" "$GEN/workers/sbx_default/worker.env"
-pass 'over a 1a bundle (no SH_WORKSPACE_IDLE) the refusal names the bundle, not the lifetime'
+pass 'over a 1a bundle (no SH_WORKSPACE_IDLE) the refusal names the bundle, not the maximum'
 
-# An unchanged lifetime says nothing about hosts, and needs no ack.
-run_setup export SBX_LIFETIME_DAYS=10 SBX_MAX_INFLIGHT=4 || fail 'a re-run with the same lifetime was refused'
-! grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" || fail 'an unchanged lifetime still warns about SH_WORKSPACE_IDLE'
-pass 'an unchanged lifetime needs no ack and gives no warning'
+# An unchanged maximum says nothing about hosts, and needs no ack.
+run_setup export SBX_MAX_LIFETIME_DAYS=20 SBX_MAX_INFLIGHT=4 || fail 'a re-run with the same maximum was refused'
+! grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" || fail 'an unchanged maximum still warns about SH_WORKSPACE_IDLE'
+pass 'an unchanged maximum needs no ack and gives no warning'
 
 run_setup export SBX_ACK_HOSTS=1 || fail 'the run back to the defaults failed'
 render
 [[ "$(pod_hash moca-control-plane)" == "$cp_hash" && "$(pod_hash sandbox-relay)" == "$relay_hash" ]] ||
   fail 'a hash is not a function of the settings'
 pass 'the settings hashes are a function of the settings'
+
+# 4c. An upgrade from bundles written by the previous setup.sh (idle 216h): the first run refuses.
+for e in "$GEN"/workers/*/worker.env; do
+  sed 's/^SH_WORKSPACE_IDLE=.*/SH_WORKSPACE_IDLE=216h/' "$e" >"$TMP/worker.env.old" && cp "$TMP/worker.env.old" "$e"
+done
+: >"$MOCK_LOG"
+! run_setup || fail 'bundles at 216h were left unacknowledged on upgrade'
+grep -q 'changes from 216h to 768h' "$TMP/out" || fail 'the upgrade refusal does not name 216h and 768h'
+grep -q 'sbx_default sbx_py312' "$TMP/out" || fail 'the upgrade refusal does not name the workers'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the upgrade refusal changed something first'
+[[ -z "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" || "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 2592000 ]] ||
+  fail 'the refused upgrade moved the maximum in the ConfigMap'
+pass 'an upgrade from 216h bundles refuses without SBX_ACK_HOSTS=1'
+
+# SBX_MAX_LIFETIME_DAYS=off takes this setup.sh before the hosts can be reinstalled: idle lifetimes
+# stay off (no SH_SANDBOX_MAX_LIFETIME_SECONDS, so the control plane keeps the absolute lifetime) and
+# the idle is SBX_LIFETIME_DAYS plus two days, as before: no host change. The previous setup.sh
+# wrote no maximum into sbx-settings (a live one floors the idle: below).
+drop_max() { jq 'del(.data.SH_SANDBOX_MAX_LIFETIME_SECONDS)' "$MOCK_STATE/configmap-sbx-settings.json" >"$TMP/cm.json" && mv "$TMP/cm.json" "$MOCK_STATE/configmap-sbx-settings.json"; }
+set_max() { jq --arg v "$1" '.data.SH_SANDBOX_MAX_LIFETIME_SECONDS = $v' "$MOCK_STATE/configmap-sbx-settings.json" >"$TMP/cm.json" && mv "$TMP/cm.json" "$MOCK_STATE/configmap-sbx-settings.json"; }
+drop_max
+: >"$MOCK_LOG"
+run_setup export SBX_MAX_LIFETIME_DAYS=off || fail 'SBX_MAX_LIFETIME_DAYS=off over 216h bundles was refused'
+! grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" || fail 'SBX_MAX_LIFETIME_DAYS=off warns about SH_WORKSPACE_IDLE'
+for w in sbx_default sbx_py312; do
+  grep -qx 'SH_WORKSPACE_IDLE=216h' "$GEN/workers/$w/worker.env" || fail "SBX_MAX_LIFETIME_DAYS=off moved the $w bundle off 216h"
+done
+! jq -e '.data | has("SH_SANDBOX_MAX_LIFETIME_SECONDS")' "$MOCK_STATE/configmap-sbx-settings.json" >/dev/null ||
+  fail 'SBX_MAX_LIFETIME_DAYS=off wrote SH_SANDBOX_MAX_LIFETIME_SECONDS'
+[[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 604800 ]] || fail 'SBX_MAX_LIFETIME_DAYS=off lost the lifetime'
+render
+grep -A5 -- '- name: SH_SANDBOX_MAX_LIFETIME_SECONDS$' "$TMP/render.yaml" | grep -q 'optional: true' ||
+  fail 'the control plane does not read SH_SANDBOX_MAX_LIFETIME_SECONDS as optional'
+pass 'SBX_MAX_LIFETIME_DAYS=off over 216h bundles applies with no ack: bundles stay 216h, no maximum in sbx-settings'
+
+run_setup export SBX_ACK_HOSTS=1 || fail 'the acknowledged upgrade failed'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'the acknowledged upgrade did not write 768h'
+[[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 2592000 ]] || fail 'the acknowledged upgrade did not write the maximum'
+pass 'an upgrade from 216h bundles applies with SBX_ACK_HOSTS=1'
+
+# off checks nothing against the maximum: SBX_LIFETIME_DAYS may be any of 1-30.
+run_setup export SBX_MAX_LIFETIME_DAYS=off SBX_LIFETIME_DAYS=30 || fail 'SBX_MAX_LIFETIME_DAYS=off refused SBX_LIFETIME_DAYS=30'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'off at 30 d did not keep 768h'
+[[ "$(cm sbx-settings SH_SANDBOX_LIFETIME_SECONDS)" == 2592000 ]] || fail 'off at 30 d did not write the lifetime'
+[[ -z "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" ]] || fail 'off at 30 d wrote a maximum'
+run_setup true || fail 'the run back to the defaults failed'
+pass 'SBX_MAX_LIFETIME_DAYS=off rejects no SBX_LIFETIME_DAYS of 1-30'
+
+# off over 768h bundles lowers nothing numeric, but sandboxes may still hold deadlines set under the
+# previous maximum (30 d): the bundles keep 768h, in off's own words, until SBX_LOWER_WORKSPACE_IDLE=1
+# (with an ack, as any lowering).
+: >"$MOCK_LOG"
+run_setup export SBX_MAX_LIFETIME_DAYS=off || fail 'off over 768h bundles was refused'
+for w in sbx_default sbx_py312; do
+  grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/$w/worker.env" || fail "off over 768h bundles moved the $w bundle off 768h"
+done
+[[ -z "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" ]] || fail 'off over 768h bundles wrote a maximum'
+grep -q 'SH_WORKSPACE_IDLE stays at 768h: idle lifetimes are off now, but sandboxes may still hold deadlines set under the previous maximum (30 days)' "$TMP/out" ||
+  fail 'off over 768h bundles does not say why the idle stays at 768h'
+grep -q 'SBX_LOWER_WORKSPACE_IDLE=1 for one run only once 30 days have passed since the run that turned idle lifetimes off' "$TMP/out" ||
+  fail 'off over 768h bundles does not say when SBX_LOWER_WORKSPACE_IDLE=1 is safe'
+! grep -qE 'with the lower maximum|lowered SBX_MAX_LIFETIME_DAYS' "$TMP/out" || fail 'off over 768h bundles is worded as a lowered maximum'
+! grep -q 'WARNING: SH_WORKSPACE_IDLE' "$TMP/out" || fail 'off over 768h bundles warns about a host change'
+! grep -q 're-run deploy/sbx/install-host.sh' "$TMP/out" || fail 'off over 768h bundles names hosts to reinstall'
+# The next off run reads no maximum in sbx-settings: the bundles alone keep 768h.
+run_setup export SBX_MAX_LIFETIME_DAYS=off || fail 'a second off run over 768h bundles was refused'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'a second off run dropped the bundles below 768h'
+grep -q 'SH_WORKSPACE_IDLE stays at 768h' "$TMP/out" || fail 'a second off run does not say the idle stays at 768h'
+: >"$MOCK_LOG"
+! run_setup export SBX_MAX_LIFETIME_DAYS=off SBX_LOWER_WORKSPACE_IDLE=1 || fail 'off lowered the idle without SBX_ACK_HOSTS=1'
+grep -q 'SH_WORKSPACE_IDLE is lowered from 768h to 216h' "$TMP/out" || fail 'the off lowering refusal does not name both values'
+grep -q 'after the old maximum (30 days) has passed since the run that turned idle lifetimes off' "$TMP/out" ||
+  fail 'the off lowering refusal does not name the run that turned idle lifetimes off'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the off lowering refusal changed something first'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'the refused off lowering rewrote a bundle'
+run_setup export SBX_MAX_LIFETIME_DAYS=off SBX_LOWER_WORKSPACE_IDLE=1 SBX_ACK_HOSTS=1 || fail 'the acknowledged off lowering failed'
+for w in sbx_default sbx_py312; do
+  grep -qx 'SH_WORKSPACE_IDLE=216h' "$GEN/workers/$w/worker.env" || fail "the acknowledged off lowering did not write 216h for $w"
+done
+grep -q 're-run deploy/sbx/install-host.sh on the host of each of: sbx_default sbx_py312 only after the old maximum (30 days) has passed since the run that turned idle lifetimes off' "$TMP/out" ||
+  fail 'the acknowledged off lowering does not end by naming the hosts and when'
+run_setup export SBX_ACK_HOSTS=1 || fail 'the run back to the defaults failed'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'the run back to the defaults did not write 768h'
+pass 'off over 768h bundles keeps 768h in its own words; only SBX_LOWER_WORKSPACE_IDLE=1 with an ack writes 216h'
+
+# With no worker bundles (.generated/ lost) the hosts' idle is unknown: on an existing deployment,
+# turning idle lifetimes on or changing the maximum is refused before anything is applied, unless
+# acknowledged; off, or the maximum the ConfigMap already holds, is not.
+rm -rf "$GEN/workers"
+drop_max
+: >"$MOCK_LOG"
+! run_setup true || fail 'turned idle lifetimes on with no worker bundles to compare'
+grep -q 'the bundles the hosts run are unknown (no deploy/sbx/.generated/workers)' "$TMP/out" || fail 'the refusal does not say the bundles are unknown'
+grep -q 'SBX_ACK_HOSTS=1' "$TMP/out" && grep -q 'SBX_MAX_LIFETIME_DAYS=off' "$TMP/out" || fail 'the refusal does not name SBX_ACK_HOSTS=1 and off'
+grep -q 'install-host.sh' "$TMP/out" || fail 'the refusal does not say to reinstall the hosts'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the unknown-bundles refusal changed something first'
+[[ ! -d "$GEN/workers" ]] || fail 'the refused run wrote bundles'
+[[ -z "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" ]] || fail 'the refused run wrote the maximum'
+run_setup export SBX_MAX_LIFETIME_DAYS=off || fail 'SBX_MAX_LIFETIME_DAYS=off with no worker bundles was refused'
+grep -qx 'SH_WORKSPACE_IDLE=216h' "$GEN/workers/sbx_default/worker.env" || fail 'off with no bundles did not write 216h'
+rm -rf "$GEN/workers"
+run_setup export SBX_ACK_HOSTS=1 || fail 'the acknowledged run with no worker bundles failed'
+grep -q 'WARNING: SH_WORKSPACE_IDLE changed: re-run deploy/sbx/install-host.sh now on the host of each of: sbx_default sbx_py312' "$TMP/out" ||
+  fail 'the acknowledged run with no worker bundles does not name the hosts to reinstall'
+[[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 2592000 ]] || fail 'the acknowledged run did not write the maximum'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'the acknowledged run did not write 768h'
+rm -rf "$GEN/workers"
+: >"$MOCK_LOG"
+! run_setup export SBX_MAX_LIFETIME_DAYS=20 || fail 'changed the maximum with no worker bundles to compare'
+grep -q 'the bundles the hosts run are unknown' "$TMP/out" || fail 'a changed maximum with no bundles is not refused as unknown'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the changed-maximum refusal changed something first'
+run_setup true || fail 'the maximum sbx-settings already holds was refused with no worker bundles'
+pass 'with no worker bundles, turning idle lifetimes on or changing the maximum is refused unless acknowledged; off and an unchanged maximum apply'
+
+# With no worker bundles, sandboxes may still hold deadlines up to the maximum sbx-settings holds
+# (2592000 s, 30 d, from an earlier run): a run that turns idle lifetimes off, or lowers the maximum,
+# keeps the workers' idle at that maximum plus two days (768h) until SBX_LOWER_WORKSPACE_IDLE=1, as
+# over known bundles, and never says to reinstall the hosts now.
+rm -rf "$GEN/workers"
+[[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 2592000 ]] || fail 'precondition: sbx-settings holds a 30 d maximum'
+run_setup export SBX_MAX_LIFETIME_DAYS=off || fail 'off with no bundles under a live 30 d maximum was refused'
+for w in sbx_default sbx_py312; do
+  grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/$w/worker.env" || fail "off with no bundles under a live 30 d maximum wrote the $w bundle below 768h"
+done
+! jq -e '.data | has("SH_SANDBOX_MAX_LIFETIME_SECONDS")' "$MOCK_STATE/configmap-sbx-settings.json" >/dev/null ||
+  fail 'off with no bundles wrote SH_SANDBOX_MAX_LIFETIME_SECONDS'
+grep -q 'SH_WORKSPACE_IDLE stays at 768h' "$TMP/out" || fail 'off with no bundles does not say the idle stays at 768h'
+! grep -qE 'install-host.sh now|right after' "$TMP/out" || fail 'off with no bundles says to reinstall the hosts now'
+pass 'with no worker bundles, off under a live 30 d maximum keeps 768h bundles and drops the key'
+
+rm -rf "$GEN/workers"
+set_max 2592000
+run_setup export SBX_MAX_LIFETIME_DAYS=20 SBX_ACK_HOSTS=1 || fail 'an acknowledged lowered maximum with no bundles failed'
+for w in sbx_default sbx_py312; do
+  grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/$w/worker.env" || fail "a lowered maximum with no bundles wrote the $w bundle below 768h"
+done
+[[ "$(cm sbx-settings SH_SANDBOX_MAX_LIFETIME_SECONDS)" == 1728000 ]] || fail 'the lowered maximum with no bundles did not reach sbx-settings'
+grep -q 'kept at 768h until SBX_LOWER_WORKSPACE_IDLE=1' "$TMP/out" || fail 'a lowered maximum with no bundles does not name SBX_LOWER_WORKSPACE_IDLE'
+! grep -qE 'install-host.sh now|right after' "$TMP/out" || fail 'a lowered maximum with no bundles says to reinstall the hosts now'
+pass 'with no worker bundles, a lowered maximum (acknowledged) keeps 768h bundles and says nothing about reinstalling now'
+
+rm -rf "$GEN/workers"
+set_max 2592000
+: >"$MOCK_LOG"
+! run_setup export SBX_MAX_LIFETIME_DAYS=20 SBX_LOWER_WORKSPACE_IDLE=1 || fail 'a lowered idle with no bundles was applied without SBX_ACK_HOSTS=1'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the lowered idle refusal with no bundles changed something first'
+[[ ! -d "$GEN/workers" ]] || fail 'the refused lowered idle wrote bundles'
+run_setup export SBX_MAX_LIFETIME_DAYS=20 SBX_LOWER_WORKSPACE_IDLE=1 SBX_ACK_HOSTS=1 || fail 'an acknowledged lowered idle with no bundles failed'
+grep -qx 'SH_WORKSPACE_IDLE=528h' "$GEN/workers/sbx_default/worker.env" || fail 'the acknowledged lowered idle with no bundles did not write 528h'
+grep -q 'only after the old maximum (30 days) has passed since the run that lowered SBX_MAX_LIFETIME_DAYS' "$TMP/out" ||
+  fail 'the acknowledged lowered idle with no bundles does not say to wait out the old maximum'
+! grep -qE 'install-host.sh now|right after' "$TMP/out" || fail 'the acknowledged lowered idle with no bundles says to reinstall now'
+rm -rf "$GEN/workers"
+set_max 2592000
+: >"$MOCK_LOG"
+! run_setup export SBX_MAX_LIFETIME_DAYS=off SBX_LOWER_WORKSPACE_IDLE=1 || fail 'off lowered the idle with no bundles without SBX_ACK_HOSTS=1'
+[[ ! -d "$GEN/workers" ]] || fail 'the refused off lowering with no bundles wrote bundles'
+run_setup export SBX_MAX_LIFETIME_DAYS=off SBX_LOWER_WORKSPACE_IDLE=1 SBX_ACK_HOSTS=1 || fail 'the acknowledged off lowering with no bundles failed'
+grep -qx 'SH_WORKSPACE_IDLE=216h' "$GEN/workers/sbx_default/worker.env" || fail 'the acknowledged off lowering with no bundles did not write 216h'
+rm -rf "$GEN/workers"
+run_setup export SBX_ACK_HOSTS=1 || fail 'the run back to the defaults failed'
+grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 'the run back to the defaults did not write 768h'
+pass 'with no worker bundles, SBX_LOWER_WORKSPACE_IDLE=1 under a live maximum is a host change: refused unless acknowledged (528h; off: 216h)'
 
 # 4b'. A template, subject or quota change is the control plane's alone: it rolls the control plane
 # and not the relay, so running Execs survive it (RUNBOOK §5).
@@ -544,19 +761,26 @@ grep -qx 'SH_LEASE_IDLE_CEILING_S=3600' "$GEN/workers/sbx_default/worker.env" ||
 run_setup export SBX_IDLE_CEILING_S=3600 || fail 'a re-run with the same ceiling failed'
 ! grep -q 'SH_LEASE_IDLE_CEILING_S' "$TMP/out" || fail 'an unchanged ceiling still warns'
 ! grep -q 're-run deploy/sbx/install-host.sh now' "$TMP/out" || fail 'an unchanged ceiling still names hosts to reinstall'
-# A ceiling change with a lifetime change: both settings, each host once.
-run_setup export SBX_LIFETIME_DAYS=10 SBX_ACK_HOSTS=1 || fail 'a ceiling and lifetime change with SBX_ACK_HOSTS=1 failed'
+# A ceiling change with a maximum-lifetime change: both settings, each host once.
+# Lowered, the line says to wait out the old maximum, for both settings.
+run_setup export SBX_MAX_LIFETIME_DAYS=10 SBX_LOWER_WORKSPACE_IDLE=1 SBX_ACK_HOSTS=1 || fail 'a ceiling and lowered idle change with SBX_ACK_HOSTS=1 failed'
 grep -q 'WARNING: SH_LEASE_IDLE_CEILING_S changes from 3600 to 1800' "$TMP/out" || fail 'the ceiling back to 1800 does not warn'
-grep -q 'WARNING: SH_WORKSPACE_IDLE and SH_LEASE_IDLE_CEILING_S changed: re-run deploy/sbx/install-host.sh now on the host of each of: sbx_default sbx_py312$' "$TMP/out" ||
+grep -q 'WARNING: SH_WORKSPACE_IDLE and SH_LEASE_IDLE_CEILING_S changed, with a lower SH_WORKSPACE_IDLE: re-run deploy/sbx/install-host.sh on the host of each of: sbx_default sbx_py312 only after' "$TMP/out" ||
   fail 'both changes do not end with one line naming both settings and each host once'
+! grep -q 're-run deploy/sbx/install-host.sh now' "$TMP/out" || fail 'a lowered idle with a ceiling change says to reinstall now'
+# Raised, the line says now.
+run_setup export SBX_MAX_LIFETIME_DAYS=20 SBX_IDLE_CEILING_S=3600 SBX_ACK_HOSTS=1 || fail 'a ceiling and raised maximum change with SBX_ACK_HOSTS=1 failed'
+grep -q 'WARNING: SH_WORKSPACE_IDLE and SH_LEASE_IDLE_CEILING_S changed: re-run deploy/sbx/install-host.sh now on the host of each of: sbx_default sbx_py312$' "$TMP/out" ||
+  fail 'both raised changes do not end with one line naming both settings and each host once'
+run_setup export SBX_MAX_LIFETIME_DAYS=10 SBX_LOWER_WORKSPACE_IDLE=1 SBX_ACK_HOSTS=1 || fail 'the run back to a 10 d maximum failed'
 # A bundle from before the ceiling existed: install-host.sh gives such a worker 1800, so only a ceiling
 # other than 1800 is a change.
 grep -v '^SH_LEASE_IDLE_CEILING_S=' "$GEN/workers/sbx_py312/worker.env" >"$TMP/worker.env.nocap"
 cp "$TMP/worker.env.nocap" "$GEN/workers/sbx_py312/worker.env"
-run_setup export SBX_LIFETIME_DAYS=10 || fail 'a re-run over a bundle without a ceiling failed'
+run_setup export SBX_MAX_LIFETIME_DAYS=10 || fail 'a re-run over a bundle without a ceiling failed'
 ! grep -q 'SH_LEASE_IDLE_CEILING_S' "$TMP/out" || fail 'a bundle without a ceiling, at the default 1800, warns'
 cp "$TMP/worker.env.nocap" "$GEN/workers/sbx_py312/worker.env"
-run_setup export SBX_LIFETIME_DAYS=10 SBX_IDLE_CEILING_S=600 || fail 'a ceiling change over a bundle without one failed'
+run_setup export SBX_MAX_LIFETIME_DAYS=10 SBX_IDLE_CEILING_S=600 || fail 'a ceiling change over a bundle without one failed'
 grep -q 'WARNING: SH_LEASE_IDLE_CEILING_S changes from 1800 to 600' "$TMP/out" || fail 'the change from a bundle without a ceiling does not warn from 1800'
 run_setup export SBX_ACK_HOSTS=1 || fail 'the run back to the defaults failed'
 pass 'a ceiling change warns and names the hosts to reinstall (with a lifetime change, one line, each host once)'
@@ -749,7 +973,7 @@ HASH="$({
   printf '%s\n' 'SH_GITHUB_CLIENT_ID=Iv1.example' 'SH_ADMIN_SUBJECTS=github:1' 'SH_API_TOKEN_TTL_SECONDS=' 'SH_SESSION_TOKEN_TTL_SECONDS='
   printf '%s\n' 'SH_ALLOWED_SUBJECTS=github:1,github:2' "SH_SANDBOX_TEMPLATES=$(jq -c . "$TMP/templates.json")" \
     'SH_SANDBOX_EXEC_ENDPOINT=sbx-exec.apps.example.invalid:443' 'SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane' \
-    'SH_SANDBOX_LIFETIME_SECONDS=604800' 'SH_SANDBOX_TOKEN_TTL_SECONDS=900' 'SH_SANDBOX_RETENTION_SECONDS=1209600' \
+    'SH_SANDBOX_LIFETIME_SECONDS=604800' 'SH_SANDBOX_MAX_LIFETIME_SECONDS=2592000' 'SH_SANDBOX_TOKEN_TTL_SECONDS=900' 'SH_SANDBOX_RETENTION_SECONDS=1209600' \
     'SH_SANDBOX_MAX_PER_SUBJECT=3' 'SH_SANDBOX_MAX_TOTAL=40' 'SH_SANDBOX_MAX_INFLIGHT=2' \
     'SH_SANDBOX_MODES_ALLOWED=per-exec' 'SH_SANDBOX_IDLE_CEILING_S=1800' "SH_SANDBOX_EXEC_CA=$(cat "$GEN/exec-ca.crt")"
   raw_val sbx-token-keys PUBLIC_KEYS
@@ -795,7 +1019,7 @@ GOLD
 diff <(expected_off_kustomization) "$K" >"$TMP/golden.diff" || { cat "$TMP/golden.diff" >&2; fail 'the generated kustomization.yaml with egress off is not today'"'"'s'; }
 jq -e '.data | keys == ["SH_ADMIN_SUBJECTS","SH_API_TOKEN_TTL_SECONDS","SH_GITHUB_CLIENT_ID","SH_SESSION_TOKEN_TTL_SECONDS"]' \
   "$MOCK_STATE/configmap-moca-settings.json" >/dev/null || fail 'moca-settings keys changed with egress off'
-jq -e '.data | keys == ["SH_ALLOWED_SUBJECTS","SH_SANDBOX_EXEC_CA","SH_SANDBOX_EXEC_ENDPOINT","SH_SANDBOX_IDLE_CEILING_S","SH_SANDBOX_LIFETIME_SECONDS","SH_SANDBOX_MAX_INFLIGHT","SH_SANDBOX_MAX_PER_SUBJECT","SH_SANDBOX_MAX_TOTAL","SH_SANDBOX_MODES_ALLOWED","SH_SANDBOX_RETENTION_SECONDS","SH_SANDBOX_TEMPLATES","SH_SANDBOX_TOKEN_ISSUER","SH_SANDBOX_TOKEN_TTL_SECONDS"]' \
+jq -e '.data | keys == ["SH_ALLOWED_SUBJECTS","SH_SANDBOX_EXEC_CA","SH_SANDBOX_EXEC_ENDPOINT","SH_SANDBOX_IDLE_CEILING_S","SH_SANDBOX_LIFETIME_SECONDS","SH_SANDBOX_MAX_INFLIGHT","SH_SANDBOX_MAX_LIFETIME_SECONDS","SH_SANDBOX_MAX_PER_SUBJECT","SH_SANDBOX_MAX_TOTAL","SH_SANDBOX_MODES_ALLOWED","SH_SANDBOX_RETENTION_SECONDS","SH_SANDBOX_TEMPLATES","SH_SANDBOX_TOKEN_ISSUER","SH_SANDBOX_TOKEN_TTL_SECONDS"]' \
   "$MOCK_STATE/configmap-sbx-settings.json" >/dev/null || fail 'sbx-settings keys changed with egress off'
 [[ "$(applied_names)" == 'configmap moca-settings;configmap sbx-settings;secret moca-mu1;secret moca-redis;secret moca-relay;secret moca-relay-sandbox-tokens;secret moca-relay-tls;secret sbx-exec-tls;secret sbx-token-keys;' ]] ||
   fail "the applied object set changed with egress off: $(applied_names)"
