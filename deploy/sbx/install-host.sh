@@ -481,7 +481,7 @@ remove_credential_file() {
   "$(egress_dropin)") ;;
   "$d"/*)
     name="${1#"$d"/}"
-    if [[ "$name" == */* || "$name" == . || "$name" == .. ]]; then
+    if [[ -z "$name" || "$name" == */* || "$name" == . || "$name" == .. ]]; then
       log "kept $1 (not a credential file of this script)"
       return 1
     fi

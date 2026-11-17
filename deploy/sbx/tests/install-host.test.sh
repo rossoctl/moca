@@ -929,6 +929,14 @@ for f in "$TMP/cred-outside/precious" "$CD/sub/precious" "$CD/../precious"; do
   sed -i.bak "\\#^egress credential $f\$#d" "$EM"; rm -f "$EM.bak" "$f"
 done
 rmdir "$CD/sub" "$TMP/cred-outside"
+# An empty name (the directory itself, `egress credential <dir>/`) names no credential file: kept and named,
+# not logged as removed (review nit).
+echo "egress credential $CD/" >>"$EM"
+bash "$INSTALL" --uninstall-egress >"$TMP/out" 2>&1 || fail '--uninstall-egress with an empty credential name'
+grep -qF "kept $CD/ (not a credential file of this script)" "$TMP/out" || fail "--uninstall-egress did not keep and name $CD/"
+grep -qF "removed $CD/" "$TMP/out" && fail "--uninstall-egress logged $CD/ as removed"
+[[ -d "$CD" ]] || fail "--uninstall-egress removed the credential directory itself"
+sed -i.bak "\\#^egress credential $CD/\$#d" "$EM"; rm -f "$EM.bak"
 pass '--uninstall-egress deletes only files of the credential directory and the drop-in, whatever the manifest says'
 
 # The last worker's uninstall removes the credential files the same way.
