@@ -39,7 +39,9 @@ function headWords(head: string): string[] {
  * The entries under `usage`'s first line, up to its first line that is not indented (the notes). A
  * line that is not indented, ends in `:` and is followed by a head is a group heading (`sbx --help`
  * groups its commands, #599), and so is the blank line before one: they end the entry before them
- * and are in none.
+ * and are in none. This applies to every usage text passed here, so a usage text must not put a
+ * note line that ends in `:` directly before a command line, or it is read as a heading; the notes
+ * go after the last command (the first other non-indented line ends the entries).
  */
 function usageEntries(usage: string, head: string): UsageEntry[] {
   const entries: UsageEntry[] = [];
