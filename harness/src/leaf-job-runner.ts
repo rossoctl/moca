@@ -215,7 +215,21 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
     if (entryAgeMs(claimed.entryId) < (deps.deferCeilingMs ?? DEFER_CEILING_MS)) {
       // Handed back UNRUN and at no cost to its attempt budget; see `defer`'s own doc for why the
       // entry then waits out `minIdleMs` rather than being instantly reclaimable.
-      await deps.queue.defer(claimed.entryId, deps.consumerId, claimed.deliveryCount - 1);
+      //
+      // A throw here (a Redis blip mid-hand-back) must not propagate: the entry has already left
+      // XREADGROUP's reach and sits in this consumer's PEL either way, so it returns via XAUTOCLAIM
+      // after `minIdleMs` -- the same wait a successful defer costs it. The one lost effect is the
+      // attempt refund, so this is logged rather than swallowed: a run of these means pacing is
+      // charging deliveries, and an owner's entries could reach `maxAttempts` by being paced.
+      try {
+        await deps.queue.defer(claimed.entryId, deps.consumerId, claimed.deliveryCount - 1);
+      } catch (err) {
+        (deps.log ?? console.warn)(
+          `[async] hand-back failed for entry ${claimed.entryId} (turn ${claimed.turnId}): ${
+            err instanceof Error ? err.message : String(err)
+          }; it returns on the reclaim path with this delivery charged`,
+        );
+      }
       return { kind: 'deferred', turnId: claimed.turnId, reclaimed: claimed.reclaimed };
     }
     // Past the ceiling, so fairness yields: see DEFER_CEILING_MS. Logged because this is the one

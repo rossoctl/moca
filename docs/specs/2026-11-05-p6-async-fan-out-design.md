@@ -179,13 +179,14 @@ wall-clock. §6 covers enforcement.
 > arithmetic — so a `caps.costUsd` on a submission was accepted and silently ignored, which is a
 > worse answer than absent. It is now refused at submission with
 > `400 invalid_request: caps.costUsd is not enforceable (no price table); use caps.tokens`. A
-> narrowing, taken while `/v1` is Preview and recorded in `docs/api/CHANGELOG.md` 1.27.0. The other
+> narrowing, taken while `/v1` is Preview and recorded in `docs/api/CHANGELOG.md` 1.30.0. The other
 > two are enforced on two different sides, deliberately:
 >
 > - **`caps.tokens` inside the leaf.** It rides the dequeue response onto `TurnConfig.budgetTokens`
 >   and arms the existing budget voter (`harness/src/budget-voter.ts`), which blocks tool calls once
 >   the turn's spend crosses it — the same mechanism as the `SH_BUDGET_TOKENS` deployment default,
->   which a turn's own cap overrides. The leaf then ends `failed` with `result.reason: "budget"`.
+>   which a turn's own cap can only narrow, never raise (`resolveBudgetLimit` takes the tighter of
+>   the two). The leaf then ends `failed` with `result.reason: "budget"`.
 > - **`caps.wallClock` outside it.** It is already clamped into `turn_exp` at mint (§5.4), and the
 >   worker's watchdog aborts the leaf at that instant and nothing else. The deadline is never
 >   recomputed in the worker: the grant expires then anyway, so a leaf outrunning it would die of

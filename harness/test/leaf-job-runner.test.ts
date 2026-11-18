@@ -353,6 +353,29 @@ describe('processOne', () => {
       expect(logged.join('\n')).toContain('deferred past the ceiling');
     });
 
+    // A Redis blip mid-hand-back used to propagate out of processOne, so the drain loop saw the
+    // whole claim fail. The entry is in this consumer's PEL either way and comes back via
+    // XAUTOCLAIM, so the outcome is still `deferred` -- but the attempt refund is lost, which is
+    // why it is logged rather than swallowed.
+    it('survives a hand-back that throws: still deferred, logged, no run, no ack', async () => {
+      const fresh = `${Date.now()}-0`;
+      queue.next = entry({ entryId: fresh, deliveryCount: 2 });
+      queue.defer = async () => {
+        throw new Error('READONLY You can’t write against a read only replica');
+      };
+      const logged: string[] = [];
+      const runLeaf = vi.fn();
+      const out = await processOne(
+        deps({ admitOwner: async () => null, runLeaf, log: (m) => logged.push(m) }),
+      );
+      expect(out).toEqual({ kind: 'deferred', turnId: 't-1', reclaimed: false });
+      expect(runLeaf).not.toHaveBeenCalled();
+      expect(queue.acked).toEqual([]); // acking would lose the turn outright
+      expect(finalized).toEqual([]);
+      expect(logged.join('\n')).toContain('hand-back failed');
+      expect(logged.join('\n')).toContain('this delivery charged');
+    });
+
     it('keeps deferring while the entry is younger than the ceiling', async () => {
       queue.next = entry();
       const out = await processOne(

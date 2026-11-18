@@ -65,19 +65,27 @@ vi.mock('../src/buffered-redis-backend.js', () => ({
 const { createAgentSessionMock } = vi.hoisted(() => ({
   createAgentSessionMock: vi.fn(async () => ({ session: { prompt: async () => {} } })),
 }));
-vi.mock('@earendil-works/pi-coding-agent', () => ({
-  SessionManager: {
-    create: () => ({}),
-    openFromCheckpoint: async () => ({}),
-  },
-  DefaultResourceLoader: class {
-    async reload() {}
-  },
-  createAgentSession: (...args: unknown[]) => createAgentSessionMock(...(args as [])),
-}));
+// Spread the real module first: turnLoaderInputs also pulls getAgentDir and SettingsManager from
+// here, and a factory listing only the overrides leaves those undefined -- which halts the leaf at
+// `getAgentDir()` with a mock-shape error before it reaches the agent, silently shortening any test
+// that runs past convergeWorkspace.
+vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@earendil-works/pi-coding-agent')>();
+  return {
+    ...actual,
+    SessionManager: {
+      create: () => ({}),
+      openFromCheckpoint: async () => ({}),
+    },
+    DefaultResourceLoader: class {
+      async reload() {}
+    },
+    createAgentSession: (...args: unknown[]) => createAgentSessionMock(...(args as [])),
+  };
+});
 
 import { realProduceSolve, type LeafEnvelope, type SolveCapture } from '../src/run-leaf.js';
-import { buildConvergeScript } from '../src/converge.js';
+import { buildConvergeScript, buildDiffCaptureScript } from '../src/converge.js';
 
 const digest = 'sha256:' + 'e'.repeat(64);
 
@@ -187,5 +195,57 @@ describe('realProduceSolve ordering (converge before attach)', () => {
     // Convergescript did execute (otherwise we never reached the configRef branch) — sanity.
     const scripts = execMock.mock.calls.map((c) => c[0] as string);
     expect(scripts).toContain(expectedConverge);
+  });
+});
+
+describe('realProduceSolve honours the stop signal (#391)', () => {
+  // The REAL wireAbort bridging and the `signal?.aborted` early return, on the real producer: every
+  // other test for #391 injects a produceSolve fake, so deleting `wireAbort(signal, session)` or the
+  // guard after `prompt()` passed the whole suite and only the Kind smoke noticed (PR #856 review).
+  // wireAbort itself is unit-tested in run-turn.test.ts; what this pins is that the leaf wires it
+  // and then declines to capture a patch from a worktree the agent was cut off mid-edit in.
+  it('aborts the session on a mid-leaf cancel and captures no patch', async () => {
+    selectPoolSandboxMock.mockReset().mockResolvedValue(podLease());
+    const expectedConverge = buildConvergeScript(
+      'https://example.test/repo.git',
+      'main',
+      'run-1-solve',
+    );
+    execMock.mockReset().mockImplementation(async (script: string) => {
+      if (script === expectedConverge)
+        return {
+          stdout: Buffer.from('/workspace/leaves/run-1-solve'),
+          exitCode: 0,
+          truncated: false,
+        };
+      return { stdout: Buffer.from('a-patch'), exitCode: 0, truncated: false };
+    });
+
+    // Cancel arrives while the agent is prompting -- the production shape (the worker aborts a
+    // running leaf), and the addEventListener half of wireAbort rather than the already-aborted one.
+    const stop = new AbortController();
+    const abort = vi.fn();
+    const prompt = vi.fn(async () => {
+      stop.abort();
+    });
+    createAgentSessionMock.mockReset().mockImplementation(async () => ({
+      session: { prompt, abort },
+    }));
+
+    const capture: SolveCapture = {};
+    await realProduceSolve(
+      { ...solveEnv(), configRef: undefined },
+      undefined,
+      capture,
+      { resolvePromotedConfig: vi.fn(), overlayConfig: vi.fn(), bundleRedis: {} as never },
+      stop.signal,
+    );
+
+    expect(prompt).toHaveBeenCalledTimes(1); // the leaf did reach the agent
+    expect(abort).toHaveBeenCalledTimes(1); // ...and the signal reached Pi through wireAbort
+    // A half-written worktree is not an answer: no diff capture, so no partial patch is returned.
+    const scripts = execMock.mock.calls.map((c) => c[0] as string);
+    expect(scripts).not.toContain(buildDiffCaptureScript('run-1-solve'));
+    expect(capture.patch).toBeUndefined();
   });
 });

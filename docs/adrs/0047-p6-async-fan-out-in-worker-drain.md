@@ -76,7 +76,8 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   die of 401s. The worker's watchdog aborts at `turn_exp` as sent — never recomputed from
   `caps.wallClock`, so there is no second copy of the clamp — and the leaf reports
   `failed: budget`. `caps.tokens` is enforced on the other side, inside the leaf, by the budget
-  voter the `SH_BUDGET_TOKENS` deployment default already arms; a turn's own cap overrides it. The
+  voter the `SH_BUDGET_TOKENS` deployment default already arms; a turn's own cap can only narrow
+  that default, never raise it (`resolveBudgetLimit` takes the tighter of the two). The
   third cap, `costUsd`, is refused at submission with `400 invalid_request`: there is no price table
   in the runtime, so accepting it promised an enforcement that silently never happened.
 
