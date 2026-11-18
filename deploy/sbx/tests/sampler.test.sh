@@ -117,6 +117,12 @@ printf 'SH_MAX_COMMITTED_MB=8192\nSH_DIAG_STATS_ADDR=10.1.2.3:9904\n' >"$SBX_ENV
 run
 ! grep -q '^curl ' "$MOCK_LOG" || fail "a non-loopback SH_DIAG_STATS_ADDR was curled: $(grep curl "$MOCK_LOG")"
 is '.workers[0].stats' 'null'
+printf 'SH_MAX_COMMITTED_MB=8192\nSH_DIAG_STATS_ADDR=127.example.com:9906\n' >"$SBX_ENV_DIR/workers/sbx_default.env"
+run
+! grep -q '^curl ' "$MOCK_LOG" || fail "a 127.-prefixed hostname was curled: $(grep curl "$MOCK_LOG")"
+printf 'SH_MAX_COMMITTED_MB=8192\nSH_DIAG_STATS_ADDR=127.0.0.2:9907\n' >"$SBX_ENV_DIR/workers/sbx_default.env"
+run
+grep -q 'http://127.0.0.2:9907/stats' "$MOCK_LOG" || fail "'127.0.0.2:9907' is not read"
 printf 'SH_MAX_COMMITTED_MB=8192\nSH_DIAG_STATS_ADDR=localhost:9905\n' >"$SBX_ENV_DIR/workers/sbx_default.env"
 run
 grep -q 'http://localhost:9905/stats' "$MOCK_LOG" || fail "'localhost:9905' is not read"

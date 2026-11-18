@@ -250,8 +250,14 @@ stats() {
   case "$host" in
     '' | 0.0.0.0) host=127.0.0.1 ;;
     '[::]') host='[::1]' ;;
-    localhost | 127.* | '[::1]') ;;
-    *) fail "stats:$id" "SH_DIAG_STATS_ADDR='$addr' is not a loopback or wildcard address: not read"; return 0 ;;
+    localhost | '[::1]') ;;
+    *)
+      # 127.0.0.0/8, numeric only: a name such as 127.example.com would go to DNS
+      if [[ ! "$host" =~ ^127(\.[0-9]{1,3}){3}$ ]]; then
+        fail "stats:$id" "SH_DIAG_STATS_ADDR='$addr' is not a loopback or wildcard address: not read"
+        return 0
+      fi
+      ;;
   esac
   command -v curl >/dev/null || { fail curl 'no curl on PATH: no worker /stats read'; return 0; }
   body="$(curl -fsS --max-time 1 --noproxy '*' "http://$host:$port/stats" 2>/dev/null)" ||
