@@ -70,8 +70,3 @@ OpenShift Routes:
 - [Security model](../reference/security-model.md): what each deployment isolates, and what it doesn't.
 - [Sandbox service runbook](../../deploy/sbx/RUNBOOK.md): users, templates, key rotation, outages.
 - [Configuration reference](../reference/configuration.md): every environment variable.
-
-<!-- Sources: docs/get-started/index.md:21-26; deploy/k8s/README.md:55-64; deploy/microvm/P4-ON-P6.md
-(prereqs); deploy/sbx/README.md:1-34, :197-211, :279-303; docs/concepts/sandboxes-and-tiers.md:12-20;
-packages/control-plane/src/sandbox-config.ts:87-94; docs/reference/configuration.md:45, :283;
-deploy/compose/README.md:69-75, :119-124. deploy/sbx/README.md:1-3 (Redis in the sandbox service namespace), :23 (one worker id per template), :210-211 (host build of microvm-worker). -->

@@ -17,7 +17,18 @@ EXCLUDED='^docs/(specs|notes|plans|archive|demos|adrs)/|^docs/REORG-PLAN\.md$|^d
 patterns="$(mktemp)"
 trap 'rm -f "$patterns"' EXIT
 echo 'SBX[0-9]' >"$patterns"
-grep -vE '^[[:space:]]*(#|$)' docs/.publish-denylist >>"$patterns" || true
+# A missing or unreadable denylist is an error, not an empty one: the `|| true` below may only
+# absorb grep's "no line selected" (1), when the file holds nothing but comments.
+if [[ ! -r docs/.publish-denylist ]]; then
+  echo 'docs-publish: docs/.publish-denylist is missing or unreadable' >&2
+  exit 2
+fi
+status=0
+grep -vE '^[[:space:]]*(#|$)' docs/.publish-denylist >>"$patterns" || status=$?
+if ((status > 1)); then
+  echo "docs-publish: reading docs/.publish-denylist failed (grep exit $status)" >&2
+  exit 2
+fi
 
 published=()
 while IFS= read -r f; do

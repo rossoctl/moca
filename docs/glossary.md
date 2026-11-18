@@ -48,16 +48,20 @@ to completion in a tooled sandbox, returning a structured result. A leaf is addr
 child leaf through `/runs`; re-invoking the same `session_id` re-runs and overwrites. See
 the [leaf-session contract](specs/2026-06-26-mvp-leaf-session-contract-design.md). Contrast `turn`,
 which is one interactive exchange on `POST /turn`. Under P6 a `--role=leaf` worker role is reserved for queued leaf work, but it is not
-implemented yet (the worker exits 2 for any role but `turn`), and async leaf dispatch has no P6
-equivalent.
+implemented yet (the worker exits 2 for any role but `turn`): async leaf dispatch runs instead in the
+ordinary `--role=turn` workers' drain loop, opt-in behind `SH_ASYNC_DRAIN=1` and single-tenant only
+in v0.10.0.
 
 ## archetype
 
-A dispatch pattern an orchestrator can use against the same backend. **A** is async fan-out
-(`async: true`, a Redis Streams queue, many leaves at once), **B** is the human gate (a leaf pauses
-with status `paused` and resumes on an external verdict), **C** is scheduled dispatch (a cron
-trigger posts async leaves). B is served by the P6 runtime; A and C were removed with the
-Knative/KEDA path. See [dispatch archetypes](concepts/dispatch-archetypes.md).
+A dispatch pattern an orchestrator can use against the same backend. **A** is async fan-out (many
+leaves queued at once and collected later), **B** is the human gate (a leaf pauses with status
+`paused` and resumes on an external verdict), **C** is scheduled dispatch (a cron trigger posts async
+leaves). B is served by the P6 runtime. A runs on P6 again, opt-in behind `SH_ASYNC_DRAIN=1` and
+single-tenant only in v0.10.0 (multi-tenant is targeted for v0.12.0), submitted to the control
+plane's `POST /v1/sessions/{id}/turns`; the data plane's `async: true` stays removed. C was removed
+with the Knative/KEDA path and has no P6 design yet
+([#536](https://github.com/rossoctl/moca/issues/536)). See [dispatch archetypes](concepts/dispatch-archetypes.md).
 
 ## brain and hands
 

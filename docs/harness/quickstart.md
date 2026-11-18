@@ -143,7 +143,3 @@ isolation differ.
 - **Understand:** [Sessions and turns](../concepts/sessions-and-turns.md),
   [Session multiplexing](../concepts/session-multiplexing.md).
 - **Look up:** [HTTP API](../reference/http-api.md), [mocactl](../reference/cli-mocactl.md).
-
-<!-- Sources: deploy/compose/README.md:19-64 (prereqs, install.sh steps, verify), :149-191
-(control plane, MU1 credentials), :262-267 (persistence); deploy/compose/docker-compose.yml:29-31
-(moca-redis volume, AOF); docs/get-started/first-run.md:25-69 (turn, resume, stream). -->

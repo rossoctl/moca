@@ -59,9 +59,3 @@ Docker Compose, as a trial.
   [What the sandbox service gives you](../sandbox/user-guide.md#1-what-you-get).
 - Checking maturity before you commit? Read
   [Maturity and lifecycle](../reference/maturity-and-lifecycle.md).
-
-<!-- Sources: docs/sandbox/user-guide.md:37-39, :60 (sandbox prerequisites, operator URL);
-deploy/compose/README.md:19-20 (compose prerequisites); scripts/install-mocactl.sh:5-36 (installer
-behaviour, env vars); packages/mocactl/src/cli.ts:40-41 (--version), :233-236 (per-command help);
-packages/mocactl/src/sbx/cli.ts:350-352 (separate sbx login); deploy/sbx/README.md:3-6, :197-206
-(OpenShift + KVM only). -->

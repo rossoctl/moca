@@ -11,14 +11,14 @@ Moca has two capabilities. Use either one on its own, or both together:
 
 - **Sandbox service.** Your coding agent (Claude Code, OpenCode, Codex or IBM Bob) keeps running on
   your laptop. Every command it runs goes to a fresh, isolated VM on a shared service, working on a
-  copy of your repository. You take the agent's work back as a patch. Your laptop's files are
-  untouched until you apply it.
+  copy of your repository. You take the agent's work back as a patch. Your laptop's source files
+  are untouched until you apply it, apart from the agent configuration `mocactl sbx up` writes.
 - **Harness.** Moca runs the agent itself. A supervisor hands each connection to a pool of warm
   workers, sessions are durable in Redis and resume by id, and tools run in a remote sandbox (a
   container, or a Firecracker microVM per command). An orchestrator dispatches work over HTTP.
 
-📖 **Documentation: [rossoctl.dev/moca](https://www.rossoctl.dev/moca/)** (`TODO(pending)`: the site
-instance doesn't exist yet. Until then, see [`docs/index.md`](docs/index.md).)
+📖 **Documentation: [rossoctl.dev/moca](https://www.rossoctl.dev/moca/)**, built from
+[`docs/`](docs/index.md).
 
 ## Try it
 
@@ -95,8 +95,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and
 ## License
 
 [Apache-2.0](LICENSE)
-
-<!-- Sources: as for docs/index.md and the two quickstarts (see their footers); package roles from
-CLAUDE.md "Repository Structure", packages/sandbox-client/package.json, `ls remote-worker/cmd`
-(moca-egress, vmpoolctl). Links into docs/ assume the 04-proposed-structure layout and resolve
-only after migration step 2 (TODO(pending)). -->

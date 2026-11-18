@@ -95,13 +95,3 @@ evidence behind its design: [Project](project/index.md). The latest release is
 [v0.10.0](https://github.com/rossoctl/moca/releases/tag/v0.10.0). Container images are
 `ghcr.io/rossoctl/moca` and `ghcr.io/rossoctl/moca-remote-worker`. These pages track moca's `main`
 branch.
-
-<!-- Sources: packages/mocactl/src/sbx/cli.ts:95-106 (SBX_ABOUT), :156 (`sbx mcp` stdio server);
-docs/sandbox/user-guide.md:11-33 (what you get, agents, safety); README.md:11-17, :93-101 (supervisor,
-warm workers, Redis, sandbox tiers); docs/concepts/brain-and-hands.md:5-16;
-docs/concepts/sandboxes-and-tiers.md:12-20; remote-worker/DESIGN.md:12-17 and glossary.md:80-86
-(workers dial out); deploy/sbx/README.md:1-6 (OpenShift + routes), :197-211 (KVM hosts,
-microvm-worker), :279-303 (combined); packages/control-plane/src/sandbox-config.ts:87-94 (route
-profiles); README.md:204-210 and issue #536 (dispatch shapes, scheduled dispatch);
-docs/reference/maturity-and-lifecycle.md:9-13, README.md:291-296 (Preview, Apache-2.0);
-`gh release list -R rossoctl/moca` on 2026-11-17 (v0.10.0); .github/workflows/build.yaml:29, :37 (images). -->

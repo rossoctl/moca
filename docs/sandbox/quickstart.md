@@ -147,6 +147,3 @@ Why this design is safer: [What you get](user-guide.md#1-what-you-get).
   [Lease mode](../api/sandbox-v1-direct-client.md#lease-mode).
 - **Understand:** [Templates and limits](user-guide.md#7-limits).
 - **Look up:** [Everyday `mocactl sbx` commands](user-guide.md#5-working-with-it).
-
-<!-- Sources: docs/sandbox/user-guide.md §1-3 (:11-33, :35-200), §3 pull (:392-416), rm (:520-552),
-doctor (:841-860); packages/mocactl/src/sbx/cli.ts:95-106 (SBX_ABOUT), :171-174 (secret globs). -->
