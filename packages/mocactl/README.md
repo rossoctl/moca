@@ -320,7 +320,7 @@ local history (the control plane stores no titles).
 `mocactl sbx templates`, and create a sandbox of one with `mocactl sbx create --template ID` (or
 `sbx up --template ID` in a repository). On a deployment with the template store,
 `mocactl sbx templates` also creates, follows, activates and retires your own templates. The
-[SBX0 user guide](../../docs/sandbox/user-guide.md) has every command; turning a container image into a
+[the sandbox service user guide](../../docs/sandbox/user-guide.md) has every command; turning a container image into a
 template is the template onboarding guide, `deploy/sbx/template-onboarding/GUIDE.md`.
 
 ## Files

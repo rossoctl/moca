@@ -120,7 +120,7 @@ field and digest, marked `"hash_version": 2`, so the hash names the build and an
 manifest is refused at worker start. The worker re-hashes the kernel, rootfs, agent and vmstate at
 every start, and the memory file only with `SH_VERIFY_MEMFILE=1` (a full read of the guest's RAM).
 The verify cache (on by default; `SH_VERIFY_CACHE=0` turns it off, `SH_VERIFY_CACHE_PATH`
-or `SH_VERIFY_CACHE_DIR` moves it; SBX0 keeps it under `/srv/sbx/verify-cache`) spares the re-read:
+or `SH_VERIFY_CACHE_DIR` moves it; the sandbox service keeps it under `/srv/sbx/verify-cache`) spares the re-read:
 a file is hashed in full once on this host, and while its device, inode, size and mtime are
 unchanged a later start trusts that hash. The trust point is a full check on this host: an entry is
 written only after a full hash matched the manifest, and a cached digest is still compared with the

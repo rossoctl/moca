@@ -1,10 +1,10 @@
-# SBX0 sandbox service
+# Sandbox service
 
 The sandbox control plane, the sandbox relay and Redis in one namespace of a shared OpenShift
 cluster. Three Routes reach them: **api** (edge TLS, the control plane: login and the sandbox
 resource), **attach** (passthrough, KVM hosts' workers dial in) and **exec** (passthrough, clients'
 `Exec` calls). Design:
-[`docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md`](../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md).
+[the sandbox service design](../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md).
 
 This page is the install reference. Day-to-day operation (users, templates, key rotation, outages,
 disk, status and upgrades) is [the runbook](RUNBOOK.md); onboarding a template from a container
@@ -16,7 +16,7 @@ image is the template onboarding folder, `deploy/sbx/template-onboarding/`; user
 
 Needs `kubectl` logged in with edit rights in an **existing** namespace, `jq`, and an `openssl` that
 makes Ed25519 keys (OpenSSL 1.1.1 or later; on macOS, `brew install openssl@3`). The namespace must
-be **dedicated to SBX0**: the overlay's default-deny and relay NetworkPolicies would cut off anything
+be **dedicated to the sandbox service**: the overlay's default-deny and relay NetworkPolicies would cut off anything
 else running in it. Keep the inputs in a file outside the repo:
 
     SBX_NAMESPACE=<namespace>
@@ -56,7 +56,7 @@ Optional inputs:
 | `SBX_API_CA_FILE`                      | none                | a PEM CA the host janitor trusts for the API Route (below)                                                                                                                                                                                                                                                                                                                                           |
 | `SBX_PROFILE`                          | sandbox             | `combined`: one control plane for Moca Pi sessions and sandboxes ([below](#one-control-plane-for-sessions-and-sandboxes))                                                                                                                                                                                                                                                                            |
 
-**Lease mode (SBX0.3)** has two policy inputs
+**Lease mode** has two policy inputs
 ([lease-mode spec](../../docs/specs/2026-11-08-sbx-lease-mode-design.md) §8.1). `setup.sh` writes
 them to `sbx-settings`, which the control plane reads:
 
@@ -199,7 +199,7 @@ Otherwise every janitor run logs `skipped`.
 ## 2. KVM host side
 
 The host needs what `deploy/microvm/P4-ON-P6.md` lists for P4 (`/dev/kvm`, Firecracker, jailer),
-SBX0's own `microvm-worker` build at `SBX_WORKER_BIN` (below), `/usr/local/bin/moca-egress` (the
+the sandbox service's own `microvm-worker` build at `SBX_WORKER_BIN` (below), `/usr/local/bin/moca-egress` (the
 install refuses without it, unless `--no-egress`) and outbound TCP 443 to the attach host. Build each template's snapshot under
 `/srv/sbx/snapshots/<image>` with `deploy/microvm/build-snapshot.sh`, then per worker:
 
@@ -208,7 +208,7 @@ install refuses without it, unless `--no-egress`) and outbound TCP 443 to the at
     ssh <host> rm -r sbx-<id>
 
 The worker's guest RAM comes from the snapshot's `manifest.json`, and `--budget-mb` (default 8192)
-must hold one session of it: (guest RAM + 32) × 3 + 1024 MiB, 13408 for a 4096 MiB guest. SBX0's
+must hold one session of it: (guest RAM + 32) × 3 + 1024 MiB, 13408 for a 4096 MiB guest. The sandbox service's
 workers run their own `microvm-worker` build, `SBX_WORKER_BIN` (default
 `/usr/local/libexec/sbx/microvm-worker`, built from the same tree:
 `CGO_ENABLED=0 go build -o /usr/local/libexec/sbx/microvm-worker ./remote-worker/cmd/microvm-worker`),
@@ -284,7 +284,7 @@ removes it. Re-run `--janitor` with a new bundle after changing `SBX_JANITOR_WAI
 plane on the `combined` route profile, serving Moca Pi sessions (the supervisor and its Route) and
 sandboxes from one template store, so a session and a sandbox can run on the same build under one
 activation lease ([design](../../docs/specs/2026-11-05-combined-control-plane-design.md)). Use a
-namespace of its own, not an SBX0 one: the run refuses, before applying anything, a namespace whose
+namespace of its own, not a sandbox-service one: the run refuses, before applying anything, a namespace whose
 `moca-mu1` holds `SH_JANITOR_TOKEN` but no `SH_EXCHANGE_TOKEN`, or that has the `sbx-api` Route,
 unless `SBX_CONVERT_TO_COMBINED=1` says the conversion is meant. It needs, beside the inputs above:
 
@@ -294,7 +294,7 @@ unless `SBX_CONVERT_TO_COMBINED=1` says the conversion is meant. It needs, besid
     SBX_IMAGE=<repo>@sha256:<digest>           # pinned by digest too
 
 It turns the template store on, adds the harness's keys to `moca-mu1`, and writes its files to
-`deploy/sbx/.generated-<namespace>/`, so an SBX0 namespace's generated files stay as they are.
+`deploy/sbx/.generated-<namespace>/`, so a sandbox-service namespace's generated files stay as they are.
 Egress credentials are not supported with it yet. On `combined` any GitHub account can log in and use
 sessions; the sandbox routes and template writes still need `SBX_ALLOWED_SUBJECTS` or an admin.
 
