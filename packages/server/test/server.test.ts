@@ -240,6 +240,59 @@ describe('GET /runs/status', () => {
     const r = await (await fetch(`${baseUrl}/runs/status?sessionId=run/i1`)).json();
     expect(r).toMatchObject({ status: 'done', verdict: { item_id: 'i1', verdict: 'FLAGGED' } });
   });
+
+  // #389 item 5 / #380: a client disconnect does NOT cancel a sync /runs leaf. The run finishes and
+  // persists its record, which is the whole basis of submit-then-poll -- mocactl's subagent path
+  // posts /v1/runs and then reads /runs/status (packages/mocactl/src/transport/leaf-turn.ts), so a
+  // disconnect abort here would strand every subagent. The opposite contract for /turn is pinned
+  // below ("client disconnect mid-stream aborts the executeTurn signal"); the two must not converge.
+  // Permanent, not interim (ADR-0028's 2026-11-17 amendment): a run that must survive a worker
+  // restart belongs on async turns, which have redelivery. Guarded because once #391 lands runLeaf
+  // takes an optional AbortSignal, and this route must still pass none -- a one-line regression.
+  it('a client disconnect does not cancel a sync /runs leaf: it completes and its record is readable', async () => {
+    let releaseLeaf: ((r: unknown) => void) | undefined;
+    let leafEntered: (() => void) | undefined;
+    const entered = new Promise<void>((r) => {
+      leafEntered = r;
+    });
+    runLeaf.mockImplementationOnce(() => {
+      leafEntered?.();
+      // Still running when the socket goes away, so the disconnect lands mid-leaf.
+      return new Promise((resolve) => {
+        releaseLeaf = resolve;
+      });
+    });
+
+    const req = http.request(new URL('/v1/runs', baseUrl), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    });
+    req.on('error', () => {}); // the deliberate req.destroy() below hangs up the socket mid-run
+    req.write(
+      JSON.stringify({
+        sessionId: 'run/disc',
+        item: { item_id: 'i-disc', file: 'f', pattern: 'p' },
+      }),
+    );
+    req.end();
+    await entered;
+    req.destroy(); // client disconnect, leaf still in flight
+
+    releaseLeaf?.({
+      status: 'done',
+      verdict: { item_id: 'i-disc', verdict: 'CLEAN', reason: 'x' },
+    });
+
+    // The record is the assertion that matters: it proves the run outlived its client.
+    await vi.waitFor(async () => {
+      const r = await (await fetch(`${baseUrl}/runs/status?sessionId=run/disc`)).json();
+      expect(r).toMatchObject({ status: 'done', verdict: { item_id: 'i-disc' } });
+    });
+
+    // ...and no signal reached the leaf, so the no-abort wiring fails loudly rather than only
+    // through its effect. runLeaf(env, config) -- a 4th `signal` argument means someone wired it.
+    expect(runLeaf.mock.calls[runLeaf.mock.calls.length - 1][3]).toBeUndefined();
+  });
 });
 
 describe('POST /turn — back-compat & streaming', () => {

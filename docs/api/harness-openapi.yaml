@@ -475,7 +475,13 @@ paths:
         (ADR-0041), whose KEDA drainer consumed the queue, and is answered 400 async_removed. This
         route is not restored (#687) — it is unauthenticated when `SH_REQUIRE_AUTH` is off. Its
         replacement is the authenticated `POST /v1/sessions/{id}/turns` with `async: true`
-        (ADR-0047, #686), designed and not yet implemented.
+        (ADR-0047, #686), which has shipped.
+
+        A client disconnect does not cancel the run: it finishes and persists its result record,
+        which `GET /runs/status` serves afterwards, so submit-then-poll is supported here. This is
+        permanent, not interim (ADR-0028). `POST /v1/turn` is the opposite and aborts on
+        disconnect. A run that must survive a worker restart belongs on async turns, which have
+        redelivery.
 
         `sandboxPoolSelector` is internal routing state and is deleted at the request boundary —
         never settable by an external caller. A synchronous prompt run naming a `workloadId` runs

@@ -78,6 +78,37 @@ async queue behaves the same as before.
   delegated prompt into the sandbox and workspace allocated for that workload; callers do not need
   to know or supply a Kubernetes selector.
 
+## Amendment (2026-11-17): a client disconnect does not cancel a sync `/runs` run, permanently
+
+`POST /runs` and `/v1/runs` keep running after the client's socket goes away, and write the result
+record when they finish; `GET /runs/status` serves it afterwards. `/turn` does the opposite — it
+aborts the in-flight turn on disconnect (`packages/server/src/server.ts`, ADR-0029 §3.6). The
+asymmetry was accidental, and #380 filed it as an **interim** contract to be retired once async
+leaf turns on P6 (#389) gave detached work a better home.
+
+Async turns have now shipped (ADR-0047, M1–M3), and the retirement goes the other way: **the
+behaviour stays and stops being interim.**
+
+- **Submit-then-poll depends on it.** `mocactl`'s subagent path posts `/v1/runs` and then reads
+  `/runs/status` (`packages/mocactl/src/transport/leaf-turn.ts`), so it is deliberately not holding
+  the socket when the run ends. Aborting on disconnect would strand every subagent.
+- **Flipping it is breaking** under the [change policy](../reference/change-policy.md) ("changing a
+  default so that behaviour … changes"), on a route that policy keeps as a frozen, supported alias.
+- **What the interim framing was actually about** — a sync run lost on a worker restart with no
+  retry — is answered by async turns, which have crash redelivery. The gap closes by offering an
+  alternative, not by changing this route.
+
+Once #391 lands, `runLeaf` takes an optional `AbortSignal` and `handleRunLeafParsed` still passes
+none, so the regression #380 feared — copying `/turn`'s abort wiring here — becomes a one-line
+edit. `packages/server/test/server.test.ts` pins both halves: the disconnect test asserts the
+record is still written **and** that no signal reaches `runLeaf`, alongside the existing `/turn`
+test asserting the opposite.
+
+This closes #380, whose remaining scope was this amendment and that test. Its third item (a live
+disconnect check in `smoke.sh` "mirroring `deploy/vm`'s") refers to a file that does not exist:
+`deploy/vm` has `research-smoke.sh` and `setup-vm.sh`, and neither it nor `deploy/k8s/smoke.sh`
+has such a check.
+
 ---
 
 _Assisted-By: Claude (Anthropic AI) <noreply@anthropic.com>_
