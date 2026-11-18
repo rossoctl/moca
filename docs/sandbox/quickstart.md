@@ -33,7 +33,7 @@ You need:
   [deploy one](../../deploy/sbx/README.md), or ask whoever runs yours.
 - A GitHub account **enrolled** in that deployment (its allowed subjects).
 - Claude Code or OpenCode. (Codex and IBM Bob work too. See
-  [the user guide](user-guide.md#codex-cli).)
+  [the user guide](how-to/connect-agents.md#codex-cli).)
 
 ## 1. Install mocactl
 
@@ -118,7 +118,7 @@ applied the sandbox's changes to 3 files (2814 bytes of patch)
 The patch goes into your working tree, not your index. Review it with `git diff`, then commit as
 usual. `pull --apply` refuses a patch that touches agent configuration or hooks (`.mcp.json`,
 `.claude/`, `.husky/`, `.envrc`, and similar), and applies nothing in that case. See
-[Move work in and out](user-guide.md#5-working-with-it).
+[Take the work back](how-to/push-and-pull.md).
 
 ## 6. Check, and clean up
 
@@ -138,12 +138,12 @@ sandbox ends after 7 days without use by default, and its files go with it.
   the host.
 - The VM holds no secrets.
 
-Why this design is safer: [What you get](user-guide.md#1-what-you-get).
+Why this design is safer: [Isolation and data handling](concepts/isolation.md).
 
 ## Next
 
-- **Do more:** [Use Codex](user-guide.md#codex-cli) or [IBM Bob](user-guide.md#ibm-bob),
-  [Use egress credentials](user-guide.md#6-credentials),
-  [Lease mode](../api/sandbox-v1-direct-client.md#lease-mode).
-- **Understand:** [Templates and limits](user-guide.md#7-limits).
-- **Look up:** [Everyday `mocactl sbx` commands](user-guide.md#5-working-with-it).
+- **Do more:** [Use Codex](how-to/connect-agents.md#codex-cli) or [IBM Bob](how-to/connect-agents.md#ibm-bob),
+  [Use egress credentials](how-to/egress-credentials.md),
+  [Keep a guest between commands (lease mode)](how-to/lease-mode.md).
+- **Understand:** [Limits](concepts/limits.md).
+- **Look up:** [`mocactl sbx` reference](reference/cli-sbx.md).

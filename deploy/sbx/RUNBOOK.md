@@ -78,7 +78,7 @@ gitignored).
    timer active, then log in as a user and run `mocactl sbx doctor` in a repository.
 
 **Which `mocactl` users install.** Since v0.7.0 the default channel, the latest release, carries
-`mocactl sbx`, as [the user guide](../../docs/sandbox/user-guide.md#2-install) says:
+`mocactl sbx`, as [the user guide](../../docs/sandbox/how-to/set-up.md) says:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | sh
@@ -375,7 +375,7 @@ record). What an operator sets there:
 - **Quotas:** `quota`, and `quotaBySubject` for an override.
 - **What clients see of it:** `mocactl sbx policy`, `mocactl sbx quota` and `mocactl sbx hosts`;
   they create, follow and activate their templates with `mocactl sbx templates`
-  ([the user guide](../../docs/sandbox/user-guide.md), §8).
+  ([Make your own templates](../../docs/sandbox/how-to/templates.md)).
 
 **Writing the policy.** A `PUT /v1/policy` stores the whole policy, quota overrides included, so
 send it as a compare-and-set: `?expect=` the `digest` of the `GET /v1/policy` it was built from.

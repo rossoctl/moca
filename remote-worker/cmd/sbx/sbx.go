@@ -34,7 +34,7 @@ import (
 const usage = `sbx: a command-line client for one sandbox/v1 workspace (the Go twin of docs/api/examples/sbx.py).
 
 Meant for a coding agent whose shell tool is restricted to ` + "`sbx ...`" + `: every command runs in a fresh
-microVM over the workspace, and nothing runs on the local machine. See docs/api/sandbox-v1-direct-client.md.
+microVM over the workspace, and nothing runs on the local machine. See docs/sandbox/how-to/direct-api.md.
 
     sbx run [COMMAND...]      run COMMAND (or, with no arguments, the script on stdin) in /workspace
     sbx put PATH              write stdin to PATH in the workspace (parent directories created)

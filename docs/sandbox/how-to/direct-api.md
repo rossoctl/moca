@@ -1,4 +1,23 @@
-# Calling the sandbox/v1 API from your own code
+---
+sidebar_position: 9
+---
+
+# Call the sandbox API from your own code
+
+The sandbox is also reachable from your own code over gRPC (`sandbox/v1`):
+
+```bash
+eval "$(mocactl sbx env)"
+```
+
+prints, for the bound sandbox, `export` lines for a client: `SBX_ADDR`, `SBX_TLS`,
+`SBX_SANDBOX_ID`, `SBX_WORKSPACE_KEY`, `SBX_TOKEN_CMD` and, when the endpoint's certificate is
+self-issued, `SBX_CA_FILE`. `mocactl sbx token` prints a fresh token; `mocactl sbx token
+--renew-every 600` prints a new one every 600 seconds, one line each, until stopped, for a
+long-lived client that reads its next token from a pipe. With `--json`, each line is an object
+with the `token`, its `expiresAt` and the sandbox's `sandboxExpiresAt` (epoch seconds, as the
+control plane returns them; a control plane from before `sandboxExpiresAt` leaves it out). Each token printed counts as use of the
+sandbox, so a `--renew-every` pump keeps it alive whether or not its client runs commands. The rest of this page is what a client sends.
 
 How to run commands in a moca sandbox service sandbox from your own code (a script, an SDK, a local tool) by
 calling `SandboxExec` over gRPC. `mocactl sbx` is the supported command line; this guide is for
@@ -6,7 +25,7 @@ everything else.
 
 ## What it is
 
-[`proto/sandbox/v1/sandbox.proto`](../../proto/sandbox/v1/sandbox.proto) is one self-contained
+[`proto/sandbox/v1/sandbox.proto`](../../../proto/sandbox/v1/sandbox.proto) is one self-contained
 file with no imports. A client uses one service, served by the sandbox service's relay:
 
 ```proto
@@ -186,10 +205,10 @@ a non-OK status. There is no exit status to report. Two have a sandbox-service m
 A sandbox in a lease mode keeps its VM between Execs, so the page cache stays warm and `/tmp` and
 `/var` survive until the lease ends. Every process is still killed at the end of each Exec, and each
 Exec gets a fresh shell. The design is
-[the lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md); the modes are `per-exec`
+[the lease-mode spec](../../specs/2026-11-08-sbx-lease-mode-design.md); the modes are `per-exec`
 (the default), `lease` and `lease+processes`, and the deployment decides which of them a user may
 pick. A sandbox's mode is set on the control plane: `mode` and `idleTimeoutS` on
-`POST /v1/sandboxes`, and `PUT /v1/sandboxes/{id}/mode` to change them ([openapi.yaml](openapi.yaml)).
+`POST /v1/sandboxes`, and `PUT /v1/sandboxes/{id}/mode` to change them ([openapi.yaml](../../api/openapi.yaml)).
 
 **The mode reaches the worker in your token.** A sandbox token carries the claims `mode`,
 `mode_epoch` and `idle_timeout_s`, and the relay writes them into every `Exec` it routes, over
@@ -222,7 +241,7 @@ before the `end` or the `error`. `state` is `start`, `end` (with an end `reason`
   lease's hard end, when it ends even mid-Exec: `at_unix_ms` plus the grace limit (30 minutes by
   default). It is 0 on every other state, and from a worker that predates the field.
 - **`mocactl sbx` and its MCP server show each event as one line** (the copy is in
-  [the lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md) §5), for example
+  [the lease-mode spec](../../specs/2026-11-08-sbx-lease-mode-design.md) §5), for example
   `[sandbox] guest restarted (idle, 14:02): ...` for an idle end.
 - **A per-exec Exec never carries one.** A downgrade's `mode_change` end therefore comes back in the
   `set_mode` result's `status.pending`.
@@ -274,7 +293,7 @@ enough (`mocactl sbx mcp` sends one every 30 s while its token's mode is a lease
 
 At level 2 a process can outlive the `Exec` that started it, if it was started as a **tracked
 process**. Everything else an Exec starts (`&`, `nohup`, `setsid`) still dies when the Exec ends.
-The design is [the lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md) §7;
+The design is [the lease-mode spec](../../specs/2026-11-08-sbx-lease-mode-design.md) §7;
 `mocactl sbx proc` and the MCP server's process tools are built on the calls below.
 
 **A process call is an `Exec` with a kind.** `Exec.kind` (field 11) is an `ExecKind`, and
@@ -360,20 +379,20 @@ the operator upgrades the worker. Level 2 is off by default: only a deployment t
 ## The stability promise
 
 Changes to `sandbox/v1` are additive only, under
-[ADR-0024](../adrs/0024-sandbox-transport-remote-exec.md)'s rules: no field is removed or renumbered,
+[ADR-0024](../../adrs/0024-sandbox-transport-remote-exec.md)'s rules: no field is removed or renumbered,
 and no meaning changes. Nothing else is promised: the relay's status details, the limits above and
 the token's lifetime may change.
 
 ## The examples
 
-[`examples/sandbox_v1_client.py`](examples/sandbox_v1_client.py) is a small client with every rule
+[`examples/sandbox_v1_client.py`](../../api/examples/sandbox_v1_client.py) is a small client with every rule
 above: TLS with keepalive, a `TokenSource` that re-runs `SBX_TOKEN_CMD`, token freshness and the
 timeout cap, the retry-once-if-not-started rule, and the outcome and failure mapping
 (`SandboxBusy`, `TokenExpiredDuringExec`, `SandboxError`). `Sandbox.from_env()` reads what
 `mocactl sbx env` prints. `SBX_TOKEN`, a one-off static token that is never refreshed, is used
 only when `SBX_TOKEN_CMD` is unset.
 
-[`examples/sbx.py`](examples/sbx.py) is an example of a thin command line on top of it, for one
+[`examples/sbx.py`](../../api/examples/sbx.py) is an example of a thin command line on top of it, for one
 sandbox. It is an example only: `mocactl sbx run` and `put` (increment 1c) are the supported CLI.
 
 | Command              | Does                                                                                                                                                                             |
