@@ -17,7 +17,7 @@ import {
   WORKSPACE,
   type LeaseEvent,
 } from '@moca/sandbox-client';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { saveAuth } from '../src/config.js';
 import { SBX_USAGE, sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import { checkAgentConfig } from '../src/sbx/agent-config.js';
@@ -35,6 +35,7 @@ import {
   leaseEnd,
   repo,
   sandbox,
+  tmp,
   withLeaseEvents,
 } from './helpers/sbx.js';
 
@@ -91,6 +92,32 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
       true,
     );
     expect(readFileSync(join(h.ws.get(NEW).ws, 'later.txt'), 'utf8')).toBe('later\n');
+  });
+
+  it('runs no hook and signs nothing under a global git config that would', async () => {
+    const h = harness();
+    const hooks = tmp('sbx-hooks-');
+    for (const name of ['pre-commit', 'commit-msg', 'post-commit', 'reference-transaction']) {
+      writeFileSync(join(hooks, name), '#!/bin/sh\necho "hook ran" >&2\nexit 1\n');
+      chmodSync(join(hooks, name), 0o755);
+    }
+    const config = join(tmp('sbx-gitconfig-'), 'config');
+    writeFileSync(
+      config,
+      `[core]\n\thooksPath = ${hooks}\n[commit]\n\tgpgSign = true\n[gpg]\n\tprogram = false\n`,
+    );
+    vi.stubEnv('GIT_CONFIG_GLOBAL', config);
+    try {
+      expect(await h.run(['up', '--template', 'node22'])).toBe(0);
+      writeFileSync(join(h.ws.get(NEW).ws, 'src/app.py'), 'print(2)\n');
+      expect(await h.run(['pull'])).toBe(0);
+      expect(h.io.outB.map((b) => b.toString()).join('') + h.io.outs.join('')).toContain(
+        '+print(2)',
+      );
+      expect(h.err()).not.toContain('hook ran');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('up --lifetime sends idleLifetimeS in the create body and prints the lifetime (#770)', async () => {
