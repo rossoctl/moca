@@ -575,6 +575,180 @@ adds each command's first 200 bytes as `cmd`.
   worker's start-up warning (slots × per-VM size against the budget) is expected at any budget below
   its slot count.
 
+## Reproducing a member's issue
+
+When a member reports a problem, assemble one bundle for the sandbox: what the member's client
+sent and got back, what the sandbox reached, and what the control plane, the relay and the KVM host
+logged for that sandbox in that window. Every query below was checked against the line formats in
+the code it names; none has been run against a live deployment yet. The `jq` filters run on your
+machine (status.sh needs `jq` too); the host's commands run over ssh as in §8.
+
+**Which sandbox, whose, and when.** Get the sandbox id from the member (`mocactl sbx ls`, or
+`.sbx/sandbox.json` in their repository), then, as an admin:
+
+```bash
+SBX=sbx-…                   # the sandbox id
+mocactl sbx ls --all --json | jq --arg id "$SBX" '.[] | select(.id == $id)
+  | {id, owner, template, state, created: (.createdAt | todate),
+     ended: (if .terminatedAt then (.terminatedAt | todate) else null end)}'
+SUB=github:…                # its owner
+FROM='2026-11-17 10:00:00'  # the window, UTC
+TO='2026-11-17 11:00:00'
+NS=<namespace>
+```
+
+`createdAt` and `terminatedAt` are epoch seconds. The KVM host logs the sandbox under its workspace
+key, which is the sandbox id itself (`wsk` is set to the id at create, in
+`packages/control-plane/src/sandbox-handlers.ts`), and its worker under the template's worker id,
+`wrk` in the relay's lines below.
+
+**1. The member's own record.** Ask the member to rerun what failed with `--record issue.ndjson`
+on the command, and to send the file:
+
+```bash
+mocactl sbx up --record issue.ndjson        # or the command that failed: run, push, pull, …
+mocactl run "prompt" --record issue.ndjson  # a Moca Pi session's calls
+```
+
+The flag goes after `sbx <command>` or `run` (`mocactl --record F sbx …` is refused, exit 2), and
+every `mocactl sbx` command that calls the API takes it except `token`, `login`, `logout` and
+`credentials`, which refuse it because it would record a secret (`NO_RECORD` in
+`packages/mocactl/src/sbx/cli.ts`). It appends one JSON line per HTTP attempt, the login's refresh
+included: the command, an invocation id, `seq` and `try` (a retry of the same call), the method and
+path (never the base URL or host), the status or the transport error's name, both bodies, their
+times (`requestAt`, `answerAt`, UTC) and any `retryAfter`; a streamed answer gets its line when the
+headers arrive and a `stream_end` line with its bytes, sha256 and frame count, never its contents
+(`packages/mocactl/src/sbx/call-record.ts`). Token-named fields, gate records and credential values,
+and any string that looks like a JWT or a refresh token, are kept only as their sha256; exec
+endpoints and CAs, a proxy's `dial_addr`, a build log and any absolute URL only as their length;
+under `run`, the prompt, the reply, the patch and other free text only as their length too. The
+file is created 0600 and opened for appending; an existing file readable or writable by anyone but
+its owner is refused (exit 2). **The record has no Exec in it:** commands go to the relay over
+gRPC, which is not recorded, so for `sbx run` or an agent's commands it shows the token mints and
+the control-plane calls around them, and the relay's lines (step 3) show the Execs.
+
+**2. The egress log.** For a template with egress, as an admin (the route answers the owner or an
+admin, `packages/control-plane/src/routes.ts`):
+
+```bash
+mocactl sbx egress "$SBX" --ndjson > egress.ndjson
+mocactl sbx egress "$SBX" --verify
+```
+
+They are two runs: `egress` takes `--ndjson` or `--verify`, not both. `--ndjson` prints the log as
+the control plane stores it, one event per line (host, method, path, status, bytes up and down,
+decision, credential name). `--verify` reads the log again and checks its sha256 and line count
+against the control plane's summary: `verified: N events, sha256:…` (with `INCOMPLETE: N dropped`
+when the log lost events, and `sealed` or `open (not sealed yet)`), or `NOT verified: …`, exit 1
+(`cmdEgress` and `verifyEgress` in `packages/mocactl/src/sbx/commands.ts`). Until the log is sealed,
+600 s after the sandbox ends, it can still gain events: take the copy after that, as
+[Egress records](#egress-records) explains.
+
+**3. The control plane's, the relay's and the host's lines.** The control plane writes one
+`"event":"audit"` JSON line per decision to stdout (`packages/control-plane/src/handler-util.ts`,
+`auditBestEffort`), with `subject`, `decision` and, for a sandbox, `sandboxId` (`sandbox_created`,
+`sandbox_deleted`, `sandbox_mode_changed`, `sandbox_create_rolled_back`, among others). Those lines
+carry no time of their own, so read them with `--timestamps` (checked against the code):
+
+```bash
+kubectl logs deployment/moca-control-plane -c control-plane -n "$NS" \
+  --since-time="${FROM/ /T}Z" --timestamps |
+  grep -F '"event":"audit"' |
+  jq -cR --arg sbx "$SBX" --arg sub "$SUB" --arg to "${TO/ /T}Z" '
+    capture("^(?<t>[^ ]+) (?<l>.*)$") | .t as $t | select($t <= $to)
+    | .l | fromjson? | objects | select(.sandboxId == $sbx or .subject == $sub) | {t: $t} + .'
+```
+
+The relay writes the `"audit":"sandbox_exec"` line of §8 per Exec, and `sandbox_abort`,
+`sandbox_release` and `sandbox_lease_control` lines, each with its own `ts`, and `sub` and `sbx`
+when the token verified (`packages/sandbox-relay/src/sandbox-caller.ts`, `makeAudit`). Checked
+against the code:
+
+```bash
+kubectl logs deployment/sandbox-relay -c sandbox-relay -n "$NS" --since-time="${FROM/ /T}Z" |
+  grep -F '"audit":"sandbox_' |
+  jq -cR --arg sbx "$SBX" --arg sub "$SUB" --arg to "${TO/ /T}Z" '
+    fromjson? | objects | select(.ts <= $to and (.sbx == $sbx or .sub == $sub))'
+```
+
+A refusal of a token that did not verify names no `sub` or `sbx`: look for it by the worker and
+the time, `select(.wrk == "<wrk>" and .outcome == "refused")`. Both Deployments run one replica, so
+`deployment/…` reads the one pod. Add `--previous` for the container before its last restart;
+anything older than that is gone (see below). On OpenShift, `oc logs` takes the same flags.
+
+The control plane also writes each decision to the Redis stream `sh:cp:audit`, with a `ts` in epoch
+ms (`OwnershipIndex.audit` in `packages/control-plane/src/ownership.ts`). Checked against the
+code (the stream and its field names; the plain output, one value per line, is redis-cli's own):
+
+```bash
+ms() { jq -nr --arg t "$1" '$t | strptime("%Y-%m-%d %H:%M:%S") | mktime * 1000'; }
+kubectl -n "$NS" exec redis-0 -c redis -- \
+  redis-cli XRANGE sh:cp:audit "$(ms "$FROM")" "$(ms "$TO")" |
+  awk -v k=" $SBX " '/^[0-9]+-[0-9]+$/ { if (index(r " ", k)) print r; r = $0; next }
+    { r = r " " $0 } END { if (index(r " ", k)) print r }'
+```
+
+Each line printed is one entry: its id, then its fields and values. The filter matches a whole
+value (spaces on both sides), so `github:1` does not also match `github:12`; use `-v k=" $SUB "`
+for the member's other decisions (logins and refreshes among them).
+
+On the KVM host, the worker's lines are plain text, and those about one sandbox name its workspace
+key, as `workspace_key="sbx-…"` or `for "sbx-…"` (`remote-worker/internal/vmpool`). Lines about
+the pool itself (its cgroups, an orphan sweep) name no sandbox, so read the worker's whole window
+too. Checked against the code:
+
+```bash
+ssh <host> "sudo journalctl -u sbx-worker@<wrk>.service --since '$FROM UTC' --until '$TO UTC' \
+  -o short-iso-precise --no-pager" | grep -F "$SBX"
+ssh <host> "sudo journalctl -u sbx-worker@<wrk>.service --since '$FROM UTC' --until '$TO UTC' \
+  -o short-iso-precise --no-pager" > worker.log
+```
+
+The janitor's JSON lines (§7) name the workspace as `wsk`, and `moca-egress` writes one JSON event
+per connection with the workspace key as `sid` (`remote-worker/internal/egress/audit.go`; the host
+agent selects the events it ships by `via` and `sid` too, `egress_select` in
+`deploy/sbx/host-agent.sh`). This is the
+host's own copy of what step 2 serves, with `vm_id` and `dial_addr` besides. Checked against the
+code:
+
+```bash
+ssh <host> "sudo journalctl -u sbx-janitor.service --since '$FROM UTC' --until '$TO UTC' -o cat \
+  --no-pager" | jq -cR --arg k "$SBX" 'fromjson? | objects | select(.wsk == $k)'
+ssh <host> "sudo journalctl -u moca-egress.service --since '$FROM UTC' --until '$TO UTC' -o json \
+  --all --no-pager" | jq -c --arg k "$SBX" '.MESSAGE | strings | (try fromjson catch null)
+  | objects | select(.via == "moca-egress" and .sid == $k)'
+```
+
+A janitor run's `summary` line has its own `ts`; the lines before it in the same run do not.
+
+**4. How loaded the host was.** Nothing samples the host's CPU, memory, pressure or disk I/O
+today; the host resource sampler of #857 (R2) will add those samples to the journal, and this step
+will then read them for the window. Until then, `sudo <checkout>/deploy/sbx/status.sh --host` gives
+a one-shot view of now, not of the window: each `sbx-worker@*` unit's state, the
+`sbx-janitor.timer`'s, the workspace filesystem's `df`, the janitor's last run and result, and the
+janitor wait and worker idle checks (§8).
+
+**What is not stored.** No command text and no output is stored anywhere server-side. The relay's
+audit line has neither (`docs/sbx/security-review.md` §1.5 lists it as tested), unless the relay
+runs with `SH_SANDBOX_AUDIT_COMMANDS=1`, the debug flag of §8, which adds each command's first 200
+bytes as `cmd`. The egress log is the network's shape only, with paths but no bodies. The member's
+`--record` file is the only trace of what was sent, and only of the HTTP calls. What is kept, and
+for how long, today:
+
+- **Control-plane and relay stdout:** the pod's current log, and with `--previous` the one before
+  its last restart; nothing else keeps them.
+- **`sh:cp:audit`:** in Redis, trimmed to about 1,000,000 entries on each write (`AUDIT_MAXLEN`);
+  refusals of a refresh token nobody issued go to `sh:cp:audit:anon` instead, about 100,000.
+  Redis has `maxmemory 200mb` (§2) for everything it holds.
+- **Egress logs:** at most 10,000 events or 4 MiB per sandbox, 64 MiB for all
+  (`packages/control-plane/src/egress-log.ts`), kept as long as the sandbox's record
+  (`SBX_RETENTION_DAYS`, default 14).
+- **Host journald:** the host's own journald settings; `install-host.sh` sets none.
+
+**Once a log pipeline is chosen** (#857, R1), the control-plane, relay and host lines are queried
+there instead, by the same fields (`sandboxId`, `subject`; `sbx`, `sub`; the workspace key), and
+this section moves its queries to that store.
+
 ## Guest egress
 
 `install-host.sh` installs and starts one `moca-egress` per host (`moca-egress.service`) before the

@@ -6,7 +6,8 @@
 This guide takes you from nothing installed to an agent's work applied in your own repository. You
 need no moca background. The design is
 [the SBX0 spec](../specs/2026-10-15-sbx0-internal-sandbox-service-design.md). Operators should read
-[the runbook](../../deploy/sbx/RUNBOOK.md) instead.
+[the runbook](../../deploy/sbx/RUNBOOK.md) instead; to look into a member's problem, its
+[Reproducing a member's issue](../../deploy/sbx/RUNBOOK.md#reproducing-a-members-issue).
 
 ## 1. What you get
 
@@ -812,7 +813,10 @@ calls the API, but `token`, `login`, `logout` and `credentials`) appends one JSO
 attempt: the command, the path, the status, both bodies and their times. The file is created `0600`.
 Tokens and gate records are kept only as their sha256, and hosts and build-log text only as their
 length, so a record can be shared. `mocactl run "prompt" --record F` writes the same record for a
-Moca Pi session's calls ([CLI reference](../reference/cli-mocactl.md)).
+Moca Pi session's calls ([CLI reference](../reference/cli-mocactl.md)). When you report a
+problem, your operator may ask you to rerun the command with `--record` and send the file
+([the runbook](../../deploy/sbx/RUNBOOK.md#reproducing-a-members-issue) says what they collect
+besides it).
 
 **For admins.** `mocactl sbx admin subjects enroll|unenroll|grant|revoke` reads the current value
 first and prints `old -> new` and the record written; if the value changed between that read and
