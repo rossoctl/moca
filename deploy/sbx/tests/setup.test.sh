@@ -1050,6 +1050,55 @@ for pvc in moca-sbx-templates moca-sbx-credentials; do
 done
 pass 'SBX_STORAGE_CLASS lands on the redis templates and every PVC the run renders'
 
+# 13c'. The knob against a deployment that already exists: a live redis StatefulSet's
+# volumeClaimTemplates are immutable (the API forbids the change in place), so a mismatching run
+# is refused BEFORE anything is applied, and a matching one passes.
+redis_sts_class() {
+  jq -n --arg c "$1" '{apiVersion: "apps/v1", kind: "StatefulSet", metadata: {name: "redis"},
+    spec: {volumeClaimTemplates: [{spec: (if $c == "" then {} else {storageClassName: $c} end)}],
+      template: {spec: {containers: [{name: "redis", image: "docker.io/valkey/valkey:9-alpine"}]}}}}' \
+    >"$MOCK_STATE/statefulset-redis.json"
+}
+reset_state
+redis_sts_class 'ocs-storagecluster-ceph-rbd'
+! run_setup export SBX_STORAGE_CLASS=another-class ||
+  fail 'a differing class on an existing StatefulSet was not refused'
+grep -q 'volumeClaimTemplates' "$TMP/out" && grep -q 'cannot be applied' "$TMP/out" ||
+  fail "the immutable-templates refusal does not say why: $(tail -2 "$TMP/out")"
+grep -q "another-class" "$TMP/out" || fail 'the refusal does not name the knob value'
+reset_state
+redis_sts_class ''
+! run_setup export SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd ||
+  fail 'an unset live class with the knob set was not refused'
+reset_state
+redis_sts_class 'ocs-storagecluster-ceph-rbd'
+run_setup export SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd ||
+  { cat "$TMP/out" >&2; fail 'a matching class on an existing StatefulSet was refused'; }
+reset_state
+redis_sts_class 'ocs-storagecluster-ceph-rbd'
+run_setup true || { cat "$TMP/out" >&2; fail 'the knob unset on an existing StatefulSet was refused'; }
+pass 'SBX_STORAGE_CLASS against an existing redis StatefulSet: mismatch refused before anything applies, match and unset pass'
+
+# 13c''. Combined renders its own third claim (moca-credentials, the harness's file credential
+# store, pvc-credentials.yaml): the knob must reach it too, or a no-default-class cluster leaves
+# it Pending and the control plane never rolls out (review #887).
+reset_state
+RWD="ghcr.io/example/moca-remote-worker@sha256:$(printf 'a%.0s' {1..64})"
+MID="ghcr.io/example/moca@sha256:$(printf 'b%.0s' {1..64})"
+GEN0="$GEN"; GEN="$REPO/deploy/sbx/.generated-moca-sbx-combined-test"
+C=(eval "export SBX_PROFILE=combined SBX_MOCA_HOST=moca.apps.example.invalid SBX_NAMESPACE=moca-sbx-combined-test SBX_SANDBOX_IMAGE=$RWD SBX_IMAGE=$MID SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd")
+run_setup "${C[@]}" || { cat "$TMP/out" >&2; fail 'the combined run with SBX_STORAGE_CLASS failed'; }
+render
+GEN="$GEN0"
+KUBECONFIG=/dev/null "$REAL_KUBECTL" label --local -f "$TMP/render.yaml" sbx-render- -o json 2>/dev/null | jq -s . >"$TMP/render.json"
+for pvc in moca-sbx-templates moca-credentials; do
+  [[ "$(jq -r --arg n "$pvc" '.[] | select(.kind == "PersistentVolumeClaim" and .metadata.name == $n) | .spec.storageClassName' "$TMP/render.json" 2>/dev/null)" == ocs-storagecluster-ceph-rbd ]] ||
+    fail "SBX_STORAGE_CLASS did not reach the combined $pvc PVC"
+done
+[[ "$(jq -r '.[] | select(.kind == "StatefulSet" and .metadata.name == "redis") | .spec.volumeClaimTemplates[0].spec.storageClassName' "$TMP/render.json" 2>/dev/null)" == ocs-storagecluster-ceph-rbd ]] ||
+  fail 'SBX_STORAGE_CLASS did not reach the redis volumeClaimTemplates (combined)'
+pass 'SBX_STORAGE_CLASS reaches combined'"'"'s own moca-credentials PVC beside the store and redis'
+
 # 14a. Off is byte-identical: the generated kustomization.yaml, both ConfigMaps, the applied object
 # set and both hashes are today's, written out here as the golden copy (each recomputed from today's
 # definition: the control plane's from every settings line, the relay's from its two, each with the

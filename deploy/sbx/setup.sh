@@ -72,13 +72,17 @@
 #                           SBX_TEMPLATES_FILE, owned by exactly one host). Unset: one host, kvm,
 #                           owning every template worker
 #   SBX_EGRESS_CREDENTIAL_TTL_SECONDS   optional; 5-300 (the control plane's default is 60)
-#   SBX_STORAGE_CLASS       optional; the storageClassName written into every claim SBX0 creates (the
-#                           redis StatefulSet's volumeClaimTemplates, the template store's PVC, the
-#                           egress credential store's PVC) -- for a cluster with NO default
-#                           StorageClass, where each claim would otherwise pend until patched by
-#                           hand. Fresh claims only: a claim that already exists keeps the class it
-#                           was created with, so an upgrade from before this knob patches those once
-#                           by hand (kubectl patch pvc).
+#   SBX_STORAGE_CLASS       optional; the storageClassName written into every claim this deployment
+#                           renders (the redis StatefulSet's volumeClaimTemplates, the template
+#                           store's PVC, the egress credential store's PVC, and combined's
+#                           moca-credentials) -- for a cluster with NO default StorageClass, where
+#                           each claim would otherwise pend until patched by hand. Fresh claims
+#                           only: a claim that already exists keeps the class it was created with
+#                           (an operator patches a Pending one once by hand), and a redis
+#                           StatefulSet that already exists cannot take the knob at all -- its
+#                           volumeClaimTemplates are immutable, so a mismatching run is refused
+#                           before anything is applied (check_storage_class); leave the variable
+#                           unset for that deployment, or recreate the StatefulSet and its claim.
 #   SBX_REDIS_IMAGE         optional; repository[:tag]@sha256:<digest>: the image Redis runs instead of the
 #                           base's valkey/valkey:9-alpine. For a namespace whose data a Redis 7.4 wrote
 #                           (RDB format 12, which Valkey 9 cannot read: its AOF load aborts), e.g.
@@ -573,6 +577,7 @@ preflight() {
   kc get configmaps -n "$NS" -o name >/dev/null 2>&1 ||
     die "namespace $NS must already exist and be readable (this script creates nothing cluster-scoped)"
   check_redis_image
+  check_storage_class
   read_live_max
   check_host_idle
   check_host_ceiling
@@ -654,6 +659,25 @@ check_redis_image() {
   [[ "${repo##*/}" != *:* ]] || repo="${repo%:*}"
   [[ "$repo" != *valkey/valkey* ]] || return 0
   die "StatefulSet redis in $NS runs $image, not Valkey, and Valkey 9 (the default without SBX_REDIS_IMAGE) cannot read the RDB format 12 Redis 7.4 writes: redis-0 would crash-loop. Until the data is migrated, set SBX_REDIS_IMAGE to that image pinned by digest (repository[:tag]@sha256:<digest>; the running digest: kubectl -n $NS get pod redis-0 -o jsonpath='{.status.containerStatuses[0].imageID}'). See deploy/sbx/RUNBOOK.md §2"
+}
+
+# SBX_STORAGE_CLASS on an existing deployment: Kubernetes forbids changing volumeClaimTemplates on
+# a StatefulSet that already exists, so the redis patch would make every later apply Forbidden (the
+# run dies under set -e before the rollouts and bundles). A pre-existing template therefore pins
+# the knob: set and different, or unset while the knob is set, is refused before anything is
+# applied. A fresh namespace (no StatefulSet) and an already-matching class pass. The component
+# PVCs (the template and egress stores) carry no such constraint -- a Patch on spec.storageClassName
+# of a Pending claim is allowed -- but a BOUND one keeps its class, so those are the operator's
+# one-time kubectl patch, as the header says.
+check_storage_class() {
+  [[ -n "${SBX_STORAGE_CLASS:-}" ]] || return 0
+  local json live
+  # Captured first (errexit), as in check_redis_image: a failing get must not read as "no StatefulSet".
+  json="$(kc get statefulset redis -n "$NS" --ignore-not-found -o json)"
+  [[ -n "$json" ]] || return 0
+  live="$(jq -r '.spec.volumeClaimTemplates[0].spec.storageClassName // empty' <<<"$json")"
+  [[ "$live" == "$SBX_STORAGE_CLASS" ]] ||
+    die "StatefulSet redis in $NS already exists with volumeClaimTemplates its API refuses to change in place (live class: '${live:-unset}'), so SBX_STORAGE_CLASS=$SBX_STORAGE_CLASS cannot be applied: leave it unset for this deployment (its claims keep the class they were created with), or recreate the StatefulSet (delete the data-redis-0 claim too -- redis data does not survive) and re-run"
 }
 
 # SBX_PROFILE=combined in an SBX0 namespace would add the harness's keys to its moca-mu1 and switch
@@ -1134,20 +1158,26 @@ write_overlay() {
     printf '      - { op: add, path: /spec/template/metadata/annotations, value: { sbx.moca.dev/settings-hash: "%s" } }\n' "$SETTINGS_HASH"
     printf '  - target: { kind: Deployment, name: sandbox-relay }\n    patch: |-\n'
     printf '      - { op: add, path: /spec/template/metadata/annotations/sbx.moca.dev~1settings-hash, value: "%s" }\n' "$RELAY_HASH"
-    # SBX_STORAGE_CLASS: one storageClassName on every claim SBX0 creates, for a cluster with no
-    # default StorageClass (without one, each PVC pends until an operator patches it by hand).
+    # SBX_STORAGE_CLASS: one storageClassName on every claim this run renders, for a cluster with
+    # no default StorageClass (without one, each PVC pends until an operator patches it by hand).
     # Each patch targets a resource this run actually renders: a patch naming an absent PVC fails
-    # the kustomize build, so the store's and the egress store's are emitted only when those
-    # components are on. Fresh claims only -- a claim that already exists (an upgrade on a
-    # deployment from before this knob) keeps the class it was created with.
+    # the kustomize build, so each component's is emitted only when that component is on. The
+    # value is quoted like the settings hashes above: a name the regex accepts but YAML would read
+    # as a non-string (123, 1e3) must fail the render, not silently change type. Fresh claims
+    # only -- a claim that already exists keeps the class it was created with, and the redis
+    # StatefulSet's templates cannot change at all once it exists (check_storage_class refuses
+    # that before anything is applied).
     if [[ -n "${SBX_STORAGE_CLASS:-}" ]]; then
-      printf '  - target: { kind: StatefulSet, name: redis }\n    patch: |-\n      - { op: add, path: /spec/volumeClaimTemplates/0/spec/storageClassName, value: %s }\n' "$SBX_STORAGE_CLASS"
+      printf '  - target: { kind: StatefulSet, name: redis }\n    patch: |-\n      - { op: add, path: /spec/volumeClaimTemplates/0/spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
       if [[ -n "$STORE_ON" || -n "$COMBINED" ]]; then
-        printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-templates }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: %s }\n' "$SBX_STORAGE_CLASS"
+        printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-templates }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
       fi
       if [[ -n "$EGRESS_ON" ]]; then
-        printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-credentials }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: %s }\n' "$SBX_STORAGE_CLASS"
+        printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-credentials }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
       fi
+      # ocp-combined's own claim (pvc-credentials.yaml): the harness's file credential store.
+      [[ -z "$COMBINED" ]] ||
+        printf '  - target: { kind: PersistentVolumeClaim, name: moca-credentials }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
     fi
     printf 'images:\n'
     image_entry ghcr.io/rossoctl/moca "$SBX_IMAGE"
