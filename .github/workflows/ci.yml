@@ -321,6 +321,11 @@ jobs:
       - name: Check Markdown links
         run: python3 scripts/check-doc-links.py
 
+      # rossoctl.dev publishes docs/ (less the design records) and skips its whole Moca section
+      # when a published file matches docs/.publish-denylist: fail here first.
+      - name: Check the published docs against the denylist
+        run: scripts/check-docs-publish.sh
+
       # The sandbox/v1 direct-client examples' offline tests (docs/api/sandbox-v1-direct-client.md):
       # no network beyond pip, no relay. The runner's own python3, so no unpinned setup action;
       # grpcio pinned to the versions the tests were written against.

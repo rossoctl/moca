@@ -1,4 +1,4 @@
-.PHONY: lint fmt check-links test test-deploy test-deploy-bash32 typecheck
+.PHONY: lint fmt check-links check-docs-publish test test-deploy test-deploy-bash32 typecheck
 
 lint:
 	pre-commit run --all-files
@@ -9,6 +9,10 @@ fmt:
 # Relative links and in-repo anchors across tracked Markdown. Offline; run in CI by the `docs` job.
 check-links:
 	python3 scripts/check-doc-links.py
+
+# The docs rossoctl.dev publishes, against docs/.publish-denylist. Offline; run in CI by the `docs` job.
+check-docs-publish:
+	scripts/check-docs-publish.sh
 
 test:
 	pnpm -r test
