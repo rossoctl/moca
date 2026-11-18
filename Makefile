@@ -1,4 +1,4 @@
-.PHONY: lint fmt check-links check-docs-publish test test-deploy test-deploy-bash32 typecheck
+.PHONY: lint fmt check-links check-docs-publish check-docs-site test test-deploy test-deploy-bash32 typecheck
 
 lint:
 	pre-commit run --all-files
@@ -13,6 +13,11 @@ check-links:
 # The docs rossoctl.dev publishes, against docs/.publish-denylist. Offline; run in CI by the `docs` job.
 check-docs-publish:
 	scripts/check-docs-publish.sh
+
+# Build rossoctl.dev with this docs/ as its Moca section (network). SITE_DIR: a rossoctl/.github
+# checkout with `npm ci` done. Run in CI by the docs-site workflow.
+check-docs-site:
+	scripts/check-docs-site.sh $(SITE_DIR)
 
 test:
 	pnpm -r test
