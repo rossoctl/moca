@@ -1220,6 +1220,24 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     });
   }
 
+  // The tree is $HOME, as in a bare-dotfiles setup, with git's default global and XDG configs.
+  const inHome = (r: string) => {
+    vi.stubEnv('HOME', r);
+    vi.stubEnv('XDG_CONFIG_HOME', undefined);
+    vi.stubEnv('GIT_CONFIG_GLOBAL', undefined);
+  };
+  // A directory whose git answers `git var` as a git before 2.42 does for an unknown variable.
+  const gitWithoutVar = () => {
+    const d = mkdtempSync(join(tmpdir(), 'git-'));
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    writeFileSync(
+      join(d, 'git'),
+      `#!/bin/sh\n[ "$1" = var ] && { echo 'usage: git var (-l | <variable>)' >&2; exit 129; }\nexec '${real}' "$@"\n`,
+    );
+    chmodSync(join(d, 'git'), 0o755);
+    return d;
+  };
+
   // What else git reads from the tree that could run commands: its directory and config files.
   for (const [what, set, p] of [
     [
@@ -1241,6 +1259,24 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       },
       'cfg',
     ],
+    ['a global config not yet created, the tree being $HOME', inHome, '.gitconfig'],
+    ['an XDG config not yet created, the tree being $HOME', inHome, '.config/git/config'],
+    [
+      'a system config not yet created',
+      (r: string) => {
+        vi.stubEnv('GIT_CONFIG_NOSYSTEM', undefined);
+        vi.stubEnv('GIT_CONFIG_SYSTEM', join(r, 'etc/gitconfig'));
+      },
+      'etc/gitconfig',
+    ],
+    [
+      'a global config not yet created, with a git before 2.42',
+      (r: string) => {
+        inHome(r);
+        vi.stubEnv('PATH', `${gitWithoutVar()}:${process.env.PATH}`);
+      },
+      '.gitconfig',
+    ],
   ] as const) {
     it(`refuses a patch writing ${p}, ${what} in the tree`, async () => {
       const r = repo();
@@ -1249,6 +1285,32 @@ describe('pull --apply never writes local agent configuration or hooks (final re
         const err = await applyPatch(r, Buffer.from(creating(p))).catch((e: unknown) => e);
         expect(err, p).toBeInstanceOf(PushError);
         expect((err as Error).message).toContain(`${p} (`);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  }
+
+  // Their siblings are not refused.
+  for (const [what, set, p] of [
+    [
+      'a git directory .df',
+      (r: string) => git(r, 'init', '-q', '--separate-git-dir', join(r, '.df')),
+      '.dfx/a',
+    ],
+    [
+      'a global config cfg/global',
+      (r: string) => vi.stubEnv('GIT_CONFIG_GLOBAL', join(r, 'cfg/global')),
+      'cfg2/x',
+    ],
+    ['an XDG config .config/git/config, the tree being $HOME', inHome, '.config/other'],
+  ] as const) {
+    it(`applies a patch writing ${p} beside ${what}`, async () => {
+      const r = repo();
+      try {
+        set(r);
+        await applyPatch(r, Buffer.from(creating(p)));
+        expect(existsSync(join(r, p))).toBe(true);
       } finally {
         vi.unstubAllEnvs();
       }

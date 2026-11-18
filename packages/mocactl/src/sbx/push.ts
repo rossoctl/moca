@@ -14,7 +14,7 @@ import {
   writeFileSync,
   type Stats,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { gzipSync } from 'node:zlib';
@@ -255,7 +255,8 @@ type GitRead = { segs: string[]; what: string };
 /**
  * What git reads from the working tree that can make it run commands: the hooks directory
  * `core.hooksPath` names (relative to the root, githooks(5); none when unset or empty), a git
- * directory not named `.git`, and config files, read or included (a missing include too).
+ * directory not named `.git`, and config files: read, included or at git's global and system
+ * locations (missing ones too).
  */
 async function gitReads(root: string): Promise<GitRead[]> {
   const text = async (args: string[], unset = false) => {
@@ -295,6 +296,32 @@ async function gitReads(root: string): Promise<GitRead[]> {
   );
   for (const { file, kv } of entries(includes)) {
     add(resolve(dirname(file), kv.slice(kv.indexOf('\n') + 1)), 'a git config file');
+  }
+  // The global, XDG and system config files, which git reads once they exist. `git var` (git 2.42
+  // on) names them whether or not they exist; an older git gets git-config(1)'s FILES locations.
+  const env = process.env;
+  const home = env.HOME ?? homedir();
+  const older = [
+    env.GIT_CONFIG_GLOBAL,
+    join(env.XDG_CONFIG_HOME || join(home, '.config'), 'git', 'config'),
+    join(home, '.gitconfig'),
+    env.GIT_CONFIG_SYSTEM,
+  ].filter((f): f is string => Boolean(f));
+  for (const name of ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']) {
+    let files: string[];
+    try {
+      files = (await git(root, ['var', name])).toString('utf8').split('\n').filter(Boolean);
+    } catch (err) {
+      const code = (err as { code?: unknown }).code;
+      if (code === 1) continue; // none enabled (GIT_CONFIG_NOSYSTEM)
+      if (code !== 129) {
+        throw new PushError(
+          `cannot read git's configuration; nothing was changed (${gitText(err)})`,
+        );
+      }
+      files = older;
+    }
+    for (const f of files) add(resolve(root, f), 'a git config file');
   }
   return out;
 }
@@ -1109,7 +1136,8 @@ export async function applyPatch(
     if (config.length) {
       throw new PushError(
         `the patch writes ${list(config.map((p) => `${p} (${why(p)})`))}: local ` +
-          'agent configuration or hooks, which could run commands on this machine, outside the ' +
+          'agent configuration, hooks, or what git reads to run them, which could run commands on ' +
+          'this machine, outside the ' +
           'sandbox, so a pull never writes them; nothing was changed. Save the patch with ' +
           'mocactl sbx pull -o FILE, review it, and apply what you want by hand ' +
           '(git apply --exclude=PATH FILE leaves a file out)',

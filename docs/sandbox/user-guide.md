@@ -407,7 +407,8 @@ changes. When there is nothing new it says `nothing to pull`.
 `pull --apply` never writes your local agent configuration or hooks: a patch that touches
 `.mcp.json`, anything under `.claude/`, `opencode.json`, `opencode.jsonc`, `.opencode/`, anything
 under `.codex/`, `.agents/`, `.pi/` or `.bob/`, `.vscode/tasks.json`, `.vscode/settings.json`,
-`.husky/` or `.envrc` (at any depth, in any case), or `.git` and `.sbx/`, is refused whole, naming
+`.husky/` or `.envrc` (at any depth, in any case), `.git` and `.sbx/`, or the `core.hooksPath`
+directory, git directory or git config files when they are in the tree, is refused whole, naming
 each file and why, and nothing is applied. These files can make your laptop run a command the next
 time an agent, an editor, git or direnv starts, and they are often uncommitted, so `git diff` would
 not show the change. To take such a change, save the patch with `mocactl sbx pull -o FILE`, read
