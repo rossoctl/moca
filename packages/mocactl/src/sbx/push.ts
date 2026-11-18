@@ -1137,9 +1137,8 @@ export async function applyPatch(
       throw new PushError(
         `the patch writes ${list(config.map((p) => `${p} (${why(p)})`))}: local ` +
           'agent configuration, hooks, or what git reads to run them, which could run commands on ' +
-          'this machine, outside the ' +
-          'sandbox, so a pull never writes them; nothing was changed. Save the patch with ' +
-          'mocactl sbx pull -o FILE, review it, and apply what you want by hand ' +
+          'this machine, outside the sandbox, so a pull never writes them; nothing was changed. ' +
+          'Save the patch with mocactl sbx pull -o FILE, review it, and apply what you want by hand ' +
           '(git apply --exclude=PATH FILE leaves a file out)',
       );
     }
