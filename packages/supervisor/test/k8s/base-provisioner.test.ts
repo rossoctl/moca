@@ -258,6 +258,8 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s workload-sandboxes component (setup.sh o
     expect(c.securityContext).toEqual(s.securityContext);
     expect(c.resources).toEqual(s.resources);
     expect(envVar(c, 'RELAY_ADDR')).toEqual(envVar(s, 'RELAY_ADDR'));
+    expect(envVar(c, 'SH_WORKSPACE_IDLE')).toBeDefined();
+    expect(envVar(c, 'SH_WORKSPACE_IDLE')).toEqual(envVar(s, 'SH_WORKSPACE_IDLE')); // #338
     // No Secret of any kind: the provisioner adds the workload's own attach token.
     expect(JSON.stringify(t)).not.toMatch(/secret/i);
     expect(envNames(c)).not.toContain('SANDBOX_TOKEN');

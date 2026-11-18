@@ -46,6 +46,15 @@ spec:
             - { name: SANDBOX_TIER, value: container }
             - name: SANDBOX_TOKEN
               valueFrom: { secretKeyRef: { name: moca-relay-attach, key: SH_RELAY_TOKEN } }
+            # How long a session's workspace outlives its last command (#338). setup.sh writes it
+            # (default 8h) to moca-sandbox-settings, this namespace's copy of the moca-settings key.
+            # `optional`: without the ConfigMap the worker's own default, 30m, applies. Disk is not
+            # admission-controlled: /workspace is this pod's writable layer, on node disk, and the
+            # idle sweep is what frees it (README §2).
+            - name: SH_WORKSPACE_IDLE
+              valueFrom:
+                configMapKeyRef:
+                  { name: moca-sandbox-settings, key: SH_WORKSPACE_IDLE, optional: true }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }

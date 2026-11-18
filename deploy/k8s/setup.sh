@@ -45,7 +45,11 @@
 # supervisor from this one key, so the async turn record and the result it describes expire
 # together), SH_TRUSTED_PROXY_HOPS (every target: how many proxies in front of the control plane
 # append to X-Forwarded-For; empty means 1, the Route's router, whose Routes pin append; 0 keys
-# every client by the socket peer; #716), SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
+# every client by the socket peer; #716), SH_WORKSPACE_IDLE (every target: how long a container
+# sandbox keeps a session's workspace after its last command, as hours, minutes and seconds in that
+# order, e.g. 8h or 1h30m; empty means 8h, as deploy/microvm writes; also mirrored to ConfigMap
+# moca-sandbox-settings in the sandbox namespace, and a change restarts the sandbox pods; #338),
+# SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
 # setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT, SH_P4_SANDBOX_IDS,
@@ -68,6 +72,12 @@ KIND_CONTEXT="kind-$KIND_CLUSTER"
 MIN_KIND_VERSION=0.24.0
 NS=moca
 SBX_NS=moca-sandbox
+# The container sandboxes' SH_WORKSPACE_IDLE when none is given or stored (#338). The worker's own
+# default is 30m (remote-worker/internal/exec/workspace.go), which resets a HITL session that waits
+# longer than that for a person; deploy/microvm writes 8h for the same reason. A pod's /workspace
+# here is its writable layer (or an emptyDir with no sizeLimit on ocp-single), on node disk that no
+# quota bounds, so nothing gives a smaller value a reason: the idle sweep is the bound (README §2).
+DEFAULT_WORKSPACE_IDLE=8h
 LOCAL_HARNESS=dev.local/moca:local
 LOCAL_SANDBOX=dev.local/moca-remote-worker:local
 
@@ -267,6 +277,10 @@ parse_args() {
   for count in SH_OIDC_MAX_PENDING_PER_SOURCE SH_TRUSTED_PROXY_HOPS; do
     valid_count "${!count-}" || die "$count='${!count}' must be a whole number, 0 to 6 digits (empty: the default)"
   done
+  # The container sandboxes' idle reclaim (#338): the worker refuses to BOOT on anything but a
+  # positive Go duration, so a typo is refused here; a stored one is checked in write_settings.
+  valid_workspace_idle "${SH_WORKSPACE_IDLE-}" ||
+    die "SH_WORKSPACE_IDLE='${SH_WORKSPACE_IDLE}' must be a positive duration in hours, minutes and seconds, in that order, e.g. 8h or 1h30m (empty: the default, $DEFAULT_WORKSPACE_IDLE)"
   WORKLOAD_SANDBOXES_GIVEN="${SH_WORKLOAD_SANDBOXES+x}"
   case "${SH_WORKLOAD_SANDBOXES-}" in
   '' | 1) WORKLOAD_SANDBOXES="${SH_WORKLOAD_SANDBOXES-}" ;;
@@ -289,6 +303,17 @@ valid_ttl() { [[ -z "$1" || "$1" =~ ^[1-9][0-9]{0,7}$ ]]; }
 # valid_count VALUE: empty (the default) or a whole number, 0 included, at most 6 digits. Mirrors
 # main.ts countEnv, which refuses to boot on anything else.
 valid_count() { [[ -z "$1" || "$1" =~ ^(0|[1-9][0-9]{0,5})$ ]]; }
+
+# valid_workspace_idle VALUE: empty (the default) or a positive duration of whole hours, minutes and
+# seconds, each at most once and in that order: 8h, 90m, 1h30m. The container worker reads it with
+# Go's time.ParseDuration and refuses to boot on an error or a value <= 0 (cmd/worker/main.go
+# workspaceRunner), so `30` (no unit), `-1m` and `0h` are refused here. Stricter than Go, and safe:
+# no sign, fraction or sub-second unit, which a workspace lifetime has no use for, and at most 6
+# digits per unit, so the sum stays far below Go's ~2,562,047h limit.
+valid_workspace_idle() {
+  [[ -z "$1" ]] && return 0
+  [[ "$1" =~ ^([0-9]{1,6}h)?([0-9]{1,6}m)?([0-9]{1,6}s)?$ && "$1" =~ [1-9] ]]
+}
 
 # valid_catalog_hosts VALUE: empty (the control plane's default, no extra hosts) or comma-separated
 # bare hostnames. Mirrors main.ts catalogHostsEnv, which trims, lower-cases and skips empty entries
@@ -1041,6 +1066,9 @@ TEST_USER_SECRET_DIGEST=''
 TIERS=''
 DEFAULT_TIER=''
 STORED_DEFAULT_TIER=''
+# SH_WORKSPACE_IDLE as resolved by write_settings (sticky; empty is DEFAULT_WORKSPACE_IDLE), which
+# write_overlay stamps on the sandbox pod template (#338).
+WORKSPACE_IDLE=''
 GEN_DIR=''
 RELAY_CA="$K8S_DIR/.generated/ocp/moca-relay-ca.crt"
 # The supervisor's self-issued certificate, when it has one (refresh_supervisor_ca), and on
@@ -1134,11 +1162,11 @@ hand_patched_catalog_hosts() {
 # SH_SANDBOX_TIERS and SH_SANDBOX_DEFAULT_TIER are derived too, by derive_tiers from the stack
 # (its sticky input lives in moca-setup). They are written even when '' so every stack hashes the
 # same key set; an empty token lifetime is the control plane's default, an empty catalog allow-list
-# its own, an empty LEAF_RESULT_TTL_SECONDS the 604800 both tiers default to, and an empty
-# SH_ASYNC_DRAIN the async drain off.
+# its own, an empty LEAF_RESULT_TTL_SECONDS the 604800 both tiers default to, an empty
+# SH_ASYNC_DRAIN the async drain off, and an empty SH_WORKSPACE_IDLE DEFAULT_WORKSPACE_IDLE.
 write_settings() {
   local before after admins fb api_ttl session_ttl catalog_hosts catalog_src url
-  local idp oidc_issuer oidc_client_id oidc_redirect oidc_scope oidc_per_source hops drain result_ttl
+  local idp oidc_issuer oidc_client_id oidc_redirect oidc_scope oidc_per_source hops drain result_ttl idle
   before="$(configmap_json moca-settings)"
   if [[ -n "${SH_GITHUB_CLIENT_ID+x}" ]]; then
     CLIENT_ID="$SH_GITHUB_CLIENT_ID"
@@ -1182,6 +1210,13 @@ write_settings() {
   valid_count "$hops" ||
     die "moca-settings holds SH_TRUSTED_PROXY_HOPS='$hops': re-run with it set to a whole number, or set but empty (SH_TRUSTED_PROXY_HOPS=) for the default"
   hops="${hops:-1}"
+  # The container sandboxes' idle reclaim (#338), same sticky convention; empty means
+  # DEFAULT_WORKSPACE_IDLE, written out like the hop count so the stored value is what runs.
+  if [[ -n "${SH_WORKSPACE_IDLE+x}" ]]; then idle="$SH_WORKSPACE_IDLE"; else idle="$(cm_value "$before" SH_WORKSPACE_IDLE)"; fi
+  valid_workspace_idle "$idle" ||
+    die "moca-settings holds SH_WORKSPACE_IDLE='$idle': re-run with it set to a duration such as 8h or 1h30m, or set but empty (SH_WORKSPACE_IDLE=) for the default"
+  idle="${idle:-$DEFAULT_WORKSPACE_IDLE}"
+  WORKSPACE_IDLE="$idle"
   OIDC_ISSUER="$oidc_issuer"
   if [[ -z "$CLIENT_ID" && "$TARGET" == kind-ci ]]; then
     # The CI smoke mints its own API tokens; no login ever runs, but the control plane needs a value.
@@ -1241,7 +1276,7 @@ write_settings() {
     --arg idp "$idp" --arg oidc_issuer "$oidc_issuer" --arg oidc_client_id "$oidc_client_id" \
     --arg oidc_redirect "$oidc_redirect" --arg oidc_scope "$oidc_scope" \
     --arg oidc_per_source "$oidc_per_source" --arg hops "$hops" \
-    --arg drain "$drain" --arg result_ttl "$result_ttl" \
+    --arg drain "$drain" --arg result_ttl "$result_ttl" --arg idle "$idle" \
     '{SH_GITHUB_CLIENT_ID: $id, SH_ADMIN_SUBJECTS: $admins, SH_PUBLIC_HARNESS_URL: $url, SH_ALLOW_OPERATOR_FALLBACK: $fb,
       SH_SANDBOX_TIERS: $tiers, SH_SANDBOX_DEFAULT_TIER: $dtier,
       SH_API_TOKEN_TTL_SECONDS: $api_ttl, SH_SESSION_TOKEN_TTL_SECONDS: $session_ttl,
@@ -1249,12 +1284,21 @@ write_settings() {
       SH_IDENTITY_PROVIDER: $idp, SH_OIDC_ISSUER: $oidc_issuer, SH_OIDC_CLIENT_ID: $oidc_client_id,
       SH_OIDC_REDIRECT_URI: $oidc_redirect, SH_OIDC_SCOPE: $oidc_scope,
       SH_OIDC_MAX_PENDING_PER_SOURCE: $oidc_per_source, SH_TRUSTED_PROXY_HOPS: $hops,
-      SH_ASYNC_DRAIN: $drain, LEAF_RESULT_TTL_SECONDS: $result_ttl}')"
+      SH_ASYNC_DRAIN: $drain, LEAF_RESULT_TTL_SECONDS: $result_ttl, SH_WORKSPACE_IDLE: $idle}')"
   jq -n --arg ns "$NS" --argjson data "$after" \
     '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-settings", namespace: $ns}, data: $data}' |
     kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
-  # The digest joins the HASH INPUT only -- never the ConfigMap, which holds nothing secret.
-  SETTINGS_HASH="$(printf '%s\n%s' "$after" "$TEST_USER_SECRET_DIGEST" | sha256)"
+  # The sandboxes' copy (#338). A configMapKeyRef reads only its own namespace, and the sandboxes
+  # run in $SBX_NS, so they cannot read moca-settings; moca-settings stays the sticky store and the
+  # one place an operator reads, and this holds only what the sandboxes' worker reads. Its own name,
+  # because on ocp-single $SBX_NS is $NS.
+  jq -n --arg ns "$SBX_NS" --arg idle "$idle" \
+    '{apiVersion: "v1", kind: "ConfigMap", metadata: {name: "moca-sandbox-settings", namespace: $ns}, data: {SH_WORKSPACE_IDLE: $idle}}' |
+    kc apply --server-side --force-conflicts --field-manager=moca-setup -f - >/dev/null
+  # The digest joins the HASH INPUT only -- never the ConfigMap, which holds nothing secret. The
+  # sandboxes' key does not: neither the control plane nor the supervisor reads it, and write_overlay
+  # stamps it on the sandbox pod template instead, so a change rolls only the sandboxes.
+  SETTINGS_HASH="$(printf '%s\n%s' "$(printf '%s' "$after" | jq -cS 'del(.SH_WORKSPACE_IDLE)')" "$TEST_USER_SECRET_DIGEST" | sha256)"
 }
 
 # kind-ci's mock model, from the file itself: no kustomization reads outside its root.
@@ -1561,9 +1605,14 @@ write_overlay() {
     # only the containers and volumes, so this stays the one "add" of the map.
     printf '  - target: { kind: Deployment, name: moca-supervisor }\n    patch: |-\n      - { op: add, path: /spec/template/metadata/annotations, value: { moca.dev/settings-hash: "%s"%s } }\n' "$SETTINGS_HASH" "$harness_ann"
     printf '  - target: { kind: StatefulSet, name: moca-sandbox }\n    patch: |-\n      - { op: replace, path: /spec/replicas, value: %s }\n' "$SH_SANDBOX_COUNT"
+    # The sandboxes read SH_WORKSPACE_IDLE from moca-sandbox-settings at start (#338), so its value
+    # on the pod template rolls them when it changes, as the settings hash does the control plane.
+    # The sandbox pod template carries no annotations in the base or any overlay, so "add" creates
+    # the map; on kind the loaded image's ID joins it.
+    printf '      - { op: add, path: /spec/template/metadata/annotations, value: { moca.dev/workspace-idle: "%s"%s } }\n' \
+      "$WORKSPACE_IDLE" "${sandbox_ann:+, $sandbox_ann}"
     if is_kind; then
-      # Neither pod template carries annotations on kind (the relay's only one is ocp's p4-relay).
-      printf '      - { op: add, path: /spec/template/metadata/annotations, value: { %s } }\n' "$sandbox_ann"
+      # The relay's pod template carries no annotations on kind (its only one is ocp's p4-relay).
       printf '  - target: { kind: Deployment, name: sandbox-relay }\n    patch: |-\n      - { op: add, path: /spec/template/metadata/annotations, value: { moca.dev/image-id: "%s" } }\n' "$HARNESS_IMAGE_ID"
     fi
     # Workload sandboxes (the component's objects, which no base or target transformer reaches):

@@ -170,6 +170,21 @@ re-running with just that one:
   server-side apply would merge the literal with the ConfigMap ref above and the API server
   would reject the Deployment. The strip rolls the control plane once on its own, just before
   the apply rolls it again: a one-time cost of the upgrade.
+- `SH_WORKSPACE_IDLE` lives in `moca-settings` too: how long a container sandbox keeps a
+  session's workspace after the session's last command, as hours, minutes and seconds in that
+  order (`8h`, `90m`, `1h30m`). Empty, the default, is `8h`, the value `deploy/microvm` writes; the
+  worker's own default is 30 minutes, which resets a human-in-the-loop session that waits longer
+  than that. A value without a unit (`30`), a sign, a fraction or zero is refused, as the worker
+  would refuse it at boot. The sandboxes run in `moca-sandbox` and cannot read `moca-settings`, so
+  setup.sh also writes the value to ConfigMap `moca-sandbox-settings` there, and stamps it on the
+  sandbox pod template (`moca.dev/workspace-idle`): **a change rolls every `moca-sandbox` pod**,
+  which resets every container session's workspace, so change it at a quiet time. A workload's
+  sandboxes read the same key when their pods next start. **Disk is not admission-controlled:**
+  `/workspace` is the pod's writable layer (an `emptyDir` with no `sizeLimit` on `ocp-single`), on
+  the node's disk, and no quota or limit bounds it. What bounds it is the idle sweep, which deletes
+  a workspace at most a minute after it has been idle this long, so a longer value holds more idle
+  sessions' files at once. Under node disk pressure the kubelet evicts a sandbox pod, which loses
+  all its workspaces. The reset when the sweep fires is still silent (#338).
 - `SH_PUBLIC_HARNESS_URL` (kind and `--target ocp-single` without Routes) overrides the default
   `http://127.0.0.1:8080` the control plane advertises via `GET /v1/discovery`; set it when 8080
   conflicts with another local service. The port in the URL also becomes the printed `kubectl

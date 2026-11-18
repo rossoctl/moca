@@ -38,6 +38,26 @@ describe.skipIf(NO_KUBECTL)('deploy/k8s base: sandboxes and isolation', () => {
     expect(podSpec(sts()).automountServiceAccountToken).toBe(false);
   });
 
+  // #338: setup.sh writes the key to moca-sandbox-settings, the sandbox namespace's copy of the
+  // moca-settings key, because a configMapKeyRef reads only its own namespace. Optional, so a stack
+  // applied without setup.sh still boots, on the worker's own 30m default.
+  it('reads the idle reclaim from moca-sandbox-settings in its own namespace, optionally', () => {
+    expect(envVar(sbx(), 'SH_WORKSPACE_IDLE')).toEqual({
+      name: 'SH_WORKSPACE_IDLE',
+      valueFrom: {
+        configMapKeyRef: {
+          name: 'moca-sandbox-settings',
+          key: 'SH_WORKSPACE_IDLE',
+          optional: true,
+        },
+      },
+    });
+    const inNs = JSON.stringify(
+      render('base').filter((o) => o.metadata.namespace === 'moca-sandbox'),
+    );
+    expect(inNs).not.toContain('"moca-settings"'); // in namespace moca: unreadable from here
+  });
+
   it('runs as the image user 1001', () => {
     expect(podSpec(sts()).securityContext).toMatchObject({ runAsNonRoot: true, runAsUser: 1001 });
   });

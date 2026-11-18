@@ -24,6 +24,12 @@ template:
         image: moca-remote-worker
         env:
           - { name: RELAY_ADDR, value: 'sandbox-relay-attach.moca.svc:9443' }
+          # The shared pool's idle reclaim (base/sandbox.yaml, #338), read at each pod start, so a
+          # change reaches a workload's pods when they next restart.
+          - name: SH_WORKSPACE_IDLE
+            valueFrom:
+              configMapKeyRef:
+                { name: moca-sandbox-settings, key: SH_WORKSPACE_IDLE, optional: true }
         securityContext:
           allowPrivilegeEscalation: false
           capabilities: { drop: [ALL] }
