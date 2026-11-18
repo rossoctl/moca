@@ -1,0 +1,15 @@
+# Patterns that must never appear on the public moca docs (rossoctl.dev/moca/*).
+#
+# Moca's sandbox service and harness are open source, for self-hosting. The
+# public docs must not carry information about internal deployments of them:
+# their names (SBX0, SBX1, ...), cohorts, or endpoints.
+#
+# The site's sync step (rossoctl/.github scripts/sync-docs.sh) checks every file
+# it publishes from docs/ against these patterns, and skips the whole Moca
+# section on any match, listing the files. specs/, notes/, plans/, archive/,
+# demos/, adrs/ and REORG-PLAN.md are not published, so they are not checked.
+#
+# One extended regular expression (grep -E) per line; blank lines and lines
+# starting with # are ignored. SBX[0-9] is also built into the site's check.
+SBX[0-9]
+[Ii]nternal cohort

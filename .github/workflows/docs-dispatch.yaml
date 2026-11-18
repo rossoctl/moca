@@ -1,0 +1,97 @@
+# Docs dispatch: tell the website to rebuild when the docs change here.
+#
+# The rossoctl website (rossoctl/.github) does not commit moca's docs: its
+# build runs scripts/sync-docs.sh, which mirrors this repository's docs/ into
+# its Moca section, /moca/*, behind a publish guard (docs/.publish-denylist).
+#
+# Without this workflow the site picks up a docs merge only on its daily 06:17
+# UTC fallback resync. This workflow sends the repository_dispatch event that
+# rossoctl/.github's "Deploy site to Pages" workflow listens for (type:
+# docs-updated), so the site rebuilds within minutes of the merge.
+#
+# ONE-TIME SETUP: the secret SITE_DISPATCH_TOKEN.
+#   GITHUB_TOKEN is scoped to this repository, so it cannot dispatch to another
+#   one. Create a fine-grained personal access token, or a GitHub App token,
+#   with "Contents: read and write" on rossoctl/.github ONLY, and store it here
+#   as the repository secret SITE_DISPATCH_TOKEN:
+#
+#     gh secret set SITE_DISPATCH_TOKEN --repo rossoctl/moca
+#
+#   Until that secret exists this workflow reports a warning and exits 0: it
+#   never fails a docs merge, and the site's daily fallback still resyncs.
+name: Docs dispatch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# One dispatch at a time: a burst of merges produces one rebuild, not one per
+# commit.
+concurrency:
+  group: docs-dispatch
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Ask rossoctl/.github to rebuild
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Send repository_dispatch to rossoctl/.github
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+          SHA: ${{ github.sha }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "notified=false" >> "$GITHUB_OUTPUT"
+            msg="The website was not notified. It resyncs on its daily 06:17 UTC"
+            msg="${msg} schedule. See the setup note in this workflow file."
+            echo "::warning title=SITE_DISPATCH_TOKEN is not set::${msg}"
+            exit 0
+          fi
+
+          echo "Dispatching docs-updated for ${SHA} to rossoctl/.github"
+
+          # client_payload is informational: it records which commit here
+          # caused the rebuild.
+          gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            repos/rossoctl/.github/dispatches \
+            -f event_type=docs-updated \
+            -f "client_payload[source_repo]=${GITHUB_REPOSITORY}" \
+            -f "client_payload[sha]=${SHA}" \
+            -f "client_payload[actor]=${ACTOR}" \
+            -f "client_payload[run_url]=${RUN_URL}"
+
+          echo "notified=true" >> "$GITHUB_OUTPUT"
+          echo "Dispatched. The site build runs at:"
+          echo "https://github.com/rossoctl/.github/actions/workflows/deploy.yaml"
+
+      - name: Summary
+        if: always()
+        env:
+          NOTIFIED: ${{ steps.dispatch.outputs.notified }}
+        run: |
+          {
+            echo "### Docs dispatch"
+            echo ""
+            if [ "${NOTIFIED}" = "true" ]; then
+              echo "Sent \`docs-updated\` to rossoctl/.github. The site rebuilds"
+              echo "\`/moca/*\` from this commit, if it passes the publish guard."
+            else
+              echo "\`SITE_DISPATCH_TOKEN\` is not set, so the site was not notified."
+              echo "It resyncs on its daily 06:17 UTC schedule."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
