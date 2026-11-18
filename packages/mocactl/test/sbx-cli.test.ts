@@ -76,10 +76,13 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       // Bob's local tools left live, the agent's edits back by pull, how long a sandbox lasts,
       // and not the sandbox a bare `mocactl` session's tools run in.
       expect(flat).toContain(
-        'In a git repository, `mocactl sbx up` creates one, copies the working tree',
+        'In a git repository, `mocactl sbx up` creates or reuses one, copies the working tree',
       );
       // No repository needed: a sandbox from a template, used by ID.
-      expect(flat).toContain('`mocactl sbx create --template ID` makes one');
+      expect(flat).toContain(
+        '`mocactl sbx create` makes one (from the default template, or `--template ID`)',
+      );
+      expect(flat).toContain('`proc` needs one made with `--mode lease+processes`');
       expect(flat).toContain("not on this machine (Bob's local tools stay available");
       expect(flat).toContain('apart from the agent configuration `up` adds');
       expect(flat).toContain(

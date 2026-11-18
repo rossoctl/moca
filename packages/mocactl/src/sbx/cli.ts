@@ -86,23 +86,24 @@ import { cmdProc, parseProcArgs, PROC_FLAG_OWNER, type ProcArgs } from './proc.j
  * What an sbx sandbox is, before the usage on `--help` and a bare `mocactl sbx` (#599): the plain
  * `mocactl` session's tools also run in "a sandbox", but one these commands never see, so a new
  * user needs the distinction before the command list. It defines the sandbox itself (made from a
- * template; no repository needed: `create`, then `run`, `put` and `proc` by ID), then `up` as the
+ * template; no repository needed: `create`, then `run` and `put` by ID), then `up` as the
  * common way in, and says what the commands really do: `up`
  * and `push` copy the working tree once each (nothing syncs by itself), `up` writes the agent
  * configuration, and the agent's edits come back only through `pull`. Bob has no deny list, so its
  * local tools are said to stay. Not printed after a usage error, where it would only bury the error.
  */
 export const SBX_ABOUT = `An sbx sandbox is a workspace on the sandbox service, made from a template, where your coding
-agent's commands run in isolated VMs. In a git repository, \`mocactl sbx up\` creates one, copies
-the working tree into its /workspace and points Claude Code, OpenCode and IBM Bob, in this
+agent's commands run in isolated VMs. In a git repository, \`mocactl sbx up\` creates or reuses one,
+copies the working tree into its /workspace and points Claude Code, OpenCode and IBM Bob, in this
 repository, at the sandbox's tools: their reads, edits and commands then run in the sandbox
 service's VMs, not on this machine (Bob's local tools stay available: it has no deny list). Your
 source files stay as they are, apart from the agent configuration \`up\` adds. The copy is not kept
 in sync: \`mocactl sbx push\` sends later local edits, and \`mocactl sbx pull --apply\` applies the
 agent's edits here as a patch. /workspace is kept between commands; the sandbox ends after a period
-without use (7 days by default). Without a repository, \`mocactl sbx create --template ID\` makes
-one, and \`run\`, \`put\` and \`proc\` use it by ID. (A bare \`mocactl\` session's tools run in a
-sandbox of moca's own server, SH_CONTROL_PLANE_URL: these commands do not see it.)`;
+without use (7 days by default). Without a repository, \`mocactl sbx create\` makes one (from the
+default template, or \`--template ID\`), and \`run\` and \`put\` use it by ID; \`proc\` needs one
+made with \`--mode lease+processes\`. (A bare \`mocactl\` session's tools run in a sandbox of moca's
+own server, SH_CONTROL_PLANE_URL: these commands do not see it.)`;
 
 /**
  * The commands, grouped, each group in the order a user reaches for them (#599): the everyday
