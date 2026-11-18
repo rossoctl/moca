@@ -59,7 +59,7 @@ export const USAGE = `usage:
                                                  (--dry-run: build and report, upload nothing)
   mocactl bundles list [--json]                  your own stored bundles, newest first
   mocactl bundles delete DIGEST [--json]         delete a bundle you promoted and free its budget
-  mocactl sbx …                                  the sandbox service, a remote copy of a repository for your agent: login, up, pull, rm (mocactl sbx --help)
+  mocactl sbx …                                  the sandbox service, workspaces in isolated VMs for your agent: login, up, pull, rm (mocactl sbx --help)
   mocactl sessions [--json]                      list your sessions
   mocactl sessions delete ID [--json]
   mocactl credentials [--json]                   list your credentials (never their secrets)

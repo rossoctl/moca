@@ -65,15 +65,21 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     const bare = setup();
     expect(await sbxMain([], bare.env, bare.io, { home: bare.home })).toBe(2);
     for (const text of [help.io.outs.join(''), bare.io.errs.join('\n')]) {
-      expect(text.startsWith('An sbx sandbox is a copy of a local git repository on the')).toBe(
-        true,
-      );
+      expect(
+        text.startsWith(
+          'An sbx sandbox is a workspace on the sandbox service, made from a template',
+        ),
+      ).toBe(true);
       const about = text.slice(0, text.indexOf('usage (the sandbox service, SBX0):'));
       const flat = about.replace(/\s+/g, ' ');
       // What the commands really do: copies made by up and push, the configuration up writes,
       // Bob's local tools left live, the agent's edits back by pull, how long a sandbox lasts,
       // and not the sandbox a bare `mocactl` session's tools run in.
-      expect(flat).toContain('`mocactl sbx up` copies the working tree');
+      expect(flat).toContain(
+        'In a git repository, `mocactl sbx up` creates one, copies the working tree',
+      );
+      // No repository needed: a sandbox from a template, used by ID.
+      expect(flat).toContain('`mocactl sbx create --template ID` makes one');
       expect(flat).toContain("not on this machine (Bob's local tools stay available");
       expect(flat).toContain('apart from the agent configuration `up` adds');
       expect(flat).toContain(
