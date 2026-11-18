@@ -82,12 +82,16 @@ async queue behaves the same as before.
 
 `POST /runs` and `/v1/runs` keep running after the client's socket goes away, and write the result
 record when they finish; `GET /runs/status` serves it afterwards. `/turn` does the opposite — it
-aborts the in-flight turn on disconnect (`packages/server/src/server.ts`, ADR-0029 §3.6). The
+aborts the in-flight turn on disconnect, unless the turn is detachable (ADR-0040,
+`SH_TURN_DETACH=1`), which is the one case where a `/turn` outlives its client
+(`packages/server/src/server.ts`;
+[streaming spec](../specs/2026-08-26-turn-sse-streaming-design.md) §3.6). The
 asymmetry was accidental, and #380 filed it as an **interim** contract to be retired once async
 leaf turns on P6 (#389) gave detached work a better home.
 
-Async turns have now shipped (ADR-0047, M1–M3), and the retirement goes the other way: **the
-behaviour stays and stops being interim.**
+Async turns have now shipped (ADR-0047, M1–M3; M2's single-tenancy gate was lifted by
+[#388](https://github.com/rossoctl/moca/issues/388), which ADR-0047's own status line predates),
+and the retirement goes the other way: **the behaviour stays and stops being interim.**
 
 - **Submit-then-poll depends on it.** `mocactl`'s subagent path posts `/v1/runs` and then reads
   `/runs/status` (`packages/mocactl/src/transport/leaf-turn.ts`), so it is deliberately not holding
@@ -101,8 +105,9 @@ behaviour stays and stops being interim.**
 Once #391 lands, `runLeaf` takes an optional `AbortSignal` and `handleRunLeafParsed` still passes
 none, so the regression #380 feared — copying `/turn`'s abort wiring here — becomes a one-line
 edit. `packages/server/test/server.test.ts` pins both halves: the disconnect test asserts the
-record is still written **and** that no signal reaches `runLeaf`, alongside the existing `/turn`
-test asserting the opposite.
+record is still written **and** that the call stays `runLeaf(body, config)` exactly — two
+arguments, no `signal` on either — so a signal arriving in any position fails it, alongside the
+existing `/turn` test asserting the opposite.
 
 This closes #380, whose remaining scope was this amendment and that test. Its third item (a live
 disconnect check in `smoke.sh` "mirroring `deploy/vm`'s") refers to a file that does not exist:

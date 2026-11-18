@@ -290,8 +290,13 @@ describe('GET /runs/status', () => {
     });
 
     // ...and no signal reached the leaf, so the no-abort wiring fails loudly rather than only
-    // through its effect. runLeaf(env, config) -- a 4th `signal` argument means someone wired it.
-    expect(runLeaf.mock.calls[runLeaf.mock.calls.length - 1][3]).toBeUndefined();
+    // through its effect. Pinned as the EXACT call -- `handleRunLeafParsed` calls
+    // `runLeaf(body, buildConfig(auth))` and `runLeaf` is `(env, config?, deps?)`, so asserting one
+    // argument position would miss a signal arriving on `config`, inside `deps`, or as a third
+    // argument, which are the likelier shapes. Any deliberate arity change now has to touch this.
+    const args = runLeaf.mock.lastCall!;
+    expect(args).toHaveLength(2);
+    expect(args[1]).not.toHaveProperty('signal');
   });
 });
 
