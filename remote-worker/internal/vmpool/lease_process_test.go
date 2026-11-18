@@ -1170,7 +1170,7 @@ func TestDowngradeGraceDoesNotCutAfterAnExecStopped(t *testing.T) {
 	errA := execAsync(p, "k", Exec{Command: "a", TimeoutS: MaxExecTimeoutS, Mode: ModeLeaseProcesses, ModeEpoch: 1})
 	recvWithin(t, enteredA, "A's Run")
 	errB := execAsync(p, "k", Exec{Command: "b", TimeoutS: MaxExecTimeoutS, Mode: ModeLease, ModeEpoch: 2})
-	waitForValue(t, `pinnedCount(p, "k")`, func() int { return pinnedCount(p, "k") }, 2) // B queued on the gate
+	waitForValue(t, `parkedIn("(*pool).execLease")`, func() int { return parkedIn("(*pool).execLease") }, 1) // B queued on the gate
 	type setResult struct {
 		stopped []TrackedProcess
 		err     error

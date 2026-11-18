@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -111,6 +112,27 @@ func pinnedCount(p *pool, key string) int {
 		return rp.pinned
 	}
 	return 0
+}
+
+// parkedIn counts the goroutines parked in a select or channel send whose innermost frame
+// is fn (`(*pool).execLease`). Unlike pinnedCount, which counts an Exec from routeExec on,
+// one counted here is already queued on the channels it waits for, so it gets the gate
+// before any waiter that queues after it.
+func parkedIn(fn string) int {
+	buf := make([]byte, 1<<20)
+	for n := runtime.Stack(buf, true); n == len(buf); n = runtime.Stack(buf, true) {
+		buf = make([]byte, 2*len(buf))
+	}
+	count := 0
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		header, frames, _ := strings.Cut(g, "\n")
+		top, _, _ := strings.Cut(frames, "\n")
+		if (strings.Contains(header, "[select") || strings.Contains(header, "[chan send")) &&
+			strings.Contains(top, "."+fn+"(") {
+			count++
+		}
+	}
+	return count
 }
 
 func secretLeaseExec() Exec { return leaseExec(secretCommand, 1) }
