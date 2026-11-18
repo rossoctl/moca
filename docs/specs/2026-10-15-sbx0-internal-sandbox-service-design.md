@@ -1,7 +1,7 @@
 # SBX0: a minimal sandbox service for an internal cohort, on the existing `sandbox/v1` API — Design
 
 Version: 1.1 — October 16, 2026 (review of rossoctl/moca#546)
-Status: Accepted (2026-10-20; live acceptance recorded in [docs/sbx/security-review.md](../sbx/security-review.md))
+Status: Accepted (2026-10-20; live acceptance recorded in [docs/notes/sandbox-security-review.md](../notes/sandbox-security-review.md))
 Milestone: **SBX0**, registered in [the milestone registry](README.md) (new `SBX` track).
 Decision record: [ADR-0042](../adrs/0042-sbx0-sandbox-service-on-sandbox-v1.md).
 

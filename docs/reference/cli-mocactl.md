@@ -1,7 +1,7 @@
 # `mocactl` command reference
 
 > **Preview.** Reflects `packages/mocactl` on `main` as of 2026-10-12. Install it with the
-> [one-line installer](../get-started/index.md#1-install-the-cli); the narrative guide, key bindings and
+> [one-line installer](../get-started/index.md#install-the-client); the narrative guide, key bindings and
 > troubleshooting are in [`packages/mocactl/README.md`](../../packages/mocactl/README.md). `mocactl`
 > talks to the multi-user control plane, which tells it where the harness is.
 

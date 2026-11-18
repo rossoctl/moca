@@ -20,7 +20,7 @@ plane and one build (§8).
 - The short reference for the same steps is [`deploy/sbx/template-onboarding/ONBOARDING.md`](ONBOARDING.md).
   Deploying SBX0 itself is [`deploy/sbx/README.md`](../README.md) and
   [`RUNBOOK.md`](../RUNBOOK.md); using a sandbox is the
-  [user guide](../../../docs/sbx/user-guide.md); templates in Moca's own agent sessions are designed in
+  [user guide](../../../docs/sandbox/user-guide.md); templates in Moca's own agent sessions are designed in
   [`docs/specs/2026-10-30-session-sandbox-templates-design.md`](../../../docs/specs/2026-10-30-session-sandbox-templates-design.md).
 - **Every host and registry below is a placeholder:** `sbx-api.example.com`, `registry.example.com`.
   No real host, account id or token appears here.
@@ -699,7 +699,7 @@ needs (4096 + 32) × 3 + 1024 MiB for one session at standby depth 2.
 A new sandbox's `/workspace` is empty, and the client seeds it. On a deployment with the template
 store, `mocactl sbx create --template django-django-11133 --seed` runs the served build's seed,
 checks that `/workspace` is a clean tree, and makes the seeded HEAD the sandbox's baseline, so
-`sbx pull` and `sbx rm` measure changes from it ([user guide](../../../docs/sbx/user-guide.md), §8).
+`sbx pull` and `sbx rm` measure changes from it ([user guide](../../../docs/sandbox/user-guide.md), §8).
 Without the store, the client runs the seed as its first command, as below. Either way use
 `sbx create`, not `sbx up`: `up` pushes the client's own repository into `/workspace` before the
 seed runs.

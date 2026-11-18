@@ -1,8 +1,8 @@
-# Logging in with an OIDC provider (w3id)
+# Logging in with an OIDC provider
 
-The control plane's default identity provider is GitHub's OAuth device flow. Deployments inside
-IBM (or in front of any OIDC provider — Keycloak, Dex, Entra) can instead use the generic OIDC
-provider, which this guide walks through with w3id as the example.
+The control plane's default identity provider is GitHub's OAuth device flow. A deployment in front
+of any OIDC provider (Keycloak, Dex, Entra ID, your company's SSO) can use the generic OIDC
+provider instead. This guide walks through it with a placeholder issuer, `https://<issuer>`.
 
 ## How the flow works
 
@@ -10,7 +10,7 @@ mocactl's login is unchanged from its side: it asks the control plane to start a
 URL it gets back, and polls. What differs is who completes the login in the middle:
 
 ```
-mocactl                    control plane                      w3id
+mocactl                    control plane                  OIDC provider
   │ POST /v1/auth/device      │                                │
   │──────────────────────────>│ mint state + user code (15 m)  │
   │<── verificationUri + code─│                                │
@@ -36,7 +36,7 @@ happens entirely server-side, at the control plane's `GET /v1/auth/oidc/callback
 page asks for a short code (`XXXX-XXXX`) that the control plane minted at login start and showed
 only in the terminal that started it, and the login settles only when that code is typed (at
 most five tries). Without this, the authorize URL alone would be a capability — an attacker who
-starts a login and gets a victim with a live w3id SSO session to open the URL would hand the
+starts a login and gets a victim with a live SSO session at the provider to open the URL would hand the
 attacker a fully verified login as the victim, one click and no code to type. With it, the
 victim lands on the confirmation page and is asked for a code they have never seen.
 
@@ -46,7 +46,7 @@ form.
 
 ## Registering the application
 
-Register an OIDC client with the provider (for w3id, an IBM SSO application registration) with:
+Register an OIDC client with the provider with:
 
 - **Redirect URI:** the control plane's public callback URL — on OpenShift, the control plane's
   Route: `https://<cp-route>/v1/auth/oidc/callback`. Providers match redirect URIs exactly, so
@@ -54,15 +54,14 @@ Register an OIDC client with the provider (for w3id, an IBM SSO application regi
 - **Grant type:** authorization code (confidential client — the control plane holds the secret).
 - **Scopes:** `openid email profile` (the default; override with `SH_OIDC_SCOPE`).
 
-For w3id preprod, the issuer is `https://preprod.login.w3.ibm.com/oidc/endpoint/default`. The
-provider must serve standard discovery (`/.well-known/openid-configuration`) and sign `id_token`s
+The issuer is the provider's base URL, `https://<issuer>` here. The provider must serve standard discovery (`/.well-known/openid-configuration`) and sign `id_token`s
 with RS256.
 
 ## Configuring the control plane
 
 ```ini
 SH_IDENTITY_PROVIDER=oidc
-SH_OIDC_ISSUER=https://preprod.login.w3.ibm.com/oidc/endpoint/default
+SH_OIDC_ISSUER=https://<issuer>
 SH_OIDC_CLIENT_ID=<registered client id>
 SH_OIDC_REDIRECT_URI=https://<cp-route>/v1/auth/oidc/callback
 # The secret is a credential, not an env var in a committed file:
@@ -96,17 +95,16 @@ prefix, a botnet) can still fill the total cap.
 ## Logging in
 
 `mocactl login` is the same command, and the rhythm is the device flow's: the terminal shows a
-code, the browser asks for it. The user signs in at the provider (an existing w3id SSO session,
-usually), lands on the moca confirmation page, and enters the terminal's code there:
+code, the browser asks for it. The user signs in at the provider (often an existing SSO session), lands on the moca confirmation page, and enters the terminal's code there:
 
 ```
 $ mocactl login
-Open https://preprod.login.w3.ibm.com/oidc/endpoint/default/authorize?... and enter the code XY7C-K2M9
+Open https://<issuer>/authorize?... and enter the code XY7C-K2M9
   (valid for 15 minutes, Ctrl-C to cancel)
-logged in as alex@us.ibm.com
+logged in as alex@example.com
 ```
 
-Sign in at w3id, then enter the terminal's code on the confirmation page the redirect lands
+Sign in at the provider, then enter the terminal's code on the confirmation page the redirect lands
 on — the same paste-and-confirm rhythm as GitHub's device flow.
 
 Everything after the login — refresh rotation, API tokens, session ownership, `mocactl auth

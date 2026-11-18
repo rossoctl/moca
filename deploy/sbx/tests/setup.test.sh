@@ -989,7 +989,7 @@ raw_val() { jq -r --arg k "$2" '.data[$k] // empty' "$MOCK_STATE/secret-$1.json"
 # The set of Secret names ever applied, and the ConfigMap keys: what "the applied object set" means here.
 applied_names() { awk '{print $1, $2}' "$MOCK_STATE/applies.log" | sort -u | tr '\n' ';'; }
 
-# 13b. The oidc identity provider (docs/guides/oidc-login-w3id.md): the settings the base's env
+# 13b. The oidc identity provider (docs/guides/oidc-login.md): the settings the base's env
 # wiring reads, the oidc: subject grammar, no GitHub client id required, and the settings hash
 # stamped (the pod rolls). The client secret never appears: it is the operator's moca-oidc Secret,
 # untouched.

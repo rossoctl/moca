@@ -10,7 +10,8 @@ request, and watch a streamed turn.
 ## Before you start
 
 Docker with Compose, `curl`, and a model credential (see the
-[chooser](index.md#2-choose-a-backend)). Install and start the stack as in the README Quick Start:
+[deployment chooser](../operate/index.md#choose-a-deployment)). Install and start the stack as in the
+[harness quickstart](../harness/quickstart.md):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/deploy/compose/install.sh \
@@ -72,7 +73,7 @@ a command, and a final `event: done`. The frames are listed in
 
 ```bash
 cd ~/.serverless-harness && docker compose logs -f
-cd ~/.serverless-harness && docker compose down     # Redis state goes with it
+cd ~/.serverless-harness && docker compose down     # sessions survive; `down -v` removes them
 ```
 
 ## Where next
@@ -80,5 +81,6 @@ cd ~/.serverless-harness && docker compose down     # Redis state goes with it
 - Use the terminal client against a control plane:
   [`mocactl`](../reference/cli-mocactl.md).
 - Run a leaf with a human approval gate: [Leaf envelope and result](../reference/leaf-and-envelope.md#the-human-gate).
-  Async fan-out and scheduled dispatch are not available on P6 yet.
+  Async fan-out runs on P6, opt-in ([dispatch archetypes](../concepts/dispatch-archetypes.md));
+  scheduled dispatch has no P6 design yet ([#536](https://github.com/rossoctl/moca/issues/536)).
 - A longer guided tour on a VM: [`demos/vm-multi-user-demo.md`](../demos/vm-multi-user-demo.md).

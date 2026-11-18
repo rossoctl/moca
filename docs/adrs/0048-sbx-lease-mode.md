@@ -1,6 +1,6 @@
 # ADR-0048: An opt-in lease mode for SBX sandboxes — a warm guest between Execs, with process survival as a separate, explicit level
 
-- **Status:** Accepted (2026-11-15; implemented by #706, #763, #802, #808, #814; off by default until [docs/sbx/security-review.md](../sbx/security-review.md) §6–§7 are signed off) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-11-15; implemented by #706, #763, #802, #808, #814; off by default until [docs/notes/sandbox-security-review.md](../notes/sandbox-security-review.md) §6–§7 are signed off) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-11-08
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-11-08-sbx-lease-mode-design.md`](../specs/2026-11-08-sbx-lease-mode-design.md)

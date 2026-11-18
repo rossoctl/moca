@@ -9,8 +9,8 @@ resource), **attach** (passthrough, KVM hosts' workers dial in) and **exec** (pa
 This page is the install reference. Day-to-day operation (users, templates, key rotation, outages,
 disk, status and upgrades) is [the runbook](RUNBOOK.md); onboarding a template from a container
 image is the template onboarding folder, `deploy/sbx/template-onboarding/`; users have
-[the user guide](../../docs/sbx/user-guide.md); the security gate's checklist is
-[the security review](../../docs/sbx/security-review.md).
+[the user guide](../../docs/sandbox/user-guide.md); the security gate's checklist is
+[the security review](../../docs/notes/sandbox-security-review.md).
 
 ## 1. Cluster side
 
@@ -66,13 +66,13 @@ them to `sbx-settings`, which the control plane reads:
 | `SBX_IDLE_CEILING_S` | 1800       | 300-86400: the longest lease idle timeout an owner may set, in seconds (`SH_SANDBOX_IDLE_CEILING_S`). An owner who sets none gets the worker's default, 300 s. It also goes into every worker bundle as `SH_LEASE_IDLE_CEILING_S`, so the workers clamp alike: after a change, re-run `install-host.sh` with the new bundle on every host (a running worker keeps its old ceiling) |
 
 **Lease mode stays off by default.** It stays off until plan 4's live smoke test passes and the
-[SBX security review](../../docs/sbx/security-review.md) has its lease section (lease-mode spec
+[SBX security review](../../docs/notes/sandbox-security-review.md) has its lease section (lease-mode spec
 §11). A microVM worker serves lease mode on its own once its snapshot advertises `lease-v1`, so the
 control plane's list is the only switch. After that gate, an operator opts in to level 1 with
 `SBX_MODES_ALLOWED=per-exec,lease` and a re-run of `setup.sh`.
 
 **Keep `lease+processes` (level 2) off** until the security review's level-2 section,
-[§7](../../docs/sbx/security-review.md#7-lease-mode-level-2-sbx03-draft), is signed off (it is a
+[§7](../../docs/notes/sandbox-security-review.md#7-lease-mode-level-2-sbx03-draft), is signed off (it is a
 draft that needs the security owner's sign-off) and live smoke step 9 has passed (RUNBOOK §13).
 Level 1's section comes first. Level 2 also needs template snapshots that advertise
 `lease-processes-v1`. A worker says it serves the process kinds in its Hello
@@ -119,9 +119,11 @@ control plane's signing key, in a shared namespace or copied in. The two stacks 
 under different issuers, so neither accepts the other's.
 
 **Rotating the signing key is a hard cut.** The keyset holds only the current key, so there is no
-overlap window. Delete `moca-mu1` and re-run: every API token and sandbox token already issued is
-refused at once. Refresh tokens are not signed and survive, so `mocactl sbx` gets new ones on its
-next call, but an Exec in flight fails, and a direct client must fetch a new sandbox token.
+overlap window. Remove only `SH_SESSION_TOKEN_PRIVATE_KEY` from `moca-mu1` and re-run, as
+[the runbook, §6](RUNBOOK.md#6-rotating-the-signing-key) shows: deleting the whole Secret would also
+rotate the janitor's token. Every token signed with the old key is refused at once. Refresh tokens
+are not signed and survive, so `mocactl sbx` gets new ones on its next call, but an Exec in flight
+fails, and a direct client must fetch a new sandbox token.
 
 **Changing `SBX_MAX_LIFETIME_DAYS` means reinstalling every host's workers.** The control plane
 takes the new maximum at once, but a running worker keeps the idle reclaim (`SH_WORKSPACE_IDLE`) it
@@ -311,7 +313,7 @@ janitor's last run (see [the runbook](RUNBOOK.md#8-status-and-the-audit-lines)).
 
 ## 4. Users
 
-Users log in with GitHub, then bring a repository up in a sandbox; [the user guide](../../docs/sbx/user-guide.md)
+Users log in with GitHub, then bring a repository up in a sandbox; [the user guide](../../docs/sandbox/user-guide.md)
 covers it end to end:
 
     mocactl sbx login --control-plane-url https://<api host>

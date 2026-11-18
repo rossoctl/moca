@@ -57,7 +57,7 @@ A dispatch pattern an orchestrator can use against the same backend. **A** is as
 (`async: true`, a Redis Streams queue, many leaves at once), **B** is the human gate (a leaf pauses
 with status `paused` and resumes on an external verdict), **C** is scheduled dispatch (a cron
 trigger posts async leaves). B is served by the P6 runtime; A and C were removed with the
-Knative/KEDA path. See the [README](../README.md#dispatch-archetypes).
+Knative/KEDA path. See [dispatch archetypes](concepts/dispatch-archetypes.md).
 
 ## brain and hands
 

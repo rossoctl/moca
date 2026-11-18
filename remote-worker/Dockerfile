@@ -74,7 +74,7 @@ RUN set -eux; \
     rm -rf "/tmp/${tarball}" /tmp/rg.sha256 "/tmp/ripgrep-${RG_VERSION}-${target}"; \
     /usr/local/bin/rg --version
 
-# gh (the GitHub CLI) is vendored for the same reason as rg: docs/sbx/user-guide.md promises `gh`
+# gh (the GitHub CLI) is vendored for the same reason as rg: docs/sandbox/user-guide.md promises `gh`
 # works in a sandbox (`gh pr create` under the sbx credentials feature), it is not in the UBI 9
 # repositories, and adding GitHub's own dnf repo would put a third-party repository into an image
 # that executes model-authored commands. Upstream release tarball, pinned by version and checked
