@@ -345,9 +345,11 @@ for u in a b; do
 done
 as() { local u="$1"; shift; "$WORK/bin-$u/mocactl" sbx "$@"; }
 
-help1="$(as a --help 2>/dev/null </dev/null | head -n 1)" || true
-[[ "$help1" == 'usage (the sandbox service, SBX0):' ]] ||
-  die "$MOCACTL has no \`mocactl sbx\` (its \`sbx --help\` begins '${help1}'): use the edge channel or a build of this branch"
+# The usage line, wherever it is: since #599 a paragraph on what a sandbox is comes before it, while
+# an older mocactl (v0.7.0 on) prints it first. A mocactl without sbx prints the general usage.
+help="$(as a --help 2>/dev/null </dev/null)" || true
+grep -qxF 'usage (the sandbox service, SBX0):' <<<"$help" ||
+  die "$MOCACTL has no \`mocactl sbx\` (its \`sbx --help\` begins '${help%%$'\n'*}'): use the edge channel or a build of this branch"
 
 # --- The direct client (steps 2 and 4) -------------------------------------------------------
 
