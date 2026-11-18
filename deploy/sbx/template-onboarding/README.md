@@ -30,7 +30,7 @@ what each step records): [`governance/`](governance/README.md).
 
 These are part of the same flow but live with the code they belong to.
 
-**SBX0, the sandbox service the templates run on** (`deploy/sbx/`):
+**The sandbox service the templates run on** (`deploy/sbx/`):
 
 | File                                             | Role in the flow                                                                                                        |
 | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
@@ -38,7 +38,7 @@ These are part of the same flow but live with the code they belong to.
 | [`../install-host.sh`](../install-host.sh)       | the KVM host: installs (or `--uninstall`s) a template's worker                                                          |
 | [`../host-agent.sh`](../host-agent.sh)           | the KVM host's template agent: builds queued templates, starts and stops their workers, removes retired builds          |
 | [`../templates-check.sh`](../templates-check.sh) | the live check that a client gets the template it asked for, and that templates are isolated                            |
-| [`../README.md`](../README.md)                   | installing SBX0                                                                                                         |
+| [`../README.md`](../README.md)                   | installing the sandbox service                                                                                          |
 | [`../RUNBOOK.md`](../RUNBOOK.md)                 | operating it: §5 templates, [guest egress](../RUNBOOK.md#guest-egress), the template host agent, checking the templates |
 | [`../tests/`](../tests/)                         | the deploy scripts' tests (`install-host.test.sh`, `setup.test.sh`, …)                                                  |
 
@@ -53,13 +53,13 @@ These are part of the same flow but live with the code they belong to.
 
 **Using a template:**
 
-| File                                                                                                                                      | Role in the flow                                                                               |
-| ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| [`docs/sandbox/user-guide.md`](../../../docs/sandbox/user-guide.md)                                                                       | clients: `mocactl sbx templates`, `create --template`, `run`, agents through `mocactl sbx mcp` |
-| [`docs/concepts/sandboxes-and-tiers.md`](../../../docs/concepts/sandboxes-and-tiers.md)                                                   | templates and tiers in Moca's own agent sessions (`--option sandboxTemplate=ID`)               |
-| `docs/specs/2026-10-30-session-sandbox-templates-design.md`                                                                               | the design of templates in agent sessions                                                      |
-| `docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md`                                                                       | the design of the template lifecycle: self-serve creates, activation, provenance               |
-| [`docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md`](../../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md) | the design of SBX0 and its templates                                                           |
+| File                                                                                                 | Role in the flow                                                                               |
+| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| [`docs/sandbox/user-guide.md`](../../../docs/sandbox/user-guide.md)                                  | clients: `mocactl sbx templates`, `create --template`, `run`, agents through `mocactl sbx mcp` |
+| [`docs/concepts/sandboxes-and-tiers.md`](../../../docs/concepts/sandboxes-and-tiers.md)              | templates and tiers in Moca's own agent sessions (`--option sandboxTemplate=ID`)               |
+| `docs/specs/2026-10-30-session-sandbox-templates-design.md`                                          | the design of templates in agent sessions                                                      |
+| `docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md`                                  | the design of the template lifecycle: self-serve creates, activation, provenance               |
+| [The sandbox service design](../../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md) | the design of the sandbox service and its templates                                            |
 
 **Code that implements template selection:** `packages/control-plane/src/sandbox-config.ts`
 (`SH_SANDBOX_TEMPLATES`), `packages/control-plane/src/sandbox-handlers.ts` (`POST /v1/sandboxes

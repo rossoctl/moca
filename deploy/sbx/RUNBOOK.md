@@ -1,13 +1,13 @@
-# SBX0 operator runbook
+# Sandbox service operator runbook
 
-> **Preview.** The SBX0 sandbox service is implemented for an internal cohort, but not yet
+> **Preview.** The sandbox service is implemented, but not yet
 > declared Stable; interfaces and limits may change.
 
-For the operators of an SBX0 deployment: the sandbox control plane, the relay and Redis in one
+For the operators of a sandbox-service deployment: the sandbox control plane, the relay and Redis in one
 namespace of a shared OpenShift cluster, and template workers plus the janitor on a KVM host. The
 install reference (every input and its rule) is [the deploy README](README.md); users have
 [the user guide](../../docs/sandbox/user-guide.md). The design is
-[the SBX0 spec](../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md) (§8 for
+[the sandbox service spec](../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md) (§8 for
 operations).
 
 Throughout, `<env file>` is the operator's settings file outside the repository (README §1),
@@ -17,7 +17,7 @@ gitignored).
 
 ## 1. Deploy from scratch
 
-1. **The namespace.** An existing namespace, dedicated to SBX0, where you have edit rights.
+1. **The namespace.** An existing namespace, dedicated to the sandbox service, where you have edit rights.
 2. **A GitHub OAuth app** of this deployment's own, with device flow enabled: its client id is
    `SBX_GITHUB_CLIENT_ID`.
 3. **The snapshots.** On the KVM host, one golden snapshot per template, built with
@@ -27,7 +27,7 @@ gitignored).
    Build them with a `build-snapshot.sh` from P4.1 or later: an older snapshot has no guest egress
    listener (see [Guest egress](#guest-egress)). The host also needs `/usr/local/bin/moca-egress`
    (`CGO_ENABLED=0 go build -o /usr/local/bin/moca-egress ./remote-worker/cmd/moca-egress`); the
-   worker install refuses without it, unless you pass `--no-egress`. And SBX0's own worker binary,
+   worker install refuses without it, unless you pass `--no-egress`. And the sandbox service's own worker binary,
    `CGO_ENABLED=0 go build -o /usr/local/libexec/sbx/microvm-worker ./remote-worker/cmd/microvm-worker`
    (`SBX_WORKER_BIN`): the install refuses without it, and never runs
    `/usr/local/bin/microvm-worker`, which a P4 worker on the same host may run.
@@ -138,7 +138,7 @@ Then re-run `install-host.sh` with the new bundle for every worker (step 5 of §
 bundle. The run deletes the static client tokens and removes the relay's harness exec token. **1a
 workspaces are not migrated:** tell 1a users to pull their work out first.
 
-**The worker binary.** `install-host.sh` runs SBX0's own build at `SBX_WORKER_BIN` (default
+**The worker binary.** `install-host.sh` runs the sandbox service's own build at `SBX_WORKER_BIN` (default
 `/usr/local/libexec/sbx/microvm-worker`), no longer `/usr/local/bin/microvm-worker`: build it there
 (§1 step 3) before re-running `install-host.sh` on a host installed before, or the install refuses.
 A new worker binary takes effect when its workers restart.
@@ -553,7 +553,7 @@ adds each command's first 200 bytes as `cmd`.
   "sandbox busy"). It keeps one user from filling a template's worker.
 - **The deaf-worker slot hold.** When an Exec outlives its token, the relay cancels it and then
   waits for the worker's acknowledgement before freeing its in-flight slot. A wedged worker that
-  never answers holds that slot until its attach stream drops: SBX0 has no bound on that drain, so
+  never answers holds that slot until its attach stream drops: the sandbox service has no bound on that drain, so
   with the default cap of 2, one wedged Exec halves the sandbox's concurrency until the worker
   disconnects. Restarting the worker (`systemctl restart sbx-worker@<id>`) drops the stream and
   frees every slot it held, and also ends every running Exec on that worker, for every user of the
@@ -802,7 +802,7 @@ Paths are logged without query, fragment or userinfo, and an injected credential
   `moca-egress.service` another install owns (a P6 worker's) without enabling it, and that install may
   start it only for a while. So on such a host, whether the agent reads the proxy's journal follows
   that unit's state: while it runs for its own install, the agent reads its events every
-  15 s, ships only this host's SBX0 sandboxes' (`egressSids`), and counts the rest `egressNotOurs`.
+  15 s, ships only this host's own sandboxes' (`egressSids`), and counts the rest `egressNotOurs`.
   Nothing of the other install's leaves the host, but check the unit's state before relying on it. Off, the agent reads no journal, posts nothing and writes no cursor; its summary
   says `"egress":"off"`.
 - **Only this host's sandboxes' events leave it.** The wanted state names them (`egressSids`: the
@@ -849,7 +849,7 @@ Paths are logged without query, fragment or userinfo, and an injected credential
   logs together at most 200,000 (`EGRESS_TOTAL_BUDGET`): with 256 MiB for Redis, egress logs take at
   most about 64 MB. The total counts the logs that still exist, so an expired log gives its share
   back. Each post reads the length of every retained log, so its cost grows with the number of
-  sandboxes retained with a log: small at SBX0's scale.
+  sandboxes retained with a log: small at the sandbox service's scale.
 - **Completeness:** an event over 8 KiB isn't sent (only its sandbox id is); the agent reads the journal with `--all`, so one up to 8 KiB is sent whole (without it journalctl prints a field over 4096 bytes as `null`). A journal entry whose message is not text (not UTF-8) cannot be read for its sandbox: the agent says so in an error line. A log's `dropped` counts
   those (`invalid`), events past its cap (`cap`) or past the total budget (`budget`), and the proxy's own `audit_dropped` reports, charged to every sandbox on
   the host's workers live within 60 s before each. `complete` is `dropped == 0`. The sandbox's end
@@ -1370,7 +1370,7 @@ pending)`, `used` being its running workers' cost, their VMs' committed memory a
   reason. A build waiting for memory reads `readiness: unavailable` with `readinessReason: memory`
   (`mocactl sbx templates show ID`), and `mocactl sbx hosts` shows each host's headroom, floor and
   brake.
-- **With the sandbox lease mode** (SBX0.3), a lease VM's guest memory is in its worker's slice, so
+- **With the sandbox lease mode**, a lease VM's guest memory is in its worker's slice, so
   `vmCommittedMib` counts it. Its reclaim acts on VMs and this floor on whole workers: on one host,
   set the floor at or above lease mode's reclaim target.
 - **Version skew, both ways:** an agent older than memory-aware placement sends no `memory`, and
@@ -1510,7 +1510,7 @@ template: add a worker id to `SBX_WORKERS` and the template to `SBX_TEMPLATES_FI
 `--snapshot <snapshot>` (the record's `snapshot`, `$SBX_SRV/templates/<snapshot>.json`).
 `install-host.sh` then names the record in the worker's env (`SH_TEMPLATE_RECORD`) and its id as
 `SANDBOX_TEMPLATE`, and the worker checks the record against its snapshot and its own id at every
-start, refusing a mismatch. The worker runs SBX0's own binary, `SBX_WORKER_BIN` (default
+start, refusing a mismatch. The worker runs the sandbox service's own binary, `SBX_WORKER_BIN` (default
 `/usr/local/libexec/sbx/microvm-worker`: `CGO_ENABLED=0 go build -o
 /usr/local/libexec/sbx/microvm-worker ./remote-worker/cmd/microvm-worker`), never
 `/usr/local/bin/microvm-worker`, which a P4 worker on the same host may run; a missing one is
