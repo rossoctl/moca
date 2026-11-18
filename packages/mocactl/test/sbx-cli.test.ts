@@ -59,6 +59,61 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(io.outs.join('')).toContain('mocactl sbx login');
   });
 
+  it('opens its usage with what an sbx sandbox is, on --help and bare (#599)', async () => {
+    const help = setup();
+    expect(await sbxMain(['--help'], help.env, help.io, { home: help.home })).toBe(0);
+    const bare = setup();
+    expect(await sbxMain([], bare.env, bare.io, { home: bare.home })).toBe(2);
+    for (const text of [help.io.outs.join(''), bare.io.errs.join('\n')]) {
+      expect(text.startsWith('An sbx sandbox is a copy of a local git repository on the')).toBe(
+        true,
+      );
+      const about = text.slice(0, text.indexOf('usage (the sandbox service, SBX0):'));
+      const flat = about.replace(/\s+/g, ' ');
+      // What the commands really do: copies made by up and push, the configuration up writes,
+      // Bob's local tools left live, the agent's edits back by pull, how long a sandbox lasts,
+      // and not the sandbox a bare `mocactl` session's tools run in.
+      expect(flat).toContain('`mocactl sbx up` copies the working tree');
+      expect(flat).toContain("not on this machine (Bob's local tools stay available");
+      expect(flat).toContain('apart from the agent configuration `up` adds');
+      expect(flat).toContain(
+        'The copy is not kept in sync: `mocactl sbx push` sends later local edits',
+      );
+      expect(flat).toContain(
+        "`mocactl sbx pull --apply` applies the agent's edits here as a patch",
+      );
+      expect(flat).toContain('the sandbox ends after a period without use (7 days by default)');
+      expect(flat).toContain('SH_CONTROL_PLANE_URL: these commands do not see it');
+    }
+  });
+
+  it('keeps the definition out of a usage error, which shows the error and the usage (#599)', async () => {
+    for (const argv of [['nope'], ['ls', '--bogus'], ['egress', '--json', '--ndjson']]) {
+      const { env, io, home } = setup();
+      expect(await sbxMain(argv, env, io, { home })).toBe(2);
+      const text = io.errs.join('\n');
+      expect(text).toMatch(/^sbx: |^Unknown option/);
+      // The whole usage for an unknown command, the command's own for a misused one (#867).
+      expect(text).toMatch(/\nusage( \(the sandbox service, SBX0\))?:\n/);
+      expect(text).not.toContain('An sbx sandbox is');
+    }
+  });
+
+  it('lists its commands in the order a user reaches for them, every one present (#599)', async () => {
+    const { env, io, home } = setup();
+    expect(await sbxMain(['--help'], env, io, { home })).toBe(0);
+    const words = [...io.outs.join('').matchAll(/^ {2}mocactl sbx (\S+)/gm)].map((m) => m[1]);
+    const order = words.filter((w, i) => w !== words[i - 1]);
+    expect(order).toEqual([
+      // A repository's sandbox, from login to logout.
+      ...['login', 'up', 'claude', 'codex', 'mcp', 'run', 'put', 'pull', 'push', 'ls'],
+      ...['doctor', 'rm', 'logout'],
+      // By hand, credentials, templates, then the admins' commands.
+      ...['create', 'get', 'mode', 'reset', 'proc', 'token', 'env', 'egress', 'credentials'],
+      ...['templates', 'quota', 'policy', 'hosts', 'templates', 'admin'],
+    ]);
+  });
+
   describe('COMMAND --help shows that command, not every command', () => {
     const help = async (...argv: string[]) => {
       const { env, io } = setup();

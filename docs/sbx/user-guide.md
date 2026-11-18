@@ -12,9 +12,16 @@ need no moca background. The design is
 
 Your coding agent (Claude Code, OpenCode, Codex or IBM Bob) still runs on your laptop, but **every
 command it runs runs in the sandbox service**, each one in a fresh virtual machine (VM). It reads,
-edits and tests your code there, in a copy of your repository at `/workspace`. **Your laptop's tree
-is untouched** until you take the agent's work back as a patch and apply it
-(`mocactl sbx pull --apply`).
+edits and tests your code there, in a copy of your repository at `/workspace`. (IBM Bob has no
+deny list, so its local tools stay available: see [IBM Bob](#ibm-bob).) **Your laptop's source
+files are untouched**, apart from the agent configuration `mocactl sbx up` adds, until you take the
+agent's work back as a patch and apply it (`mocactl sbx pull --apply`).
+The copy is not kept in sync: edits you make locally after `mocactl sbx up` reach the sandbox only
+when you send them with `mocactl sbx push`. `/workspace` is kept between commands, and the sandbox
+ends after a period without use (7 days by default).
+
+This sandbox is not the one a bare `mocactl` session (moca's own server, `SH_CONTROL_PLANE_URL`)
+runs its tools in: the `mocactl sbx` commands neither see nor manage that one.
 
 Why this is safer than letting the agent run on your laptop:
 
@@ -41,7 +48,7 @@ about `SH_CONTROL_PLANE_URL` is for moca's own server: ignore it here. Check tha
 
 ```bash
 mocactl --version     # v0.7.0 or later
-mocactl sbx --help    # the first line: usage (the sandbox service, SBX0):
+mocactl sbx --help    # what an sbx sandbox is, then: usage (the sandbox service, SBX0):
 ```
 
 If `mocactl sbx --help` prints mocactl's general `usage:` list instead, with no `mocactl sbx`
