@@ -167,7 +167,7 @@ credentials)
   *) echo "mock mocactl: unexpected: credentials ${args[*]}" >&2; exit 99 ;;
   esac ;;
 --help) echo 'An sbx sandbox is a copy of a local git repository on the sandbox service, ...'; echo
-  echo 'usage (the sandbox service, SBX0):'; echo '  mocactl sbx login ...' ;;
+  echo 'usage (the sandbox service):'; echo '  mocactl sbx login ...' ;;
 ls)
   if [[ " ${args[*]:-} " == *' --json '* ]]; then
     sep='' out='['

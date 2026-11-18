@@ -348,7 +348,7 @@ as() { local u="$1"; shift; "$WORK/bin-$u/mocactl" sbx "$@"; }
 # The usage line, wherever it is: since #599 a paragraph on what a sandbox is comes before it, while
 # an older mocactl (v0.7.0 on) prints it first. A mocactl without sbx prints the general usage.
 help="$(as a --help 2>/dev/null </dev/null)" || true
-grep -qxF 'usage (the sandbox service, SBX0):' <<<"$help" ||
+grep -qxE 'usage \(the sandbox service(, SBX0)?\):' <<<"$help" ||
   die "$MOCACTL has no \`mocactl sbx\` (its \`sbx --help\` begins '${help%%$'\n'*}'): use the edge channel or a build of this branch"
 
 # --- The direct client (steps 2 and 4) -------------------------------------------------------
@@ -936,7 +936,7 @@ step9() {
   ttyx "create-procs-$N" "$WORK/bin-a/mocactl" sbx create --template "$TEMPLATE" --name "$RUN-$N-procs" --mode lease+processes --json
   f="$LOGS/create-procs-$N.out"
   # 403 mode_not_allowed, as in step 8: level 2 is off by default, and stays off until its section
-  # of docs/sbx/security-review.md is signed off.
+  # of docs/notes/sandbox-security-review.md is signed off.
   if [[ "$RC" != 0 ]] && grep -q 'is not allowed on this deployment' "$f"; then WHY='lease+processes not allowed'; return 3; fi
   read -r id mode setmode code <<<"$(lease_created "$f")"
   [[ "${id:-}" =~ $ID_RE ]] && record a "$id" ||

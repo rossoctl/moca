@@ -22,7 +22,7 @@ clearly marked "Legacy" note, so removing the Legacy path deletes a row instead 
 ## Maturity labels and banners
 
 Every install path, guide and reference page states **Stable**, **Preview** or **Legacy** (meanings
-in the [documentation map](index.md#maturity-labels)). The label must agree with the milestone
+in the [Maturity and lifecycle](reference/maturity-and-lifecycle.md)). The label must agree with the milestone
 registry; if it does not, fix the registry in the same change.
 
 Use this banner verbatim, changing only the bracketed parts.

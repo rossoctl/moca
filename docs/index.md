@@ -1,67 +1,97 @@
-# moca documentation
+---
+title: Moca
+sidebar_label: Overview
+sidebar_position: 0
+description: Moca runs AI coding agents' work away from where they run — as a sandbox service for the agent on your laptop, and as a harness that runs the agent sessions themselves.
+doc_type: navigation
+audience: [evaluator, sandbox-user, harness-user, operator]
+capability: both
+---
 
-Moca runs stateful AI coding-agent sessions as a backend service: sessions are durable and
-resumable, the agent's reasoning (the _brain_) is isolated from the sandboxes that execute its
-tools (the _hands_), many users share one deployment, and sandboxes are disposable. The README has
-the pitch; this page is the map.
+# Moca
 
-## Maturity labels
+Moca is the rossoctl project for running AI coding agents safely and at scale. It has **two
+capabilities**. You can use either one on its own, or both together.
 
-Every install path, guide and reference page should carry one of these. The label is a claim about
-the path, not about the project as a whole.
+|                       | **Moca sandbox service**                                                                                            | **Moca harness**                                                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| **In one line**       | Your coding agent stays on your laptop, and every command it runs goes to a fresh, isolated VM on a shared service. | Moca runs the agent itself: long-lived sessions on a warm worker pool, with state in Redis and tools in a remote sandbox. |
+| **Who uses it**       | Developers using Claude Code, OpenCode, Codex or IBM Bob                                                            | Teams and orchestrators that send agent work over HTTP, or users of `mocactl`                                             |
+| **You drive it with** | `mocactl sbx`                                                                                                       | The HTTP API (`/turn`, `/v1/runs`) or `mocactl`                                                                           |
+| **What you get back** | The agent's edits, as a patch you apply (`mocactl sbx pull --apply`)                                                | Replies, streamed or not, from sessions that resume by `sessionId`                                                        |
+| **Where it runs**     | You host it: an OpenShift cluster plus KVM hosts                                                                    | A laptop (Docker Compose), a single VM, or Kubernetes / OpenShift                                                         |
+| **Start here**        | [Sandbox quickstart](sandbox/quickstart.md)                                                                         | [Harness quickstart](harness/quickstart.md)                                                                               |
 
-| Label                                                                                                   | Meaning                                                                                                   |
-| ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| **Stable**                                                                                              | Supported, no planned removal.                                                                            |
-| **Preview**                                                                                             | Implemented and the recommended direction, but not yet declared Stable. Interfaces and limits may change. |
-| Today every deployment path is **Preview**. The first path to be promoted to Stable is P6 on            |
-| Kubernetes; the criteria, the status of each path and the support policy are in                         |
-| [Maturity and lifecycle](reference/maturity-and-lifecycle.md). The Knative + KEDA path this map         |
-| once carried was removed in November 2026 ([ADR-0041](adrs/0041-deprecate-knative-keda-deployment.md)). |
+## How the two fit together
 
-## Start here
+Both capabilities keep an agent's **commands away from the agent's own process**. They differ in
+_where the agent runs_.
 
-| I want to...                          | Go to                                                                                                                                                                                     |
-| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Pick an install path and run moca     | [Get started](get-started/index.md)                                                                                                                                                       |
-| Run moca for the first time           | [First run](get-started/first-run.md)                                                                                                                                                     |
-| Understand the security model         | [Security model](reference/security-model.md); [hardening checklist](operations/hardening.md)                                                                                             |
-| Run a deployment for several users    | [Manage multi-user sessions](guides/manage-multi-user-sessions.md)                                                                                                                        |
-| Attach a sandbox on another host      | [Attach a remote sandbox](guides/remote-sandbox.md)                                                                                                                                       |
-| Run a coding agent in a sandbox       | [Sandbox service (SBX0) user guide](sbx/user-guide.md) — **Preview**                                                                                                                      |
-| Use Codex or IBM Bob with a sandbox   | [Codex CLI](sbx/user-guide.md#codex-cli); [IBM Bob](sbx/user-guide.md#ibm-bob)                                                                                                            |
-| Turn an image into a sandbox template | [Template onboarding](../deploy/sbx/template-onboarding/README.md); [gating, provenance and the process](../deploy/sbx/template-onboarding/governance/README.md) — **Preview**            |
-| Promote a Claude Code workflow        | [Promote a workflow](guides/promote-claude-workflow.md)                                                                                                                                   |
-| Operate P6 on Kubernetes              | [Operations](operations/index.md)                                                                                                                                                         |
-| Understand how it works               | [Concepts](concepts/index.md)                                                                                                                                                             |
-| See the terms moca uses               | [Glossary](glossary.md)                                                                                                                                                                   |
-| Know what changes need notice         | [Change policy](reference/change-policy.md)                                                                                                                                               |
-| Know what Stable requires             | [Maturity and lifecycle](reference/maturity-and-lifecycle.md)                                                                                                                             |
-| Look up an environment variable       | [Configuration reference](reference/configuration.md)                                                                                                                                     |
-| Look up a `mocactl` command           | [`mocactl` reference](reference/cli-mocactl.md)                                                                                                                                           |
-| Call the HTTP API                     | [HTTP API guide](reference/http-api.md); contracts: [`api/openapi.yaml`](api/openapi.yaml), [`api/harness-openapi.yaml`](api/harness-openapi.yaml), [Context service](context-service.md) |
-| Dispatch a leaf, use the human gate   | [Leaf envelope and result](reference/leaf-and-envelope.md)                                                                                                                                |
-| Watch a guided walkthrough            | [Demos](demos/README.md)                                                                                                                                                                  |
-| Understand why a decision was made    | [ADRs](adrs/README.md) and the [spec registry](specs/README.md)                                                                                                                           |
-| Work on moca itself                   | [`CONTRIBUTING.md`](../CONTRIBUTING.md), [`CONTRIBUTING-DOCS.md`](CONTRIBUTING-DOCS.md)                                                                                                   |
+```mermaid
+flowchart LR
+  subgraph S["Sandbox service: the agent runs on your laptop"]
+    A1["Claude Code / OpenCode /<br/>Codex / IBM Bob"] -->|"MCP tools"| M["mocactl sbx mcp"]
+    M -->|"Exec"| CP1["sandbox service<br/>(control plane + relay)"]
+    CP1 --> V1["KVM host:<br/>a fresh microVM per command"]
+  end
+  subgraph H["Harness: moca runs the agent"]
+    C["your client or<br/>orchestrator"] -->|"HTTP /turn"| SUP["supervisor"]
+    SUP -->|"hands off the socket"| W["warm workers<br/>(Pi agent loop)"]
+    W --- R[("Redis<br/>sessions")]
+    W -->|"gRPC relay"| SB["sandbox:<br/>container or microVM"]
+  end
+```
 
-## What is in `docs/`
+- **Shared parts.** Both use moca's sandbox relay and its sandbox workers, which dial _out_ to the
+  relay, so a sandbox needs no inbound route. Both can run each command in its own Firecracker
+  microVM.
+  ([Sandboxes and tiers](concepts/sandboxes-and-tiers.md),
+  [Install the sandbox service](../deploy/sbx/README.md))
+- **One control plane, three profiles.** The same control-plane component serves the harness, the
+  sandbox service, or both (`SH_ROUTE_PROFILE` = `harness`, `sandbox` or `combined`). With
+  `combined`, one deployment serves sessions and sandboxes from a single template store.
+  ([One control plane for both](../deploy/sbx/README.md#one-control-plane-for-sessions-and-sandboxes))
+- **Two different "sandboxes".** A harness session runs its tools in the harness's own sandbox. A
+  sandbox-service workspace is a separate thing: `mocactl sbx` commands neither see nor manage a
+  harness session's sandbox. The [glossary](glossary.md) defines both.
 
-| Location                                    | What it is                                                                             | Audience                  |
-| ------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------- |
-| `get-started/`                              | Install-path chooser                                                                   | New users                 |
-| `guides/`                                   | Task guides: multi-user sessions, remote sandbox, promoting a workflow                 | Operators and users       |
-| `operations/`                               | Upgrades, Redis backup, observability, sizing, troubleshooting                         | Operators                 |
-| `concepts/`                                 | How sessions, sandboxes, multiplexing, multi-user, dispatch and context workflows work | Everyone                  |
-| `reference/`                                | Configuration, `mocactl` commands, HTTP API guide, leaf envelope                       | Operators and integrators |
-| `glossary.md`, `context-service.md`, `api/` | Terms and API reference                                                                | Integrators               |
-| `demos/`                                    | Guided, hand-driven walkthroughs                                                       | Evaluators                |
-| `specs/` (registry: `specs/README.md`)      | Design specs; the milestone registry is the source of truth for status                 | Maintainers               |
-| `adrs/`                                     | Immutable decision records                                                             | Maintainers               |
-| `notes/`                                    | Working notes, runbooks and result write-ups                                           | Maintainers               |
-| `archive/`                                  | Dated historical write-ups                                                             | Background                |
-| `REORG-PLAN.md`                             | The plan this structure follows, with the audit and open questions                     | Maintainers               |
+## Which one do I want?
 
-Install guides live next to the scripts they describe: `deploy/compose/`, `deploy/vm/`, `deploy/k8s/` and
-`deploy/microvm/`. Day-two operations for P6 on Kubernetes are in [`operations/`](operations/index.md); the
-[security model](reference/security-model.md) and [hardening checklist](operations/hardening.md) cover the rest.
+| If you want to…                                                                              | Use                                   |
+| -------------------------------------------------------------------------------------------- | ------------------------------------- |
+| Let a coding agent on your laptop edit and test code without running anything on your laptop | **Sandbox service**                   |
+| Hand an agent a repository and get a reviewable patch back                                   | **Sandbox service**                   |
+| Run many agent sessions on a few warm processes, resumable after a restart                   | **Harness**                           |
+| Dispatch units of agent work ("leaves") from your own orchestrator over HTTP                 | **Harness**                           |
+| Run harness sessions and sandboxes on one control plane                                      | **Both**, with the `combined` profile |
+
+Not a fit today:
+
+- **A sandbox service on your laptop.** The sandbox service deploys only to OpenShift plus a KVM
+  host, so you, or your team, deploy it before anyone can use it. The harness has a five-minute
+  local trial.
+- **Scheduled dispatch.** The harness runs synchronous turns, streaming and detachable turns,
+  human-gated runs and opt-in async fan-out. Scheduled dispatch has no design on the current
+  runtime yet ([#536](https://github.com/rossoctl/moca/issues/536)).
+- **A hosted service.** Moca is open source for you to self-host: there is no moca-run endpoint.
+  Every deployment path is **Preview**, so interfaces and limits may still change ([Maturity and lifecycle](reference/maturity-and-lifecycle.md)).
+
+## Find your path
+
+- **Evaluating moca?** Read the table above, then [Get started](get-started/index.md), which
+  says what each path needs. The [harness quickstart](harness/quickstart.md) runs on a laptop
+  in about five minutes.
+- **Using the sandbox service?** You need the URL of your sandbox service deployment. Start with the
+  [sandbox quickstart](sandbox/quickstart.md).
+- **Building on the harness?** Start with the [harness quickstart](harness/quickstart.md), then
+  [the mocactl README](../packages/mocactl/README.md).
+- **Deploying or operating moca?** Start with [Deploy and operate](operate/index.md). It says
+  which deployment delivers which capability.
+
+## Status
+
+Moca is open source (Apache-2.0), for self-hosting, and in **Preview**. Where it is going, and the
+evidence behind its design: [Project](project/index.md). The latest release is
+[v0.10.0](https://github.com/rossoctl/moca/releases/tag/v0.10.0). Container images are
+`ghcr.io/rossoctl/moca` and `ghcr.io/rossoctl/moca-remote-worker`. These pages track moca's `main`
+branch.

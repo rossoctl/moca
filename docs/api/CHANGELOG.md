@@ -735,7 +735,7 @@ Session grants: the key ring, the token format and the two lifecycle endpoints o
 - The grants are signed by a **separate key ring** from session tokens, with header
   `typ: moca-grant+jwt`, so a session token can never pass as a grant even where an `aud` check is
   forgotten (§6.1). Note for any out-of-tree verifier: `aud: moca-sandbox` now names two different
-  tokens — the sandbox grant and SBX0's sandbox access token — and only `typ` separates them. The
+  tokens — the sandbox grant and the sandbox service's sandbox access token — and only `typ` separates them. The
   cross-language vectors are at
   `packages/control-plane/test/fixtures/grant-vectors.json` (§12.2); they pin the verifier side and
   carry the public key only.
@@ -906,7 +906,7 @@ and the claim. M2 mints grants for both audiences with a `turn_exp` and lifts th
 
 ## 1.2.0
 
-The sandbox service's routes ([SBX0 spec](../specs/2026-10-15-sbx0-internal-sandbox-service-design.md) §5.1),
+The sandbox service's routes (sandbox-service spec §5.1),
 served only by a control plane on the `sandbox` route profile (`SH_ROUTE_PROFILE=sandbox`); a moca
 control plane answers 404 for all of them.
 

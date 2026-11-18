@@ -1,14 +1,13 @@
 # Calling the sandbox/v1 API from your own code
 
-How to run commands in an SBX0 sandbox from your own code (a script, an SDK, a local tool) by
+How to run commands in a moca sandbox service sandbox from your own code (a script, an SDK, a local tool) by
 calling `SandboxExec` over gRPC. `mocactl sbx` is the supported command line; this guide is for
-everything else. The design is
-[the SBX0 spec](../specs/2026-10-15-sbx0-internal-sandbox-service-design.md), §7.
+everything else.
 
 ## What it is
 
 [`proto/sandbox/v1/sandbox.proto`](../../proto/sandbox/v1/sandbox.proto) is one self-contained
-file with no imports. A client uses one service, served by the SBX0 sandbox service's relay:
+file with no imports. A client uses one service, served by the sandbox service's relay:
 
 ```proto
 service SandboxExec {
@@ -161,7 +160,7 @@ verify it, which is the relay's job.
   The call then ends with `INTERNAL`, which a client ignores once it has seen the timeout.
 
 **The machinery's failure:** any other `error` event (the VM did not boot, the worker went away), or
-a non-OK status. There is no exit status to report. Two have an SBX0 meaning of their own:
+a non-OK status. There is no exit status to report. Two have a sandbox-service meaning of their own:
 
 - **`DEADLINE_EXCEEDED`, "sandbox token expired during the Exec":** the command outlived its token
   and was cancelled. Give it a shorter timeout, or split it.
@@ -187,7 +186,7 @@ a non-OK status. There is no exit status to report. Two have an SBX0 meaning of 
 A sandbox in a lease mode keeps its VM between Execs, so the page cache stays warm and `/tmp` and
 `/var` survive until the lease ends. Every process is still killed at the end of each Exec, and each
 Exec gets a fresh shell. The design is
-[the lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md) (SBX0.3); the modes are `per-exec`
+[the lease-mode spec](../specs/2026-11-08-sbx-lease-mode-design.md); the modes are `per-exec`
 (the default), `lease` and `lease+processes`, and the deployment decides which of them a user may
 pick. A sandbox's mode is set on the control plane: `mode` and `idleTimeoutS` on
 `POST /v1/sandboxes`, and `PUT /v1/sandboxes/{id}/mode` to change them ([openapi.yaml](openapi.yaml)).

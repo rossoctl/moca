@@ -6,7 +6,7 @@
 For the operators of an SBX0 deployment: the sandbox control plane, the relay and Redis in one
 namespace of a shared OpenShift cluster, and template workers plus the janitor on a KVM host. The
 install reference (every input and its rule) is [the deploy README](README.md); users have
-[the user guide](../../docs/sbx/user-guide.md). The design is
+[the user guide](../../docs/sandbox/user-guide.md). The design is
 [the SBX0 spec](../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md) (§8 for
 operations).
 
@@ -78,11 +78,11 @@ gitignored).
    timer active, then log in as a user and run `mocactl sbx doctor` in a repository.
 
 **Which `mocactl` users install.** Since v0.7.0 the default channel, the latest release, carries
-`mocactl sbx`, as [the user guide](../../docs/sbx/user-guide.md#2-install) says:
+`mocactl sbx`, as [the user guide](../../docs/sandbox/user-guide.md#2-install) says:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | sh
-mocactl sbx --help    # what an sbx sandbox is, then: usage (the sandbox service, SBX0):
+mocactl sbx --help    # what an sbx sandbox is, then: usage (the sandbox service):
 ```
 
 A `mocactl` older than v0.7.0 has no `sbx`: its `mocactl sbx --help` prints the general
@@ -375,7 +375,7 @@ record). What an operator sets there:
 - **Quotas:** `quota`, and `quotaBySubject` for an override.
 - **What clients see of it:** `mocactl sbx policy`, `mocactl sbx quota` and `mocactl sbx hosts`;
   they create, follow and activate their templates with `mocactl sbx templates`
-  ([the user guide](../../docs/sbx/user-guide.md), §8).
+  ([the user guide](../../docs/sandbox/user-guide.md), §8).
 
 **Writing the policy.** A `PUT /v1/policy` stores the whole policy, quota overrides included, so
 send it as a compare-and-set: `?expect=` the `digest` of the `GET /v1/policy` it was built from.
@@ -1109,7 +1109,7 @@ SBX_LIVE_SMOKE=1 SBX_API_URL=https://<api host> SBX_SMOKE_HOME_A="$HOME" SBX_SMO
 ```
 
 `SBX_MODES_ALLOWED` is deployment-wide: listing `lease` for the smoke lets every enrolled user create
-lease sandboxes. Until `docs/sbx/security-review.md` §6 is signed off, run step 8 on a test
+lease sandboxes. Until `docs/notes/sandbox-security-review.md` §6 is signed off, run step 8 on a test
 deployment, or list `lease` for the run only and set `SBX_MODES_ALLOWED` back afterwards (§2's
 re-run of `setup.sh`; the next token mint then moves any lease sandbox left to `per-exec`). The
 create is an upgrade, which `mocactl` takes only from a terminal, so the step runs it under `script`
@@ -1129,7 +1129,7 @@ SBX_LIVE_SMOKE=1 SBX_API_URL=https://<api host> SBX_SMOKE_HOME_A="$HOME" SBX_SMO
   deploy/sbx/smoke.sh
 ```
 
-Until `docs/sbx/security-review.md` §7 (level 2, a draft) is signed off, run step 9 as step 8: on a
+Until `docs/notes/sandbox-security-review.md` §7 (level 2, a draft) is signed off, run step 9 as step 8: on a
 test deployment, or with `lease+processes` listed for the run only and `SBX_MODES_ALLOWED` set back
 afterwards. Its create runs under `script` too; the rest of the step needs no terminal.
 
@@ -1186,7 +1186,7 @@ What each step does:
 
 What it cannot check for you: the agents' own logs (kept on a failure) show whether an agent
 fixed the test by the shortest route, or tried its local tools first and was denied. The
-`no network in the guest` claim is not one of its steps (`docs/sbx/security-review.md` §2).
+`no network in the guest` claim is not one of its steps (`docs/notes/sandbox-security-review.md` §2).
 
 ## 14. Checking the templates
 

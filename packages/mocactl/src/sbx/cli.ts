@@ -110,7 +110,7 @@ own server, SH_CONTROL_PLANE_URL: these commands do not see it.)`;
  * workflow first, from login to rm and logout, then the by-hand, credential, template and admin
  * commands.
  */
-export const SBX_USAGE = `usage (the sandbox service, SBX0):
+export const SBX_USAGE = `usage (the sandbox service):
 a repository's sandbox, in the order you use it:
   mocactl sbx login [--control-plane-url URL] [--no-browser]
                                                  log in with the GitHub device flow (the URL is remembered;

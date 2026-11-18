@@ -55,7 +55,7 @@ These are part of the same flow but live with the code they belong to.
 
 | File                                                                                                                                      | Role in the flow                                                                               |
 | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| [`docs/sbx/user-guide.md`](../../../docs/sbx/user-guide.md)                                                                               | clients: `mocactl sbx templates`, `create --template`, `run`, agents through `mocactl sbx mcp` |
+| [`docs/sandbox/user-guide.md`](../../../docs/sandbox/user-guide.md)                                                                       | clients: `mocactl sbx templates`, `create --template`, `run`, agents through `mocactl sbx mcp` |
 | [`docs/concepts/sandboxes-and-tiers.md`](../../../docs/concepts/sandboxes-and-tiers.md)                                                   | templates and tiers in Moca's own agent sessions (`--option sandboxTemplate=ID`)               |
 | `docs/specs/2026-10-30-session-sandbox-templates-design.md`                                                                               | the design of templates in agent sessions                                                      |
 | `docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md`                                                                       | the design of the template lifecycle: self-serve creates, activation, provenance               |

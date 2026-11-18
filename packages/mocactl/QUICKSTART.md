@@ -113,8 +113,9 @@ And outside doctor:
 ## 5. Clean up
 
 ```bash
-docker compose -d down   # in ~/.serverless-harness (SH_COMPOSE_DIR)
+docker compose down      # in ~/.serverless-harness (SH_COMPOSE_DIR)
 ```
 
-This removes the stack and **every credential stored through the control plane**. `mocactl`'s own
+This stops the stack. Sessions and the credentials stored through the control plane are on named
+volumes and survive it; `docker compose down -v` removes them too. `mocactl`'s own
 files are in `~/.config/mocactl/` and `~/.local/state/mocactl/`.

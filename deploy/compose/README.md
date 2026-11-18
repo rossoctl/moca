@@ -61,7 +61,7 @@ Then:
 curl -s -H 'Content-Type: application/json' -d '{"prompt":"Run uname -a and tell me the kernel."}' \
   http://127.0.0.1:8080/turn
 cd ~/.serverless-harness && docker compose logs -f     # watch it
-cd ~/.serverless-harness && docker compose down        # stop it (Redis state goes with it)
+cd ~/.serverless-harness && docker compose down        # stop it (sessions survive; down -v removes them)
 ```
 
 ## What runs, and the one constraint on its shape

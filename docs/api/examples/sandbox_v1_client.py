@@ -1,4 +1,4 @@
-"""A minimal direct client for MOCA's sandbox/v1 SandboxExec API, for the SBX0 sandbox service.
+"""A minimal direct client for MOCA's sandbox/v1 SandboxExec API, for the moca sandbox service.
 
 See docs/api/sandbox-v1-direct-client.md. Needs Python 3.10+ and grpcio. Generate the stubs first,
 from this directory:
@@ -27,7 +27,7 @@ import grpc
 
 from sandbox.v1 import sandbox_pb2, sandbox_pb2_grpc
 
-# The relay pings every connection every 20 s (SBX0 §3.4); the client does too, so a command that
+# The relay pings every connection every 20 s (sandbox-service spec §3.4); the client does too, so a command that
 # prints nothing for minutes keeps its connection through a load balancer's idle cut.
 CHANNEL_OPTIONS = [
     ("grpc.max_receive_message_length", 16 << 20),
@@ -38,7 +38,7 @@ CHANNEL_OPTIONS = [
 
 # A token is refreshed within this many seconds of its `exp`, and an Exec's timeout leaves this
 # much of the token's life spare, so the worker's own timeout fires before the relay cancels the
-# Exec at `exp` (SBX0 §3.6, §6.5).
+# Exec at `exp` (sandbox-service spec §3.6, §6.5).
 MARGIN_S = 60
 
 # The worker's ExecError message when the command ran out of `timeout_s`.
@@ -173,7 +173,7 @@ class Sandbox:
         return [("authorization", f"Bearer {self._tokens.get(force, need)}")]
 
     def _prepare(self, requested: int | None) -> tuple[list, int, bool]:
-        """Token freshness (SBX0 §6.5): the metadata, the timeout to send, and whether a requested
+        """Token freshness (sandbox-service spec §6.5): the metadata, the timeout to send, and whether a requested
         timeout was cut. `timeout_s` is capped at the token lifetime minus 60 s, and the token must
         have the timeout plus 60 s left, or the relay cancels the Exec at its `exp` (§3.6).
 
@@ -216,7 +216,7 @@ class Sandbox:
             r = self._exec(req_id, command, stdin, timeout, md)
         except _NotStarted:
             # The token was refused before anything ran: refresh once and retry. A command that had
-            # STARTED is never re-run (SBX0 §6.5) -- that path raises SandboxError instead.
+            # STARTED is never re-run (sandbox-service spec §6.5) -- that path raises SandboxError instead.
             try:
                 r = self._exec(req_id, command, stdin, timeout, self._md(force=True))
             except _NotStarted:

@@ -769,7 +769,7 @@ export function indexPage(profile: RouteProfile, version?: string): string {
       ? [
           'For sandboxes, log in with:',
           '  mocactl sbx login --control-plane-url <this URL>',
-          `  (guide: ${GUIDE}/sbx/user-guide.md)`,
+          `  (guide: ${GUIDE}/sandbox/user-guide.md)`,
         ]
       : []),
     ...(harness

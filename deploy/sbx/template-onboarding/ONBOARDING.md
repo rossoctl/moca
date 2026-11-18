@@ -243,7 +243,7 @@ it they stay on the host's disk.
    baseline), or the template's `seed` as its first command. The seed is in the record, and in the
    description for SWE-bench templates.
 3. Works through `mocactl sbx` (`run`, `put`, `pull`) or an agent wired to `mocactl sbx mcp`
-   (Claude Code, OpenCode: the [user guide](../../../docs/sbx/user-guide.md)).
+   (Claude Code, OpenCode: the [user guide](../../../docs/sandbox/user-guide.md)).
 
 **A template that brings its own repository (a seed), such as a SWE-bench template:** use
 `sbx create`, not `sbx up`. `sbx up` pushes the client's repository into `/workspace`, `.git`

@@ -98,7 +98,7 @@ describe('GET / (#779)', () => {
     const body = await page({ routeProfile: 'sandbox', sandbox: base });
     expect(body).toMatch(/^This is a Moca control plane \(the sandbox service\)\./);
     expect(body).toContain('mocactl sbx login --control-plane-url <this URL>');
-    expect(body).toContain('docs/sbx/user-guide.md');
+    expect(body).toContain('docs/sandbox/user-guide.md');
     expect(body).not.toContain('SH_CONTROL_PLANE_URL');
   });
 

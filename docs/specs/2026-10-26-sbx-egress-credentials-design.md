@@ -730,8 +730,8 @@ store env, the unchanged NetworkPolicy, and no service-account token.
   SBX path.
 - **ADR-0042** is refined, not superseded, by ADR-0046. It is not edited (ADR rule 1).
 - **Registry** (`docs/specs/README.md`): an SBX0.2b row. MI1's row drops the stale "ADR-0037" pointer.
-- **User guide and security review:** a "Credentials" section in `docs/sbx/user-guide.md`. Before
-  the cohort uses it, `docs/sbx/security-review.md` gains rows for §1.2 items 3–5 and §8's risk.
+- **User guide and security review:** a "Credentials" section in `docs/sandbox/user-guide.md`. Before
+  the cohort uses it, `docs/notes/sandbox-security-review.md` gains rows for §1.2 items 3–5 and §8's risk.
 
 ## 14. Implementation order (for the plan)
 

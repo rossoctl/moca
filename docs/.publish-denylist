@@ -11,5 +11,5 @@
 #
 # One extended regular expression (grep -E) per line; blank lines and lines
 # starting with # are ignored. SBX[0-9] is also built into the site's check.
-SBX[0-9]
+[Ss][Bb][Xx][0-9]
 [Ii]nternal cohort

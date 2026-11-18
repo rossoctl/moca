@@ -1,6 +1,6 @@
 # ADR-0046: Inject user-scoped credentials at `moca-egress` for SBX microVMs, resolved by sandbox owner (phase 1), then by the user's sandbox token (phase 2)
 
-- **Status:** Accepted (2026-10-28; phase 1 implemented by #630, #641, #646, live acceptance recorded in [docs/sbx/security-review.md](../sbx/security-review.md) §2.1; phase 2 owed) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-10-28; phase 1 implemented by #630, #641, #646, live acceptance recorded in [docs/notes/sandbox-security-review.md](../notes/sandbox-security-review.md) §2.1; phase 2 owed) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-10-26
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-10-26-sbx-egress-credentials-design.md`](../specs/2026-10-26-sbx-egress-credentials-design.md)

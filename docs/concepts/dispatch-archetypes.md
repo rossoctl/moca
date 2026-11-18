@@ -103,6 +103,9 @@ which looks like a real answer. Poll the turn route, not this one.
 
 **Limits on the shipped path**, each tracked rather than implied:
 
+> **Status: single-tenant in v0.10.0.** Async fan-out under `MOCA_TENANCY=multi` is being worked on,
+> on `main`, and is targeted for v0.12.0; the `multi` notes below describe work in progress.
+
 - **Under `multi`, inference is isolated and egress is not yet.** `multi` works: the dequeue hands
   the worker MI1 §6.1 grants instead of a key, and the worker spends the inference grant at the
   control plane's inference listener. It costs three settings on the control plane —
