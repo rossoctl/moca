@@ -968,7 +968,8 @@ samples its own load from then on. Every 15 s (`SBX_SAMPLER_INTERVAL_S`, 5-3600,
 oneshot, `sbx-sampler.service`, runs `/usr/local/libexec/sbx-sampler.sh` (`deploy/sbx/sampler.sh`),
 which writes one JSON line to the journal. It reads `/proc` and the cgroup files; it starts `df`
 twice and, per worker that runs with `SH_DIAG_STATS_ADDR`, one `curl` of that worker's
-`/stats` (1 s at most); and it never fails its unit. A sample, shortened:
+`/stats` on this host (1 s at most; an address that is neither loopback nor a wildcard is refused, never
+curled); and it never fails its unit. A sample, shortened:
 
 ```json
 {

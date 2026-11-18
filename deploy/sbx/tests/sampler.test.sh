@@ -111,6 +111,15 @@ grep -q 'http://127.0.0.1:9901/stats' "$MOCK_LOG" || fail "':9901' is not read o
 printf 'SH_MAX_COMMITTED_MB=8192\nSH_DIAG_STATS_ADDR=[::]:9902\n' >"$SBX_ENV_DIR/workers/sbx_default.env"
 run
 grep -q 'http://\[::1\]:9902/stats' "$MOCK_LOG" || fail "'[::]:9902' is not read on [::1]"
+# Any other host is refused, never curled: the sampler reads only this host's own workers.
+: >"$MOCK_LOG"
+printf 'SH_MAX_COMMITTED_MB=8192\nSH_DIAG_STATS_ADDR=10.1.2.3:9904\n' >"$SBX_ENV_DIR/workers/sbx_default.env"
+run
+! grep -q '^curl ' "$MOCK_LOG" || fail "a non-loopback SH_DIAG_STATS_ADDR was curled: $(grep curl "$MOCK_LOG")"
+is '.workers[0].stats' 'null'
+printf 'SH_MAX_COMMITTED_MB=8192\nSH_DIAG_STATS_ADDR=localhost:9905\n' >"$SBX_ENV_DIR/workers/sbx_default.env"
+run
+grep -q 'http://localhost:9905/stats' "$MOCK_LOG" || fail "'localhost:9905' is not read"
 # A running worker's environment (a drop-in's SH_DIAG_STATS_ADDR, the unit's reserve) wins over
 # its env file, which every install rewrites.
 printf 'SH_MAX_COMMITTED_MB=8192\n' >"$SBX_ENV_DIR/workers/sbx_default.env"
@@ -124,7 +133,7 @@ rm -rf "$D"
 run
 is '.workers[0] | {vms, memory_current, budget_mb, reserve_mb, stats}' '{"vms":0,"memory_current":null,"budget_mb":8192,"reserve_mb":1024,"stats":null}'
 is '.errors' '[]'
-pass 'VMs: populated pool-/vm- cgroups only; a stopped worker (no slice) is 0 VMs and no error; wildcard addresses on loopback; a running worker'"'"'s environment wins'
+pass 'VMs: populated pool-/vm- cgroups only; a stopped worker (no slice) is 0 VMs and no error; wildcard addresses on loopback, any other host refused; a running worker'"'"'s environment wins'
 
 # 3. Failures: one error line per kind, before the sample, whose errors names them; nulls, exit 0.
 setup

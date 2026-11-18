@@ -16,7 +16,8 @@
 # files of sbx.slice and of each worker's sbx-<id>.slice, the worker env files and each running
 # worker's /proc/<pid>/environ. The only programs it starts are df (twice: bytes and inodes, each
 # under `timeout 5`) and, for a worker that runs with SH_DIAG_STATS_ADDR, one curl of that
-# worker's /stats on this host (1 s at most). Nothing needs jq, so a worker host needs no more than
+# worker's /stats on this host (1 s at most; a wildcard address is read on loopback, and an address that
+# is neither loopback nor a wildcard is refused, never curled). Nothing needs jq, so a worker host needs no more than
 # it did. Every value printed is matched as a number first and is null when it cannot be read.
 #
 # Output, in this order:
@@ -244,8 +245,14 @@ stats() {
     return 0
   fi
   host="${BASH_REMATCH[1]}" port="${BASH_REMATCH[2]}"
-  # A wildcard listen address is reached on loopback.
-  case "$host" in '' | 0.0.0.0) host=127.0.0.1 ;; '[::]') host='[::1]' ;; esac
+  # A wildcard listen address is reached on loopback; any other host must be a loopback one: the sampler reads
+  # this host's own workers and never calls out, whatever an env file names.
+  case "$host" in
+    '' | 0.0.0.0) host=127.0.0.1 ;;
+    '[::]') host='[::1]' ;;
+    localhost | 127.* | '[::1]') ;;
+    *) fail "stats:$id" "SH_DIAG_STATS_ADDR='$addr' is not a loopback or wildcard address: not read"; return 0 ;;
+  esac
   command -v curl >/dev/null || { fail curl 'no curl on PATH: no worker /stats read'; return 0; }
   body="$(curl -fsS --max-time 1 --noproxy '*' "http://$host:$port/stats" 2>/dev/null)" ||
     { fail "stats:$id" "no answer from http://$host:$port/stats (SH_DIAG_STATS_ADDR)"; return 0; }
