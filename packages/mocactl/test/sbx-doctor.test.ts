@@ -22,6 +22,7 @@ import {
 import type { ExecFactory } from '../src/sbx/exec.js';
 import { recordCall } from '../src/sbx/recorder.js';
 import {
+  CLAUDE_CURRENT,
   LOGIN,
   NO_LEASE,
   SBX,
@@ -90,9 +91,6 @@ function world(
   return { ...s, cp, r, ctx };
 }
 
-/** A `claude --version` the deny list covers: doctor never asks the real one in a test. */
-const CURRENT = () => '2.1.304 (Claude Code)';
-
 const byName = (cs: DoctorCheck[], name: string) => {
   const c = cs.find((k) => k.name === name);
   if (!c) throw new Error(`no ${name} check in ${cs.map((k) => k.name).join(', ')}`);
@@ -102,10 +100,10 @@ const byName = (cs: DoctorCheck[], name: string) => {
 describe('mocactl sbx doctor (SBX0 §6.1)', () => {
   it('names the idle lifetime in the ready line only when the record carries one (#770)', async () => {
     const w = world({ box: { idleLifetimeS: 604_800 } });
-    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT);
     expect(byName(cs, 'sandbox').detail).toMatch(/, in .+, after 7 d without use$/);
     const o = world();
-    const os = await runDoctor(o.ctx(), o.r, SBX, fakeExec().factory, CURRENT);
+    const os = await runDoctor(o.ctx(), o.r, SBX, fakeExec().factory, CLAUDE_CURRENT);
     const d = byName(os, 'sandbox').detail;
     expect(d).not.toContain('without use');
     expect(d).not.toContain('undefined');
@@ -114,7 +112,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
   it('passes all six checks for a configured repository and a sandbox with days left', async () => {
     const w = world();
     const x = fakeExec();
-    const cs = await runDoctor(w.ctx(), w.r, SBX, x.factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), w.r, SBX, x.factory, CLAUDE_CURRENT);
     expect(cs.map((k) => k.name)).toEqual([
       'login',
       'sandbox',
@@ -138,7 +136,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
 
   it('says any command extends the sandbox when the record carries an idle lifetime (#770)', async () => {
     const w = world({ expiresInS: 2 * 3600, box: { idleLifetimeS: 604_800 } });
-    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT);
     const s = byName(cs, 'sandbox');
     expect(s.ok).toBe(false);
     expect(s.fix).toContain('ends after 7 d without use');
@@ -149,7 +147,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
 
   it('fails the sandbox check with less than 24 h left, naming the expiry and sbx up', async () => {
     const w = world({ expiresInS: 2 * 3600 });
-    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT);
     const s = byName(cs, 'sandbox');
     expect(s.ok).toBe(false);
     expect(s.detail).toContain(new Date((nowS() + 7200) * 1000).toISOString().slice(0, 13));
@@ -167,7 +165,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     for (const box of [{ state: 'terminated', reason: 'expired' }, null]) {
       const w = world({ box });
       const x = fakeExec();
-      const cs = await runDoctor(w.ctx(), w.r, SBX, x.factory, CURRENT);
+      const cs = await runDoctor(w.ctx(), w.r, SBX, x.factory, CLAUDE_CURRENT);
       const s = byName(cs, 'sandbox');
       expect(s.ok).toBe(false);
       expect(s.detail).toMatch(box ? /terminated \(expired\)/ : /no longer exists/);
@@ -183,7 +181,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     const s = JSON.parse(readFileSync(f, 'utf8'));
     s.permissions.deny = s.permissions.deny.filter((t: string) => t !== 'Bash');
     writeFileSync(f, JSON.stringify(s));
-    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT);
     const c = byName(cs, 'agent config');
     expect(c.ok).toBe(false);
     expect(c.detail).toMatch(/Bash/);
@@ -193,7 +191,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
   it('fails a Claude Code older than the deny list covers, and is silent otherwise (#568)', async () => {
     const w = world();
     const names = (cs: DoctorCheck[]) => cs.map((k) => k.name);
-    for (const v of [CURRENT, () => undefined]) {
+    for (const v of [CLAUDE_CURRENT, () => undefined]) {
       expect(names(await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, v))).not.toContain(
         'claude code',
       );
@@ -233,7 +231,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
 
   it('says the denied state is checked in the project config only (review I2)', async () => {
     const w = world();
-    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT);
     const detail = byName(cs, 'agent config').detail;
     expect(detail).toContain("in this repository's project config");
     expect(detail).toContain('user-level and managed settings are not checked');
@@ -249,7 +247,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     o.agent = { build: { permission: { bash: 'allow' } } };
     writeFileSync(f, JSON.stringify(o));
     const c = byName(
-      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT),
+      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT),
       'agent config',
     );
     expect(c.ok).toBe(false);
@@ -261,14 +259,14 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     const w = world({ box: { mode: 'lease', modeEpoch: 1 } });
     writeAgentConfig(w.r, { mode: 'lease' });
     const before = byName(
-      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT),
+      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT),
       'agent config',
     );
     expect(before.ok, before.detail).toBe(true);
     // `sbx mode per-exec` changes the record, not the block.
     w.cp.boxes.set(SBX, { ...w.cp.boxes.get(SBX)!, mode: 'per-exec', modeEpoch: 2 });
     const after = byName(
-      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT),
+      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT),
       'agent config',
     );
     expect(after.ok).toBe(false);
@@ -285,7 +283,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     const w = world({ box: { mode: 'lease+processes', modeEpoch: 2 } });
     writeAgentConfig(w.r, { mode: 'lease' });
     const c = byName(
-      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT),
+      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT),
       'agent config',
     );
     expect(c.ok).toBe(false);
@@ -294,7 +292,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     );
     writeAgentConfig(w.r, { mode: 'lease+processes' });
     const ok = byName(
-      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT),
+      await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT),
       'agent config',
     );
     expect(ok.ok, ok.detail).toBe(true);
@@ -303,20 +301,26 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
   it('doctor says the lease events its Execs carried, on stderr (plan-4 M2)', async () => {
     const w = world();
     const end = leaseEnd({ reason: 'idle' });
-    await runDoctor(w.ctx(), w.r, SBX, withLeaseEvents(fakeExec().factory, [[end]]), CURRENT);
+    await runDoctor(
+      w.ctx(),
+      w.r,
+      SBX,
+      withLeaseEvents(fakeExec().factory, [[end]]),
+      CLAUDE_CURRENT,
+    );
     expect(w.io.errs).toContain(leaseNotice(end, Date.now()));
   });
 
   it('fails the agent-config check in a repository sbx up never configured', async () => {
     const w = world();
-    const cs = await runDoctor(w.ctx(), repo(), SBX, fakeExec().factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), repo(), SBX, fakeExec().factory, CLAUDE_CURRENT);
     expect(byName(cs, 'agent config').detail).toMatch(/Claude Code[\s\S]*OpenCode/);
   });
 
   it('fails the exec check with the sandbox failure text when an Exec throws', async () => {
     const w = world();
     const x = fakeExec({ fail: new ExecMachineryError('sandbox failure: worker unavailable') });
-    const cs = await runDoctor(w.ctx(), w.r, SBX, x.factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), w.r, SBX, x.factory, CLAUDE_CURRENT);
     const e = byName(cs, 'exec');
     expect(e.ok).toBe(false);
     expect(e.detail).toContain('worker unavailable');
@@ -341,7 +345,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
       w.r,
       SBX,
       () => ({ exec, close: () => {}, ...NO_LEASE }),
-      CURRENT,
+      CLAUDE_CURRENT,
     );
     expect(Date.now() - t0).toBeLessThan(5_000);
     expect(asked).toEqual([20]);
@@ -353,7 +357,13 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
 
   it('fails the exec check when `true` itself fails', async () => {
     const w = world();
-    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec({ exitCode: 127 }).factory, CURRENT);
+    const cs = await runDoctor(
+      w.ctx(),
+      w.r,
+      SBX,
+      fakeExec({ exitCode: 127 }).factory,
+      CLAUDE_CURRENT,
+    );
     expect(byName(cs, 'exec')).toMatchObject({
       ok: false,
       detail: expect.stringMatching(/exited 127/),
@@ -363,7 +373,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
   it('warns, without failing, when the sandbox has changes not yet pulled', async () => {
     for (const state of ['dirty', 'no_baseline']) {
       const w = world();
-      const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec({ state }).factory, CURRENT);
+      const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec({ state }).factory, CLAUDE_CURRENT);
       const c = byName(cs, 'changes');
       expect(c.ok).toBe(true);
       expect(c.warn).toBe(true);
@@ -393,7 +403,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
       execs: 1,
       ok: false,
     });
-    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT);
     const c = byName(cs, 'recent calls');
     expect(c.ok).toBe(true);
     expect(c.detail).toBe(
@@ -403,7 +413,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
 
   it('reports the login, and nothing that needs one, when not logged in (R7)', async () => {
     const w = world({ loggedIn: false });
-    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT);
     expect(cs[0]).toMatchObject({ name: 'login', ok: false, fix: 'mocactl sbx login' });
     expect(cs.map((k) => k.name)).toEqual(['login', 'agent config', 'recent calls']);
     expect(w.cp.calls).toEqual([]);
@@ -425,7 +435,10 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
       io: w.io,
       json: false,
     };
-    const c = byName(await runDoctor(broken, w.r, SBX, fakeExec().factory, CURRENT), 'sandbox');
+    const c = byName(
+      await runDoctor(broken, w.r, SBX, fakeExec().factory, CLAUDE_CURRENT),
+      'sandbox',
+    );
     expect(c.ok).toBe(false);
     expect(c.fix).toBeDefined();
   });
@@ -433,7 +446,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
   it('reports an unreadable flight recorder as a failed check, and goes on', async () => {
     const w = world();
     mkdirSync(join(w.paths.stateDir, 'sbx', `${SBX}.log`), { recursive: true }); // a directory
-    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), w.r, SBX, fakeExec().factory, CLAUDE_CURRENT);
     const c = byName(cs, 'recent calls');
     expect(c.ok).toBe(false);
     expect(c.detail).toMatch(/cannot read the flight recorder/);
@@ -442,7 +455,7 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
 
   it('outside a repository, checks everything but the agent configuration', async () => {
     const w = world();
-    const cs = await runDoctor(w.ctx(), undefined, SBX, fakeExec().factory, CURRENT);
+    const cs = await runDoctor(w.ctx(), undefined, SBX, fakeExec().factory, CLAUDE_CURRENT);
     expect(cs.map((k) => k.name)).toEqual(['login', 'sandbox', 'exec', 'changes', 'recent calls']);
     expect(cs.every((k) => k.ok)).toBe(true);
   });
@@ -467,7 +480,7 @@ describe('mocactl sbx doctor, the command', () => {
         fetchImpl: w.cp.fetchImpl,
         cwd: join(w.r, 'src'),
         execFactory: x.factory,
-        claudeVersion: CURRENT,
+        claudeVersion: CLAUDE_CURRENT,
       });
     };
     return { ...w, run, out: () => w.io.outs.join('') };

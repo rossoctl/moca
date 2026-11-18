@@ -19,7 +19,7 @@ import {
   type LeaseStatusView,
 } from '@moca/sandbox-client';
 import { resolvePaths, saveAuth } from '../../src/config.js';
-import { sbxMain, sbxPaths } from '../../src/sbx/cli.js';
+import { sbxMain, sbxPaths, type SbxDeps } from '../../src/sbx/cli.js';
 import type { AgentopExec } from '../../src/sbx/agentop.js';
 import type { ExecFactory } from '../../src/sbx/exec.js';
 
@@ -405,6 +405,9 @@ export function workspaces(o: Parameters<typeof localWorkspace>[0] = {}) {
   return { get, factory, counts: () => ({ opened, closed }) };
 }
 
+/** A `claude --version` the deny list covers: doctor never asks the real one in a test. */
+export const CLAUDE_CURRENT = () => '2.1.304 (Claude Code)';
+
 export function harness(
   o: {
     boxes?: ReturnType<typeof sandbox>[];
@@ -413,6 +416,8 @@ export function harness(
     agentop?: AgentopExec;
     /** A control plane from before idle lifetimes. */
     noLifetimes?: boolean;
+    /** `claude --version`'s output for doctor (default: CLAUDE_CURRENT). */
+    claudeVersion?: SbxDeps['claudeVersion'];
   } = {},
 ) {
   const s = setup();
@@ -431,6 +436,7 @@ export function harness(
       cwd: over.cwd ?? r,
       execFactory: ws.factory,
       agentop,
+      claudeVersion: o.claudeVersion ?? CLAUDE_CURRENT,
     });
   };
   const err = () => s.io.errs.join('\n');

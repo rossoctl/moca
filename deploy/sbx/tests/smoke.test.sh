@@ -2,7 +2,7 @@
 # Tests for deploy/sbx/smoke.sh, the SBX0 live smoke (spec §10.6), against fakes on PATH: a mocactl
 # that keeps sandboxes, workspaces and owners in a temp dir and logs every call; a python3 that plays
 # the example sandbox/v1 client (and runs everything else on the real one); a fake clock (sleep and
-# date), so the 5-minute and token-expiry steps run in a second; ssh, a janitor and claude.
+# date), so the 5-minute and token-expiry steps run in a second; ssh, a janitor, claude and opencode.
 # What it must do: nothing at all without SBX_LIVE_SMOKE=1; refuse bad settings before any call;
 # run the selected steps only; print `ok N` / `not ok N` and exit 1 on a failure; delete every
 # sandbox it created, as its owner, even on failure, and nothing else; never print a token.
@@ -484,6 +484,14 @@ printf 'claude %s\n' "$*" >>"$MOCK_LOG"
 mocactl sbx mcp </dev/null
 echo 'Fixed add() and ran the tests.'
 MOCK
+# opencode: only as `opencode run PROMPT`; like claude, it works through `mocactl sbx mcp`.
+cat >"$TMP/bin/opencode" <<'MOCK'
+#!/usr/bin/env bash
+printf 'opencode %s\n' "$*" >>"$MOCK_LOG"
+[[ "$1" == run && $# -eq 2 ]] || { echo "mock opencode: unexpected: $*" >&2; exit 9; }
+mocactl sbx mcp </dev/null
+echo 'Fixed add() and ran the tests.'
+MOCK
 # script (step 8): util-linux's (MOCK_SCRIPT_FLAVOR=util-linux, the KVM host and the runners) or the
 # BSD one (the default, macOS), as far as smoke.sh uses them: -V tells them apart, util-linux's takes
 # `-qec CMD /dev/null` and runs CMD with $SHELL, the BSD one `-q /dev/null CMD...`. The command gets a
@@ -608,7 +616,7 @@ reject 'a mocactl without sbx' 'has no `mocactl sbx`' MOCK_NO_SBX=1
 reject 'both homes logged in as one user' 'are both logged in as github:a' SBX_SMOKE_HOME_B="$TMP/home-same"
 pass 'refuses bad settings, an argument, a missing or sbx-less mocactl, one user for two, with exit 2 and no sandbox call'
 
-# 3. A full run: every step ok (opencode is not on PATH: a SKIP), in order, each sandbox deleted.
+# 3. A full run: every step ok, in order, each sandbox deleted.
 reset_state
 smoke >"$TMP/out" 2>&1 || fail "a full run exited $?"
 has 'ok 1 - round trip: sbx up, run, put, pull --apply on a sample repository'
@@ -616,17 +624,17 @@ has "ok 2 - two users: B is refused A's sandbox (404, PERMISSION_DENIED); one re
 has 'ok 3 - a command silent for 5 minutes completes'
 has 'ok 4 - delete: the mint is refused at once; the kept token is cancelled at exp + leeway, then refused'
 has 'ok 5 - claude fixes the failing test through mocactl sbx mcp; the tree is unchanged until pull --apply'
-has 'ok 5 - opencode fixes the failing test through mocactl sbx mcp; the tree is unchanged until pull --apply # SKIP opencode not on PATH'
+has 'ok 5 - opencode fixes the failing test through mocactl sbx mcp; the tree is unchanged until pull --apply'
 has "ok 6 - the janitor frees a deleted sandbox's directory"
 has 'ok 7 - egress credentials: the PAT works from the sandbox without being in it; the placeholder is inert; delete revokes # SKIP SBX_SMOKE_GITHUB_TOKEN_FILE and SBX_SMOKE_GITHUB_REPO not both set'
 has "$STEP8_OK"
 has "$STEP9_OK"
-has '# 8 ok, 0 not ok, 2 skipped'
+has '# 9 ok, 0 not ok, 1 skipped'
 [[ "$(grep -o '^ok [0-9]' "$TMP/out" | tr -d '\n')" == 'ok 1ok 2ok 3ok 4ok 5ok 5ok 6ok 7ok 8ok 9' ]] || fail 'the steps did not run in order'
 ! grep -q '^not ok' "$TMP/out" || fail 'a step is not ok'
 all_cleaned
-[[ "$(created)" == 8 ]] || fail "created $(created) sandboxes, not 8 (steps 1, 2 x2, 3, 4, 5, 8, 9)"
-pass 'a full run: ok 1-6, 8 and 9 in order, step 7 a SKIP without its inputs, an agent not installed is a SKIP, and every sandbox it made is deleted by its owner'
+[[ "$(created)" == 9 ]] || fail "created $(created) sandboxes, not 9 (steps 1, 2 x2, 3, 4, 5 x2, 8, 9)"
+pass 'a full run: ok 1-6, 8 and 9 in order, step 7 a SKIP without its inputs, and every sandbox it made is deleted by its owner'
 
 # What the full run sent: every mocactl as one of the two homes, with the URL, no XDG overrides.
 ! grep '^mocactl ' "$MOCK_LOG" | grep -qv "^mocactl user=[ab] url=https://api.sbx.example xdg= " || fail 'a mocactl ran without the HOME, URL or XDG settings'
@@ -649,15 +657,32 @@ grep -A1 '^mocactl user=a .* sbx rm --force sbx-0*5$' "$MOCK_LOG" | grep -q ' sb
 grep -q '^client user=a wsk=sbx-[0-9a-f]* req_id=[0-9]* cmd=sleep 120; echo not-cancelled$' "$MOCK_LOG" || fail 'no command started before exp'
 # Step 5: claude headless with the project MCP config, the agent's mocactl as user A.
 grep -qx "claude -p The test suite fails (python3 -m unittest). Fix it with a minimal change and run the tests. --mcp-config .mcp.json --strict-mcp-config --allowedTools mcp__sandbox__\*" "$MOCK_LOG" || fail 'claude not run headless with --mcp-config .mcp.json --strict-mcp-config and only the sandbox MCP tools allowed'
+grep -qx "opencode run The test suite fails (python3 -m unittest). Fix it with a minimal change and run the tests." "$MOCK_LOG" || fail 'opencode not run as opencode run PROMPT'
 grep -q '^mocactl user=a url=https://api.sbx.example xdg= sbx mcp$' "$MOCK_LOG" || fail "the agent's mocactl sbx mcp did not run as user A"
 # Step 6: the janitor with the env file sourced, the host's own wait kept, and the host's paths.
 grep -q '^ssh -o BatchMode=yes kvm.example sudo -n bash -s -- sbx_default sbx-[0-9a-f]* ' "$MOCK_LOG" || fail 'no ssh for the janitor'
 grep -qx "janitor age=3630 url=https://api.sbx.example env=$TMP/host/etc srv=$MOCK_SRV token_file=$TMP/host/etc/janitor.token" "$MOCK_LOG" || fail "the janitor did not run with janitor.env sourced and the host's own SBX_JANITOR_AGE"
-pass "the calls: B's mint/env/Exec on A's sandbox, one req_id from both users, a 400 s run, the pre-exp cancel, headless claude, the janitor"
+pass "the calls: B's mint/env/Exec on A's sandbox, one req_id from both users, a 400 s run, the pre-exp cancel, headless claude and opencode, the janitor"
 
 # No token, API token or janitor token printed.
 for secret in tok. api-secret janitor-secret; do hasnt "$secret"; done
 pass 'never prints a sandbox, login or janitor token'
+
+# An agent not installed is a SKIP: no opencode on PATH, neither the fake nor one the host has.
+reset_state
+mkdir -p "$TMP/bin-no-opencode"
+cp -p "$TMP/bin/"* "$TMP/bin-no-opencode/"
+rm "$TMP/bin-no-opencode/opencode"
+nopath="$TMP/bin-no-opencode"
+IFS=: read -ra dirs <<<"$BASEPATH"
+for d in "${dirs[@]}"; do [[ -x "$d/opencode" ]] || nopath+=":$d"; done
+smoke SBX_SMOKE_STEPS=5 PATH="$nopath" >"$TMP/out" 2>&1 || fail "step 5 without opencode exited $?"
+has 'ok 5 - claude fixes the failing test through mocactl sbx mcp; the tree is unchanged until pull --apply'
+has 'ok 5 - opencode fixes the failing test through mocactl sbx mcp; the tree is unchanged until pull --apply # SKIP opencode not on PATH'
+! grep -q '^opencode ' "$MOCK_LOG" || fail 'opencode ran'
+[[ "$(created)" == 1 ]] || fail "created $(created) sandboxes, not 1 (claude's)"
+all_cleaned
+pass 'an agent not on PATH is a SKIP, and the other agent still runs'
 
 # 4. Step selection.
 reset_state
