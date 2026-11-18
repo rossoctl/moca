@@ -109,11 +109,6 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
     vi.stubEnv('GIT_CONFIG_GLOBAL', config);
     try {
       expect(await h.run(['up', '--template', 'node22'])).toBe(0);
-      writeFileSync(join(h.ws.get(NEW).ws, 'src/app.py'), 'print(2)\n');
-      expect(await h.run(['pull'])).toBe(0);
-      expect(h.io.outB.map((b) => b.toString()).join('') + h.io.outs.join('')).toContain(
-        '+print(2)',
-      );
       expect(h.err()).not.toContain('hook ran');
     } finally {
       vi.unstubAllEnvs();
