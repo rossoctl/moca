@@ -933,6 +933,11 @@ async function select(
     // Another first turn of this session claimed a different sandbox between our read and our claim.
     // Converge on it, once: two concurrent turns of one session must share one workspace.
     await got.release().catch(() => {});
+    // And close the channel `take()` opened for it, or this path leaks one per losing claim -- #894
+    // one caller up. The `raced` branch below is reached from a 503 the client retries, so it is the
+    // concurrency path that repeats hardest. Nothing is outstanding on it: `take()` neither seeds nor
+    // execs. Best effort, like the release: the loser still has to converge on the winner.
+    await got.transport.close().catch(() => {});
     if (raced) throw new SandboxAffinityPendingError(winner.sandboxId, 0);
     return select(env, headCwd, sessionId, opts, deps, true);
   }
