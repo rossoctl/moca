@@ -175,8 +175,8 @@ jobs:
           path: ~/bash32
           key: bash32-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_VERSION }}-${{ env.BASH32_SHA256 }}
 
-      # gnu89: 3.2.57 predates C99 implicit-declaration errors and C23 keywords, so a newer
-      # runner compiler would otherwise break the build for reasons unrelated to the suites.
+      # gnu89 via CC, not CFLAGS: the build-time helpers (mkbuiltins) ignore CFLAGS, and under
+      # the runner's gnu23 default their K&R `xmalloc ()` declarations mean "no arguments".
       - name: Build bash 3.2
         if: steps.bash32-cache.outputs.cache-hit != 'true'
         run: |
@@ -186,7 +186,7 @@ jobs:
           echo "${BASH32_SHA256}  bash-${BASH32_VERSION}.tar.gz" | sha256sum -c -
           tar xzf "bash-${BASH32_VERSION}.tar.gz"
           cd "bash-${BASH32_VERSION}"
-          CFLAGS="-std=gnu89 -w" ./configure --prefix="$HOME/bash32" --without-bash-malloc
+          CC="gcc -std=gnu89" CFLAGS="-w" ./configure --prefix="$HOME/bash32" --without-bash-malloc
           make -j"$(nproc)"
           make install
 

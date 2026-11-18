@@ -11,12 +11,12 @@ on:
   push:
     branches: [main]
     paths:
-      - "deploy/**"
-      - "scripts/**"
-      - "Makefile"
-      - ".github/workflows/deploy-bash32-macos.yml"
+      - 'deploy/**'
+      - 'scripts/**'
+      - 'Makefile'
+      - '.github/workflows/deploy-bash32-macos.yml'
   schedule:
-    - cron: "17 5 * * *"
+    - cron: '17 5 * * *'
   workflow_dispatch:
 
 permissions:
