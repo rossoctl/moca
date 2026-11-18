@@ -67,6 +67,9 @@ describe('§9.3 test 3 — contract drift', () => {
       const schemes = (op.security ?? []).flatMap((s) => Object.keys(s));
       if (auth === 'none') expect(schemes, `${method} ${path}`).toEqual([]);
       if (auth === 'api') expect(schemes, `${method} ${path}`).toEqual(['sessionToken']);
+      if (auth === 'admin')
+        // Either an admin's API token or the installer's static bearer (OR semantics).
+        expect(schemes, `${method} ${path}`).toEqual(['sessionToken', 'installerToken']);
       if (auth === 'exchange') expect(schemes, `${method} ${path}`).toEqual(['exchangeToken']);
       if (auth === 'janitor') expect(schemes, `${method} ${path}`).toEqual(['janitorToken']);
       if (auth === 'egress') expect(schemes, `${method} ${path}`).toEqual(['egress']);
@@ -74,6 +77,7 @@ describe('§9.3 test 3 — contract drift', () => {
     }
     // Every auth kind the route table uses is one of the six handled above.
     expect([...new Set(ROUTES.map((r) => r.auth))].sort()).toEqual([
+      'admin',
       'api',
       'egress',
       'exchange',
@@ -88,6 +92,7 @@ describe('§9.3 test 3 — contract drift', () => {
       'egress',
       'exchangeToken',
       'hostToken',
+      'installerToken',
       'janitorToken',
       'sessionToken',
     ]);

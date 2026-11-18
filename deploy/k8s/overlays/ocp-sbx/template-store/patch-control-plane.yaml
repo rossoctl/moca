@@ -36,6 +36,8 @@ spec:
                   items:
                     - { key: SH_SESSION_TOKEN_PRIVATE_KEY, path: SH_SESSION_TOKEN_PRIVATE_KEY }
                     - { key: SH_JANITOR_TOKEN, path: SH_JANITOR_TOKEN }
+                    # The operator's static bearer for the members routes (setup.sh keeps it).
+                    - { key: SH_INSTALLER_TOKEN, path: SH_INSTALLER_TOKEN }
               # The oidc client secret, optional like the egress source: a GitHub stack has no
               # moca-oidc Secret and the source is skipped (patch-control-plane.yaml, the base).
               - secret:

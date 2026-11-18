@@ -29,12 +29,15 @@ export interface RouteSpec {
   /**
    * `none`     -- unauthenticated (probes, device flow).
    * `api`      -- Ed25519 token with scope `api` (plan gap #7).
+   * `admin`    -- the members routes: an admin's `api` token, or the installer's static
+   *               SH_INSTALLER_TOKEN bearer acting as the synthetic `installer` subject
+   *               (server.ts); handlers still enforce the admin role on both paths.
    * `exchange` -- the shared SH_EXCHANGE_TOKEN bearer (spec §5.3.1).
    * `janitor`  -- the sandbox host janitor's SH_JANITOR_TOKEN bearer (SBX0 §8.3).
    * `egress`   -- one configured KVM host's egress token (SBX0.2b §4.2); names the host.
    * `host`     -- one template host agent's SH_HOST_TOKEN_<ID> (template lifecycle spec §6.1); names the host.
    */
-  auth: 'none' | 'api' | 'exchange' | 'janitor' | 'egress' | 'host';
+  auth: 'none' | 'api' | 'admin' | 'exchange' | 'janitor' | 'egress' | 'host';
   /** The profiles that mount this route (see RouteProfile). */
   profiles: readonly RouteProfile[];
   /**
@@ -697,7 +700,7 @@ export const ROUTES: readonly RouteSpec[] = [
   {
     method: 'GET',
     path: '/v1/subjects',
-    auth: 'api',
+    auth: 'admin',
     sessionScoped: false,
     profiles: BOTH,
     operationId: 'listSubjects',
@@ -705,7 +708,7 @@ export const ROUTES: readonly RouteSpec[] = [
   {
     method: 'PUT',
     path: '/v1/subjects/{subject}',
-    auth: 'api',
+    auth: 'admin',
     sessionScoped: false,
     profiles: BOTH,
     operationId: 'enrollSubject',
@@ -713,7 +716,7 @@ export const ROUTES: readonly RouteSpec[] = [
   {
     method: 'DELETE',
     path: '/v1/subjects/{subject}',
-    auth: 'api',
+    auth: 'admin',
     sessionScoped: false,
     profiles: BOTH,
     operationId: 'unenrollSubject',
@@ -721,7 +724,7 @@ export const ROUTES: readonly RouteSpec[] = [
   {
     method: 'PUT',
     path: '/v1/subjects/{subject}/roles/admin',
-    auth: 'api',
+    auth: 'admin',
     sessionScoped: false,
     bodyRequired: false,
     profiles: BOTH,
@@ -730,7 +733,7 @@ export const ROUTES: readonly RouteSpec[] = [
   {
     method: 'DELETE',
     path: '/v1/subjects/{subject}/roles/admin',
-    auth: 'api',
+    auth: 'admin',
     sessionScoped: false,
     profiles: BOTH,
     operationId: 'revokeAdmin',

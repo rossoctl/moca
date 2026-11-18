@@ -406,8 +406,14 @@ jtok="$(secret_val moca-mu1 SH_JANITOR_TOKEN)"
 [[ "$jtok" =~ ^[0-9a-f]{64}$ ]] || fail 'no 64-hex SH_JANITOR_TOKEN in moca-mu1'
 mu1_applies="$(grep '^secret moca-mu1 ' "$MOCK_STATE/applies.log")"
 [[ -n "$mu1_applies" ]] || fail 'moca-mu1 was never applied'
-! grep -vx 'secret moca-mu1 SH_JANITOR_TOKEN,SH_SESSION_TOKEN_PRIVATE_KEY' <<<"$mu1_applies" ||
+! grep -vx 'secret moca-mu1 SH_INSTALLER_TOKEN,SH_JANITOR_TOKEN,SH_SESSION_TOKEN_PRIVATE_KEY' <<<"$mu1_applies" ||
   fail "an apply of moca-mu1 omits a key (server-side apply would prune it): $(sort -u <<<"$mu1_applies")"
+# The installer token (SH_INSTALLER_TOKEN): generated once like the janitor's, in every apply,
+# 64 hex, and NEVER written into any bundle or file outside the Secret -- it is the operator's.
+itok="$(secret_val moca-mu1 SH_INSTALLER_TOKEN)"
+[[ "$itok" =~ ^[0-9a-f]{64}$ ]] || fail 'no 64-hex SH_INSTALLER_TOKEN in moca-mu1'
+! find "$GEN" -type f -exec grep -lF "$itok" {} + 2>/dev/null | grep -q . ||
+  fail 'the installer token leaked into a generated bundle or file'
 JB="$GEN/janitor"
 mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 [[ -f "$JB/janitor.env" && -f "$JB/janitor.token" ]] || fail 'no janitor bundle (janitor.env + janitor.token)'

@@ -270,6 +270,13 @@ export const MEMBER_SUBJECT_RE = new RegExp(`^(?:github:[0-9]+|oidc:${OIDC_SUB_P
 /** The member grammar as a reader sees it, for refusals and help texts. */
 export const MEMBER_SUBJECT_FORMS = 'github:<numeric id> or oidc:<provider sub>';
 
+/**
+ * The subject the installer bearer acts as (SH_INSTALLER_TOKEN, server.ts): a synthetic operator
+ * identity no login can ever mint -- SUBJECT_RE refuses a bare word, so no github:/oidc:/test:
+ * subject can collide with it. Every audit line of its actions names it.
+ */
+export const INSTALLER_SUBJECT = 'installer';
+
 export function adminSubjectsFromEnv(raw: string | undefined): string[] {
   return (raw ?? '')
     .split(',')

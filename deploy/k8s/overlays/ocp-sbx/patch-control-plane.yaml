@@ -79,6 +79,8 @@ spec:
                     - { key: SH_SESSION_TOKEN_PRIVATE_KEY, path: SH_SESSION_TOKEN_PRIVATE_KEY }
                     # The host janitor's bearer (SBX0 §8.1), admitted on GET /v1/janitor/sandboxes only.
                     - { key: SH_JANITOR_TOKEN, path: SH_JANITOR_TOKEN }
+                    # The operator's static bearer for the members routes (setup.sh keeps it).
+                    - { key: SH_INSTALLER_TOKEN, path: SH_INSTALLER_TOKEN }
               - secret:
                   name: moca-oidc
                   optional: true
