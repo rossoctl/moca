@@ -1,5 +1,13 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -77,22 +85,17 @@ describe('decideWorkspaceMarker', () => {
     });
   });
 
-  it('record and marker missing: reset, the marker rewritten and recorded', () => {
-    expect(decideWorkspaceMarker(true, { prev: 'absent', now: 'ours' })).toEqual({
+  it('record and marker missing: reset, nothing recorded yet, the rewrite left to the turn end', () => {
+    // With a record the start only reads, so `now` is `none`: the end-of-turn write rewrites it.
+    expect(decideWorkspaceMarker(true, { prev: 'absent', now: 'none' })).toEqual({
       verdict: 'reset',
-      record: true,
-      finishWrite: false,
+      finishWrite: true,
     });
   });
 
   it("record and another session's marker: reset as well", () => {
-    expect(decideWorkspaceMarker(true, { prev: 'other', now: 'ours' }).verdict).toBe('reset');
-  });
-
-  it('a reset into a still-empty workspace records written=false, so it is reported once', () => {
-    expect(decideWorkspaceMarker(true, { prev: 'absent', now: 'none' })).toEqual({
+    expect(decideWorkspaceMarker(true, { prev: 'other', now: 'none' })).toEqual({
       verdict: 'reset',
-      record: false,
       finishWrite: true,
     });
   });
@@ -127,8 +130,10 @@ describe('recordedMarker', () => {
 });
 
 describe('buildMarkerScript, run for real', () => {
-  const run = async (dir: string, key = 's-1') =>
-    parseMarkerOutput((await bash.exec(buildMarkerScript({ key, dir }))).stdout.toString());
+  const run = async (dir: string, key = 's-1', write = true) =>
+    parseMarkerOutput(
+      (await bash.exec(buildMarkerScript({ key, dir }, { write }))).stdout.toString(),
+    );
 
   it('leaves an empty workspace empty, so the empty-directory sweep (#551) still removes it', async () => {
     const dir = scratch();
@@ -166,8 +171,67 @@ describe('buildMarkerScript, run for real', () => {
     expect(status.split('\n').filter(Boolean)).toEqual(['?? app.py']);
   });
 
+  it('without write, only reads: a workspace with files and no marker stays unmarked', async () => {
+    const dir = scratch();
+    writeFileSync(join(dir, 'a.txt'), 'x');
+    expect(await run(dir, 's-1', false)).toEqual({ prev: 'absent', now: 'none' });
+    expect(existsSync(join(dir, WORKSPACE_MARKER))).toBe(false);
+    writeFileSync(join(dir, WORKSPACE_MARKER), 's-1');
+    expect(await run(dir, 's-1', false)).toEqual({ prev: 'ours', now: 'ours' });
+  });
+
+  it('a git worktree (.git is a file): the marker goes in the shared info/exclude', async () => {
+    const root = scratch();
+    const main = join(root, 'main');
+    const wt = join(root, 'wt');
+    const git = (cwd: string, ...a: string[]) =>
+      execFileSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], {
+        encoding: 'utf8',
+      });
+    execFileSync('git', ['init', '-q', main]);
+    writeFileSync(join(main, 'base'), 'x');
+    git(main, 'add', '-A');
+    git(main, 'commit', '-qm', 'base');
+    git(main, 'worktree', 'add', '-q', wt);
+    writeFileSync(join(wt, 'app.py'), 'x');
+    expect(await run(wt)).toEqual({ prev: 'absent', now: 'ours' });
+    expect(git(wt, 'status', '--porcelain').split('\n').filter(Boolean)).toEqual(['?? app.py']);
+  });
+
+  it('a workspace in a subdirectory of a repository gets an exclude line for its own path', async () => {
+    const root = scratch();
+    execFileSync('git', ['init', '-q', root]);
+    const dir = join(root, 'sub');
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'app.py'), 'x');
+    await run(dir);
+    const status = execFileSync('git', ['-C', root, 'status', '--porcelain', '-uall'], {
+      encoding: 'utf8',
+    });
+    expect(status.split('\n').filter(Boolean)).toEqual(['?? sub/app.py']);
+  });
+
+  it('a failing git (a broken .git file, or no git at all) is ignored: the marker is still written', async () => {
+    const dir = scratch();
+    writeFileSync(join(dir, '.git'), 'gitdir: /nonexistent/repo\n');
+    writeFileSync(join(dir, 'app.py'), 'x');
+    expect(await run(dir)).toEqual({ prev: 'absent', now: 'ours' });
+    expect(readFileSync(join(dir, WORKSPACE_MARKER), 'utf8')).toBe('s-1');
+
+    // No git on PATH (only what the write needs): `command -v git` fails, the step is skipped.
+    const bin = scratch();
+    for (const tool of ['mv', 'rm']) symlinkSync(`/bin/${tool}`, join(bin, tool));
+    const bare = scratch();
+    writeFileSync(join(bare, 'f'), 'x');
+    const script = buildMarkerScript({ key: 's-1', dir: bare }, { write: true });
+    const out = execFileSync('/bin/bash', ['-c', script], { env: { PATH: bin }, encoding: 'utf8' });
+    expect(parseMarkerOutput(out)).toEqual({ prev: 'absent', now: 'ours' });
+  });
+
   it('a missing workspace directory is an exit status, not output that parses', async () => {
-    const res = await bash.exec(buildMarkerScript({ key: 's-1', dir: join(scratch(), 'gone') }));
+    const res = await bash.exec(
+      buildMarkerScript({ key: 's-1', dir: join(scratch(), 'gone') }, { write: true }),
+    );
     expect(res.exitCode).toBe(90);
   });
 
@@ -203,7 +267,7 @@ describe('checkWorkspaceMarker', () => {
     );
   });
 
-  it('reports a reset when the recorded marker is gone, and logs it', async () => {
+  it('reports a reset when the recorded marker is gone, and logs it; the turn end rewrites it', async () => {
     const dir = scratch();
     const log = fakeLog();
     writeFileSync(join(dir, 'f'), 'x');
@@ -214,8 +278,59 @@ describe('checkWorkspaceMarker', () => {
     const check = await checkWorkspaceMarker(bash, { key: 's-1', dir }, log, 'sbx-1');
     expect(check.verdict).toBe('reset');
     expect(warn.mock.calls[0]?.[0]).toMatch(/no longer carries its marker \(absent\)/);
-    // Recorded as not written: the fresh workspace is empty, and the next turn must not see the
-    // same reset again.
+    writeFileSync(join(dir, 'again'), 'x'); // the agent's turn
+    await check.finish();
+    expect(readFileSync(join(dir, WORKSPACE_MARKER), 'utf8')).toBe('s-1');
+    expect(log.entries).toHaveLength(1); // still `written: true`: nothing to record
+    expect((await checkWorkspaceMarker(bash, { key: 's-1', dir }, log, 'sbx-1')).verdict).toBe(
+      'intact',
+    );
+  });
+
+  it('a reset turn that never reaches its end leaves the marker missing: the next turn reports it again', async () => {
+    const dir = scratch();
+    const log = fakeLog();
+    writeFileSync(join(dir, 'f'), 'x');
+    await checkWorkspaceMarker(bash, { key: 's-1', dir }, log, 'sbx-1');
+    rmSync(join(dir, WORKSPACE_MARKER));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // The start only read: no write, no record, even though the workspace still holds files.
+    expect((await checkWorkspaceMarker(bash, { key: 's-1', dir }, log, 'sbx-1')).verdict).toBe(
+      'reset',
+    );
+    expect(existsSync(join(dir, WORKSPACE_MARKER))).toBe(false);
+    // finish() not called: the turn failed before the agent ran.
+    expect((await checkWorkspaceMarker(bash, { key: 's-1', dir }, log, 'sbx-1')).verdict).toBe(
+      'reset',
+    );
+  });
+
+  it('an intact turn that fails leaves the marker in place: no false reset next turn', async () => {
+    const dir = scratch();
+    const log = fakeLog();
+    writeFileSync(join(dir, 'f'), 'x');
+    await checkWorkspaceMarker(bash, { key: 's-1', dir }, log, 'sbx-1');
+    const check = await checkWorkspaceMarker(bash, { key: 's-1', dir }, log, 'sbx-1');
+    expect(check.verdict).toBe('intact');
+    // No finish(): the turn failed. The check itself never removed anything.
+    expect(readFileSync(join(dir, WORKSPACE_MARKER), 'utf8')).toBe('s-1');
+    expect((await checkWorkspaceMarker(bash, { key: 's-1', dir }, log, 'sbx-1')).verdict).toBe(
+      'intact',
+    );
+  });
+
+  it('a reset into a workspace the turn leaves empty records written=false, so it is reported once', async () => {
+    const dir = scratch();
+    const log = fakeLog();
+    writeFileSync(join(dir, 'f'), 'x');
+    await checkWorkspaceMarker(bash, { key: 's-1', dir }, log, 'sbx-1');
+    rmSync(dir, { recursive: true });
+    mkdirSync(dir);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const check = await checkWorkspaceMarker(bash, { key: 's-1', dir }, log, 'sbx-1');
+    expect(check.verdict).toBe('reset');
+    await check.finish(); // the agent wrote nothing
+    expect(existsSync(join(dir, WORKSPACE_MARKER))).toBe(false);
     expect(recordedMarker(log, 's-1')).toBe(false);
     expect((await checkWorkspaceMarker(bash, { key: 's-1', dir }, log, 'sbx-1')).verdict).toBe(
       'first',

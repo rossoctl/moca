@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * that runs every Exec under a real bash in a scratch directory standing in for the workspace. The
  * fake agent writes a file during its turn, as a session that clones a repository does.
  */
-const { prompts, logs, selection, FakeRedisSessionBackend } = vi.hoisted(() => {
+const { prompts, notes, loader, logs, selection, FakeRedisSessionBackend } = vi.hoisted(() => {
   class FakeRedisSessionBackend {
     async read() {
       return [];
@@ -28,6 +28,9 @@ const { prompts, logs, selection, FakeRedisSessionBackend } = vi.hoisted(() => {
   }
   return {
     prompts: [] as string[],
+    /** Per prompt: the custom messages the turn's before_agent_start handlers returned. */
+    notes: [] as unknown[][],
+    loader: { factories: [] as unknown[] },
     logs: new Map<string, unknown[]>(),
     selection: { current: null as unknown },
     FakeRedisSessionBackend,
@@ -59,6 +62,32 @@ vi.mock('@earendil-works/pi-coding-agent', () => {
       session: {
         prompt: async (p: string) => {
           prompts.push(p);
+          // What Pi does after expanding the prompt: run every extension's before_agent_start.
+          const handlers: Array<() => unknown> = [];
+          const pi = new Proxy(
+            {},
+            {
+              get: (_t, k) =>
+                k === 'on'
+                  ? (ev: string, h: () => unknown) => {
+                      if (ev === 'before_agent_start') handlers.push(h);
+                    }
+                  : () => {},
+            },
+          );
+          for (const f of loader.factories) {
+            try {
+              (f as (pi: unknown) => void)(pi);
+            } catch {
+              // The sandbox tools need Pi's real tool builders; only the handlers matter here.
+            }
+          }
+          const msgs: unknown[] = [];
+          for (const h of handlers) {
+            const r = (await h()) as { message?: unknown } | undefined;
+            if (r?.message) msgs.push(r.message);
+          }
+          notes.push(msgs);
           agentTurn();
         },
         abort: () => {},
@@ -66,6 +95,9 @@ vi.mock('@earendil-works/pi-coding-agent', () => {
       },
     }),
     DefaultResourceLoader: class {
+      constructor(opts: { extensionFactories: unknown[] }) {
+        loader.factories = opts.extensionFactories;
+      }
       async reload() {}
     },
     getAgentDir: () => '/fake/agent-dir',
@@ -86,12 +118,16 @@ vi.mock('../src/select-sandbox.js', async (importOriginal) => {
 const { executeTurn } = await import('../src/run-turn.js');
 const { WORKSPACE_MARKER, WORKSPACE_RESET_NOTE } = await import('../src/workspace-marker.js');
 
+/** The reset note, as the custom message the model gets beside the prompt. */
+const NOTE = { customType: 'workspace_reset', content: WORKSPACE_RESET_NOTE, display: false };
+
 const dirs: string[] = [];
 let ws: string;
 beforeEach(() => {
   ws = mkdtempSync(join(tmpdir(), 'turn-marker-'));
   dirs.push(ws);
   prompts.length = 0;
+  notes.length = 0;
   logs.clear();
   selection.current = null;
   agentTurn = () => writeFileSync(join(ws, 'work.txt'), 'x');
@@ -152,7 +188,7 @@ async function turn(
 }
 
 describe('executeTurn: the workspace marker (#338)', () => {
-  it('marks the workspace, finds it intact, and reports a reclaim with a frame and a prompt note', async () => {
+  it('marks the workspace, finds it intact, and reports a reclaim with a frame and a note', async () => {
     const t = bashTransport();
 
     // Turn 1, a new session: nothing recorded, an empty workspace, marked once the agent wrote.
@@ -170,7 +206,7 @@ describe('executeTurn: the workspace marker (#338)', () => {
     // The session idles past SH_WORKSPACE_IDLE; the worker reclaims its workspace.
     reclaim();
 
-    // Turn 3: recorded, missing. The frame first, the note before the prompt, then the rewrite.
+    // Turn 3: recorded, missing. The frame first, the note beside the prompt, the rewrite at the end.
     const t3 = await turn(t);
     expect(t3.frames).toEqual([
       {
@@ -181,12 +217,16 @@ describe('executeTurn: the workspace marker (#338)', () => {
         reason: 'reclaimed',
       },
     ]);
-    expect(prompts[2]).toBe(`${WORKSPACE_RESET_NOTE}\n\ndo the work`);
+    // The prompt reaches Pi byte for byte; the note travels as its own message.
+    expect(prompts[2]).toBe('do the work');
+    expect(notes[2]).toEqual([NOTE]);
+    expect([notes[0], notes[1]]).toEqual([[], []]);
 
     // Turn 4: marked again during turn 3, so intact.
     const t4 = await turn(t);
     expect(t4.frames).toEqual([]);
     expect(prompts[3]).toBe('do the work');
+    expect(notes[3]).toEqual([]);
   });
 
   it('a session from before this change (no record) is never reported on its first turn', async () => {
@@ -248,7 +288,8 @@ describe('executeTurn: the workspace marker (#338)', () => {
       { type: 'workspace_reset', sessionId: 'sess-1', ...reset, tier: 'container' },
     ]);
     expect(result.sandbox).toEqual({ id: 'sbx-1', tier: 'container', workspaceReset: reset });
-    expect(prompts[1]).toBe(`${WORKSPACE_RESET_NOTE}\n\ndo the work`);
+    expect(prompts[1]).toBe('do the work');
+    expect(notes[1]).toEqual([NOTE]);
   });
 
   it('a session that moved keeps its own reset reason, and the model is told as well', async () => {
@@ -284,6 +325,88 @@ describe('executeTurn: the workspace marker (#338)', () => {
         reason: 'detached',
       },
     ]);
-    expect(prompts[0]).toBe(`${WORKSPACE_RESET_NOTE}\n\ndo the work`);
+    expect(prompts[0]).toBe('do the work');
+    expect(notes[0]).toEqual([NOTE]);
+  });
+
+  it('a slash command on a reset turn reaches Pi exactly as sent, with the note beside it', async () => {
+    const t = bashTransport();
+    await turn(t);
+    reclaim();
+    const prompt = '/skill:review  the diff\n';
+    await executeTurn({
+      prompt,
+      sessionId: 'sess-1',
+      createIfAbsent: true,
+      sandbox: {
+        transport: t,
+        podCwd: ws,
+        sandboxId: 'sbx-1',
+        workspace: { key: 'sess-1', dir: ws },
+      },
+    });
+    expect(prompts[1]).toBe(prompt);
+    expect(notes[1]).toEqual([NOTE]);
+  });
+
+  it('a reset turn that throws before its end reports the same reset again on the next turn', async () => {
+    const t = bashTransport();
+    await turn(t);
+    reclaim();
+    writeFileSync(join(ws, 'left.txt'), 'x'); // files, so a write at the start would have marked it
+    agentTurn = () => {
+      throw new Error('boom: the turn failed');
+    };
+    const failed = await turn(t).catch((e: unknown) => e);
+    expect((failed as Error).message).toMatch(/^boom/);
+    expect(existsSync(join(ws, WORKSPACE_MARKER))).toBe(false);
+    agentTurn = () => {};
+    const { frames } = await turn(t);
+    expect(frames).toEqual([
+      {
+        type: 'workspace_reset',
+        sessionId: 'sess-1',
+        from: 'sbx-1',
+        tier: '',
+        reason: 'reclaimed',
+      },
+    ]);
+    expect(existsSync(join(ws, WORKSPACE_MARKER))).toBe(true);
+  });
+
+  it('a turn aborted before its prompt leaves a reset to be reported again', async () => {
+    const t = bashTransport();
+    await turn(t);
+    reclaim();
+    writeFileSync(join(ws, 'left.txt'), 'x');
+    const ac = new AbortController();
+    ac.abort();
+    const aborted = await executeTurn({
+      prompt: 'do the work',
+      sessionId: 'sess-1',
+      createIfAbsent: true,
+      signal: ac.signal,
+      sandbox: {
+        transport: t,
+        podCwd: ws,
+        sandboxId: 'sbx-1',
+        workspace: { key: 'sess-1', dir: ws },
+      },
+    });
+    expect(aborted.stopReason).toBe('aborted');
+    expect(existsSync(join(ws, WORKSPACE_MARKER))).toBe(false);
+    expect((await turn(t)).frames).toHaveLength(1);
+  });
+
+  it('an intact turn that throws leaves the marker: the next turn is intact, not reset', async () => {
+    const t = bashTransport();
+    await turn(t);
+    agentTurn = () => {
+      throw new Error('boom');
+    };
+    await turn(t).catch(() => {});
+    agentTurn = () => {};
+    expect(existsSync(join(ws, WORKSPACE_MARKER))).toBe(true);
+    expect((await turn(t)).frames).toEqual([]);
   });
 });

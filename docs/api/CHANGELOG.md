@@ -31,8 +31,8 @@ The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.7
 `workspace_reset` frame's and `TurnPlacement.workspaceReset`'s `reason` gains `reclaimed`. The
 harness keeps a marker file (`.moca-session`, holding the workspace key) in the session's
 workspace and records in the session's log that it wrote it; a later turn that finds the record
-but not the file reports the reset before the agent runs, and tells the model in a note before
-the prompt. A client that does not know `reclaimed` should treat it as any reset: the earlier
+but not the file reports the reset before the agent runs, and tells the model in a separate
+message (`workspace_reset`) beside the prompt, which is left as sent. A client that does not know `reclaimed` should treat it as any reset: the earlier
 files are gone. `mocactl` before this release prints it as a gone sandbox.
 
 ## 1.30.0

@@ -52,7 +52,7 @@ import { compactIfOverflowing } from './pre-prompt-compaction.js';
 import { recordModelSwitch } from './model-switch-record.js';
 import {
   checkWorkspaceMarker,
-  WORKSPACE_RESET_NOTE,
+  workspaceResetNoteExtension,
   type SessionWorkspace,
   type WorkspaceMarkerCheck,
 } from './workspace-marker.js';
@@ -1389,14 +1389,15 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
         ? placementFrame(sessionId, { sandboxId: '', tier: '', workspaceReset: reset })
         : null);
     if (resetFrame) input.onEvent?.(resetFrame);
-    // The model is told too, whatever the cause: its earlier files are gone.
-    const turnInput = {
-      ...input,
-      ...(reset ? { prompt: `${WORKSPACE_RESET_NOTE}\n\n${input.prompt}` } : {}),
-      ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
-    };
+    // The model is told too, whatever the cause: its earlier files are gone. As its own message,
+    // never in the prompt, which must reach Pi as sent (see WORKSPACE_RESET_NOTE).
     const result = withPlacement(
-      await executeTurnCore(turnInput, acquired.sandbox, opened, marker),
+      await executeTurnCore(
+        attached ? { ...input, promotedConfig: attached.promotedConfig } : input,
+        acquired.sandbox,
+        opened,
+        { marker, resetNote: reset !== undefined },
+      ),
       placement,
     );
     // A templated session's end state, while the lease is still held and renewed (spec §5.1).
@@ -1462,7 +1463,7 @@ async function executeTurnCore(
   input: ExecuteTurnInput,
   turnSandbox: TurnSandbox | null,
   opened: OpenedTurnSession,
-  marker?: WorkspaceMarkerCheck,
+  workspace: { marker?: WorkspaceMarkerCheck; resetNote?: boolean } = {},
 ): Promise<TurnResult> {
   const { prompt, config } = input;
   const cwd = config?.cwd ?? process.cwd();
@@ -1500,6 +1501,8 @@ async function executeTurnCore(
     // SH_PROMPT_CACHE / SH_GATEWAY_CACHE (#754). Built here, not inside pi's loader, so a refused
     // value throws out of the turn; with both unset it registers nothing.
     promptCacheExtension(),
+    // A reset workspace (#338): the note goes to the model beside the prompt, not inside it.
+    ...(workspace.resetNote ? [workspaceResetNoteExtension()] : []),
   ];
   if (budgetLimit !== undefined) {
     // session_start is not emitted in the headless path, so compute the pre-turn baseline
@@ -1567,6 +1570,10 @@ async function executeTurnCore(
     // only on a turn that runs, so an aborted one records no switch it never made (R11).
     recordModelSwitch(sessionManager, model);
     await session.prompt(prompt);
+    // Only after the agent ran (and so after the model got any reset note), and before the flush,
+    // so its record is in this turn's durable entries. A turn aborted before its prompt, or one that
+    // throws, never gets here and leaves the marker as the check found it (#338). Never throws.
+    await workspace.marker?.finish();
     const lastMessage = session.state.messages.at(-1) as AssistantMessage | undefined;
     if (lastMessage?.role === 'assistant') {
       stopReason = lastMessage.stopReason ?? 'end_turn';
@@ -1582,8 +1589,6 @@ async function executeTurnCore(
     }
   }
 
-  // Before the flush, so its record is in this turn's durable entries. Never throws.
-  await marker?.finish();
   await backend.flush();
 
   // AFTER the flush, deliberately. The turn really did happen — entries, tool results and

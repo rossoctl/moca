@@ -920,7 +920,8 @@ components:
         one the previous turn used (`detached`, `retiered`; P6.3), or it is, but the workspace
         there lost the session's marker (`reclaimed`, #338). `from` is the sandbox the files
         were on; for `reclaimed` that is the turn's own sandbox (empty when the turn has none to
-        name). The model is told as well, in a note before the turn's prompt.
+        name). The model is told as well, in a message of its own beside the turn's prompt,
+        which is left as sent.
       properties:
         type: { type: string, enum: [workspace_reset] }
         sessionId: { type: string }

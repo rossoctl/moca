@@ -132,7 +132,8 @@ rule 5).
   tier and one VM acquire (a standby restore, then its replenish) on the microVM per-exec tier. A reclaimed
   workspace is reported as `workspace_reset` with reason `reclaimed`; a `mocactl` from before harness API 1.7.0
   prints that as its "sandbox is gone" message, so upgrade `mocactl` to see the right one. In a git repository
-  the marker is added to `.git/info/exclude`, so `git status`, `git add -A` and `git clean -fd` leave it alone.
+  (a worktree or submodule included) the marker is added to the repository's `info/exclude`, so `git status`,
+  `git add -A` and `git clean -fd` leave it alone.
 - **Container sandboxes keep an idle workspace for 8 hours, not 30 minutes
   ([#338](https://github.com/rossoctl/moca/issues/338)).** The first `setup.sh` run after the upgrade writes
   `SH_WORKSPACE_IDLE=8h` to `moca-settings` and to a new ConfigMap, `moca-sandbox-settings`, in the sandbox

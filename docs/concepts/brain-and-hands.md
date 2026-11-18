@@ -73,13 +73,18 @@ command or at its end, so a container directory that is still empty stays empty 
 above. At the start of every later turn, before the agent runs, one command checks the file. If the log
 says it was written and it is missing, or holds another session's id, the workspace was reset on the
 same sandbox: a streamed turn's first frame is `workspace_reset` with reason `reclaimed`, the turn's
-placement (and so the session's resources view) records it, and the model's prompt starts with a note
-that files from earlier turns are gone. A queued turn has no stream, but its model gets the note. The
-file is then written again. A check that fails is logged and the turn runs with no verdict; it never
-fails the turn. A turn whose commands carry no workspace key (a workload run that writes only in its
-context) has no workspace to check. The file is left out of a templated session's patch and, when the
-workspace root is a git repository, listed in its `info/exclude`. The cost is one extra command per
-turn, two on a turn that starts in an empty workspace.
+placement (and so the session's resources view) records it, and the model gets a note that files from
+earlier turns are gone. The note is a message of its own (`workspace_reset`, not displayed) beside the
+user's prompt, which reaches the agent exactly as sent, so a `/skill:` or prompt-template call still
+works and the session's history keeps the user's own words. A queued turn has no stream, but its model
+gets the note. The file is written again at the end of the turn, after the agent ran: a turn that fails
+or is aborted before then leaves it missing, so the next turn reports the same reset again, and a turn
+that found the file intact never removes it. A check that fails is logged and the turn runs with no
+verdict; it never fails the turn. A turn whose commands carry no workspace key (a workload run that
+writes only in its context) has no workspace to check. The file is left out of a templated session's
+patch and, when the workspace is in a git repository (a worktree or submodule included), listed in that
+repository's `info/exclude`; a git that fails there is ignored. The cost is one extra command per turn,
+two on a turn that starts in an empty workspace or finds a reset.
 
 It is a convention, not a guarantee:
 
