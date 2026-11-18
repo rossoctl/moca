@@ -77,7 +77,14 @@ func main() {
 	} else {
 		log.Printf("moca-egress: credentials: off")
 	}
-	log.Printf("moca-egress: serving %d allowlist entries, control socket %s", len(cfg.Allow), cc.Socket)
+	if cfg.AllowAll {
+		// Plainly, so an operator reading the journal cannot miss the mode (review #886): the
+		// allowlist is off, and only the always-refused tier (cloud metadata, link-local)
+		// remains.
+		log.Printf("moca-egress: allow-all mode: every destination permitted (MOCA_EGRESS_ALLOW=*), control socket %s", cc.Socket)
+	} else {
+		log.Printf("moca-egress: serving %d allowlist entries, control socket %s", len(cfg.Allow), cc.Socket)
+	}
 	// The control socket is bound (NewServer listened on it above), so a worker ordered After=
 	// this Type=notify unit can connect from here on. A failed notify is logged, not fatal:
 	// systemd then fails the start on its own timeout, which names this unit.
