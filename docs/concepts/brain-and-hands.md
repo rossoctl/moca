@@ -52,9 +52,9 @@ Each session gets its own directory under the sandbox's workspace root
 (`KAGENTI_SANDBOX_CWD`) must equal the sandbox worker's `SH_WORKSPACE_ROOT`
 ([Configuration](../reference/configuration.md)). The per-session directory is **not a security
 boundary**: sessions on one sandbox share a Unix user and container. An idle workspace is deleted after
-`SH_WORKSPACE_IDLE` (30 minutes by default; the microVM installer sets 8 hours), and the next turn is
-**not told** that it happened (#338). On a container worker, a per-session directory that is still
-empty `SH_WORKSPACE_EMPTY_IDLE` (15 minutes by default) after its last command is removed sooner
+`SH_WORKSPACE_IDLE` (30 minutes by default; the microVM installer and `deploy/k8s/setup.sh` set 8
+hours), and the next turn is **not told** that it happened (#338). On a container worker, a per-session
+directory that is still empty `SH_WORKSPACE_EMPTY_IDLE` (15 minutes by default) after its last command is removed sooner
 (#551), unless a process is still running in it. It holds no files, and the session's next command
 re-creates it. The limit: a background process that is not in the directory when the sweep runs (one
 that changes into it later), and on a worker not running on Linux, where it cannot see process working

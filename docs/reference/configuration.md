@@ -329,7 +329,7 @@ path, the query or the secret.
 | `WORKER_MAX_CONCURRENT`          | `4`                | Concurrency slots; garbage or non-positive falls back                                                                                                                                                                                                                                                                     |
 | `SANDBOX_IMAGE`, `SANDBOX_TRUST` | empty, `untrusted` | Labels                                                                                                                                                                                                                                                                                                                    |
 | `SH_WORKSPACE_ROOT`              | built-in default   | Absolute path                                                                                                                                                                                                                                                                                                             |
-| `SH_WORKSPACE_IDLE`              | built-in default   | Go duration; idle time after which a session workspace is deleted                                                                                                                                                                                                                                                         |
+| `SH_WORKSPACE_IDLE`              | `30m`              | Go duration; idle time after which a session workspace is deleted (#338); malformed or non-positive is fatal. `deploy/k8s/setup.sh` writes `8h` (sticky, via ConfigMap `moca-sandbox-settings`); disk is not admission-controlled, so the idle sweep bounds `/workspace`                                                  |
 | `SH_WORKSPACE_EMPTY_IDLE`        | `15m`              | Go duration; idle time after which an empty session workspace that no process is in is deleted (#551). Must not exceed `SH_WORKSPACE_IDLE`; a larger or unparseable value is fatal                                                                                                                                        |
 
 `SH_EXEC_TIMING=1` (off unless exactly `1`) writes one `exec-timing` line per Exec to the worker's log:
@@ -419,7 +419,8 @@ header is authoritative.
   `MOCA_RELAY_EXEC_PORT`, `MOCA_RELAY_BRAIN_IP`, `MOCA_BRAIN_SUBNET`, `COMPOSE_PROFILES`.
 - **Kubernetes `setup.sh`:** `SH_P4_SANDBOX_IDS`, `SH_SANDBOX_EGRESS_EXCEPT`, `SH_ROUTE_DOMAIN`,
   `SH_SINGLE_NAMESPACE`, `SH_WAIT_SECONDS`, `SH_PUBLIC_HARNESS_URL` (port-forward-reached targets
-  only: overrides the default `http://127.0.0.1:8080`).
+  only: overrides the default `http://127.0.0.1:8080`), `SH_WORKSPACE_IDLE` (the container
+  sandboxes' idle reclaim, default `8h`; a change rolls the sandbox pods).
 - **SBX0 KVM host (`deploy/sbx/install-host.sh`, `deploy/sbx/host-agent.sh`):** `SBX_WORKER_BIN`
   (default `/usr/local/libexec/sbx/microvm-worker`: the worker binary SBX0's units run, never
   `/usr/local/bin/microvm-worker`); the host agent's `SBX_API_URL`, `SBX_HOST_ID`,

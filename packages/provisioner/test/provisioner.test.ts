@@ -129,10 +129,15 @@ describe('PUT: what a workload gets', () => {
     expect(c.securityContext).toEqual(t.spec.containers[0].securityContext);
     expect(c.resources).toEqual(t.spec.containers[0].resources);
     const env = Object.fromEntries(c.env.map((e: { name: string }) => [e.name, e]));
-    expect(c.env).toHaveLength(4);
+    expect(c.env).toHaveLength(5);
     expect(env.SANDBOX_TIER.value).toBe('container');
     expect(env.SANDBOX_TOKEN_FILE.value).toBe('/run/moca-attach/token');
     expect(env.RELAY_ADDR.value).toBe('sandbox-relay-attach.moca.svc:9443');
+    // The idle reclaim (#338) passes through as the template's ConfigMap read, not a value.
+    expect(env.SH_WORKSPACE_IDLE.valueFrom).toEqual(
+      t.spec.containers[0].env.find((e: { name: string }) => e.name === 'SH_WORKSPACE_IDLE')
+        .valueFrom,
+    );
     expect(env.SANDBOX_ID.valueFrom).toEqual({ fieldRef: { fieldPath: 'metadata.name' } });
     // The attach token as a directory mount, never a subPath, so the kubelet refreshes it.
     expect(c.volumeMounts).toEqual([

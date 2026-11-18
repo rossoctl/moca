@@ -9,7 +9,8 @@
 # GO_TLS_SECRET, GO_HARNESS_IMAGE_ID, GO_SANDBOX_IMAGE_ID, GO_EGRESS_EXCEPT (space-separated CIDRs),
 # GO_NS and GO_SBX_NS (ocp-single's namespace; default setup.sh's own), GO_WORKLOAD_SANDBOXES,
 # GO_KUBE_API_EGRESS (the provisioner's egress list, JSON), GO_WORKLOAD_CLASSES and GO_OTHER_CLASSES
-# (space-separated; workload_storage_classes), GO_REDIS_ACL_HASH (ensure_redis_secret's) -- what
+# (space-separated; workload_storage_classes), GO_REDIS_ACL_HASH (ensure_redis_secret's),
+# GO_WORKSPACE_IDLE (write_settings' resolved SH_WORKSPACE_IDLE; default setup.sh's own) -- what
 # setup.sh's earlier steps would have set. Prefixed because sourcing setup.sh resets its own globals
 # (TARGET='' and so on).
 set -euo pipefail
@@ -40,5 +41,6 @@ SH_SOURCE_ONLY=1 source "$here/../../../../../deploy/k8s/setup.sh"
   WORKLOAD_CLASSES="${GO_WORKLOAD_CLASSES-}"
   OTHER_CLASSES="${GO_OTHER_CLASSES-}"
   REDIS_ACL_HASH="${GO_REDIS_ACL_HASH-}"
+  WORKSPACE_IDLE="${GO_WORKSPACE_IDLE-$DEFAULT_WORKSPACE_IDLE}"
 }
 write_overlay "${1:?usage: write-generated-overlay.sh DIR}"

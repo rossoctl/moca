@@ -137,6 +137,16 @@ export function workloadTemplate(): KubeObject {
             image: 'dev.local/moca-remote-worker:local',
             env: [
               { name: 'RELAY_ADDR', value: 'sandbox-relay-attach.moca.svc:9443' },
+              {
+                name: 'SH_WORKSPACE_IDLE',
+                valueFrom: {
+                  configMapKeyRef: {
+                    name: 'moca-sandbox-settings',
+                    key: 'SH_WORKSPACE_IDLE',
+                    optional: true,
+                  },
+                },
+              },
               // An operator's value for a binding variable is replaced, never kept.
               { name: 'SANDBOX_TIER', value: 'microvm' },
             ],
