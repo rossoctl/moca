@@ -237,6 +237,7 @@ refusals=(
   'export SBX_MAX_TOTAL=1 SBX_WORKSPACE_IMAGE_MB=999999999 SBX_WORKSPACE_FS_GIB=999999999 => SBX_WORKSPACE_IMAGE_MB must be'
   'export SBX_MAX_PER_SUBJECT=999999999 => SBX_MAX_PER_SUBJECT must be'
   'export SBX_MAX_TOTAL=1000000 => SBX_MAX_TOTAL must be'
+  'export SBX_STORAGE_CLASS=Not_A_Class => SBX_STORAGE_CLASS must be a storage class name'
   'unset SBX_TEMPLATES_FILE => SBX_TEMPLATES_FILE is required'
   "export SBX_TEMPLATES_FILE=\$TMP/bad-worker.json => template worker 'sbx_other' is not in SBX_WORKERS"
   'export SBX_TEMPLATES_FILE=$TMP/bad-two.json => serves two templates'
@@ -1023,6 +1024,31 @@ for ref in $(jq -r '.[] | select(.kind == "Deployment" and .metadata.name == "mo
     fail "the control plane reads $ref non-optionally, but setup.sh wrote no such key"
 done
 pass 'an oidc deployment writes the identity settings, oidc: subjects and no GitHub client id'
+
+# 13c. SBX_STORAGE_CLASS: one class on every claim this run renders. The base shape (no store, no
+# egress) patches only the redis StatefulSet's volumeClaimTemplates -- a patch naming an absent PVC
+# would fail the kustomize build, so a successful render of each shape is itself part of the claim.
+reset_state
+run_setup export SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd ||
+  { cat "$TMP/out" >&2; fail 'the SBX_STORAGE_CLASS run failed'; }
+render
+KUBECONFIG=/dev/null "$REAL_KUBECTL" label --local -f "$TMP/render.yaml" sbx-render- -o json 2>/dev/null | jq -s . >"$TMP/render.json"
+[[ "$(jq -r '.[] | select(.kind == "StatefulSet" and .metadata.name == "redis") | .spec.volumeClaimTemplates[0].spec.storageClassName' "$TMP/render.json" 2>/dev/null)" == ocs-storagecluster-ceph-rbd ]] ||
+  fail 'SBX_STORAGE_CLASS did not reach the redis volumeClaimTemplates'
+jq -e '.[] | select(.kind == "PersistentVolumeClaim")' "$TMP/render.json" >/dev/null 2>&1 &&
+  fail 'the base shape renders a PVC (nothing to carry SBX_STORAGE_CLASS)' || true
+# The store and egress components on: both PVCs carry the class, and the build still renders
+# (each patch target exists in this shape).
+reset_state
+run_setup export SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd SBX_TEMPLATE_STORE=1 SBX_EGRESS_CREDENTIALS=1 ||
+  { cat "$TMP/out" >&2; fail 'the SBX_STORAGE_CLASS run with store and egress failed'; }
+render
+KUBECONFIG=/dev/null "$REAL_KUBECTL" label --local -f "$TMP/render.yaml" sbx-render- -o json 2>/dev/null | jq -s . >"$TMP/render.json"
+for pvc in moca-sbx-templates moca-sbx-credentials; do
+  [[ "$(jq -r --arg n "$pvc" '.[] | select(.kind == "PersistentVolumeClaim" and .metadata.name == $n) | .spec.storageClassName' "$TMP/render.json" 2>/dev/null)" == ocs-storagecluster-ceph-rbd ]] ||
+    fail "SBX_STORAGE_CLASS did not reach the $pvc PVC"
+done
+pass 'SBX_STORAGE_CLASS lands on the redis templates and every PVC the run renders'
 
 # 14a. Off is byte-identical: the generated kustomization.yaml, both ConfigMaps, the applied object
 # set and both hashes are today's, written out here as the golden copy (each recomputed from today's

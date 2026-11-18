@@ -72,6 +72,13 @@
 #                           SBX_TEMPLATES_FILE, owned by exactly one host). Unset: one host, kvm,
 #                           owning every template worker
 #   SBX_EGRESS_CREDENTIAL_TTL_SECONDS   optional; 5-300 (the control plane's default is 60)
+#   SBX_STORAGE_CLASS       optional; the storageClassName written into every claim SBX0 creates (the
+#                           redis StatefulSet's volumeClaimTemplates, the template store's PVC, the
+#                           egress credential store's PVC) -- for a cluster with NO default
+#                           StorageClass, where each claim would otherwise pend until patched by
+#                           hand. Fresh claims only: a claim that already exists keeps the class it
+#                           was created with, so an upgrade from before this knob patches those once
+#                           by hand (kubectl patch pvc).
 #   SBX_REDIS_IMAGE         optional; repository[:tag]@sha256:<digest>: the image Redis runs instead of the
 #                           base's valkey/valkey:9-alpine. For a namespace whose data a Redis 7.4 wrote
 #                           (RDB format 12, which Valkey 9 cannot read: its AOF load aborts), e.g.
@@ -183,6 +190,10 @@ validate() {
   [[ -n "${SBX_IMAGE:-}" && "$SBX_IMAGE" != *[[:space:]]* ]] || die 'SBX_IMAGE is required (the relay image)'
   [[ -z "${SBX_REDIS_IMAGE:-}" || "$SBX_REDIS_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] ||
     die 'SBX_REDIS_IMAGE must be pinned by digest: repository[:tag]@sha256:<64 hex>'
+  # A StorageClass name is a DNS label with dots (lower-case alphanumerics, "-" and "."), per the
+  # API's own validation; refusing anything else here names the typo before a pend does.
+  [[ -z "${SBX_STORAGE_CLASS:-}" || "$SBX_STORAGE_CLASS" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] ||
+    die "SBX_STORAGE_CLASS must be a storage class name (lower-case alphanumerics, '-' and '.'), got '$SBX_STORAGE_CLASS'"
   [[ -n "${SBX_WORKERS:-}" ]] || die 'SBX_WORKERS is required: the template worker ids, space-separated'
   local seen=' ' w
   for w in $SBX_WORKERS; do
@@ -1123,6 +1134,21 @@ write_overlay() {
     printf '      - { op: add, path: /spec/template/metadata/annotations, value: { sbx.moca.dev/settings-hash: "%s" } }\n' "$SETTINGS_HASH"
     printf '  - target: { kind: Deployment, name: sandbox-relay }\n    patch: |-\n'
     printf '      - { op: add, path: /spec/template/metadata/annotations/sbx.moca.dev~1settings-hash, value: "%s" }\n' "$RELAY_HASH"
+    # SBX_STORAGE_CLASS: one storageClassName on every claim SBX0 creates, for a cluster with no
+    # default StorageClass (without one, each PVC pends until an operator patches it by hand).
+    # Each patch targets a resource this run actually renders: a patch naming an absent PVC fails
+    # the kustomize build, so the store's and the egress store's are emitted only when those
+    # components are on. Fresh claims only -- a claim that already exists (an upgrade on a
+    # deployment from before this knob) keeps the class it was created with.
+    if [[ -n "${SBX_STORAGE_CLASS:-}" ]]; then
+      printf '  - target: { kind: StatefulSet, name: redis }\n    patch: |-\n      - { op: add, path: /spec/volumeClaimTemplates/0/spec/storageClassName, value: %s }\n' "$SBX_STORAGE_CLASS"
+      if [[ -n "$STORE_ON" || -n "$COMBINED" ]]; then
+        printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-templates }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: %s }\n' "$SBX_STORAGE_CLASS"
+      fi
+      if [[ -n "$EGRESS_ON" ]]; then
+        printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-credentials }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: %s }\n' "$SBX_STORAGE_CLASS"
+      fi
+    fi
     printf 'images:\n'
     image_entry ghcr.io/rossoctl/moca "$SBX_IMAGE"
     [[ -z "$COMBINED" ]] || image_entry ghcr.io/rossoctl/moca-remote-worker "$SBX_SANDBOX_IMAGE"
