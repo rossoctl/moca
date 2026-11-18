@@ -964,7 +964,8 @@ failed install.
 ## The host sampler
 
 Every worker install also installs `sbx-sampler.timer` (#857, R2), so a KVM host with a worker
-samples its own load from then on. Every 15 s (`SBX_SAMPLER_INTERVAL_S`, 5-3600, at the install) a
+samples its own load from then on. Every 15 s (`SBX_SAMPLER_INTERVAL_S`, 5-3600, at the install; in practice every
+15-16 s, the timer's 1 s accuracy on top) a
 oneshot, `sbx-sampler.service`, runs `/usr/local/libexec/sbx-sampler.sh` (`deploy/sbx/sampler.sh`),
 which writes one JSON line to the journal. It reads `/proc` and the cgroup files; it starts `df`
 twice and, per worker that runs with `SH_DIAG_STATS_ADDR`, one `curl` of that worker's
