@@ -770,7 +770,11 @@ agent's sandbox instructions carry the rule there. The allowlist below is where 
   `sudo systemctl restart moca-egress`; to change the default for new hosts, edit
   `deploy/sbx/egress-allow.env` in the repo (see its header for the format and the entry groups).
   Open tunnels end on the restart, new ones work at once. The same restart is needed after
-  rebuilding the binary.
+  rebuilding the binary. A bare `MOCA_EGRESS_ALLOW=*` (nothing else on the line) is allow-everything
+  mode: every destination is permitted, private and local addresses included -- only the
+  always-refused tier stays (cloud metadata endpoints, link-local, multicast), so a sandbox still
+  cannot fetch the host's instance credentials. For trusted research rigs only; the startup log
+  says `allow-all mode` plainly, so a journal reader cannot miss it.
 - **Another install's `moca-egress.service`.** A host that also runs `deploy/microvm`'s P6 worker
   already has one. If `/etc/systemd/system/moca-egress.service` exists and `/etc/sbx/manifest` has no
   `egress unit` line for it, `install-host.sh` logs

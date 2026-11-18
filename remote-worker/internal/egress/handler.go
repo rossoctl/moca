@@ -43,6 +43,14 @@ const (
 // the proxy does not know the deployment's user-facing URL (its credentials
 // URL is the host's view of the control plane), and the allowlist itself is
 // not echoed, since no API shows it to a sandbox's user either.
+
+// allPrefixes permits every address CheckAddr would otherwise judge by the permit list: the
+// allow-everything mode's stand-in for a configured list, so its always-refused tier still runs.
+var allPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/0"),
+	netip.MustParsePrefix("::/0"),
+}
+
 var refusalHints = map[string]string{
 	DecisionDestinationDenied: "This host is not on this sandbox's egress allowlist, so the egress proxy refused it.\n" +
 		"Retrying will not help: only the hosts the operator allowlisted are reachable.\n" +
@@ -213,7 +221,7 @@ func (pc *proxyConn) handle(r *http.Request, br *bufio.Reader) bool {
 	if t.bad || r.ProtoMajor != 1 || r.ProtoMinor != 1 {
 		return refuse(http.StatusBadRequest, DecisionBadRequest)
 	}
-	if !Allowed(pc.p.cfg.Allow, t.host, t.port, t.connect) {
+	if !pc.p.cfg.AllowAll && !Allowed(pc.p.cfg.Allow, t.host, t.port, t.connect) {
 		return refuse(http.StatusForbidden, DecisionDestinationDenied)
 	}
 	addrs, decision := pc.resolveAndCheck(t.host)
@@ -265,6 +273,19 @@ func (pc *proxyConn) resolveAndCheck(host string) ([]netip.Addr, string) {
 		if err != nil || len(addrs) == 0 {
 			return nil, DecisionUpstreamUnreachable
 		}
+	}
+	// Allow-everything mode (Config.AllowAll) keeps the always-refused tier -- link-local,
+	// unspecified, multicast, broadcast and the cloud metadata endpoints: agent code runs on
+	// untrusted content, so it must not fetch the host's instance credentials whatever the
+	// operator permitted -- while permitting every other address, private and local included:
+	// CheckAddr with an all-covering permit list and no local addresses.
+	if pc.p.cfg.AllowAll {
+		for _, a := range addrs {
+			if err := CheckAddr(a, allPrefixes, nil); err != nil {
+				return nil, DecisionDestinationPrivate
+			}
+		}
+		return addrs, ""
 	}
 	var local []netip.Addr
 	if f := pc.p.cfg.LocalAddrs; f != nil {
