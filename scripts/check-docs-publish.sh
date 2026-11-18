@@ -24,7 +24,15 @@ while IFS= read -r f; do
   published+=("$f")
 done < <(git ls-files docs | grep -vE "$EXCLUDED")
 
-if hits="$(grep -nIE -f "$patterns" -- "${published[@]}")"; then
+# grep's status decides: 0 = a match, 1 = no match, 2 or more = the scan itself failed (a
+# malformed pattern in the denylist), which must not pass as clean.
+status=0
+hits="$(grep -nIE -f "$patterns" -- "${published[@]}")" || status=$?
+if ((status > 1)); then
+  echo "docs-publish: the scan failed (grep exit $status): is a pattern in docs/.publish-denylist malformed?" >&2
+  exit 2
+fi
+if ((status == 0)); then
   printf '%s\n' "$hits" | cut -c1-200 >&2
   echo "docs-publish: $(printf '%s\n' "$hits" | cut -d: -f1 | sort -u | wc -l | tr -d ' ') published file(s) match docs/.publish-denylist; rossoctl.dev would skip the Moca section" >&2
   exit 1
