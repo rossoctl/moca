@@ -213,7 +213,7 @@ func (pc *proxyConn) handle(r *http.Request, br *bufio.Reader) bool {
 	if t.bad || r.ProtoMajor != 1 || r.ProtoMinor != 1 {
 		return refuse(http.StatusBadRequest, DecisionBadRequest)
 	}
-	if !Allowed(pc.p.cfg.Allow, t.host, t.port, t.connect) {
+	if !pc.p.cfg.AllowAll && !Allowed(pc.p.cfg.Allow, t.host, t.port, t.connect) {
 		return refuse(http.StatusForbidden, DecisionDestinationDenied)
 	}
 	addrs, decision := pc.resolveAndCheck(t.host)
@@ -265,6 +265,11 @@ func (pc *proxyConn) resolveAndCheck(host string) ([]netip.Addr, string) {
 		if err != nil || len(addrs) == 0 {
 			return nil, DecisionUpstreamUnreachable
 		}
+	}
+	// Allow-everything mode skips every address refusal, private and local
+	// included (Config.AllowAll).
+	if pc.p.cfg.AllowAll {
+		return addrs, ""
 	}
 	var local []netip.Addr
 	if f := pc.p.cfg.LocalAddrs; f != nil {

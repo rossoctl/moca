@@ -363,6 +363,29 @@ func TestIdentityComesFromTheAcceptingSocket(t *testing.T) {
 	}
 }
 
+// Allow-everything mode: a host that is off the allowlist and resolves to a
+// private address still tunnels -- the allowlist and CheckAddr are both off.
+func TestAllowAllTunnelsOffAllowlistAndPrivate(t *testing.T) {
+	up := newTCPUpstream(t, echo)
+	h := newHarness(t, "up.test:443", func(c *Config) {
+		c.AllowAll = true
+		c.PermitCIDRs = nil // 127.0.0.1 would need a permit without AllowAll
+	})
+	h.res.set("evil.test", "127.0.0.1", "10.0.0.5")
+	c := dial(t, h.register("vm-1", "run-a"))
+	connect(t, c, fmt.Sprintf("evil.test:%d", up.port))
+	c.Write([]byte("ping"))
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(c, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("echo %q, %v", buf, err)
+	}
+	c.Close()
+	e := h.sink.waitEvent(t, DecisionTunnel)
+	if e.Host != "evil.test" || e.Status != 200 {
+		t.Fatalf("event %+v", e)
+	}
+}
+
 func TestOffAllowlistIsANamed403(t *testing.T) {
 	up := newTCPUpstream(t, echo)
 	h := newHarness(t, fmt.Sprintf("up.test:%d", up.port), nil)

@@ -21,7 +21,13 @@ type Resolver interface {
 
 // Config configures a Proxy.
 type Config struct {
-	Allow       []AllowEntry
+	Allow []AllowEntry
+	// AllowAll removes every destination restriction: the hostname allowlist
+	// and the private/loopback-address refusal (CheckAddr) are both skipped.
+	// It is set only by MOCA_EGRESS_ALLOW=* in ConfigFromEnv -- an explicit
+	// operator opt-in for a rig whose sandboxes are trusted to reach anything.
+	// ParseAllow still refuses "*" as an ordinary list entry.
+	AllowAll    bool
 	PermitCIDRs []netip.Prefix
 
 	MaxConnsPerVM, MaxRequestsPerSession int
@@ -126,7 +132,7 @@ var _ control.Handler = (*Proxy)(nil)
 // NewProxy validates cfg and returns a Proxy with no VMs registered.
 func NewProxy(cfg Config) (*Proxy, error) {
 	switch {
-	case len(cfg.Allow) == 0:
+	case len(cfg.Allow) == 0 && !cfg.AllowAll:
 		return nil, errors.New("egress: empty allowlist")
 	case cfg.Resolver == nil:
 		return nil, errors.New("egress: nil Resolver")
