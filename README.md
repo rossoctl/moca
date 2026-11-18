@@ -69,6 +69,8 @@ Every deployment path is **Preview**: this is explorative work, and interfaces m
 | [MicroVM tier (P4)](deploy/microvm/P4-ON-P6.md) | The harness's microVM sandboxes | Preview                          |
 | [Sandbox service](deploy/sbx/README.md)         | Sandbox service                 | Preview                          |
 
+Roadmap and the evidence behind moca's design: [Project](docs/project/index.md) (a draft).
+
 Releases: [GitHub releases](https://github.com/rossoctl/moca/releases). Images:
 `ghcr.io/rossoctl/moca` and `ghcr.io/rossoctl/moca-remote-worker`.
 

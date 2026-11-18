@@ -90,7 +90,8 @@ Not a fit today:
 
 ## Status
 
-Moca is open source (Apache-2.0), for self-hosting, and in **Preview**. The latest release is
+Moca is open source (Apache-2.0), for self-hosting, and in **Preview**. Where it is going, and the
+evidence behind its design: [Project](project/index.md). The latest release is
 [v0.10.0](https://github.com/rossoctl/moca/releases/tag/v0.10.0). Container images are
 `ghcr.io/rossoctl/moca` and `ghcr.io/rossoctl/moca-remote-worker`. These pages track moca's `main`
 branch.

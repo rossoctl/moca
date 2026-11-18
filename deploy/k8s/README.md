@@ -1288,6 +1288,10 @@ An orchestrator that wants to dispatch many leaves and collect them later submit
 ([dispatch archetypes](../../docs/concepts/dispatch-archetypes.md)), the KEDA `ScaledObject`'s
 replacement, decided in [ADR-0047](../../docs/adrs/0047-p6-async-fan-out-in-worker-drain.md).
 
+> **Status: single-tenant in v0.10.0.** Async fan-out under `MOCA_TENANCY=multi` (grants minted at
+> dequeue, #388) is being worked on, on `main`, and is targeted for v0.12.0. Until it ships, run the
+> drain only under `MOCA_TENANCY=single`; the `multi` notes in this section describe work in progress.
+
 **The consumer is not a new workload.** No Deployment, no `--role=leaf` pod, no autoscaler: with the
 knob on, each of the supervisor's ordinary `--role=turn` workers also runs a drain loop that claims
 one queued turn at a time and runs it through the same `runLeaf` a synchronous `/v1/runs` uses. Both
