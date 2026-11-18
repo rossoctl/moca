@@ -8,6 +8,7 @@ that shipped it ("The data plane's twin … goes to"):
 
 | `harness-openapi.yaml` | Shipped with                   |
 | ---------------------- | ------------------------------ |
+| 1.7.0                  | [1.31.0](#1310)                |
 | 1.6.0                  | [1.30.0](#1300)                |
 | 1.5.0                  | [1.28.0](#1280)                |
 | 1.4.0                  | [1.26.0](#1260)                |
@@ -15,6 +16,24 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.2.0                  | [1.16.0](#1160)                |
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
+
+## 1.31.0
+
+A workspace reset on the session's own sandbox is reported
+([#338](https://github.com/rossoctl/moca/issues/338), option 2). Additive on the wire: no new
+field, route or frame, and no change to the sandbox protocol.
+
+- `GET /v1/sessions/{id}/resources`: `placement.workspaceReset` now also records a workspace that
+  was reclaimed where the session is. Its `from` is then the sandbox the session is still on, not
+  one it left.
+
+The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.7.0: the
+`workspace_reset` frame's and `TurnPlacement.workspaceReset`'s `reason` gains `reclaimed`. The
+harness keeps a marker file (`.moca-session`, holding the workspace key) in the session's
+workspace and records in the session's log that it wrote it; a later turn that finds the record
+but not the file reports the reset before the agent runs, and tells the model in a note before
+the prompt. A client that does not know `reclaimed` should treat it as any reset: the earlier
+files are gone. `mocactl` before this release prints it as a gone sandbox.
 
 ## 1.30.0
 

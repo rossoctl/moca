@@ -53,7 +53,7 @@ Each session gets its own directory under the sandbox's workspace root
 ([Configuration](../reference/configuration.md)). The per-session directory is **not a security
 boundary**: sessions on one sandbox share a Unix user and container. An idle workspace is deleted after
 `SH_WORKSPACE_IDLE` (30 minutes by default; the microVM installer and `deploy/k8s/setup.sh` set 8
-hours), and the next turn is **not told** that it happened (#338). On a container worker, a per-session
+hours). The next turn is told, from a marker file (below). On a container worker, a per-session
 directory that is still empty `SH_WORKSPACE_EMPTY_IDLE` (15 minutes by default) after its last command
 is removed sooner (#551), unless a process is still running in it. It holds no files, and the session's
 next command re-creates it. The limit: a background process that is not in the directory when the sweep
@@ -65,6 +65,33 @@ removed early: each waits for `SH_WORKSPACE_IDLE`, and the worker logs why. A co
 cgroup namespace usually puts the worker at that namespace's root, where every process in the container
 counts as inside. Such a process in another cgroup cannot be a session's and is ignored. A session
 moved to another sandbox gets a fresh workspace, and that turn reports `workspace_reset`.
+
+**How a turn learns of a reset (#338).** The harness keeps a small file, `.moca-session`, holding the
+session id (the workspace key), at the root of the session's workspace, and records in the session's
+log in Redis that it wrote it. It writes the file once the workspace holds anything, at a turn's first
+command or at its end, so a container directory that is still empty stays empty for the early removal
+above. At the start of every later turn, before the agent runs, one command checks the file. If the log
+says it was written and it is missing, or holds another session's id, the workspace was reset on the
+same sandbox: a streamed turn's first frame is `workspace_reset` with reason `reclaimed`, the turn's
+placement (and so the session's resources view) records it, and the model's prompt starts with a note
+that files from earlier turns are gone. A queued turn has no stream, but its model gets the note. The
+file is then written again. A check that fails is logged and the turn runs with no verdict; it never
+fails the turn. A turn whose commands carry no workspace key (a workload run that writes only in its
+context) has no workspace to check. The file is left out of a templated session's patch and, when the
+workspace root is a git repository, listed in its `info/exclude`. The cost is one extra command per
+turn, two on a turn that starts in an empty workspace.
+
+It is a convention, not a guarantee:
+
+- A session that deletes `.moca-session` itself is reported as reset on its next turn: that cannot be
+  told from a reclaim.
+- A session reopened from a compaction checkpoint does not load a record older than the checkpoint, so
+  the first turn after it counts as a first turn. A reset on exactly that turn is not reported; none is
+  reported falsely.
+- It needs a workspace per session. A container worker that predates `workspace-subdir` runs every
+  session in one shared directory, where sessions overwrite each other's marker.
+- It does not prevent the reset. The workspace is still deleted after `SH_WORKSPACE_IDLE`; releasing it
+  explicitly when a session ends is the next step of #338.
 
 ## What the sandbox can reach
 

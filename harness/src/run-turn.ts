@@ -50,6 +50,12 @@ import { leaseTimings } from './lease-timings.js';
 import { attachPromotedConfig, type AttachedPromotedConfig } from './promoted-config.js';
 import { compactIfOverflowing } from './pre-prompt-compaction.js';
 import { recordModelSwitch } from './model-switch-record.js';
+import {
+  checkWorkspaceMarker,
+  WORKSPACE_RESET_NOTE,
+  type SessionWorkspace,
+  type WorkspaceMarkerCheck,
+} from './workspace-marker.js';
 
 // Re-exported because they are now part of executeTurn's CONTRACT: since /turn leases from the pool,
 // every caller of executeTurn can be handed these errors and needs to distinguish them from a generic
@@ -129,6 +135,11 @@ export interface TurnSandbox {
   podCwd: string;
   /** The sandbox's id, named in the model's prompt. */
   sandboxId?: string;
+  /**
+   * The session's own workspace in this sandbox, when it has one (a non-empty `workspace_key`):
+   * what the turn's workspace marker check reads and writes (#338). Absent: no check.
+   */
+  workspace?: SessionWorkspace;
 }
 
 /**
@@ -367,6 +378,9 @@ export async function acquireTurnSandbox(
       transport: selected.transport,
       podCwd: selected.podCwd,
       sandboxId: selected.sandboxId,
+      ...(selected.workspaceKey
+        ? { workspace: { key: selected.workspaceKey, dir: selected.podCwd } }
+        : {}),
     },
     leased: true,
     heartbeat: selected.heartbeat,
@@ -580,7 +594,10 @@ export async function withWorkspacePatch(
   return { ...result, workspace };
 }
 
-/** The `workspace_reset` frame for a placement that moved the session, else null (P6.3 spec §6). */
+/**
+ * The `workspace_reset` frame for a placement whose workspace was reset (P6.3 spec §6: the session
+ * moved; #338: its workspace on the same sandbox lost its marker), else null.
+ */
 export function placementFrame(
   sessionId: string,
   p: TurnPlacement | undefined,
@@ -603,6 +620,27 @@ function placementView(p: TurnPlacement): NonNullable<TurnResult['sandbox']> {
     ...(p.seed ? { seed: p.seed } : {}),
     ...(p.workspaceReset ? { workspaceReset: p.workspaceReset } : {}),
   };
+}
+
+/**
+ * Fold the workspace marker's verdict into the turn's placement (#338). A `reset` verdict on a
+ * placement that already carries a reset (the session moved, so of course its new workspace has no
+ * marker) keeps that reset: it is the cause. Otherwise it is `reclaimed`, from the sandbox the
+ * session is still on. `reset` is what the turn reports, with or without a placement (an injected
+ * sandbox has none).
+ */
+export function withMarkerVerdict(
+  placement: TurnPlacement | undefined,
+  verdict: WorkspaceMarkerCheck['verdict'] | undefined,
+  sandboxId: string | undefined,
+): { placement: TurnPlacement | undefined; reset: WorkspaceReset | undefined } {
+  if (placement?.workspaceReset) return { placement, reset: placement.workspaceReset };
+  if (verdict !== 'reset') return { placement, reset: undefined };
+  const reset: WorkspaceReset = {
+    from: placement?.sandboxId ?? sandboxId ?? '',
+    reason: 'reclaimed',
+  };
+  return { placement: placement ? { ...placement, workspaceReset: reset } : undefined, reset };
 }
 
 /** The result, plus where the turn ran -- what a JSON caller and the runtime report read. */
@@ -1306,15 +1344,31 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
 
   let attached: AttachedPromotedConfig | undefined;
   try {
+    // The workspace marker (#338): one Exec before the agent runs, and before the placement is
+    // reported, so a reset it finds is in the placement, the frame and the result alike. Never
+    // throws; an Exec that fails is logged and gives no verdict.
+    const sessionId = opened.sessionManager.getSessionId();
+    const marker = acquired.sandbox?.workspace
+      ? await checkWorkspaceMarker(
+          acquired.sandbox.transport,
+          acquired.sandbox.workspace,
+          opened.sessionManager,
+          acquired.sandbox.sandboxId ?? 'its sandbox',
+        )
+      : undefined;
+    const { placement, reset } = withMarkerVerdict(
+      acquired.placement,
+      marker?.verdict,
+      acquired.sandbox?.sandboxId,
+    );
     // First, so a turn that fails anywhere after this still has its placement recorded -- see
     // `onPlacement`. Inside the try for the same reason as the frame below: a throwing callback must
     // still release the lease.
-    if (acquired.placement) input.onPlacement?.(placementView(acquired.placement));
+    if (placement) input.onPlacement?.(placementView(placement));
     // After the renewal timer is armed: fetching and overlaying a multi-MB bundle can outlast a lease.
     // Before the reset frame: that frame flushes the SSE headers, and a missing bundle must still be a
     // plain 410, not an error frame.
     if (input.configRef && !input.promotedConfig) {
-      const sessionId = opened.sessionManager.getSessionId();
       attached = await attachPromotedConfig({
         digest: input.configRef,
         sessionId,
@@ -1328,15 +1382,22 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     // headers: a later pre-content failure then degrades to an error frame instead of a status code,
     // which is the same regime as any failure after the first token. Inside the try, so a sink that
     // throws still releases the lease below.
-    const resetFrame = placementFrame(opened.sessionManager.getSessionId(), acquired.placement);
+    // An injected sandbox has no placement, so its reset (a prompt leaf's) is framed here directly.
+    const resetFrame =
+      placementFrame(sessionId, placement) ??
+      (reset
+        ? placementFrame(sessionId, { sandboxId: '', tier: '', workspaceReset: reset })
+        : null);
     if (resetFrame) input.onEvent?.(resetFrame);
+    // The model is told too, whatever the cause: its earlier files are gone.
+    const turnInput = {
+      ...input,
+      ...(reset ? { prompt: `${WORKSPACE_RESET_NOTE}\n\n${input.prompt}` } : {}),
+      ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
+    };
     const result = withPlacement(
-      await executeTurnCore(
-        attached ? { ...input, promotedConfig: attached.promotedConfig } : input,
-        acquired.sandbox,
-        opened,
-      ),
-      acquired.placement,
+      await executeTurnCore(turnInput, acquired.sandbox, opened, marker),
+      placement,
     );
     // A templated session's end state, while the lease is still held and renewed (spec §5.1).
     return await withWorkspacePatch(result, acquired, input.config?.sandboxTemplate, process.env);
@@ -1401,6 +1462,7 @@ async function executeTurnCore(
   input: ExecuteTurnInput,
   turnSandbox: TurnSandbox | null,
   opened: OpenedTurnSession,
+  marker?: WorkspaceMarkerCheck,
 ): Promise<TurnResult> {
   const { prompt, config } = input;
   const cwd = config?.cwd ?? process.cwd();
@@ -1520,6 +1582,8 @@ async function executeTurnCore(
     }
   }
 
+  // Before the flush, so its record is in this turn's durable entries. Never throws.
+  await marker?.finish();
   await backend.flush();
 
   // AFTER the flush, deliberately. The turn really did happen — entries, tool results and

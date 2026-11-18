@@ -1,6 +1,7 @@
 import type { ExtensionFactory } from '@earendil-works/pi-coding-agent';
 import type { LeafUsage } from './run-leaf.js';
 import type { TurnResult, TurnWorkspace } from './run-turn.js';
+import type { WorkspaceReset } from './select-sandbox.js';
 
 /** Why the registry aborted a detachable turn (turn-reattach spec §5); absent for any other end. */
 export type AbortReasonCode =
@@ -21,12 +22,13 @@ export type TurnStreamFrame =
   | { type: 'tool_result'; id: string; isError: boolean; preview: string } // tool call ended (clipped)
   // P6.3: emitted first when this turn's sandbox is not the one the session's previous turn used, so
   // the user learns at the turn itself why earlier files are gone. Old clients ignore unknown types.
+  // `reclaimed` (#338): the same sandbox, whose workspace no longer carries the session's marker.
   | {
       type: 'workspace_reset';
       sessionId: string;
       from: string;
       tier: string;
-      reason: 'detached' | 'retiered';
+      reason: WorkspaceReset['reason'];
     }
   | {
       type: 'done';

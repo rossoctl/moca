@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.30.0
+  version: 1.31.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -1893,11 +1893,15 @@ paths:
                       tier: { type: [string, 'null'] }
                       workspaceReset:
                         type: [object, 'null']
-                        description: when, and from which sandbox, the session last lost its workspace
+                        description: when, and on which sandbox, the session last lost its workspace
                         required: [at, from]
                         properties:
                           at: { type: number, description: epoch ms }
-                          from: { type: string, description: the sandbox the session left }
+                          from:
+                            type: string
+                            description: |
+                              the sandbox the session left or, when its workspace was reclaimed
+                              where it is, the sandbox it is still on
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
   /v1/sessions/{id}/models:

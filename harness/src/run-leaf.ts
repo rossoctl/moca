@@ -812,11 +812,16 @@ async function runPromptLeaf(
     }
     // A workload run starts in its context, as a solve leaf starts in its worktree. The session's
     // own directory stays the scratch space the note points a read-only run at.
+    // The session's own workspace is selected.podCwd even when the run starts in its context: that
+    // is where the workspace marker goes (#338). None when the run's Execs carry no workspace key.
     const turnSandbox = selected
       ? {
           transport: selected.transport,
           podCwd: contextPath ?? selected.podCwd,
           sandboxId: selected.sandboxId,
+          ...(selected.workspaceKey
+            ? { workspace: { key: selected.workspaceKey, dir: selected.podCwd } }
+            : {}),
         }
       : undefined;
     const r: TurnResult = await exec({

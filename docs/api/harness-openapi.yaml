@@ -15,7 +15,7 @@
 openapi: 3.1.0
 info:
   title: MOCA harness (data plane)
-  version: 1.6.0
+  version: 1.7.0
   description: |
     The agent execution tier: HTTP server and P6 workers that run turns and jobs against sandboxed
     workspaces. It is a separate deployable from the control plane, and a client that knows only
@@ -779,11 +779,15 @@ components:
         workspaceReset:
           type: object
           description: |
-            Why the session's files moved — the tier is `sandbox.tier` above (and on the SSE
-            frame). `retiered`: the sandbox now serves another tier or sandbox template.
+            Why the session's earlier files are gone — the tier is `sandbox.tier` above (and on
+            the SSE frame). `detached`: the session's sandbox `from` is gone and the session moved.
+            `retiered`: the sandbox now serves another tier or sandbox template. `reclaimed`: the
+            session is still on `from`, but its workspace there no longer holds the harness's
+            marker file, most often because the worker reclaimed the idle workspace
+            (SH_WORKSPACE_IDLE). Clients ignore a reason they do not know.
           properties:
             from: { type: string }
-            reason: { type: string, enum: [detached, retiered] }
+            reason: { type: string, enum: [detached, retiered, reclaimed] }
     TurnWorkspace:
       type: object
       description: |
@@ -911,14 +915,18 @@ components:
       type: object
       required: [type, sessionId, from, tier, reason]
       description: |
-        First frame of a turn whose sandbox is not the one the session's previous turn used, so
-        the user learns at the turn itself why earlier files are gone (P6.3).
+        First frame of a turn whose workspace is not the one the session's previous turn left,
+        so the user learns at the turn itself why earlier files are gone: its sandbox is not the
+        one the previous turn used (`detached`, `retiered`; P6.3), or it is, but the workspace
+        there lost the session's marker (`reclaimed`, #338). `from` is the sandbox the files
+        were on; for `reclaimed` that is the turn's own sandbox (empty when the turn has none to
+        name). The model is told as well, in a note before the turn's prompt.
       properties:
         type: { type: string, enum: [workspace_reset] }
         sessionId: { type: string }
         from: { type: string }
         tier: { type: string }
-        reason: { type: string, enum: [detached, retiered] }
+        reason: { type: string, enum: [detached, retiered, reclaimed] }
     FrameDone:
       type: object
       required: [type, sessionId, stopReason]

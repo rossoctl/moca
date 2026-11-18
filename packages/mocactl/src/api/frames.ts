@@ -68,7 +68,7 @@ export type WorkspaceResetFrame = {
   sessionId: string;
   from: string;
   tier: string;
-  reason: 'detached' | 'retiered';
+  reason: 'detached' | 'retiered' | 'reclaimed';
 };
 export type UnknownFrame = { type: 'unknown'; event: string; data: unknown };
 

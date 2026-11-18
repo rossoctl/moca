@@ -46,12 +46,13 @@ checkpoint marker still scans the whole stream, so total Redis work is not const
 
 ## What survives what
 
-| Event                   | Result                                                                                                                     |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| A worker dies mid-turn  | The in-flight turn is lost; the committed session survives in Redis and the next request resumes it                        |
-| The supervisor restarts | Workers exit and are restarted; in-flight turns end, sessions survive. Turns do not survive a restart                      |
-| A sandbox goes away     | The session survives; if it is moved the workspace is reset and the turn reports `workspace_reset`; idle reclaim is silent |
-| **Redis is lost**       | All sessions, ownership records and leases are lost                                                                        |
+| Event                    | Result                                                                                                                                                                                                |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A worker dies mid-turn   | The in-flight turn is lost; the committed session survives in Redis and the next request resumes it                                                                                                   |
+| The supervisor restarts  | Workers exit and are restarted; in-flight turns end, sessions survive. Turns do not survive a restart                                                                                                 |
+| A sandbox goes away      | The session survives; if it is moved the workspace is reset and the turn reports `workspace_reset`                                                                                                    |
+| A workspace is reclaimed | The session survives on its sandbox with a fresh workspace; the next turn reports `workspace_reset` with reason `reclaimed`, from a marker file ([Brain and hands](brain-and-hands.md#the-workspace)) |
+| **Redis is lost**        | All sessions, ownership records and leases are lost                                                                                                                                                   |
 
 Redis durability depends on the deployment. In the single-VM and Compose deployments Redis has no named
 volume (it keeps only the image's default snapshots in an anonymous volume), so a reboot may lose
