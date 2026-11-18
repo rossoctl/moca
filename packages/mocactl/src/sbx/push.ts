@@ -298,16 +298,19 @@ async function gitReads(root: string): Promise<GitRead[]> {
     add(resolve(dirname(file), kv.slice(kv.indexOf('\n') + 1)), 'a git config file');
   }
   // The global, XDG and system config files, which git reads once they exist. `git var` (git 2.42
-  // on) names them whether or not they exist; an older git gets git-config(1)'s FILES locations.
+  // on) names them whether or not they exist; an older git gets git-config(1)'s global and XDG
+  // locations, and GIT_CONFIG_SYSTEM when set.
   const env = process.env;
   const home = env.HOME ?? homedir();
-  const older = [
-    env.GIT_CONFIG_GLOBAL,
-    join(env.XDG_CONFIG_HOME || join(home, '.config'), 'git', 'config'),
-    join(home, '.gitconfig'),
-    env.GIT_CONFIG_SYSTEM,
-  ].filter((f): f is string => Boolean(f));
-  for (const name of ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']) {
+  const older: Record<string, (string | undefined)[]> = {
+    GIT_CONFIG_GLOBAL: [
+      env.GIT_CONFIG_GLOBAL,
+      join(env.XDG_CONFIG_HOME || join(home, '.config'), 'git', 'config'),
+      join(home, '.gitconfig'),
+    ],
+    GIT_CONFIG_SYSTEM: [env.GIT_CONFIG_SYSTEM],
+  };
+  for (const name of Object.keys(older)) {
     let files: string[];
     try {
       files = (await git(root, ['var', name])).toString('utf8').split('\n').filter(Boolean);
@@ -319,7 +322,7 @@ async function gitReads(root: string): Promise<GitRead[]> {
           `cannot read git's configuration; nothing was changed (${gitText(err)})`,
         );
       }
-      files = older;
+      files = older[name]!.filter((f): f is string => Boolean(f));
     }
     for (const f of files) add(resolve(root, f), 'a git config file');
   }
@@ -341,6 +344,19 @@ function gitReadWhy(p: string, reads: GitRead[]): string | undefined {
     const n = Math.min(segs.length, d.length);
     if (!segs.slice(0, n).every((s, i) => same(s, d[i]!))) continue;
     return segs.length >= d.length ? what : `where ${what} goes`;
+  }
+  return undefined;
+}
+
+/**
+ * The submodule or nested repository under `root` a path is inside (a parent directory holding a
+ * `.git`), which a push never sends and whose hooks and config `gitReads` does not see.
+ */
+function nestedRepo(root: string, p: string): string | undefined {
+  const segs = segments(p);
+  for (let i = 1; i < segs.length; i++) {
+    const d = segs.slice(0, i).join('/');
+    if (lstatOrGone(join(root, d, '.git'))) return d;
   }
   return undefined;
 }
@@ -1083,8 +1099,8 @@ async function dryRun3way(root: string, dir: string, patch: string): Promise<str
 }
 
 /**
- * Applies a pulled patch in the local repository (R6c). First, a patch that writes `.git`, the
- * `.sbx/` binding, local agent configuration or hooks (`isAgentConfigPath`), or what git
+ * Applies a pulled patch in the local repository (R6c). First, a patch that writes `.git`, a
+ * submodule or nested repository, the `.sbx/` binding, local agent configuration or hooks (`isAgentConfigPath`), or what git
  * reads to run commands (`gitReads`: hooks, git directory, config) is refused whole, before git is
  * asked to apply anything. Then:
  * 1. a plain `git apply`, which changes only the working tree and is all or nothing;
@@ -1118,6 +1134,17 @@ export async function applyPatch(
       throw new PushError(
         `the patch writes ${list(gitPaths)}, inside a repository's .git, which a pull never ` +
           'changes; nothing was changed. Look at it with mocactl sbx pull -o FILE',
+      );
+    }
+    const nested = touched.flatMap((p) => {
+      const d = nestedRepo(root, p);
+      return d === undefined ? [] : [`${p} (in ${d})`];
+    });
+    if (nested.length) {
+      throw new PushError(
+        `the patch writes ${list(nested)}, inside a submodule or nested repository, which a ` +
+          'push never sends and a pull never changes; nothing was changed. Look at it with ' +
+          'mocactl sbx pull -o FILE',
       );
     }
     const binding = touched.filter(isBindingPath);

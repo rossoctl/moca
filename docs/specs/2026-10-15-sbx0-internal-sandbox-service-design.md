@@ -493,7 +493,8 @@ persistence follows the existing `base/redis.yaml`.
   `.vscode/tasks.json`, `.vscode/settings.json`, `.husky/`, `.envrc`, or `.vscode`
   itself), on either side of a rename or copy, at any depth and under case and Unicode folding;
   also the in-tree `core.hooksPath` directory, git directory and git config files
-  (`include.path` ones too), as git reports them, through symlinks. A
+  (`include.path` ones too), as git reports them, through symlinks, and anything inside a
+  submodule or nested repository (a parent directory holding `.git`). A
   change to a steering file — `CLAUDE.md`, `AGENTS.md`, `AGENTS.override.md` (Codex reads it in
   preference to `AGENTS.md`) or `.bobrules` (IBM Bob's, which `sbx up` does not write, so a change
   to it is all change) — outside the `sbx up` block is applied with a warning.

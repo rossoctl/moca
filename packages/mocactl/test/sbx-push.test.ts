@@ -53,7 +53,7 @@ import {
 } from '../src/sbx/push.js';
 import { MARK_BEGIN, MARK_END } from '../src/sbx/agent-config.js';
 import { readBinding } from '../src/sbx/state.js';
-import { SBX, cleanupTmp, git, localWorkspace, repo } from './helpers/sbx.js';
+import { SBX, cleanupTmp, git, localWorkspace, repo, tmp } from './helpers/sbx.js';
 
 afterEach(cleanupTmp);
 
@@ -1228,7 +1228,7 @@ describe('pull --apply never writes local agent configuration or hooks (final re
   };
   // A directory whose git answers `git var` as a git before 2.42 does for an unknown variable.
   const gitWithoutVar = () => {
-    const d = mkdtempSync(join(tmpdir(), 'git-'));
+    const d = tmp('git-');
     const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
     writeFileSync(
       join(d, 'git'),
@@ -1316,6 +1316,41 @@ describe('pull --apply never writes local agent configuration or hooks (final re
       }
     });
   }
+
+  // A nested repository's own hooks and config are not the tree's: nothing inside one is written.
+  for (const [what, set, p] of [
+    [
+      'a nested repository with core.hooksPath=.githooks',
+      (r: string) => {
+        git(r, 'init', '-q', 'sub');
+        git(join(r, 'sub'), 'config', 'core.hooksPath', '.githooks');
+      },
+      'sub/.githooks/pre-commit',
+    ],
+    [
+      'a nested repository with a .git file, as a submodule has',
+      (r: string) => git(r, 'init', '-q', '--separate-git-dir', tmp('gitdir-'), 'sub'),
+      'sub/deep/x',
+    ],
+  ] as const) {
+    it(`refuses a patch writing ${p}, in ${what}, with nothing changed`, async () => {
+      const r = repo();
+      set(r);
+      const tree = snapshot(r);
+      const patch = Buffer.from(creating('src/ok.py') + creating(p));
+      const err = await applyPatch(r, patch).catch((e: unknown) => e);
+      expect(err, p).toBeInstanceOf(PushError);
+      expect((err as Error).message).toContain(`${p} (in sub)`);
+      expect(snapshot(r)).toEqual(tree);
+    });
+  }
+
+  it('applies a patch writing subx/a beside the nested repository sub', async () => {
+    const r = repo();
+    git(r, 'init', '-q', 'sub');
+    await applyPatch(r, Buffer.from(creating('subx/a')));
+    expect(existsSync(join(r, 'subx/a'))).toBe(true);
+  });
 
   for (const [v, p] of [
     ['scripts/hooks', 'scripts/hooksx/a'],
