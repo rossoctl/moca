@@ -69,6 +69,8 @@ saturated the turn gets 503 `sandbox_unavailable` with `Retry-After`.
   moves to another sandbox in the same tier on a fresh workspace, and the turn reports `workspace_reset`
   with reason `detached`. If the sandbox has been relabelled to another declared tier, the session falls
   back immediately with reason `retiered`.
+  A session that stays on its sandbox but whose workspace was reclaimed there reports reason `reclaimed`
+  ([Brain and hands](brain-and-hands.md#the-workspace)).
 
 ## Templates
 

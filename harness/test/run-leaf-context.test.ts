@@ -91,6 +91,26 @@ describe('frozen context on a prompt leaf', () => {
     expect(lease.release).toHaveBeenCalled();
   });
 
+  it("hands the turn the session's own workspace for its marker, not the context (#338)", async () => {
+    const { lease, transport } = relayLease();
+    const overlayContext = vi.fn(async () => '/workspace/.moca-context/runs/run-1');
+    // A read-only context keeps the session key: the marker goes in the session's scratch dir.
+    selectPoolSandboxMock.mockReset().mockResolvedValue({ ...lease, workspaceKey: 'run-1' });
+    let executeTurn = okTurn();
+    await runLeaf(env(vi.fn()), undefined, { executeTurn, overlayContext });
+    expect(executeTurn.mock.calls[0]![0].sandbox).toEqual({
+      transport,
+      podCwd: '/workspace/.moca-context/runs/run-1',
+      sandboxId: 'sbx-0',
+      workspace: { key: 'run-1', dir: '/workspace/run-1' },
+    });
+    // A run whose Execs carry no key (it writes only in its context, #613) has no workspace to mark.
+    selectPoolSandboxMock.mockReset().mockResolvedValue({ ...lease, workspaceKey: '' });
+    executeTurn = okTurn();
+    await runLeaf(env(vi.fn(), true), undefined, { executeTurn, overlayContext });
+    expect(executeTurn.mock.calls[0]![0].sandbox).not.toHaveProperty('workspace');
+  });
+
   it('fails without running a turn when the sandbox is not a P6 relay sandbox', async () => {
     const { lease } = relayLease();
     selectPoolSandboxMock.mockReset().mockResolvedValue({ ...lease, transport: undefined });

@@ -120,16 +120,16 @@ Headers go out with the first frame. If none has been written after `SH_TURN_STR
 `turn` frame instead), so a proxy idle timeout cannot cut a slow first frame. A failure after that point is a
 terminal `error` frame, not an HTTP status.
 
-| Event             | Fields                                                               | Notes                                                                                       |
-| ----------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `turn`            | `turnId`, `sessionId`, `truncated?`, `ended?`                        | Detachable and attach only; not terminal                                                    |
-| `text`            | `delta`                                                              |                                                                                             |
-| `thinking`        | `delta`                                                              | May never fire                                                                              |
-| `tool_use`        | `id`, `name`, `args`                                                 |                                                                                             |
-| `tool_result`     | `id`, `isError`, `preview`                                           | Preview is clipped to `SH_TURN_STREAM_TOOL_RESULT_PREVIEW_BYTES` (2048)                     |
-| `workspace_reset` | `sessionId`, `from`, `tier`, `reason`                                | First, when the sandbox changed since the last turn (`detached` or `retiered`)              |
-| `done`            | `sessionId`, `stopReason`, `usage?`                                  | Terminal                                                                                    |
-| `error`           | `sessionId`, `stopReason`, `errorMessage?`, `usage?`, `abortReason?` | Terminal. `abortReason`: `cancelled`, `unwatched`, `restarting`, `lease_lost`, `owner_lost` |
+| Event             | Fields                                                               | Notes                                                                                                                          |
+| ----------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `turn`            | `turnId`, `sessionId`, `truncated?`, `ended?`                        | Detachable and attach only; not terminal                                                                                       |
+| `text`            | `delta`                                                              |                                                                                                                                |
+| `thinking`        | `delta`                                                              | May never fire                                                                                                                 |
+| `tool_use`        | `id`, `name`, `args`                                                 |                                                                                                                                |
+| `tool_result`     | `id`, `isError`, `preview`                                           | Preview is clipped to `SH_TURN_STREAM_TOOL_RESULT_PREVIEW_BYTES` (2048)                                                        |
+| `workspace_reset` | `sessionId`, `from`, `tier`, `reason`                                | First, when the sandbox changed since the last turn (`detached` or `retiered`), or its workspace there was reset (`reclaimed`) |
+| `done`            | `sessionId`, `stopReason`, `usage?`                                  | Terminal                                                                                                                       |
+| `error`           | `sessionId`, `stopReason`, `errorMessage?`, `usage?`, `abortReason?` | Terminal. `abortReason`: `cancelled`, `unwatched`, `restarting`, `lease_lost`, `owner_lost`                                    |
 
 `done` is used when `stopReason` is `stop`, `length`, `end_turn` or `max_tokens`; anything else ends in
 `error`. On a non-detachable stream a client disconnect aborts the turn.
