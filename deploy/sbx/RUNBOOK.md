@@ -684,12 +684,13 @@ code (the stream and its field names; the plain output, one value per line, is r
 ms() { jq -nr --arg t "$1" '$t | strptime("%Y-%m-%d %H:%M:%S") | mktime * 1000'; }
 kubectl -n "$NS" exec redis-0 -c redis -- \
   redis-cli XRANGE sh:cp:audit "$(ms "$FROM")" "$(ms "$TO")" |
-  awk -v k="$SBX" '/^[0-9]+-[0-9]+$/ { if (r ~ k) print r; r = $0; next }
-    { r = r " " $0 } END { if (r ~ k) print r }'
+  awk -v k=" $SBX " '/^[0-9]+-[0-9]+$/ { if (index(r " ", k)) print r; r = $0; next }
+    { r = r " " $0 } END { if (index(r " ", k)) print r }'
 ```
 
-Each line printed is one entry: its id, then its fields and values. Use `-v k="$SUB"` for the
-member's other decisions (logins and refreshes among them).
+Each line printed is one entry: its id, then its fields and values. The filter matches a whole
+value (spaces on both sides), so `github:1` does not also match `github:12`; use `-v k=" $SUB "`
+for the member's other decisions (logins and refreshes among them).
 
 On the KVM host, the worker's lines are plain text, and those about one sandbox name its workspace
 key, as `workspace_key="sbx-…"` or `for "sbx-…"` (`remote-worker/internal/vmpool`). Lines about
