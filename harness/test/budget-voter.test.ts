@@ -1,5 +1,11 @@
-import { describe, it, expect } from 'vitest';
-import { decideBudget, sessionSpendTotal, budgetVoterExtension } from '../src/budget-voter';
+import { describe, it, expect, vi } from 'vitest';
+import { afterEach } from 'vitest';
+import {
+  decideBudget,
+  sessionSpendTotal,
+  budgetVoterExtension,
+  resolveBudgetLimit,
+} from '../src/budget-voter';
 
 // --- minimal fakes (no Pi runtime) -------------------------------------------
 function fakeCtx(
@@ -40,6 +46,51 @@ function harness() {
   };
   return { handlers, appended, pi, sm };
 }
+
+describe('resolveBudgetLimit', () => {
+  const saved = process.env.SH_BUDGET_TOKENS;
+  afterEach(() => {
+    if (saved === undefined) delete process.env.SH_BUDGET_TOKENS;
+    else process.env.SH_BUDGET_TOKENS = saved;
+  });
+
+  it('takes the deployment limit when the turn names no cap', () => {
+    process.env.SH_BUDGET_TOKENS = '1000';
+    expect(resolveBudgetLimit(undefined)).toBe(1000);
+  });
+
+  it('takes the turn cap when the deployment sets none', () => {
+    delete process.env.SH_BUDGET_TOKENS;
+    expect(resolveBudgetLimit(500)).toBe(500);
+  });
+
+  // The review's must-fix: `caps.tokens ?? SH_BUDGET_TOKENS` let a submitter RAISE the operator's
+  // limit, which is exactly what the API contract forbids ("a cap above the deployment's own limit
+  // does not raise it"). An unattended fan-out is the caller this protects the operator from.
+  it('clamps a turn cap above the deployment limit down to it', () => {
+    process.env.SH_BUDGET_TOKENS = '1000';
+    expect(resolveBudgetLimit(999999)).toBe(1000);
+  });
+
+  it('honours a turn cap below the deployment limit', () => {
+    process.env.SH_BUDGET_TOKENS = '1000';
+    expect(resolveBudgetLimit(250)).toBe(250);
+  });
+
+  it('is no cap at all when neither side is usable', () => {
+    process.env.SH_BUDGET_TOKENS = 'not-a-number';
+    expect(resolveBudgetLimit(undefined)).toBeUndefined();
+    expect(resolveBudgetLimit(0)).toBeUndefined();
+    expect(resolveBudgetLimit(-5)).toBeUndefined();
+  });
+
+  it('ignores an unusable side rather than disabling the other', () => {
+    process.env.SH_BUDGET_TOKENS = '0';
+    expect(resolveBudgetLimit(700)).toBe(700);
+    process.env.SH_BUDGET_TOKENS = '700';
+    expect(resolveBudgetLimit(Number.NaN)).toBe(700);
+  });
+});
 
 describe('decideBudget', () => {
   it('commits below the cap', () => {
@@ -120,6 +171,22 @@ describe('budgetVoterExtension (headless: no session_start, injected baseline)',
     const { handlers, pi, sm } = harness();
     budgetVoterExtension(sm as never, { limit: 1, baseline: 0 })(pi as never);
     expect(handlers.tool_call({}, brokenCtx())).toEqual({}); // total == null -> no block
+  });
+  // #391: the only signal a caller gets. Blocking the call is invisible from outside -- pi reports
+  // `end_turn` for a turn whose every call was refused -- so without this an async turn over its
+  // `caps.tokens` would be finalized as a normal completion.
+  it('calls onExceeded exactly when it blocks, and still blocks', () => {
+    const { handlers, pi, sm } = harness();
+    const onExceeded = vi.fn();
+    budgetVoterExtension(sm as never, { limit: 50, baseline: 0, onExceeded })(pi as never);
+    expect(
+      handlers.tool_call({}, fakeCtx([{ input: 10, output: 0, cacheRead: 0, cacheWrite: 0 }])),
+    ).toEqual({});
+    expect(onExceeded).not.toHaveBeenCalled();
+    expect(
+      handlers.tool_call({}, fakeCtx([{ input: 60, output: 0, cacheRead: 0, cacheWrite: 0 }])),
+    ).toEqual({ block: true, reason: 'Session token budget exceeded' });
+    expect(onExceeded).toHaveBeenCalledTimes(1);
   });
   it('is disabled when limit <= 0', () => {
     const { handlers, appended, pi, sm } = harness();

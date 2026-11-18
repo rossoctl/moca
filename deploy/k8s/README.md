@@ -1353,16 +1353,28 @@ like an answer. Poll the turn route above.
 On the admin port's `/metrics`, under `counters` (counts, so missing and zero mean the same thing)
 and as two top-level gauges:
 
-| Reading                   | Means                                                                            |
-| ------------------------- | -------------------------------------------------------------------------------- |
-| `async_claims`            | leaves claimed by this pod's workers since they started                          |
-| `async_reclaims`          | of those, the ones redelivered after a worker died holding one (90 s idle floor) |
-| `async_dead_letters`      | of those, the ones that exhausted their attempts                                 |
-| `async_claim_denied_full` | claims this pod's workers refused because their admission cap was full           |
-| `async_queue_depth`       | queued turns, from slot 0 only                                                   |
-| `async_oldest_age_ms`     | age of the oldest queued turn, from slot 0 only                                  |
+| Reading                   | Means                                                                         |
+| ------------------------- | ----------------------------------------------------------------------------- |
+| `async_claims`            | leaves claimed by this pod's workers since they started                       |
+| `async_reclaims`          | of those, the ones redelivered: a worker died holding one, OR it was deferred |
+| `async_dead_letters`      | of those, the ones that exhausted their attempts                              |
+| `async_claim_denied_full` | claims this pod's workers refused because their admission cap was full        |
+| `async_deferred_subject`  | entries handed back unrun because their owner was at `SH_TURNS_PER_SUBJECT`   |
+| `async_queue_depth`       | queued turns, from slot 0 only                                                |
+| `async_oldest_age_ms`     | age of the oldest queued turn, from slot 0 only                               |
 
-The four counters are **one pod's**, not the deployment's: `/metrics` answers from whichever pod you
+`async_deferred_subject` rising while slots sit idle is the per-owner cap pacing one submitter -- the
+fairness working, not a fault. Rising with no second owner submitting means `SH_TURNS_PER_SUBJECT` is
+too low for this deployment: a deferred entry waits out the 90 s reclaim window before any worker may
+take it again, so each deferral costs that turn up to 90 s. That window is also why it inflates
+`async_reclaims`: the entry comes back by the same `XAUTOCLAIM` a dead worker's entry does, so
+subtract `async_deferred_subject` before reading a reclaim rate as workers dying mid-leaf.
+A flat zero is not proof of fairness: the
+cap counts sync and async together and a worker runs one queued leaf at a time, so an async-only
+backlog never reaches it and is drained FIFO -- one owner's deep queue ahead of another's single turn
+(open on #391).
+
+The five counters are **one pod's**, not the deployment's: `/metrics` answers from whichever pod you
 reached, each worker counts in its own memory, and a worker that respawns starts its own count at
 zero. At `replicas` > 1 (section 4) add the pods up yourself. The two gauges describe the one shared
 queue, so every pod's slot 0 reports the same numbers.
@@ -1383,9 +1395,11 @@ for you.
   redeemer, so an async turn gets inference isolation and not egress isolation.
 - **Two leaves per pod at the default W.** The loop is sequential; see section 4 for the width rule
   and why no autoscaler ships.
-- **Caps: wall clock yes, the other two no.** Under `multi`, `turn_exp` is enforced — anchored at
-  the dequeue and clamped to `min(caps.wallClock, MOCA_TURN_MAX_S)` — and bounds how long the turn's
-  grants are usable. `tokens` and `costUsd` are recorded, not enforced.
+- **Caps: both of them, enforced by the worker.** `turn_exp` — anchored at the dequeue and clamped
+  to `min(caps.wallClock, MOCA_TURN_MAX_S)` — is the deadline the worker stops the leaf at, and under
+  `multi` it also bounds how long the turn's grants are usable. `caps.tokens` is enforced inside the
+  run. Either one spent ends the turn `failed` with `result.reason: "budget"`
+  ([#391](https://github.com/rossoctl/moca/issues/391)). `caps.costUsd` is refused at submission.
 - **The scheduled on-ramp has no equivalent.** Archetype C went with the KEDA path and has no P6
   design ([#536](https://github.com/rossoctl/moca/issues/536)).
 

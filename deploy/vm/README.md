@@ -70,7 +70,12 @@ Since #366 a re-run also installs the control plane. It writes `control-plane.en
 setting changes: the claim reuses the `SH_CONTROL_PLANE_URL` and `SH_EXCHANGE_TOKEN` this VM already
 wires. The drain shares `SH_TURNS_PER_WORKER` with sync `/turn` — there is no reserved headroom, so
 a deep queue can occupy every slot. `async_claim_denied_full` on the admin `/metrics` counts the
-claims that were refused for that reason.
+claims that were refused for that reason. It also shares `SH_TURNS_PER_SUBJECT` with sync `/turn`, so
+one owner's running fan-out cannot also fill the worker with interactive turns: an entry claimed past
+that owner's cap is handed back unrun (counted as `async_deferred_subject`) and waits out the 90 s
+reclaim window. That cap does not pace an async-only drain — a worker runs one queued leaf at a time,
+so queued work alone never reaches it, and one owner's deep backlog is still served before another
+owner's single turn (open on #391).
 
 The crash path has its own test, skipped unless you ask for it -- it waits out the production 90 s
 reclaim window, so it cannot run in CI:

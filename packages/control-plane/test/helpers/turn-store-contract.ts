@@ -154,7 +154,7 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       await done();
     });
 
-    it('cancels a queued turn and answers conflict for a running or terminal one (§4.5)', async () => {
+    it('cancels a queued turn and answers conflict for a terminal one (§4.5)', async () => {
       const { store, now, done } = await make();
       await store.create(rec({ turnId: 't-q' }));
       expect(await store.cancel('t-q', now)).toBe('cancelled');
@@ -162,11 +162,50 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       // Cancel is idempotent in effect but reports the conflict: already-cancelled is terminal.
       expect(await store.cancel('t-q', now)).toBe('conflict');
 
+      await store.create(rec({ turnId: 't-d' }));
+      expect(await store.finalize('t-d', 'done', now)).toBe('ok');
+      expect(await store.cancel('t-d', now)).toBe('conflict');
+      await done();
+    });
+
+    it('REQUESTS a cancel on a running turn, leaving it running for its worker to stop (#391)', async () => {
+      const { store, now, done } = await make();
       await store.create(rec({ turnId: 't-r' }));
       await store.markRunning('t-r', 1);
-      // A running leaf is NOT interrupted (§4.5): the DELETE answers 409 naming the state.
-      expect(await store.cancel('t-r', now)).toBe('conflict');
+
+      expect(await store.cancel('t-r', now)).toBe('cancelling');
+      // The STATE is untouched. Every redelivery write CASes against the open states, so a third
+      // live state would refuse exactly the reclaimed entries crash recovery exists for -- which
+      // the markRunning below is here to prove.
       expect((await store.get('t-r'))?.state).toBe('running');
+      expect((await store.get('t-r'))?.cancelRequested).toBe(true);
+      expect(await store.cancelRequested('t-r')).toBe(true);
+      // Idempotent: a caller retrying the DELETE is told the same thing, not given a 409 for a
+      // cancel already in flight.
+      expect(await store.cancel('t-r', now)).toBe('cancelling');
+      expect(await store.markRunning('t-r', 2)).toBe('ok');
+
+      // The worker's own finalize is what ends it, mapping its aborted leaf to `cancelled`.
+      expect(await store.finalize('t-r', 'cancelled', now)).toBe('ok');
+      expect((await store.get('t-r'))?.state).toBe('cancelled');
+      await done();
+    });
+
+    it('reports no cancel request for a turn that has none, or no record at all (#391)', async () => {
+      const { store, done } = await make();
+      await store.create(rec({ turnId: 't-1' }));
+      expect(await store.cancelRequested('t-1')).toBe(false);
+      expect(await store.cancelRequested('t-missing')).toBe(false);
+      await done();
+    });
+
+    it('reads the owner of a turn, and empty for no record (#391)', async () => {
+      const { store, done } = await make();
+      await store.create(rec({ turnId: 't-1', owner: 'github:1234' }));
+      expect(await store.owner('t-1')).toBe('github:1234');
+      // '' not a throw: the async drain reads this before its claim, and the claim is what decides
+      // what a missing record means.
+      expect(await store.owner('t-missing')).toBe('');
       await done();
     });
 

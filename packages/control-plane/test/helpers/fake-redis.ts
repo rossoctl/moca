@@ -38,6 +38,9 @@ export function fakeRedis() {
     async hGetAll(key) {
       return { ...(hashes.get(key) ?? {}) };
     },
+    async hGet(key, field) {
+      return hashes.get(key)?.[field] ?? null;
+    },
     async zAdd(key, member) {
       ops.push(`zAdd ${key}`);
       const z = zsets.get(key) ?? [];

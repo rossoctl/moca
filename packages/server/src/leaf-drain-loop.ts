@@ -163,7 +163,12 @@ export function createLeafDrainLoop(deps: LeafDrainLoopDeps): LeafDrainLoop {
             const outcome = await runOne(deps.job);
             if (stopping) return; // drained mid-leaf: do not report, do not claim again
             deps.onOutcome?.(outcome);
-            if (outcome.kind === 'idle') backoffMs = idleBackoffMs;
+            // `deferred` backs off like `idle` (#391): the entry was handed back because its owner
+            // is at their cap, and claiming again at once would most likely re-read that same
+            // owner's next entry and defer it too -- a hot loop against Redis that makes no
+            // progress. The backoff is also what gives the deferred entry time to go stale enough
+            // to be reclaimable.
+            if (outcome.kind === 'idle' || outcome.kind === 'deferred') backoffMs = idleBackoffMs;
           } catch (err) {
             // A claim that THREW left its entry pending, by design (turn-claim.ts). Back off so
             // a control-plane outage is a slow retry rather than a hot loop against it.

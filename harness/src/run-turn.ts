@@ -37,7 +37,7 @@ import {
   type WorkspaceReset,
 } from './select-sandbox.js';
 import { checkpointExtension } from './checkpoint-extension.js';
-import { budgetVoterExtension, branchSpend } from './budget-voter.js';
+import { budgetVoterExtension, branchSpend, resolveBudgetLimit } from './budget-voter.js';
 import { AMBIENT_KEY_SENTINEL } from './ambient-sentinel.js';
 import { toolChoiceExtension } from './tool-choice-extension.js';
 import { promptCacheExtension } from './prompt-cache-extension.js';
@@ -702,6 +702,13 @@ export interface TurnConfig {
    * `model` above is also read by /runs, which must not inherit an id pi's registry may not know.
    */
   sessionModel?: SessionModelSpec;
+  /**
+   * This turn's token cap -- an async turn's `caps.tokens`, carried through the dequeue exchange
+   * (#391). A CEILING, not an override: `resolveBudgetLimit` takes the tighter of this and
+   * SH_BUDGET_TOKENS, so a submitter can narrow the deployment's limit and never raise it. Absent ⇒
+   * the env var alone, as before.
+   */
+  budgetTokens?: number;
 }
 
 export interface ModelSelection {
@@ -952,6 +959,13 @@ export interface TurnResult {
   sandbox?: { id: string; tier: string; seed?: TurnSeed; workspaceReset?: WorkspaceReset };
   /** A templated session's workspace patch after the turn (session-templates spec §5.1). */
   workspace?: TurnWorkspace;
+  /**
+   * The token cap fired and tool calls were blocked (#391). `stopReason` is NOT 'error': pi's loop
+   * ends the turn normally when every call is refused, so without this field a turn that spent its
+   * whole budget and did nothing looks like a turn that chose to answer. A prompt leaf maps it to
+   * `failed: budget`; `/v1/turn` reports it and keeps the response it did get.
+   */
+  budgetExceeded?: boolean;
 }
 
 /**
@@ -1393,8 +1407,11 @@ async function executeTurnCore(
   // Opened by executeTurn ahead of the pool acquire, so a missing session 404s before any lease work.
   const { store, backend, sessionManager } = opened;
 
-  const budgetLimit = Number(process.env.SH_BUDGET_TOKENS);
+  // The tighter of this turn's own `caps.tokens` and the deployment's SH_BUDGET_TOKENS (#391);
+  // undefined when neither is set.
+  const budgetLimit = resolveBudgetLimit(config?.budgetTokens);
   const budgetMargin = Number(process.env.SH_BUDGET_MARGIN);
+  let budgetExceeded = false;
   // acquireTurnSandbox (called by executeTurn, which owns the lease lifecycle) hands back exactly
   // k8sSandboxExtension's argument, and it is passed on untransformed below — so a leased
   // transport cannot be dropped by a field-by-field rebuild here.
@@ -1422,7 +1439,7 @@ async function executeTurnCore(
     // value throws out of the turn; with both unset it registers nothing.
     promptCacheExtension(),
   ];
-  if (Number.isFinite(budgetLimit) && budgetLimit > 0) {
+  if (budgetLimit !== undefined) {
     // session_start is not emitted in the headless path, so compute the pre-turn baseline
     // (cumulative spend already on the loaded branch) here and inject it into the voter.
     const budgetBaseline = branchSpend(sessionManager) ?? 0;
@@ -1430,6 +1447,9 @@ async function executeTurnCore(
       budgetVoterExtension(sessionManager, {
         limit: budgetLimit,
         baseline: budgetBaseline,
+        onExceeded: () => {
+          budgetExceeded = true;
+        },
         ...(Number.isFinite(budgetMargin) && budgetMargin > 0 ? { margin: budgetMargin } : {}),
       }),
     );
@@ -1528,6 +1548,7 @@ async function executeTurnCore(
     stopReason,
     ...(errorMessage ? { errorMessage } : {}),
     ...(usage ? { usage } : {}),
+    ...(budgetExceeded ? { budgetExceeded: true } : {}),
   };
 }
 

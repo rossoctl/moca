@@ -51,7 +51,7 @@ import { isTerminalState, type TurnCaps } from './turn-record.js';
  */
 export interface TurnExchangeResponse extends ExchangeResponse {
   turnId: string;
-  /** The caps recorded at submission (§4.3). Enforcing them is the worker's job (#389). */
+  /** The caps recorded at submission (§4.3). The WORKER enforces them (#391, `turn-claim.ts`). */
   caps: TurnCaps;
   /**
    * The LeafEnvelope the worker runs, from the record (§5.1), with the record's `sessionId`
@@ -164,6 +164,26 @@ export async function exchangeTurnCredential(
     ...(turn.model ? { model: { id: turn.model, ...turn.modelLimits } } : {}),
   };
 
+  // The turn's DEADLINE, anchored at this dequeue (§5.4): `caps.wallClock` clamped to
+  // MOCA_TURN_MAX_S, or the ceiling itself when the submission named no cap. An ask above the
+  // ceiling is clamped rather than refused -- a caller asking for too long wants the longest turn
+  // it can have.
+  //
+  // Returned in BOTH modes (#391), because the WORKER now stops the leaf on it and a wall-clock cap
+  // that only existed under `multi` would be a cap that depends on tenancy. Computed once, here, and
+  // handed to the grant mint below so the grants' `exp` and this field cannot disagree (decision D4).
+  //
+  // "This dequeue" means PER DELIVERY, as the contract says (openapi `caps`, `turnExp`): a reclaimed
+  // redelivery gets a fresh window rather than its predecessor's remainder, so one turn's aggregate
+  // can reach the cap times the delivery limit. Persisting the first dequeue's deadline instead would
+  // hand a reclaimed delivery grants that expire the moment they are minted -- a turn that cannot be
+  // retried at all, which is a worse answer than one that may run long after a worker died.
+  const turnExpS = turnExp(
+    Math.floor(deps.now() / 1000),
+    turn.caps.wallClock,
+    deps.config.turnMaxS,
+  );
+
   // #388 item 3: ADR-0047's `async_tenancy_unsupported` gate is GONE from here, and the refusal it
   // enforced is now a boot contract (`checkGrantRedemption`, main.ts) plus the branch below. The gate
   // existed because MI1 §6.6 forbids returning a real key under `multi` and there was nothing else to
@@ -175,7 +195,6 @@ export async function exchangeTurnCredential(
     if (!deps.config.inferenceUrl) {
       throw new CpError('internal_error', 'MOCA_INFERENCE_URL is not configured');
     }
-    const nowS = Math.floor(deps.now() / 1000);
     // The turn record's own fields, as a GrantSource -- it is not structurally one, because the
     // record calls the bundle digest `cfg` where a session record calls it `configRef`.
     const grants = await grantsForTurn(
@@ -187,10 +206,8 @@ export async function exchangeTurnCredential(
         ...(turn.cfg ? { configRef: turn.cfg } : {}),
       },
       // Turn start means DEQUEUE (async §5.4), so the anchor is `now` -- here, at the claim -- and
-      // never the submission. `caps.wallClock` is the turn's own request, clamped to MOCA_TURN_MAX_S
-      // by `turnExp`; an ask above the cap is clamped rather than refused, since a caller asking for
-      // too long wants the longest turn it can have.
-      turnExp(nowS, turn.caps.wallClock, deps.config.turnMaxS),
+      // never the submission. The same number the response carries, computed above.
+      turnExpS,
       turn.turnId,
       deps,
     );
@@ -207,7 +224,7 @@ export async function exchangeTurnCredential(
       // provider directly in this mode and does not know one's address.
       anthropicBaseUrl: deps.config.inferenceUrl,
       sandboxGrant: grants.sandboxGrant,
-      turnExp: grants.turnExp,
+      turnExp: turnExpS,
       sessionId: turn.sessionId,
       subject: turn.owner,
       caps: turn.caps,
@@ -279,6 +296,7 @@ export async function exchangeTurnCredential(
     sessionId: turn.sessionId,
     subject: turn.owner,
     caps: turn.caps,
+    turnExp: turnExpS,
     // sessionId LAST, so a stored envelope cannot override the record's own.
     envelope: { ...turn.envelope, sessionId: turn.sessionId },
     // Direct mode only: in placeholder mode the worker sends `Bearer <placeholder>` and the injector

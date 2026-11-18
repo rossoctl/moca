@@ -173,6 +173,40 @@ describe('createLeafDrainLoop', () => {
     await loop.stop();
   });
 
+  // #391: a defer made no progress, so claiming straight away would most likely re-read the same
+  // capped owner's next entry -- a hot loop against Redis. `completed` is the control: that one
+  // DOES claim again at once, which is what makes this a backoff and not a throttle on everything.
+  it('backs off after a deferred claim, as it does after an idle one', async () => {
+    const sleep = vi.fn(async () => {});
+    const loop = createLeafDrainLoop(
+      loopDeps({
+        sleep,
+        idleBackoffMs: 250,
+        processOneImpl: scripted([{ kind: 'deferred', turnId: 't1', reclaimed: false }]),
+      }),
+    );
+    loop.start();
+    await tick();
+    await loop.stop();
+    expect(sleep).toHaveBeenCalledWith(250);
+  });
+
+  it('does not back off after a completed claim', async () => {
+    const sleep = vi.fn(async () => {});
+    const loop = createLeafDrainLoop(
+      loopDeps({
+        sleep,
+        processOneImpl: scripted([
+          { kind: 'completed', turnId: 't1', status: 'done', reclaimed: false },
+        ]),
+      }),
+    );
+    loop.start();
+    await tick();
+    await loop.stop();
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
   it('reports every outcome to onOutcome', async () => {
     const onOutcome = vi.fn();
     const processOneImpl = scripted([

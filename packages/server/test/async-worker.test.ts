@@ -32,6 +32,8 @@ const {
   createAsyncTally,
 } = await import('../src/async-worker.js');
 
+import { SubjectCounter } from '../src/subject-quota.js';
+
 /** A port nothing listens on: a real socket target, with no real Redis needed. */
 async function closedPort(): Promise<number> {
   const s = createServer();
@@ -364,7 +366,11 @@ describe('armAsyncLeafWorker', () => {
   const counter = () => ({ inFlight: 0, start: () => () => undefined });
 
   it('returns null and opens no client when SH_ASYNC_DRAIN is not set', () => {
-    const worker = armAsyncLeafWorker({ counter: counter(), env: {} });
+    const worker = armAsyncLeafWorker({
+      counter: counter(),
+      subjects: new SubjectCounter(),
+      env: {},
+    });
     expect(worker).toBeNull();
     expect(created).toHaveLength(0);
   });
@@ -376,7 +382,7 @@ describe('armAsyncLeafWorker', () => {
       SH_EXCHANGE_TOKEN: 'tok',
       REDIS_URL: `redis://127.0.0.1:${await closedPort()}`,
     };
-    const worker = armAsyncLeafWorker({ counter: counter(), env });
+    const worker = armAsyncLeafWorker({ counter: counter(), subjects: new SubjectCounter(), env });
     expect(worker).not.toBeNull();
     // Exactly three clients: the queue's, the turn store's, and getResultStore's own (unrelated)
     // one -- so a shared queue/turns client (the regression this guards) collapses this to two.
@@ -404,7 +410,12 @@ describe('armAsyncLeafWorker', () => {
       REDIS_URL: 'redis://127.0.0.1:6379',
       SH_WORKER_ID: '0', // slot 0: the only slot that polls
     };
-    const worker = armAsyncLeafWorker({ counter: counter(), env, stream });
+    const worker = armAsyncLeafWorker({
+      counter: counter(),
+      subjects: new SubjectCounter(),
+      env,
+      stream,
+    });
     expect(worker).not.toBeNull();
 
     try {
@@ -447,7 +458,12 @@ describe('armAsyncLeafWorker', () => {
       REDIS_URL: 'redis://127.0.0.1:6379',
       SH_WORKER_ID: '0', // slot 0: the only slot that polls
     };
-    const worker = armAsyncLeafWorker({ counter: counter(), env, stream });
+    const worker = armAsyncLeafWorker({
+      counter: counter(),
+      subjects: new SubjectCounter(),
+      env,
+      stream,
+    });
     expect(worker).not.toBeNull();
 
     try {
@@ -476,6 +492,20 @@ describe('createAsyncTally', () => {
       asyncReclaims: 0,
       asyncDeadLetters: 0,
       asyncClaimDeniedFull: 0,
+      asyncDeferredSubject: 0,
+    });
+  });
+
+  // A defer read an entry and put it straight back, so counting it as a claim would make
+  // `async_claims` rise while the queue made no progress -- it gets its own count instead (#391).
+  it('counts a defer as a deferral, not as a claim', () => {
+    const t = createAsyncTally();
+    t.onOutcome({ kind: 'deferred', turnId: 'a', reclaimed: false });
+    t.onOutcome({ kind: 'deferred', turnId: 'b', reclaimed: true });
+    expect(t.snapshot()).toMatchObject({
+      asyncDeferredSubject: 2,
+      asyncClaims: 0,
+      asyncReclaims: 0,
     });
   });
 

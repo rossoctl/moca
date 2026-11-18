@@ -43,6 +43,22 @@ export interface WorkQueue {
   ): Promise<ClaimedEntry | null>;
   ack(entryId: string): Promise<void>;
   /**
+   * Hand a claimed entry back UNRUN, at no cost to its attempt budget (#391's fairness defer).
+   *
+   * `retryCount` is what the delivery counter should read afterwards — the caller passes the value
+   * from BEFORE this delivery, so a defer is invisible to `maxAttempts`. Without that, an owner at
+   * their concurrency cap would have their own turns dead-lettered for being deferred three times,
+   * which is a refusal dressed up as a failure.
+   *
+   * shortcut: the idle timer is RESET, so a deferred entry is not reclaimable for `minIdleMs` even
+   * if a slot frees sooner — the defer buys fairness with up to one `minIdleMs` of latency for the
+   * deferred turn. Setting IDLE high instead would make this worker's own next claim reclaim the
+   * same entry immediately (XAUTOCLAIM leads every claim), defer it again, and starve the fresh
+   * entries behind it — the exact starvation this call exists to prevent. Upgrade when the queue
+   * grows per-owner streams and a claim can skip an owner without touching their entries.
+   */
+  defer(entryId: string, consumerId: string, retryCount: number): Promise<void>;
+  /**
    * Reset the entry's idle timer so a healthy long run is not reclaimed. Returns false when the
    * entry is NO LONGER this consumer's — reclaimed by someone else, or already acked — in which
    * case nothing was touched. Callers treat false as "stop pretending to own this".
@@ -93,21 +109,28 @@ return removed
 `;
 
 /**
- * The heartbeat's idle reset, CONDITIONAL on still owning the entry. A bare `XCLAIM ... 0 JUSTID`
- * transfers ownership whatever the current state is, because min-idle 0 matches everything — so a
- * worker that stalled past `minIdleMs`, had its entry legitimately reclaimed by another worker, and
- * then woke up would STEAL IT BACK on its next beat. Both workers would then be running the same
- * turn, both would write a result, and the loser's ack would retire an entry the winner still
- * believed it owned. Checking the owner first and claiming in the same script closes that.
+ * `XCLAIM ... 0 JUSTID`, CONDITIONAL on still owning the entry, with an optional RETRYCOUNT
+ * (ARGV[4], absent for the heartbeat's plain idle reset). A bare claim transfers ownership whatever
+ * the current state is, because min-idle 0 matches everything — so a worker that stalled past
+ * `minIdleMs`, had its entry legitimately reclaimed by another worker, and then woke up would STEAL
+ * IT BACK on its next beat. Both workers would then be running the same turn, both would write a
+ * result, and the loser's ack would retire an entry the winner still believed it owned. Checking the
+ * owner first and claiming in the same script closes that, for the beat and for the hand-back alike:
+ * `defer` runs after a claim the owner may already have lost, and its RETRYCOUNT would otherwise
+ * rewrite the delivery counter of a turn somebody else is now running.
  *
  * XPENDING's per-entry reply is a flat four-element array (id, consumer, idle, deliveries); only
  * the consumer is read here. 0 entries means the entry is gone from the PEL — acked, or trimmed —
  * which is the other case where touching would be a lie.
  */
-const TOUCH_IF_OWNED_LUA = `
+const CLAIM_IF_OWNED_LUA = `
 local p = redis.call('XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1)
 if #p == 0 or p[1][2] ~= ARGV[2] then return 0 end
-redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'JUSTID')
+if ARGV[4] then
+  redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'JUSTID', 'RETRYCOUNT', ARGV[4])
+else
+  redis.call('XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'JUSTID')
+end
 return 1
 `;
 
@@ -205,8 +228,20 @@ export class RedisWorkQueue implements WorkQueue {
     await this.client.xAck(this.stream, this.group, entryId);
   }
 
+  async defer(entryId: string, consumerId: string, retryCount: number): Promise<void> {
+    // Claiming to the consumer that already holds it: JUSTID keeps Redis from counting a delivery of
+    // an entry nobody read, and RETRYCOUNT then puts the counter back where the caller says it
+    // belongs. OWNER-CHECKED (see the script), because min-idle 0 matches everything -- including an
+    // entry this worker no longer holds, which it would otherwise steal back while handing it over.
+    // A lost entry needs no hand-back: its new owner is already running it.
+    await this.client.eval(CLAIM_IF_OWNED_LUA, {
+      keys: [this.stream],
+      arguments: [this.group, consumerId, entryId, String(Math.max(0, retryCount))],
+    });
+  }
+
   async touch(entryId: string, consumerId: string): Promise<boolean> {
-    const held = await this.client.eval(TOUCH_IF_OWNED_LUA, {
+    const held = await this.client.eval(CLAIM_IF_OWNED_LUA, {
       keys: [this.stream],
       arguments: [this.group, consumerId, entryId],
     });

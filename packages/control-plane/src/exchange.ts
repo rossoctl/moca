@@ -84,9 +84,14 @@ export interface ExchangeResponse {
    */
   sandboxGrant?: string;
   /**
-   * `grant` mode only. Absolute epoch SECONDS past which the turn will not be extended
-   * (async §5.4). Equal to the grants' own `exp` (decision D4), so a worker needs it only to know
-   * when to stop, never to schedule a refresh.
+   * Absolute epoch SECONDS past which the turn will not be extended (async §5.4). Under `grant`
+   * mode it equals the grants' own `exp` (decision D4), so a worker needs it only to know when to
+   * stop, never to schedule a refresh.
+   *
+   * The DEQUEUE exchange returns it in both modes (#391): it is the async turn's wall-clock
+   * deadline, which the worker enforces by aborting the leaf, and a cap that existed only under
+   * `multi` would be a cap that depends on tenancy. The interactive exchange still sets it in grant
+   * mode only, where it is the grant's expiry and the turn is bounded by the connection anyway.
    */
   turnExp?: number;
 }

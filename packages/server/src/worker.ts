@@ -2,7 +2,7 @@ import { createServer, type RequestListener, type Server } from 'node:http';
 import type { Socket } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { abortDetachedTurns, armRunReaper, handler } from './server.js';
+import { abortDetachedTurns, armRunReaper, handler, subjectCounter } from './server.js';
 // Boot-time validation of the sandbox-discovery enum; see its use below.
 import { resolveDiscoverySource } from '@moca/harness/select-sandbox';
 // ...and of the sandbox tier settings (P6.3), likewise.
@@ -40,6 +40,7 @@ export type WorkerToSupervisor =
       asyncReclaims?: number;
       asyncDeadLetters?: number;
       asyncClaimDeniedFull?: number;
+      asyncDeferredSubject?: number;
       asyncQueueDepth?: number;
       asyncOldestAgeMs?: number;
     };
@@ -389,9 +390,10 @@ if (isMainModule) {
   };
   const runtime = createWorkerRuntime({ send });
   // #389: drain the async leaf queue on this worker, sharing `runtime.counter` with sync /turn so
-  // one cap governs both (§5.3). Returns null unless SH_ASYNC_DRAIN and the control-plane settings
-  // are all present, so a deployment that never submits async turns pays nothing.
-  const asyncWorker = armAsyncLeafWorker({ counter: runtime.counter });
+  // one cap governs both (§5.3), and `subjectCounter` with it so one PER-OWNER cap does too (#391).
+  // Returns null unless SH_ASYNC_DRAIN and the control-plane settings are all present, so a
+  // deployment that never submits async turns pays nothing.
+  const asyncWorker = armAsyncLeafWorker({ counter: runtime.counter, subjects: subjectCounter });
   const stopStats = startStatsReporter({
     send,
     intervalMs: statsIntervalMs(process.env),

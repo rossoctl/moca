@@ -8,12 +8,57 @@ that shipped it ("The data plane's twin … goes to"):
 
 | `harness-openapi.yaml` | Shipped with                   |
 | ---------------------- | ------------------------------ |
+| 1.6.0                  | [1.30.0](#1300)                |
 | 1.5.0                  | [1.28.0](#1280)                |
 | 1.4.0                  | [1.26.0](#1260)                |
 | 1.3.0                  | [1.17.0](#1170)                |
 | 1.2.0                  | [1.16.0](#1160)                |
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
+
+## 1.30.0
+
+Per-turn budgets, and cancelling a turn that is already running
+([#391](https://github.com/rossoctl/moca/issues/391)), per the
+[async fan-out spec](../specs/2026-11-05-p6-async-fan-out-design.md) §4.3 and §4.5. The data plane's
+twin goes to **1.6.0** with it. One **narrowing** on the wire, deliberate and named below — allowed
+because `/v1` is Preview ([maturity](../reference/maturity-and-lifecycle.md)), and recorded here
+because that is what Preview requires.
+
+- `caps.costUsd` is **removed** from `POST /v1/sessions/{id}/turns`; a submission that names it is
+  refused `400 invalid_request`, with a message pointing at `caps.tokens`. It was accepted and
+  recorded and never enforceable — nothing in MOCA prices a token — so every caller that set it got
+  an unbounded turn and no warning. Refusing it is the honest answer; a caller wanting a spend bound
+  uses `caps.tokens`.
+- `caps.tokens` and `caps.wallClock` are now **enforced**. A turn that reaches its token cap has its
+  tool calls refused from that point and ends `failed` with `result.reason: "budget"`; so does one
+  that outruns `wallClock`, counted from the moment a worker dequeues it and clamped to the
+  deployment's `MOCA_TURN_MAX_S`. The data plane's `budget` joins the failed-reason enum, and its
+  `TurnResult` gains `budgetExceeded` (the loop reports `end_turn` when every call was refused, so
+  the cap firing is otherwise invisible). Both caps are **per delivery**: a worker that dies mid-leaf
+  has its turn redelivered, and the retry gets a fresh token budget and a wall clock anchored at its
+  own dequeue, because a retry must not fail on its predecessor's spend. Across a turn's deliveries
+  the aggregate can therefore reach the cap times the delivery limit (three).
+- **`subject_quota_exceeded` on the data plane's `/v1/turn` now counts the caller's running queued
+  turns too.** `SH_TURNS_PER_SUBJECT` is one budget per subject across both paths, so a caller whose
+  async fan-out is executing can be refused an interactive turn it would previously have been given.
+  Nothing new on the wire -- the same 429, the same code -- but the condition is wider. On the queue
+  side there is no refusal at all: an entry claimed past its owner's cap is handed back unrun and
+  retried, with its attempt budget untouched. This bounds MIXED load only -- a worker runs one queued
+  leaf at a time, so an owner's async-only fan-out never reaches the cap, and the queue is still one
+  FIFO stream. A deep async backlog from one owner therefore still delays another owner's async turn;
+  bounding that needs a cluster-wide count and stays open on #391.
+- `DELETE /v1/sessions/{id}/turns/{turnId}` now cancels a **running** turn as well as a queued one.
+  It answers `202` with `{turnId, state: "running", cancelRequested: true}`; the worker stops the
+  leaf within a few seconds, releases its sandbox, and the turn reaches `cancelled`. `409`
+  `turn_not_cancellable` is now only for an already-terminal turn, and a leaf that finishes first
+  stays finished — which is why both answers are `202`.
+- `TurnStatus` gains `cancelRequested` (`true` only on a running turn whose cancel is in flight), and
+  its `result` documentation is corrected: a leaf result of `aborted` reads `state: "cancelled"`, not
+  `failed`. That has always been the behaviour; cancel is what makes it load-bearing.
+- `POST /internal/turn-credentials` returns `turnExp` in **every** tenancy mode, not only `grant`:
+  it is the deadline the worker enforces, so a single-tenant deployment got an unenforceable
+  `caps.wallClock` without it. `caps.costUsd` is gone from that body too.
 
 ## 1.29.0
 

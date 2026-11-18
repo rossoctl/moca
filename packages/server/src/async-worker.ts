@@ -16,6 +16,7 @@ import { createLeafDrainLoop, asyncLeafCap, shouldArmAsync } from './leaf-drain-
 import { getResultStore, RESULT_TTL_SECONDS } from './server.js';
 import { claimTurn, deadLetterTurn } from './turn-claim.js';
 import type { SlotCounter } from './leaf-drain-loop.js';
+import { turnsPerSubjectCap, type SubjectCounter } from './subject-quota.js';
 
 /** §6.2's fixed constants. Injectable for tests; none of them is an operator knob. */
 const MIN_IDLE_MS = 90_000;
@@ -158,6 +159,13 @@ export interface AsyncWorkerStats {
   asyncReclaims: number;
   asyncDeadLetters: number;
   asyncClaimDeniedFull: number;
+  /**
+   * Entries handed back because their owner was at `SH_TURNS_PER_SUBJECT` on this worker (#391).
+   * Distinct from `asyncClaimDeniedFull`, which is the WHOLE worker being full: a rate here with
+   * idle slots means one owner's fan-out is being paced, which is the cap working, while a rate
+   * here with no other owner submitting means the cap is set too low.
+   */
+  asyncDeferredSubject: number;
   /** Slot 0 only (§9.2): properties of Redis, wanted once per deployment, not once per worker. */
   asyncQueueDepth?: number;
   asyncOldestAgeMs?: number;
@@ -176,11 +184,25 @@ export interface AsyncTally {
  * restart resets this worker's contribution, which is visible in the same body as `restarts`.
  */
 export function createAsyncTally(): AsyncTally {
-  const t = { asyncClaims: 0, asyncReclaims: 0, asyncDeadLetters: 0, asyncClaimDeniedFull: 0 };
+  const t = {
+    asyncClaims: 0,
+    asyncReclaims: 0,
+    asyncDeadLetters: 0,
+    asyncClaimDeniedFull: 0,
+    asyncDeferredSubject: 0,
+  };
   return {
     onOutcome(outcome: ProcessOutcome): void {
       if (outcome.kind === 'idle') return; // an empty poll is not throughput
+      // Nor is a defer: the entry was read and put straight back, so counting it as a claim would
+      // make `async_claims` rise while the queue made no progress at all (§7).
+      if (outcome.kind === 'deferred') {
+        t.asyncDeferredSubject += 1;
+        return;
+      }
       t.asyncClaims += 1;
+      // Counts a DEFERRED entry's return as well as a dead worker's: both arrive by XAUTOCLAIM and
+      // the drain cannot tell them apart. §7 says to read this net of `async_deferred_subject`.
       if (outcome.reclaimed) t.asyncReclaims += 1;
       if (outcome.kind === 'dead_lettered') t.asyncDeadLetters += 1;
     },
@@ -257,6 +279,13 @@ export function reconnecting<T extends object>(target: T, client: RedisClientTyp
  */
 export function armAsyncLeafWorker(opts: {
   counter: SlotCounter;
+  /**
+   * The SAME `SubjectCounter` the sync `/turn` route holds (`server.ts`), not a second one: per
+   * owner, async leaves and interactive turns share one budget, so two counters would let an owner
+   * hold `2 x SH_TURNS_PER_SUBJECT` of this worker. Required rather than optional because fairness
+   * silently off is indistinguishable from fairness working.
+   */
+  subjects: SubjectCounter;
   env?: NodeJS.ProcessEnv;
   /**
    * The stream name, defaulting to LEAF_QUEUE_STREAM. Overridable for the same reason
@@ -301,14 +330,40 @@ export function armAsyncLeafWorker(opts: {
   const controlPlaneUrl = String(env.SH_CONTROL_PLANE_URL);
   const exchangeToken = String(credentialValue(env, 'SH_EXCHANGE_TOKEN'));
   const resultStore = getResultStore();
+  const subjectCap = turnsPerSubjectCap(env);
 
   const job: LeafJobDeps = {
     queue,
     consumerId,
     claimTurn: (turnId, deliveryCount) =>
       claimTurn(turnId, deliveryCount, { controlPlaneUrl, exchangeToken, turns }),
-    // The same runLeaf the sync route calls (`server.ts:1105`), with the same signature.
-    runLeaf: (envelope, config) => runLeaf(envelope, config),
+    // The same runLeaf the sync route calls (`server.ts:1105`), with the same signature. The
+    // signal is runLeaf's fourth argument; the third is the injected-fakes bag, which production
+    // never passes.
+    runLeaf: (envelope, config, signal) => runLeaf(envelope, config, undefined, signal),
+    // One HGET on the turn record per watchdog tick (#391). It rides `cpClient`, the same client the
+    // finalize uses, so a cancel poll never shares a socket with the queue's claim burst.
+    //
+    // This works because records and results share one Redis in M1 (see above): the worker's own
+    // TurnStore IS the control plane's, so a `DELETE /turns/{id}` on a running turn is visible here
+    // with no control-plane-to-worker transport at all. A deployment that split the two keyspaces
+    // would need the second variable that note already calls for.
+    cancelRequested: (turnId) => turns.cancelRequested(turnId),
+    // Per-owner fairness (#391), and only when a cap is configured: `turnsPerSubjectCap` answers
+    // undefined for a deployment that sets neither SH_TURNS_PER_SUBJECT nor SH_TURNS_PER_WORKER,
+    // and leaving the dep off is cheaper than a dep that admits everything -- it is the owner read
+    // below, one HGET per claim, that we are declining to pay for.
+    ...(subjectCap === undefined
+      ? {}
+      : {
+          admitOwner: async (turnId: string) => {
+            // A record with no owner is a turn the claim will refuse anyway, and deferring it
+            // forever would leave an entry nothing ever retires. Admitted, so `claimTurn` gets to
+            // give the real answer; the slot it borrows is returned either way.
+            const owner = await turns.owner(turnId);
+            return owner ? opts.subjects.acquire(owner, subjectCap) : () => {};
+          },
+        }),
     finalize: async (turnId, status) => {
       await turns.finalize(turnId, asyncFinalizeState(status), Date.now());
     },

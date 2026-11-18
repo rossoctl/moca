@@ -26,6 +26,14 @@ describe('classifyOutcome', () => {
       retryable: false,
     });
   });
+  // #391: a turn that ran out of tokens or wall clock is DONE, not transient. Retrying it would
+  // re-run the whole leaf against a cap it has already spent.
+  it('acks a budget failure without retrying', () => {
+    expect(classifyOutcome({ status: 'failed', reason: 'budget' })).toEqual({
+      ack: true,
+      retryable: false,
+    });
+  });
   it('retries a transient error without acking', () => {
     expect(classifyOutcome({ status: 'failed', reason: 'error' })).toEqual({
       ack: false,
