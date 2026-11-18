@@ -1,0 +1,51 @@
+name: Deploy scripts on macOS bash 3.2
+
+# The real-macOS half of the bash 3.2 check (#440). The per-PR check is the Linux
+# `deploy-scripts-bash32` job in ci.yml, on a bash 3.2.57 built from source. This one runs the
+# same make target on macOS's own /bin/bash, to catch what a Linux build cannot (BSD userland,
+# LibreSSL, Apple shipping a different bash). It is off the PR path on purpose (#901): the macOS
+# runner pool is scarce, and a job that sat queued until cancellation made every PR need a manual
+# re-run.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/**"
+      - "scripts/**"
+      - "Makefile"
+      - ".github/workflows/deploy-bash32-macos.yml"
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-scripts-bash32-macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The target skips when /bin/bash is not 3.x, so without this check an Apple bump would
+      # turn this job into a green no-op that reads as coverage. Fail loudly instead.
+      - name: Confirm /bin/bash is 3.x
+        run: |
+          v="$(/bin/bash --version | head -1)"
+          echo "$v"
+          case "$v" in
+          *"version 3."*) ;;
+          *) echo "::error title=/bin/bash is no longer 3.x::$v -- this job no longer tests bash 3.2. The runner image changed or macOS shipped a newer bash; re-point the job, or drop it and say why on #440."; exit 1 ;;
+          esac
+
+      # deploy/microvm/tests/setup-microvm.test.sh guards its `shellcheck "$SCRIPT"` with
+      # `command -v shellcheck`, so without this the check silently skips and asserts nothing.
+      # jq is already on the runner image, and the suites pass against the stock LibreSSL at
+      # /usr/bin/openssl, so neither of those needs installing.
+      - name: Install shellcheck
+        run: brew install shellcheck
+
+      - name: Run the 3.2-safe deploy shell tests on /bin/bash
+        run: make test-deploy-bash32
