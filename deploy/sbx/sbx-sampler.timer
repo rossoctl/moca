@@ -1,0 +1,14 @@
+# deploy/sbx/sbx-sampler.timer -- sample this KVM host every 15 seconds (deploy/sbx/sampler.sh,
+# #857 R2). Installed and enabled with every worker by deploy/sbx/install-host.sh, which writes
+# SBX_SAMPLER_INTERVAL_S (default 15) into OnUnitActiveSec=; removed with the last worker.
+[Unit]
+Description=Sample the SBX0 host every 15 seconds
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=15s
+# The default accuracy is a minute: a 15 s series needs the tick on time.
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
