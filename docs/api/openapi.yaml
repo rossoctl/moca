@@ -49,7 +49,7 @@ components:
       type: http
       scheme: bearer
       description: |
-        The operator's static `SH_INSTALLER_TOKEN` (SBX0 members API): admits the /v1/subjects
+        The operator's static `SH_INSTALLER_TOKEN` (sandbox members API): admits the /v1/subjects
         routes only, acting as the synthetic `installer` subject with the admin role. With none
         configured every call is refused. An admin's API token is accepted on the same routes
         instead.
