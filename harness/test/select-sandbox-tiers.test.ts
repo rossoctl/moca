@@ -463,6 +463,38 @@ describe('selectPoolSandbox: affinity (P6.3 spec §4 steps 2–6, §5)', () => {
     expect(sel?.sandboxId).toBe('m-1');
   });
 
+  it('the loser closes the channel it opened, and leaves the winner’s open', async () => {
+    // #894 one caller up: `take()` builds a transport per lease, so a loser that only gives the
+    // LEASE back drops a live gRPC channel -- per losing claim, on a path a 503 makes the client
+    // retry. Per-id transports, so this also proves the close does not reach the winner's.
+    const closed: string[] = [];
+    const { lease } = fakeLease({ 'm-1': 1 });
+    const aff = fakeAffinity();
+    const realClaim = aff.store.claim;
+    aff.store.claim = async (s, e, ttl) => {
+      if (!aff.entries.has(s)) aff.entries.set(s, { sandboxId: 'm-1', tier: 'microvm' });
+      return realClaim(s, e, ttl);
+    };
+    const sel = await selectPoolSandbox(
+      tiered,
+      '/h',
+      's',
+      opts({ tier: 'microvm' }),
+      deps([m('m-0'), m('m-1')], lease, {
+        affinity: aff.store,
+        ...at,
+        makeTransport: (id) => ({
+          ...fakeTransport,
+          close: async () => {
+            closed.push(id);
+          },
+        }),
+      }),
+    );
+    expect(sel?.sandboxId).toBe('m-1');
+    expect(closed).toEqual(['m-0']);
+  });
+
   it('losing the race twice is pending, never a third attempt', async () => {
     const { lease, released } = fakeLease();
     const aff = fakeAffinity();
