@@ -136,6 +136,11 @@ export interface TurnSandbox {
  * took the lease, which is what makes `heartbeat`/`release` safe to drive unconditionally: for an
  * injected sandbox the caller owns the lease, and renewing or returning someone else's would let
  * one turn release the sandbox another turn is still executing in.
+ *
+ * `closeTransport` follows the same ownership rule for the same reason. It stays a SEPARATE member
+ * rather than folding into `release` so the injected path is a pair of no-ops instead of a
+ * conditional inside `release`: the two resources are owned together, but a leaf keeps using the
+ * transport it injected after this turn hands the lease back.
  */
 export interface AcquiredTurnSandbox {
   sandbox: TurnSandbox | null;
@@ -144,6 +149,19 @@ export interface AcquiredTurnSandbox {
   heartbeat: () => Promise<void>;
   /** Return this call's lease. A no-op unless `leased`. */
   release: () => Promise<void>;
+  /**
+   * Close the gRPC channel this call opened. A no-op for an injected sandbox (the caller owns it)
+   * and when no sandbox resolved.
+   *
+   * Without this, `/turn` leaked one channel per turn (#894). `GrpcRelayTransport.close()` existed
+   * and `run-leaf.ts` called it, but this interface had no way to reach it, so the one caller that
+   * owns the transport it opens never closed it. The retention is not visible from the call site:
+   * grpc-js shares subchannels globally by target+credentials, so the dead channels held only a
+   * handful of sockets while one live `Subchannel`'s `stateListeners` Set accumulated an entry — and
+   * a whole channel graph — per turn. Measured at ~15-19 KB per turn per worker, ~10 GB/hour at 149
+   * turns/s, which is what made every RSS-derived capacity figure for this tier unusable.
+   */
+  closeTransport: () => Promise<void>;
   placement?: TurnPlacement;
 }
 
@@ -308,7 +326,18 @@ export async function acquireTurnSandbox(
   template?: { id: string; seed?: string; seedSource?: 'build' | 'declared'; build?: string },
 ): Promise<AcquiredTurnSandbox> {
   const noop = async () => {};
-  if (injected) return { sandbox: injected, leased: false, heartbeat: noop, release: noop };
+  // Injected: the caller (a prompt leaf) owns both the lease and the transport, and closes the
+  // transport itself (run-leaf.ts:713, :903, :968, :1118, :1191, :1319). Closing it here too would
+  // break run-leaf's "closes it exactly once" contract and tear the channel out from under the
+  // leaf's own converge and cleanup execs, which run AFTER this turn returns.
+  if (injected)
+    return {
+      sandbox: injected,
+      leased: false,
+      heartbeat: noop,
+      release: noop,
+      closeTransport: noop,
+    };
 
   // Same knobs and defaults as every leaf's call, deliberately: two lease conventions for one lease
   // store is how a cap means different things depending on which path took it. That is now ONE shared
@@ -338,7 +367,15 @@ export async function acquireTurnSandbox(
     },
     deps,
   );
-  if (!selected) return { sandbox: null, leased: false, heartbeat: noop, release: noop };
+  if (!selected)
+    return { sandbox: null, leased: false, heartbeat: noop, release: noop, closeTransport: noop };
+
+  // `async` rather than `() => selected.transport.close()`: a close that throws SYNCHRONOUSLY has no
+  // promise for the caller's `.catch` to attach to, and would replace the error that explains the
+  // turn's failure with its own. As a rejection it is swallowed where it should be.
+  const closeTransport = async () => {
+    await selected.transport.close();
+  };
   // A templated workspace is seeded before the turn's first tool call (session-templates spec §5).
   // The lease is held: a seed that throws must return it, as every other failure after the acquire.
   if (template?.seed) {
@@ -352,6 +389,10 @@ export async function acquireTurnSandbox(
       await seedWorkspace(selected.transport, template.id, template.seed, selected.podCwd);
     } catch (err) {
       await selected.release().catch(() => {});
+      // The caller never gets a `closeTransport` for a throwing acquire, so this path has to close
+      // its own channel or a failing seed leaks one per attempt -- the same defect as #894, on the
+      // error path that retries hardest.
+      await closeTransport().catch(() => {});
       throw err;
     } finally {
       clearInterval(renew);
@@ -371,6 +412,9 @@ export async function acquireTurnSandbox(
     leased: true,
     heartbeat: selected.heartbeat,
     release: selected.release,
+    // Idempotent on the far side (GrpcRelayTransport's `closed` flag), so this stays correct if a
+    // future exit path ever closes twice.
+    closeTransport,
     placement: {
       sandboxId: selected.sandboxId,
       tier: selected.tier ?? '',
@@ -1346,6 +1390,15 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     await attached?.detach().catch(() => {});
     if (leaseRenewal) clearInterval(leaseRenewal);
     await acquired.release().catch(() => {});
+    // Release before close, matching run-leaf. By the time this finally runs the turn has fully
+    // unwound and no exec is outstanding on either path, so the only real difference between the two
+    // orders is consistency -- and keeping them identical means an ordering bug, if there is one, is
+    // one bug in two places rather than a divergence to explain.
+    //
+    // Swallowed like release() and for the same reason: teardown must not turn a completed turn into
+    // a failed one. A failed close costs this worker one retained channel; throwing here costs a
+    // turn that did its work and reports an error.
+    await acquired.closeTransport().catch(() => {});
   }
 }
 
