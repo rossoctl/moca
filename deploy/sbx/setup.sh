@@ -111,6 +111,14 @@
 #                           SBX_MODES_ALLOWED names a lease mode, that plus SBX_IDLE_CEILING_S too
 #   SBX_API_CA_FILE         optional; a PEM CA the janitor trusts for the API Route, when that Route's
 #                           certificate (the router's default, say) is not publicly trusted
+#
+# The installer token (SH_INSTALLER_TOKEN, in moca-mu1): generated once and kept, like the janitor's.
+# A static operator bearer for the members API -- GET/PUT/DELETE /v1/subjects and its roles routes,
+# and nothing else: it cannot create sessions, run sandboxes or touch credentials. It acts as the
+# synthetic subject `installer` with the admin role, so automation (an enrollment sync, say) needs
+# no login and no refresh tokens. Read it from the Secret (kubectl get secret moca-mu1 -o
+# jsonpath='{.data.SH_INSTALLER_TOKEN}' | base64 -d); rotate it by deleting the key and re-running
+# (every pod rolls). Refused everywhere when the key is absent.
 # SBX_CLIENTS, increment 1a's static client tokens, is gone and refused.
 #
 # Re-runnable: every token, password, key and certificate is generated once and kept. A worker
@@ -791,7 +799,7 @@ remove_client_tokens() {
 # kept). Both keys ride in the one apply: with one field manager, an apply that omitted a key would
 # prune it.
 ensure_signing_key() {
-  local json priv dir jtok foreign='' published
+  local json priv dir jtok itok foreign='' published
   json="$(secret_json moca-mu1)"
   # A moca-mu1 this script did not write is a MOCA control plane's key (a shared namespace, or a
   # copied Secret), and signing with it would tie the two stacks together: refused, below, unless
@@ -802,6 +810,7 @@ ensure_signing_key() {
   fi
   priv="$(json_value "$json" SH_SESSION_TOKEN_PRIVATE_KEY)"
   jtok="$(json_value "$json" SH_JANITOR_TOKEN)"
+  itok="$(json_value "$json" SH_INSTALLER_TOKEN)"
   # Combined: the harness's keys beside SBX0's (combined design §3.5), each generated once and kept.
   local kek='' xtok=''
   if [[ -n "$COMBINED" ]]; then
@@ -814,9 +823,15 @@ ensure_signing_key() {
     log 'generating the janitor token (SH_JANITOR_TOKEN)'
     jtok="$(rand_hex)"
   fi
+  if [[ -z "$itok" ]]; then
+    log 'generating the installer token (SH_INSTALLER_TOKEN)'
+    itok="$(rand_hex)"
+  fi
   # The control plane refuses one under 32 characters; it travels in an HTTP header file, so no space.
   [[ "$jtok" =~ ^[[:graph:]]{32,}$ ]] ||
     die 'moca-mu1 SH_JANITOR_TOKEN is not 32+ printable characters: delete the key and re-run (this rotates it)'
+  [[ "$itok" =~ ^[[:graph:]]{32,}$ ]] ||
+    die 'moca-mu1 SH_INSTALLER_TOKEN is not 32+ printable characters: delete the key and re-run (this rotates it)'
   dir="$(mktemp -d)"
   (
     trap 'rm -rf "$dir"' EXIT
@@ -838,12 +853,12 @@ ensure_signing_key() {
     if [[ -n "$COMBINED" ]]; then
       # SH_SESSION_TOKEN_PUBLIC_KEYS is what the supervisor verifies session tokens with: the same
       # <kid>:<SPKI> as sbx-token-keys (genkeys.ts's format).
-      export S_0="$priv" S_1="$jtok" S_2="$kid:$spki" S_3="$kek" S_4="$xtok"
+      export S_0="$priv" S_1="$jtok" S_2="$kid:$spki" S_3="$kek" S_4="$xtok" S_5="$itok"
       apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY SH_JANITOR_TOKEN SH_SESSION_TOKEN_PUBLIC_KEYS \
-        SH_CREDENTIAL_KEK SH_EXCHANGE_TOKEN
+        SH_CREDENTIAL_KEK SH_EXCHANGE_TOKEN SH_INSTALLER_TOKEN
     else
-      export S_0="$priv" S_1="$jtok"
-      apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY SH_JANITOR_TOKEN
+      export S_0="$priv" S_1="$jtok" S_2="$itok"
+      apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY SH_JANITOR_TOKEN SH_INSTALLER_TOKEN
     fi
     export S_0="$kid:$spki"
     apply_secret sbx-token-keys PUBLIC_KEYS

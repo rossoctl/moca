@@ -45,6 +45,14 @@ components:
         The sandbox host janitor's `SH_JANITOR_TOKEN` (sandbox-service spec §8.3); admits GET /v1/janitor/sandboxes
         only. No user or admin API token is accepted there, and with none configured every call is
         refused.
+    installerToken:
+      type: http
+      scheme: bearer
+      description: |
+        The operator's static `SH_INSTALLER_TOKEN` (SBX0 members API): admits the /v1/subjects
+        routes only, acting as the synthetic `installer` subject with the admin role. With none
+        configured every call is refused. An admin's API token is accepted on the same routes
+        instead.
     egress:
       type: http
       scheme: bearer
@@ -4012,7 +4020,7 @@ paths:
         Enrollment and roles spec §4. Any admin may read it. A subject is enrolled by the deployment's
         settings (`source: env`: SH_ALLOWED_SUBJECTS, SH_ADMIN_SUBJECTS) or through this API
         (`source: api`). Roles are evaluated per request: an API grant past its `until` is not listed.
-      security: [{ sessionToken: [] }]
+      security: [{ sessionToken: [] }, { installerToken: [] }]
       responses:
         '200':
           description: the subjects
@@ -4044,7 +4052,7 @@ paths:
         and so does enrolling one the settings enroll (SH_ALLOWED_SUBJECTS or SH_ADMIN_SUBJECTS): it is
         answered unchanged (`record: null`), so the store never holds an enrollment hidden behind the
         settings.
-      security: [{ sessionToken: [] }]
+      security: [{ sessionToken: [] }, { installerToken: [] }]
       parameters:
         - name: subject
           in: path
@@ -4093,7 +4101,7 @@ paths:
         the settings can't be unenrolled here: `409 bootstrap_subject`. A subject holding an admin grant
         is enrolled by it, so unenrolling it would change nothing: `409 admin_granted` (revoke the role
         first).
-      security: [{ sessionToken: [] }]
+      security: [{ sessionToken: [] }, { installerToken: [] }]
       parameters:
         - name: subject
           in: path
@@ -4141,7 +4149,7 @@ paths:
         lapse by itself; the first request that
         sees it lapsed writes a `role` record `expired`, once. A grant writes a `role` record
         `granted`, naming the admin and `until`. Effective at the subject's next request.
-      security: [{ sessionToken: [] }]
+      security: [{ sessionToken: [] }, { installerToken: [] }]
       parameters:
         - name: subject
           in: path
@@ -4197,7 +4205,7 @@ paths:
         Writes a `role` record `revoked`. Refused for an admin by the settings (`409
         bootstrap_subject`) and for the caller's own role (`409 self_revoke`), so the API can't
         lock itself out.
-      security: [{ sessionToken: [] }]
+      security: [{ sessionToken: [] }, { installerToken: [] }]
       parameters:
         - name: subject
           in: path
