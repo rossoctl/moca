@@ -218,20 +218,22 @@ unverified. See [Configuration: control plane](../../reference/configuration.md#
 
 ## 6. Revoke access
 
-| To remove...               | Do this                                                                                                                                                                  |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| One login                  | `mocactl logout` ends this login on the server and deletes the local file. `mocactl logout --all` ends all of that user's logins                                         |
-| A credential               | `mocactl credentials delete NAME`. A session on a deleted credential has its next turn refused                                                                           |
-| Admin rights               | Remove the subject from `SH_ADMIN_SUBJECTS` and restart the control plane (it reads the list only at boot); it then takes effect within the 15-minute API token lifetime |
-| A user's network path      | Close their tunnel (`ssh -S ~/.ssh/moca-tunnel -O exit <account>@<vm>`), `sudo userdel -r <account>`, remove their `Match` block, then `sshd -t` and reload              |
-| Their GitHub authorization | The user revokes the app under Settings, Applications, Authorized OAuth Apps. The control plane keeps no GitHub token                                                    |
+| To remove...               | Do this                                                                                                                                                                                                                                                                                                                                                         |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| One login                  | `mocactl logout` ends this login on the server and deletes the local file. `mocactl logout --all` ends all of that user's logins                                                                                                                                                                                                                                |
+| A credential               | `mocactl credentials delete NAME`. A session on a deleted credential has its next turn refused                                                                                                                                                                                                                                                                  |
+| Admin rights               | Remove the subject from `SH_ADMIN_SUBJECTS` and restart the control plane (it reads the list only at boot); it then takes effect within the 15-minute API token lifetime, or at the subject's next request with a template store (`SH_PROVENANCE_DIR`). An API grant is revoked with `DELETE /v1/subjects/{subject}/roles/admin`, effective at the next request |
+| A user's network path      | Close their tunnel (`ssh -S ~/.ssh/moca-tunnel -O exit <account>@<vm>`), `sudo userdel -r <account>`, remove their `Match` block, then `sshd -t` and reload                                                                                                                                                                                                     |
+| Their GitHub authorization | The user revokes the app under Settings, Applications, Authorized OAuth Apps. The control plane keeps no GitHub token                                                                                                                                                                                                                                           |
 
 API tokens last 15 minutes and are never revoked, so a logged-out client can keep calling the control plane until its
 token expires. An already-open SSH tunnel keeps its rights until it closes.
 
-**There is no way to remove a user** from the control plane: no route deletes a subject, and there is no allowlist.
+**There is no way to remove a user** from a harness control plane: login is open to any account that reaches it, and
+sessions are not gated by enrollment, so `DELETE /v1/subjects/{subject}` changes nothing a harness user can do.
 Removal means closing the network path. The only cleanup the demos document is deleting a smoke-test subject's record
-file by hand.
+file by hand. What stays behind on each profile is in
+[Users, enrollment and roles](../../reference/users-and-roles.md#when-a-user-leaves).
 
 ## What this does not give you
 

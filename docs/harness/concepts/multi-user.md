@@ -9,10 +9,13 @@ tokens the data plane trusts. `mocactl` is its terminal client.
 
 ## Identity and roles
 
-Login is the GitHub OAuth device flow; a user is identified as `github:<id>`. A subject listed in
-`SH_ADMIN_SUBJECTS` has the `admin` role, re-evaluated at each refresh. In the code the admin's powers are
-narrow: list another user's sessions (`?owner=`) and delete any config bundle. An admin does **not** bypass
-session ownership.
+Login is the GitHub OAuth device flow (or an [OIDC provider](../../operate/oidc-login.md)); a user is identified as
+`github:<id>` (or `oidc:<sub>`). A subject listed in `SH_ADMIN_SUBJECTS` has the `admin` role. With a template store
+(`SH_PROVENANCE_DIR`), an admin named there can also grant and revoke the role through `/v1/subjects`, and each
+request's roles are then evaluated at that request, not taken from the token; without one, a token's roles are fixed
+at its mint or refresh. The admin's powers on sessions are narrow: list another user's sessions (`?owner=`) and delete
+any config bundle. An admin does **not** bypass session ownership. See
+[Users, enrollment and roles](../../reference/users-and-roles.md).
 
 ## Tokens
 
