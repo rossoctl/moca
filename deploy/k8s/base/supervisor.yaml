@@ -90,7 +90,8 @@ spec:
             # #391: async leaves one owner may RUN deployment-wide. Counted in Redis, so unlike
             # SH_TURNS_PER_SUBJECT it holds across replicas -- which is the only place it matters.
             # Every supervisor pod reads the same ConfigMap, so they cannot disagree on the value.
-            # `optional`, and unset is off.
+            # `optional`, and unset is off. setup.sh does not write the key, so adding it by hand
+            # leaves the settings-hash unchanged: roll this Deployment to pick it up.
             - name: MOCA_ASYNC_RUNNING_PER_OWNER
               valueFrom:
                 {

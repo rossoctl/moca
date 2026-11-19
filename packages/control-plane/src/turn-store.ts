@@ -50,6 +50,29 @@ redis.call('HSET', KEYS[1], unpack(fields))
 return 1
 `;
 
+/**
+ * Take an owner's CLUSTER-WIDE running slot and answer their count, in one step (#391).
+ *
+ * ARGV is `[score, turnId, cap]`. The add and the count have to be atomic because separately they
+ * are exact in one direction only. Counting first is wrong: N workers that each read an under-limit
+ * ZCARD before any of them writes all pass (`reserveOpenSlot` measured that against real Redis).
+ * Adding first and counting second never admits more than `cap` -- but N workers that each add
+ * before any of them counts all see the full total and all hand their entry back, with none of them
+ * running anything, which is exactly the contended case the cap exists for and costs each entry a
+ * reclaim window. In one script the loser's add is the only one undone.
+ *
+ * A returned count over `cap` therefore means "not admitted, and holding nothing": the member is
+ * already gone and the caller has no slot to give back.
+ */
+export const RESERVE_RUNNING_LUA = `
+redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
+local n = redis.call('ZCARD', KEYS[1])
+if n > tonumber(ARGV[3]) then
+  redis.call('ZREM', KEYS[1], ARGV[2])
+end
+return n
+`;
+
 /** The two states a turn can be written from: everything else is already final (§5.4). */
 const OPEN_STATES: readonly TurnState[] = TURN_STATES.filter((s) => !isTerminalState(s));
 
@@ -288,16 +311,27 @@ export class TurnStore {
    * is why it lives here rather than behind a control-plane route: records and queue share one Redis
    * in M1, the same thing `cancelRequested` relies on.
    *
-   * Write first, count second, for `reserveOpenSlot`'s measured reason -- N workers that each read an
-   * under-limit ZCARD before any of them writes all pass, and here N is "every worker in the
-   * deployment" rather than "every concurrent submission".
+   * `cap` is passed in and enforced inside `RESERVE_RUNNING_LUA` rather than compared by the caller,
+   * so that two workers claiming one owner's entries at once cannot both defer: a count over `cap`
+   * comes back with this turn's member already removed, and the caller owes nothing.
    *
-   * The caller MUST `releaseRunningSlot` on every way out, including the ones that leave the record
-   * `running` for another worker to reclaim: the member describes a delivery in flight, not a turn.
+   * On admission the caller MUST `releaseRunningSlot` on every way out, including the ones that leave
+   * the record `running` for another worker to reclaim: the member describes a delivery in flight,
+   * not a turn.
    */
-  async reserveRunningSlot(owner: string, turnId: string, now: number): Promise<number> {
-    await this.guard(() => this.redis.zAdd(this.runningKey(owner), { score: now, value: turnId }));
-    return this.guard(() => this.redis.zCard(this.runningKey(owner)));
+  async reserveRunningSlot(
+    owner: string,
+    turnId: string,
+    now: number,
+    cap: number,
+  ): Promise<number> {
+    const n = await this.guard(() =>
+      this.redis.eval(RESERVE_RUNNING_LUA, {
+        keys: [this.runningKey(owner)],
+        arguments: [String(now), turnId, String(cap)],
+      }),
+    );
+    return Number(n ?? 0);
   }
 
   async releaseRunningSlot(owner: string, turnId: string): Promise<void> {

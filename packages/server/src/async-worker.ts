@@ -316,11 +316,20 @@ export function ownerAdmission(opts: {
     const local = subjectCap === undefined ? noop : subjects.acquire(owner, subjectCap);
     if (!local) return null;
     if (runningCap === undefined) return local;
-    const running = await turns.reserveRunningSlot(owner, turnId, now());
+    // Any throw from here must give the local slot back before it propagates. `TurnStore.guard`
+    // turns every Redis blip into one and the drain loop logs it as a failed claim and carries on,
+    // so a slot left taken is burned on that owner for the life of the PROCESS -- and the counter is
+    // shared with sync `/turn`, so enough blips would refuse their interactive turns too.
+    let running: number;
+    try {
+      running = await turns.reserveRunningSlot(owner, turnId, now(), runningCap);
+    } catch (err) {
+      local();
+      throw err;
+    }
     if (running > runningCap) {
-      // Give back what this claim took, in both counters, and let the entry go down the ordinary
-      // defer path -- unrun, unpenalised, and with no credential minted.
-      await turns.releaseRunningSlot(owner, turnId);
+      // The script took this turn's member back out, so only the local slot is owed. The entry then
+      // goes down the ordinary defer path -- unrun, unpenalised, and with no credential minted.
       local();
       return null;
     }

@@ -1245,8 +1245,12 @@ it adds is the schedule. Its design should cite this document for both.
   **#391 also ships the cluster-wide half**: `MOCA_ASYNC_RUNNING_PER_OWNER` (unset = off, no derived
   default — the value is deployment-wide, so S cannot imply it, and a cap appearing on upgrade would
   pace a single-owner deployment's own fan-out) is checked against a per-owner **running** zset
-  (`sh:cp:owner:<subjectHash>:running`), ZADD-then-ZCARD so N simultaneous readers of an under-limit
-  count cannot all pass. It answers through the same `admitOwner` hook and takes the same unrun,
+  (`sh:cp:owner:<subjectHash>:running`), taken by a Lua script that ZADDs, ZCARDs and ZREMs the
+  member again when it is over the cap. One script rather than two round trips, because the halves
+  are each exact in one direction only: count-then-add lets N simultaneous readers of an under-limit
+  count all pass (`reserveOpenSlot` measured that), while add-then-count has N simultaneous writers
+  all see the full total and all hand their entry back with none of them running — the contended
+  case the cap exists for. It answers through the same `admitOwner` hook and takes the same unrun,
   unpenalised hand-back, so the defer latency and the ten-minute `DEFER_CEILING_MS` yield above apply
   unchanged. A member is **one delivery's** claim, taken before the claim handshake and released in
   the runner's `finally` on every path — `redelivered` and `lost` included — so the count is

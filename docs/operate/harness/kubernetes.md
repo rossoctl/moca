@@ -1385,8 +1385,11 @@ backlog never reaches it and is drained FIFO -- one owner's deep queue ahead of 
 turn. At `replicas` > 1 that is what `MOCA_ASYNC_RUNNING_PER_OWNER` is for (#391): it caps an owner's
 RUNNING leaves across every pod, counted in Redis, and is the only one of the two caps a pod-local
 counter cannot provide. Unset by default; add it to `moca-settings` to turn it on, and give every pod
-the same value. Its defers land in this same counter, so a rise after setting it is the new cap
-working.
+the same value. **Then roll the supervisor yourself** --
+`kubectl -n moca rollout restart deployment/moca-supervisor`. The pods read the key as environment at
+start, and their `moca.dev/settings-hash` annotation covers only the keys `setup.sh` writes, so a key
+added by hand changes no annotation and the running pods keep their old environment indefinitely. Its
+defers land in this same counter, so a rise after the restart is the new cap working.
 
 The five counters are **one pod's**, not the deployment's: `/metrics` answers from whichever pod you
 reached, each worker counts in its own memory, and a worker that respawns starts its own count at

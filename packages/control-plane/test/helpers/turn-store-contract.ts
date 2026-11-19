@@ -310,20 +310,35 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       await store.create(rec({ turnId: 't-q' }));
       expect(await store.countOpen('github:1234')).toBe(1);
 
-      expect(await store.reserveRunningSlot('github:1234', 't-1', now)).toBe(1);
-      expect(await store.reserveRunningSlot('github:1234', 't-2', now)).toBe(2);
+      // Cap well above every count here: this case is about the counting, and the one below about
+      // the cap.
+      expect(await store.reserveRunningSlot('github:1234', 't-1', now, 99)).toBe(1);
+      expect(await store.reserveRunningSlot('github:1234', 't-2', now, 99)).toBe(2);
       // Idempotent per turn: a redelivery re-admitted by another worker must not take a second slot.
-      expect(await store.reserveRunningSlot('github:1234', 't-2', now + 1)).toBe(2);
-      expect(await store.reserveRunningSlot('github:9999', 't-3', now)).toBe(1);
+      expect(await store.reserveRunningSlot('github:1234', 't-2', now + 1, 99)).toBe(2);
+      expect(await store.reserveRunningSlot('github:9999', 't-3', now, 99)).toBe(1);
       // ...and it did not touch the open count either way.
       expect(await store.countOpen('github:1234')).toBe(1);
 
       await store.releaseRunningSlot('github:1234', 't-2');
-      expect(await store.reserveRunningSlot('github:1234', 't-2', now)).toBe(2);
+      expect(await store.reserveRunningSlot('github:1234', 't-2', now, 99)).toBe(2);
       // Releasing a slot nobody holds is a no-op, not an underflow: the worker's `finally` runs on
       // paths where the slot was already given back by the terminal transition.
       await store.releaseRunningSlot('github:1234', 't-never');
-      expect(await store.reserveRunningSlot('github:1234', 't-4', now)).toBe(3);
+      expect(await store.reserveRunningSlot('github:1234', 't-4', now, 99)).toBe(3);
+      await done();
+    });
+
+    it('takes a running slot back out when it is over the cap, so two workers cannot both lose (#391)', async () => {
+      const { store, now, done } = await make();
+      expect(await store.reserveRunningSlot('github:1234', 't-1', now, 1)).toBe(1);
+      // Over the cap: the count says refused, and the member is already gone -- the caller owes
+      // nothing, and this owner's ONE slot still belongs to t-1 rather than being surrendered by
+      // both of them (add-then-count in two round trips has the refusers remove each other's).
+      expect(await store.reserveRunningSlot('github:1234', 't-2', now, 1)).toBe(2);
+      expect(await store.reserveRunningSlot('github:1234', 't-3', now, 1)).toBe(2);
+      await store.releaseRunningSlot('github:1234', 't-1');
+      expect(await store.reserveRunningSlot('github:1234', 't-2', now, 1)).toBe(1);
       await done();
     });
 
@@ -334,17 +349,17 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       // was deleted under it (which deletes the record outright, never going through `toTerminal`).
       await store.create(rec({ turnId: 't-dead', sessionId }));
       await store.create(rec({ turnId: 't-gone', sessionId, idempotencyKey: 'k-gone' }));
-      expect(await store.reserveRunningSlot('github:1234', 't-dead', now)).toBe(1);
-      expect(await store.reserveRunningSlot('github:1234', 't-gone', now)).toBe(2);
+      expect(await store.reserveRunningSlot('github:1234', 't-dead', now, 99)).toBe(1);
+      expect(await store.reserveRunningSlot('github:1234', 't-gone', now, 99)).toBe(2);
 
       expect(await store.finalize('t-dead', 'lost', now)).toBe('ok');
       // Only the finalized turn's slot: the count is back to 1, which `reserveRunningSlot`'s own
       // return value reports by re-adding the member it just removed.
-      expect(await store.reserveRunningSlot('github:1234', 't-dead', now)).toBe(2);
+      expect(await store.reserveRunningSlot('github:1234', 't-dead', now, 99)).toBe(2);
       await store.releaseRunningSlot('github:1234', 't-dead');
 
       await store.deleteSessionTurns(sessionId, 'github:1234');
-      expect(await store.reserveRunningSlot('github:1234', 't-probe', now)).toBe(1);
+      expect(await store.reserveRunningSlot('github:1234', 't-probe', now, 99)).toBe(1);
       await done();
     });
 
