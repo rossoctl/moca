@@ -72,6 +72,24 @@
 #                           SBX_TEMPLATES_FILE, owned by exactly one host). Unset: one host, kvm,
 #                           owning every template worker
 #   SBX_EGRESS_CREDENTIAL_TTL_SECONDS   optional; 5-300 (the control plane's default is 60)
+#   SBX_STORAGE_CLASS       optional; the storageClassName written into every claim this deployment
+#                           renders (the redis StatefulSet's volumeClaimTemplates, the template
+#                           store's PVC, the egress credential store's PVC, and combined's
+#                           moca-credentials) -- for a cluster with NO default StorageClass, where
+#                           each claim would otherwise pend until patched by hand. Fresh claims
+#                           only: the class of anything that already exists is immutable (a redis
+#                           StatefulSet's volumeClaimTemplates outright, a PVC's
+#                           storageClassName once set -- the API allows only nil to set), so a run
+#                           whose knob disagrees with what is live (a different class, or a class
+#                           where the live object has one and the knob is unset: the server-side
+#                           apply would DROP the field its manager owns) is refused before
+#                           anything is applied (check_storage_class, on the StatefulSet and on
+#                           every claim this run renders). To move a deployment onto the knob,
+#                           keep SBX_STORAGE_CLASS at the live class; to change an existing one,
+#                           kubectl delete sts redis --cascade=orphan first (the pod and the
+#                           data-redis-0 claim survive; the re-run's StatefulSet adopts both),
+#                           and delete any PVC whose class must change (its contents do not
+#                           survive).
 #   SBX_REDIS_IMAGE         optional; repository[:tag]@sha256:<digest>: the image Redis runs instead of the
 #                           base's valkey/valkey:9-alpine. For a namespace whose data a Redis 7.4 wrote
 #                           (RDB format 12, which Valkey 9 cannot read: its AOF load aborts), e.g.
@@ -197,6 +215,10 @@ validate() {
   [[ -n "${SBX_IMAGE:-}" && "$SBX_IMAGE" != *[[:space:]]* ]] || die 'SBX_IMAGE is required (the relay image)'
   [[ -z "${SBX_REDIS_IMAGE:-}" || "$SBX_REDIS_IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] ||
     die 'SBX_REDIS_IMAGE must be pinned by digest: repository[:tag]@sha256:<64 hex>'
+  # A StorageClass name is a DNS label with dots (lower-case alphanumerics, "-" and "."), per the
+  # API's own validation; refusing anything else here names the typo before a pend does.
+  [[ -z "${SBX_STORAGE_CLASS:-}" || "$SBX_STORAGE_CLASS" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] ||
+    die "SBX_STORAGE_CLASS must be a storage class name (lower-case alphanumerics, '-' and '.'), got '$SBX_STORAGE_CLASS'"
   [[ -n "${SBX_WORKERS:-}" ]] || die 'SBX_WORKERS is required: the template worker ids, space-separated'
   local seen=' ' w
   for w in $SBX_WORKERS; do
@@ -578,6 +600,7 @@ preflight() {
   kc get configmaps -n "$NS" -o name >/dev/null 2>&1 ||
     die "namespace $NS must already exist and be readable (this script creates nothing cluster-scoped)"
   check_redis_image
+  check_storage_class
   read_live_max
   check_host_idle
   check_host_ceiling
@@ -659,6 +682,76 @@ check_redis_image() {
   [[ "${repo##*/}" != *:* ]] || repo="${repo%:*}"
   [[ "$repo" != *valkey/valkey* ]] || return 0
   die "StatefulSet redis in $NS runs $image, not Valkey, and Valkey 9 (the default without SBX_REDIS_IMAGE) cannot read the RDB format 12 Redis 7.4 writes: redis-0 would crash-loop. Until the data is migrated, set SBX_REDIS_IMAGE to that image pinned by digest (repository[:tag]@sha256:<digest>; the running digest: kubectl -n $NS get pod redis-0 -o jsonpath='{.status.containerStatuses[0].imageID}'). See docs/operate/sandbox-service/runbook.md §2"
+}
+
+# Every PVC this run writes SBX_STORAGE_CLASS into (write_overlay emits one patch per name here;
+# the conditions mirror its, so a claim this run does not render is neither patched nor checked --
+# applying it could not change the claim, and the render has no patch target for it).
+rendered_pvc_claims() {
+  [[ -z "$STORE_ON" && -z "$COMBINED" ]] || printf 'moca-sbx-templates\n'
+  [[ -z "$EGRESS_ON" ]] || printf 'moca-sbx-credentials\n'
+  [[ -n "$COMBINED" ]] && printf 'moca-credentials\n'
+  return 0
+}
+
+# SBX_STORAGE_CLASS on an existing deployment: Kubernetes forbids changing volumeClaimTemplates on
+# a StatefulSet that already exists, so the redis patch would make every later apply Forbidden (the
+# run dies under set -e before the rollouts and bundles). A pre-existing template therefore pins
+# the knob: set and different, or unset while the knob is set, is refused before anything is
+# applied. A fresh namespace (no StatefulSet) and an already-matching class pass. The component
+# PVCs fail the same way one object later in the stream: PVC.spec.storageClassName is immutable
+# once set (the API allows only nil -> set), so each claim this run renders is preflighted alike
+# (check_claim_class) -- a differing class, or a run that drops the field its field manager owns,
+# is refused before anything is applied.
+check_storage_class() {
+  local json claim
+  # Captured first (errexit), as in check_redis_image: a failing get must not read as "no StatefulSet".
+  json="$(kc get statefulset redis -n "$NS" --ignore-not-found -o json)"
+  if [[ -n "$json" ]]; then
+    check_sts_class "$json"
+  fi
+  for claim in $(rendered_pvc_claims); do
+    check_claim_class "$claim"
+  done
+}
+
+# The redis half: $1 is the live StatefulSet's JSON, captured before anything else runs.
+check_sts_class() {
+  local live
+  live="$(jq -r '.spec.volumeClaimTemplates[0].spec.storageClassName // empty' <<<"$1")"
+  if [[ -n "${SBX_STORAGE_CLASS:-}" ]]; then
+    # Forward: a differing (or unset) live class against a set knob is the apply the API refuses.
+    [[ "$live" == "$SBX_STORAGE_CLASS" ]] ||
+      die "StatefulSet redis in $NS already exists with volumeClaimTemplates its API refuses to change in place (live class: '${live:-unset}'), so SBX_STORAGE_CLASS=$SBX_STORAGE_CLASS cannot be applied: keep SBX_STORAGE_CLASS=$live for this deployment (its claim keeps the class it was created with), or, to change it, kubectl -n $NS delete sts redis --cascade=orphan (the pod and the data-redis-0 claim survive; a re-run's StatefulSet adopts both, and the claim keeps its class) and re-run"
+  else
+    # Reverse (review round 2): a live class can only have come from an earlier knob run
+    # (base/redis.yaml sets none), and the apply is server-side with one field manager: a run
+    # without the knob DROPS the storageClassName that manager owns, which changes
+    # volumeClaimTemplates -- the same Forbidden, partway through the object stream. Refused.
+    [[ -z "$live" ]] ||
+      die "StatefulSet redis in $NS carries storageClassName '$live' an earlier SBX_STORAGE_CLASS run set, and this run has SBX_STORAGE_CLASS unset: the apply would remove the field (server-side apply drops what its field manager no longer owns), which changes volumeClaimTemplates and is Forbidden. Set SBX_STORAGE_CLASS=$live (the claim keeps that class either way)"
+  fi
+}
+
+# The claim half (review round 3): PVC.spec.storageClassName is immutable once set (the API allows
+# only nil -> set), and apply_manifest applies with the same field manager as the redis patch, so a
+# run whose knob disagrees with a live claim this run renders is the same Forbidden one object later
+# in the stream -- redis applies, then the claim fails, partway through. A claim with NO class
+# passes in both directions: nil -> set is the one transition the API allows, and a knob-unset run
+# writes nothing.
+check_claim_class() {
+  local json live
+  # Captured first (errexit), as in check_redis_image: a failing get must not read as "no PVC".
+  json="$(kc get pvc "$1" -n "$NS" --ignore-not-found -o json)"
+  [[ -n "$json" ]] || return 0
+  live="$(jq -r '.spec.storageClassName // empty' <<<"$json")"
+  [[ -z "$live" ]] && return 0
+  if [[ -n "${SBX_STORAGE_CLASS:-}" ]]; then
+    [[ "$live" == "$SBX_STORAGE_CLASS" ]] ||
+      die "PVC $1 in $NS already exists with storageClassName '$live', which the API refuses to change in place (PVC.spec.storageClassName is immutable, apart from nil to set), so SBX_STORAGE_CLASS=$SBX_STORAGE_CLASS cannot be applied: keep SBX_STORAGE_CLASS=$live for this deployment (the claim keeps the class it was created with), or, to change it, kubectl -n $NS delete pvc $1 (its contents do not survive) and re-run"
+  else
+    die "PVC $1 in $NS carries storageClassName '$live' an earlier SBX_STORAGE_CLASS run set, and this run has SBX_STORAGE_CLASS unset: the apply would remove the field (server-side apply drops what its field manager no longer owns), which the API refuses on a set class. Set SBX_STORAGE_CLASS=$live (the claim keeps that class either way)"
+  fi
 }
 
 # SBX_PROFILE=combined in an SBX0 namespace would add the harness's keys to its moca-mu1 and switch
@@ -1146,6 +1239,27 @@ write_overlay() {
     printf '      - { op: add, path: /spec/template/metadata/annotations, value: { sbx.moca.dev/settings-hash: "%s" } }\n' "$SETTINGS_HASH"
     printf '  - target: { kind: Deployment, name: sandbox-relay }\n    patch: |-\n'
     printf '      - { op: add, path: /spec/template/metadata/annotations/sbx.moca.dev~1settings-hash, value: "%s" }\n' "$RELAY_HASH"
+    # SBX_STORAGE_CLASS: one storageClassName on every claim this run renders, for a cluster with
+    # no default StorageClass (without one, each PVC pends until an operator patches it by hand).
+    # Each patch targets a resource this run actually renders: a patch naming an absent PVC fails
+    # the kustomize build, so each component's is emitted only when that component is on. The
+    # value is quoted like the settings hashes above: a name the regex accepts but YAML would read
+    # as a non-string (123, 1e3) must fail the render, not silently change type. Fresh claims
+    # only -- a claim that already exists keeps the class it was created with, and the redis
+    # StatefulSet's templates cannot change at all once it exists (check_storage_class refuses
+    # that before anything is applied).
+    if [[ -n "${SBX_STORAGE_CLASS:-}" ]]; then
+      printf '  - target: { kind: StatefulSet, name: redis }\n    patch: |-\n      - { op: add, path: /spec/volumeClaimTemplates/0/spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
+      if [[ -n "$STORE_ON" || -n "$COMBINED" ]]; then
+        printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-templates }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
+      fi
+      if [[ -n "$EGRESS_ON" ]]; then
+        printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-credentials }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
+      fi
+      # ocp-combined's own claim (pvc-credentials.yaml): the harness's file credential store.
+      [[ -z "$COMBINED" ]] ||
+        printf '  - target: { kind: PersistentVolumeClaim, name: moca-credentials }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
+    fi
     printf 'images:\n'
     image_entry ghcr.io/rossoctl/moca "$SBX_IMAGE"
     [[ -z "$COMBINED" ]] || image_entry ghcr.io/rossoctl/moca-remote-worker "$SBX_SANDBOX_IMAGE"
