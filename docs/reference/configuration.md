@@ -3,7 +3,7 @@
 > **Preview.** Describes the P6 runtime as of `main` on 2026-10-12. Variable names keep their
 > historical prefixes (`SH_*`, `KAGENTI_*`, `MOCA_*`); they are listed as they exist in the code.
 > Each row is taken from the code that reads it. The deployment READMEs ([`deploy/vm`](../../deploy/vm/README.md),
-> [`deploy/k8s`](../../deploy/k8s/README.md), [`deploy/compose`](../../deploy/compose/README.md),
+> [`deploy/k8s`](../../deploy/k8s/README.md), [`deploy/compose`](../operate/harness/compose.md),
 > [`deploy/microvm`](../../deploy/microvm/P4-ON-P6.md)) say how each path sets these; the env
 > templates are in `deploy/vm/env/*.env.example`.
 

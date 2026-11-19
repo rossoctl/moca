@@ -28,7 +28,7 @@ with its worker pool, the sandbox relay, Redis, one remote-worker sandbox — co
 the trial. The control plane is published on `http://localhost:8090` (`SH_CP_PORT`).
 
 Details, configuration and the trial's limits:
-[`deploy/compose/README.md`](../../../deploy/compose/README.md).
+[Docker Compose (trial)](../../operate/harness/compose.md).
 
 ## 2. Register a GitHub OAuth app (once)
 
