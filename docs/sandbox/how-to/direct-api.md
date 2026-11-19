@@ -22,6 +22,8 @@ sandbox, so a `--renew-every` pump keeps it alive whether or not its client runs
 How to run commands in a moca sandbox service sandbox from your own code (a script, an SDK, a local tool) by
 calling `SandboxExec` over gRPC. `mocactl sbx` is the supported command line; this guide is for
 everything else.
+For the control-plane calls behind each `mocactl sbx` command, and one table of errors and retry
+rules across REST, SSE and gRPC, see [Build a client](../../api/client-guide.md).
 
 ## What it is
 
