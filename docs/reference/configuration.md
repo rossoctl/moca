@@ -423,7 +423,8 @@ header is authoritative.
   sandboxes' idle reclaim, default `8h`; a change rolls the sandbox pods).
 - **Sandbox service KVM host (`deploy/sbx/install-host.sh`, `deploy/sbx/host-agent.sh`):** `SBX_WORKER_BIN`
   (default `/usr/local/libexec/sbx/microvm-worker`: the worker binary the sandbox service's units run, never
-  `/usr/local/bin/microvm-worker`); the host agent's `SBX_API_URL`, `SBX_HOST_ID`,
+  `/usr/local/bin/microvm-worker`), `SBX_SAMPLER_INTERVAL_S` (the host sampler's interval in seconds,
+  5-3600, default 15; `0` installs none and removes an installed one); the host agent's `SBX_API_URL`, `SBX_HOST_ID`,
   `SBX_HOST_TOKEN_FILE`, `SBX_KERNEL`, `SBX_API_CA_FILE`, `SBX_DISK_FLOOR_GB` (default 60),
   `SBX_BUILD_CONCURRENCY` (default 1, at most 4), `SBX_ACTIVE_LIMIT` (the workers the control plane
   places on the host at once; default 0, none), `SBX_IDLE_LIMIT_S` (the default activation lease,

@@ -519,10 +519,16 @@ sudo <checkout>/deploy/sbx/status.sh --host --token-ttl-seconds 900
 ```
 unit sbx-worker@sbx_default.service: active
 unit sbx-janitor.timer: active
+unit sbx-sampler.timer: active
 workspace filesystem: 45% used, 90G of 200G (110G free) on /srv
 janitor last run: {"janitor":"summary",…}
 janitor wait: 3600 s (outlasts the token lifetime 900 s + 30 s)
+host sample: {"sampler":"sample",…}
 ```
+
+`host sample` is one run of [the host sampler](#the-host-sampler), the line its timer writes to the
+journal, now; a `host sample error` line before it names each field it could not read. To read it:
+`… | sed -n 's/^host sample: //p' | jq .`.
 
 Pass `--token-ttl-seconds` the cluster's `token lifetime`, or set `SBX_STATUS_HOSTS="<host> …"` (ssh
 targets whose user has passwordless sudo) in `<env file>`, and the cluster-side run reports each
@@ -721,12 +727,20 @@ ssh <host> "sudo journalctl -u moca-egress.service --since '$FROM UTC' --until '
 
 A janitor run's `summary` line has its own `ts`; the lines before it in the same run do not.
 
-**4. How loaded the host was.** Nothing samples the host's CPU, memory, pressure or disk I/O
-today; the host resource sampler of #857 (R2) will add those samples to the journal, and this step
-will then read them for the window. Until then, `sudo <checkout>/deploy/sbx/status.sh --host` gives
-a one-shot view of now, not of the window: each `sbx-worker@*` unit's state, the
-`sbx-janitor.timer`'s, the workspace filesystem's `df`, the janitor's last run and result, and the
-janitor wait and worker idle checks (§8).
+**4. How loaded the host was.** [The host sampler](#the-host-sampler) writes one JSON line every
+15 s; take the window's, from a little before `FROM`, so the first counter difference covers it:
+
+```bash
+ssh <host> "sudo journalctl -u sbx-sampler.service --since '$FROM UTC' --until '$TO UTC' -o cat \
+  --no-pager" > samples.ndjson
+jq -c 'select(.sampler == "sample") | {ts, load1: .load.avg1, mem_avail_kb: .mem_kb.available,
+  psi_mem_full10: .psi.memory.full_avg10, psi_io_some10: .psi.io.some_avg10, errors,
+  workers: [.workers[] | {wrk, vms, committed: .stats.committedBytes, budget_mb, reserve_mb}]}' samples.ndjson
+jq -c 'select(.sampler != "sample")' samples.ndjson   # the fields it could not read, and when
+```
+
+The worker's `wrk` is the relay's (step 3). `sudo <checkout>/deploy/sbx/status.sh --host` (§8) adds
+a view of now: the units' states, the janitor's last run and one sample.
 
 **What is not stored.** No command text and no output is stored anywhere server-side. The relay's
 audit line has neither (`docs/sbx/security-review.md` §1.5 lists it as tested), unless the relay
@@ -743,7 +757,8 @@ for how long, today:
 - **Egress logs:** at most 10,000 events or 4 MiB per sandbox, 64 MiB for all
   (`packages/control-plane/src/egress-log.ts`), kept as long as the sandbox's record
   (`SBX_RETENTION_DAYS`, default 14).
-- **Host journald:** the host's own journald settings; `install-host.sh` sets none.
+- **Host journald:** the host's own journald settings; `install-host.sh` sets none. The host sampler
+  adds about 1 KB per sample with a few workers, about 6-8 MB a day at the default 15 s.
 
 **Once a log pipeline is chosen** (#857, R1), the control-plane, relay and host lines are queried
 there instead, by the same fields (`sandboxId`, `subject`; `sbx`, `sub`; the workspace key), and
@@ -950,6 +965,125 @@ failed install.
 - **Turn it off:** re-run a worker's install with `SBX_READ_AHEAD_KB=0`. That writes the recorded
   value back and removes the unit. A later install without `SBX_READ_AHEAD_KB=0` sets it again.
 
+## The host sampler
+
+Every worker install also installs `sbx-sampler.timer` (#857, R2), so a KVM host with a worker
+samples its own load from then on. Every 15 s (`SBX_SAMPLER_INTERVAL_S`, 5-3600, at the install; in practice every
+15-16 s, the timer's 1 s accuracy on top) a
+oneshot, `sbx-sampler.service`, runs `/usr/local/libexec/sbx-sampler.sh` (`deploy/sbx/sampler.sh`),
+which writes one JSON line to the journal. It reads `/proc` and the cgroup files; it starts `df`
+twice (3 s each at most; after one that does not answer, as on a hung filesystem, it skips the
+second and reports `workspaces` null) and, per worker that runs with `SH_DIAG_STATS_ADDR`, one `curl` of that worker's
+`/stats` on this host (1 s at most; an address that is neither loopback nor a wildcard is refused, never
+curled); and it never fails its unit. A sample, shortened:
+
+```json
+{
+  "sampler": "sample",
+  "ts": "2026-11-17T10:30:00Z",
+  "load": { "avg1": 3.1, "avg5": 2.8, "avg15": 2.2 },
+  "mem_kb": {
+    "total": 65536000,
+    "available": 40000000,
+    "swap_total": 0,
+    "swap_free": 0,
+    "swap_used": 0
+  },
+  "psi": {
+    "memory": { "some_avg10": 0.2, "some_avg60": 0.1, "full_avg10": 0.1, "full_avg60": 0.05 },
+    "…": "cpu, io"
+  },
+  "workspaces": {
+    "bytes_total": 214748364800,
+    "bytes_used": 96636764160,
+    "…": "bytes_avail, inodes_total, inodes_used, inodes_free"
+  },
+  "slice": {
+    "cpu_usage_usec": 9000000,
+    "cpu_nr_throttled": 0,
+    "memory_current": 6442450944,
+    "memory_peak": 8589934592,
+    "io_rbytes": 1024,
+    "…": "…"
+  },
+  "workers": [
+    {
+      "wrk": "sbx_default",
+      "vms": 3,
+      "memory_current": 4294967296,
+      "budget_mb": 17536,
+      "reserve_mb": 1024,
+      "stats": {
+        "committedBytes": 3221225472,
+        "standbyCommittedBytes": 268435456,
+        "refusals": { "memory-budget": 2 }
+      }
+    }
+  ],
+  "errors": []
+}
+```
+
+- **`load`, `mem_kb`, `psi`** are the host's: `/proc/loadavg`, `/proc/meminfo` (kB; `swap_used` is
+  SwapTotal minus SwapFree) and `/proc/pressure/{cpu,memory,io}` (the share of time some or all
+  tasks waited, over 10 and 60 s, in percent).
+- **`workspaces`** is the filesystem holding `/srv/sbx/workspaces`, in bytes and inodes.
+- **`slice`** is `sbx.slice`, every worker and its VMs: `cpu.stat`, `memory.current`, `memory.peak`
+  (null before Linux 5.19) and `io.stat` summed over devices. The CPU, throttling and I/O figures
+  are counters since the slice was made: the use in a window is the difference between two samples
+  (below). `memory.current` counts page cache too.
+- **`workers`**, one per `/etc/sbx/workers/<id>.env`: `vms` is the VM cgroups in that worker's slice
+  that hold a process, running and paused standby VMs alike (a stopped worker has 0);
+  `memory_current` is its slice's (null when it is not running); `budget_mb` and `reserve_mb` are
+  its `SH_MAX_COMMITTED_MB` and `SH_MEMORY_RESERVE_MB`, from the running worker's environment (the
+  process named `microvm-worker` in its unit's cgroup; else its env file). A VM is admitted while `committedBytes` stays within `budget_mb` minus
+  `reserve_mb`. `stats` is from the worker's `/stats`, named as the worker names them, and null
+  unless the worker runs with `SH_DIAG_STATS_ADDR`, which is off by default. To turn it on for one
+  worker, a drop-in (an install rewrites the env file, never this), with a port of its own per
+  worker: `sudo systemctl edit sbx-worker@<id>`, then `[Service]` and
+  `Environment=SH_DIAG_STATS_ADDR=127.0.0.1:9901`, and `sudo systemctl restart sbx-worker@<id>`,
+  which ends that worker's running commands. It serves the pool's counters only, on its own
+  listener.
+- **`errors`** names each field group it could not read in this sample; their values are null. The
+  first sample in which a kind fails is preceded by one `{"sampler":"error","kind":…,"why":…}` line,
+  and the first one in which it reads again by one `{"sampler":"recovered","kind":…}` line, so a
+  lasting failure (a kernel without PSI, a worker's `/stats` not answering) is one line in the
+  journal, not one every 15 s.
+
+The unit logs at `notice` and drops anything below it, so systemd's own lines about each run
+(started, finished) stay out of the journal. On the host:
+
+```bash
+sudo journalctl -u sbx-sampler.service -o cat --since -5min | jq -c 'select(.sampler == "sample")'
+# How loaded was it at 10:30 UTC: the samples around it.
+sudo journalctl -u sbx-sampler.service -o cat --since '2026-11-17 10:29:30 UTC' \
+  --until '2026-11-17 10:30:30 UTC' | jq -c 'select(.sampler == "sample") | {ts, load, mem_kb, psi}'
+# sbx.slice's CPU in cores, between consecutive samples.
+sudo journalctl -u sbx-sampler.service -o cat --since -10min | jq -sc '[.[] | select(.sampler == "sample")]
+  | . as $s | range(1; length) as $i | {ts: $s[$i].ts, slice_cores: (($s[$i].slice.cpu_usage_usec
+  - $s[$i - 1].slice.cpu_usage_usec) / ((($s[$i].ts | fromdate) - ($s[$i - 1].ts | fromdate)) * 1e6))}'
+```
+
+These run `jq` on the host; on a host without it, run the `journalctl` over ssh and `jq` on your
+machine, as [Reproducing a member's issue](#reproducing-a-members-issue) does. The journal keeps the samples for as
+long as the host's journald settings keep anything. Once a log pipeline is chosen (#857, R1), it
+ships the same lines.
+
+- **Its own cost.** The target is under 1% of one core. Measure it on the host: 200 runs as the
+  timer runs them, then the CPU time per run over the interval:
+
+  ```bash
+  sudo env SBX_ENV_DIR=/etc/sbx SBX_SRV=/srv/sbx SBX_SAMPLER_STATE_DIR= bash -c \
+    'time (for i in $(seq 200); do /usr/local/libexec/sbx-sampler.sh >/dev/null; done)'
+  sudo systemd-run --wait -p CPUAccounting=yes /usr/local/libexec/sbx-sampler.sh   # one run, as a unit
+  ```
+
+  (user + sys) / 200 / 15 s is the share of one core; `systemd-run --wait` prints one run's
+  `CPU time consumed`.
+
+- **Change the interval, or turn it off:** re-run a worker's install with `SBX_SAMPLER_INTERVAL_S=60`
+  (or `0`, which removes it). The last worker's uninstall removes it; `--keep-shared` keeps it.
+
 ## 10. A KVM-host outage
 
 **What users see.** Every sandbox whose template runs on the host fails: `mocactl sbx run` and the
@@ -1006,7 +1140,8 @@ sudo <checkout>/deploy/sbx/install-host.sh --uninstall-janitor
 ```
 
 They remove exactly what the installs recorded in `/etc/sbx/manifest`; the last worker's uninstall
-also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx.slice`, and the `moca-egress.service` it
+also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx.slice`, the host sampler
+([The host sampler](#the-host-sampler)), and the `moca-egress.service` it
 installed ([Guest egress](#guest-egress)). Workspace data under `/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` (the uninstall names it) is left; remove it by hand.
 
 In the cluster, delete what `setup.sh` applied, then its Secrets and ConfigMaps:

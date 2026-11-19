@@ -63,7 +63,7 @@ list-units)
   printf 'sbx-worker@sbx_py312.service loaded failed failed SBX0 sandbox worker sbx_py312\n' ;;
 is-active)
   case "$2" in
-  sbx-worker@sbx_default.service | sbx-janitor.timer) echo active ;;
+  sbx-worker@sbx_default.service | sbx-janitor.timer | sbx-sampler.timer) echo active ;;
   *) echo failed; exit 3 ;;
   esac ;;
 show)
@@ -74,10 +74,15 @@ show)
 *) echo "mock systemctl: unexpected: $*" >&2; exit 99 ;;
 esac
 MOCK
+# df: -hP is status.sh's own; -P -k and -P -i are the host sampler's (bytes in KiB, and inodes).
 cat >"$TMP/bin/df" <<'MOCK'
 #!/usr/bin/env bash
 printf 'df %s\n' "$*" >>"$MOCK_LOG"
-printf 'Filesystem      Size  Used Avail Use%% Mounted on\n/dev/nvme1n1    200G   90G  110G  45%% /srv\n'
+case "$1 $2" in
+'-P -k') printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/nvme1n1 209715200 94371840 115343360 45%% /srv\n' ;;
+'-P -i') printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\n/dev/nvme1n1 13107200 52000 13055200 1%% /srv\n' ;;
+*) printf 'Filesystem      Size  Used Avail Use%% Mounted on\n/dev/nvme1n1    200G   90G  110G  45%% /srv\n' ;;
+esac
 MOCK
 cat >"$TMP/bin/journalctl" <<'MOCK'
 #!/usr/bin/env bash
@@ -183,9 +188,20 @@ grep -q '^parse_args()' "$SRC/deploy/sbx/lib.sh" || fail 'lib.sh does not define
 grep -q '^\. "\$SBX_DIR/lib.sh"' "$SRC/deploy/sbx/setup.sh" || fail 'setup.sh does not source lib.sh'
 pass 'arguments: unknown and missing refused; parse_args lives in lib.sh, sourced by setup.sh'
 
-# 5. The host side.
-export SBX_ENV_DIR="$TMP/etc" SBX_SRV="$TMP/srv"
-mkdir -p "$SBX_ENV_DIR" "$SBX_SRV/workspaces"
+# 5. The host side. The host sampler (deploy/sbx/sampler.sh, beside the script under test: no
+#    installed one in SBX_LIBEXEC_DIR) reads a fake /proc and cgroup tree.
+export SBX_ENV_DIR="$TMP/etc" SBX_SRV="$TMP/srv" SBX_LIBEXEC_DIR="$TMP/libexec"
+export SBX_SYS_ROOT="$TMP/sys"
+FAKE_PROC="$SBX_SYS_ROOT/proc" FAKE_CG="$SBX_SYS_ROOT/sys/fs/cgroup"
+mkdir -p "$SBX_ENV_DIR" "$SBX_SRV/workspaces" "$FAKE_PROC/pressure" "$FAKE_CG/sbx.slice" "$SBX_LIBEXEC_DIR"
+printf '0.52 0.40 0.31 2/811 12345\n' >"$FAKE_PROC/loadavg"
+printf 'MemTotal: 65536000 kB\nMemAvailable: 40000000 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n' >"$FAKE_PROC/meminfo"
+for r in cpu memory io; do
+  printf 'some avg10=1.00 avg60=0.50 avg300=0.00 total=1\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n' >"$FAKE_PROC/pressure/$r"
+done
+printf 'usage_usec 9000000\nnr_throttled 0\nthrottled_usec 0\n' >"$FAKE_CG/sbx.slice/cpu.stat"
+printf '6442450944\n' >"$FAKE_CG/sbx.slice/memory.current"
+printf '259:0 rbytes=1 wbytes=2 rios=3 wios=4 dbytes=0 dios=0\n' >"$FAKE_CG/sbx.slice/io.stat"
 printf 'SBX_API_URL=https://sbx-api.apps.example.invalid\nSBX_JANITOR_AGE=3600\n' >"$SBX_ENV_DIR/janitor.env"
 cat >"$MOCK_DIR/journal" <<'LOG'
 {"janitor":"summary","ts":"2026-10-19T08:45:00Z","examined":3,"removed":0,"unknown":0,"bytes_freed":0,"errors":0}
@@ -198,6 +214,7 @@ bash "$STATUS" --host --token-ttl-seconds 900 >"$TMP/out" 2>&1 || fail "--host e
 has 'unit sbx-worker@sbx_default.service: active'
 has 'unit sbx-worker@sbx_py312.service: failed'
 has 'unit sbx-janitor.timer: active'
+has 'unit sbx-sampler.timer: active'
 has 'workspace filesystem: 45% used, 90G of 200G (110G free) on /srv'
 has 'janitor last run: {"janitor":"summary","ts":"2026-10-19T09:00:00Z","examined":4,"removed":1,"unknown":0,"bytes_freed":4096,"errors":0}'
 has 'janitor wait: 3600 s (outlasts the token lifetime 900 s + 30 s)'
@@ -205,11 +222,35 @@ has 'janitor service: success, last started Mon 2026-10-19 09:00:00 UTC'
 grep -qx "df -hP $SBX_SRV/workspaces" "$MOCK_LOG" || fail 'df is not of the workspace root'
 while read -r tool verb _; do
   case "$tool $verb" in
-  'systemctl list-units' | 'systemctl is-active' | 'systemctl show' | 'df -hP' | journalctl\ *) ;;
+  'systemctl list-units' | 'systemctl is-active' | 'systemctl show' | 'df -hP' | 'df -P' | journalctl\ *) ;;
   *) fail "a host call that is not a read: $tool $verb" ;;
   esac
 done <"$MOCK_LOG"
 pass 'host: units, workspace disk, the janitor last summary and its wait; read-only'
+
+# The host sample: the sampler's own line, once, the same fields as the journal's series.
+sample="$(sed -n 's/^host sample: //p' "$TMP/out")"
+[[ "$(grep -c '^host sample: ' "$TMP/out")" == 1 ]] || fail 'not exactly one host sample line'
+command -v jq >/dev/null || fail 'the status tests need jq (the cluster side does)'
+jq -e '.sampler == "sample" and .load.avg1 == 0.52 and .mem_kb.available == 40000000 and .psi.io.some_avg10 == 1
+  and .workspaces.inodes_free == 13055200 and .slice.memory_current == 6442450944 and .errors == []' <<<"$sample" >/dev/null ||
+  fail "host sample: $sample"
+! grep -q '^host sample error: ' "$TMP/out" || fail 'a clean host printed a sample error'
+rm "$FAKE_PROC/pressure/io"
+bash "$STATUS" --host >"$TMP/out" 2>&1 || fail "exited $?"
+grep -q '^host sample error: {"sampler":"error","ts":"[^"]*","kind":"psi",' "$TMP/out" || fail 'a failing kind is not shown'
+sed -n 's/^host sample: //p' "$TMP/out" | jq -e '.errors == ["psi"]' >/dev/null || fail 'the sample does not name the failing kind'
+# The sampler's state directory is never used here: run under a unit's RUNTIME_DIRECTORY, the
+# kind it already reported is still shown.
+mkdir -p "$TMP/state" && printf 'psi\n' >"$TMP/state/errors"
+RUNTIME_DIRECTORY="$TMP/state" bash "$STATUS" --host >"$TMP/out" 2>&1 || fail "exited $?"
+grep -q '^host sample error: .*"kind":"psi"' "$TMP/out" || fail 'status.sh used the sampler state directory'
+printf 'some avg10=1.00 avg60=0.50 avg300=0.00 total=1\n' >"$FAKE_PROC/pressure/io"
+# No sampler installed and none beside the script: said so.
+mkdir -p "$TMP/alone" && cp "$STATUS" "$TMP/alone/status.sh"
+bash "$TMP/alone/status.sh" --host >"$TMP/out" 2>&1 || fail "exited $?"
+grep -q "^host sample: unavailable (no $SBX_LIBEXEC_DIR/sbx-sampler.sh: " "$TMP/out" || fail 'a missing sampler is not reported'
+pass 'host: one host sample line (the sampler'"'"'s), an error line per failing kind, never the timer'"'"'s state; a missing sampler said so'
 
 # A janitor run that refused its settings writes no JSON line: the service result shows it failed,
 # though the last summary in the journal is an older, good one (#554 review).
@@ -262,7 +303,9 @@ rm -rf "$SBX_ENV_DIR/workers"
 pass 'host: a worker idle warns at <= the longest lifetime, notes an unknown maximum, reports an unreadable idle'
 
 # 6. The cluster side runs the host side on every SBX_STATUS_HOSTS target over ssh, with the
-#    cluster's token lifetime, and reports an unreachable host without failing.
+#    cluster's token lifetime, and reports an unreachable host without failing. Piped, the host
+#    side has no script path: it runs the installed sampler.
+cp "$SRC/deploy/sbx/sampler.sh" "$SBX_LIBEXEC_DIR/sbx-sampler.sh"
 printf 'SBX_JANITOR_AGE=900\n' >"$SBX_ENV_DIR/janitor.env"
 cp "$MOCK_DIR/journal" "$MOCK_DIR/journal.bak"
 printf '%s\n' '{"janitor":"skipped","why":"control plane unreachable; nothing touched"}' >"$MOCK_DIR/journal"
@@ -274,6 +317,7 @@ has 'host kvm-a.example.invalid janitor last run: {"janitor":"skipped","why":"co
 grep -q '^host kvm-a.example.invalid janitor wait: 900 s; WARNING: not above the token lifetime 900 s + 30 s' "$TMP/out" ||
   fail 'the stale-bundle warning does not reach the cluster-side report'
 has 'host ops@kvm-b.example.invalid: unreachable (ssh exit 255)'
+grep -q '^host kvm-a.example.invalid host sample: {"sampler":"sample",' "$TMP/out" || fail 'the piped host side did not run the installed sampler'
 grep -q '^ssh -o BatchMode=yes -o ConnectTimeout=10 kvm-a.example.invalid sudo -n bash -s -- --host --token-ttl-seconds 900$' "$MOCK_LOG" ||
   fail 'ssh did not run the host side with the cluster token lifetime'
 printf 'SBX_STATUS_HOSTS="-oProxyCommand=evil"\n' >>"$TMP/sbx.env"

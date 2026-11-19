@@ -84,6 +84,16 @@
 # writes it back and removes the three files, the manifest kind `readahead <path>`. A $SBX_SRV on no
 # block device (tmpfs, overlay), or a value the device does not take, is a warning, never a failed
 # install. The setting is device-wide: everything else on that device reads ahead as much.
+#
+# Host sampler (#857, R2): a worker install also installs $SBX_LIBEXEC_DIR/sbx-sampler.sh
+# (deploy/sbx/sampler.sh), sbx-sampler.service and sbx-sampler.timer, and enables the timer, which
+# writes one JSON line of the host's load, sbx.slice's and each worker's to the journal every
+# SBX_SAMPLER_INTERVAL_S seconds (default 15; 5-3600; 0 installs none and removes one an earlier
+# install left). It rides on the worker install, not a flag of its own like --janitor: it needs no
+# bundle and no secret, and it measures the workers, so every host that has one samples from its
+# first install on, with no step to forget. Its three files are the manifest kind
+# `sampler <path>`: shared, like the template unit, so the last worker's plain --uninstall removes
+# them and --keep-shared keeps them (a host agent's retire of one build never stops the sampling).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -101,6 +111,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${SBX_WORKER_BIN:=/usr/local/libexec/sbx/microvm-worker}"
 # KiB, 0..16384; 0 leaves the device unchanged (and removes the unit a previous install left).
 : "${SBX_READ_AHEAD_KB:=512}"
+# Seconds between host samples, 5..3600; 0 installs no sampler (and removes the one a previous
+# install left).
+: "${SBX_SAMPLER_INTERVAL_S:=15}"
 # moca-egress's control socket: the path inside the unit is fixed (RuntimeDirectory=moca-egress); the
 # override exists for tests only. The wait is as setup-microvm.sh's.
 : "${MOCA_EGRESS_SOCKET:=/run/moca-egress/control.sock}"
@@ -598,6 +611,93 @@ remove_read_ahead() {
   systemctl daemon-reload || true
 }
 
+# ---- host sampler (see the header) ----
+sampler_files() { # the three files, in the order they are recorded
+  printf '%s\n' "$SBX_LIBEXEC_DIR/sbx-sampler.sh" "$SBX_UNIT_DIR/sbx-sampler.service" "$SBX_UNIT_DIR/sbx-sampler.timer"
+}
+valid_sampler_interval() { [[ "$1" =~ ^(0|[1-9][0-9]{0,3})$ ]] && (($1 == 0 || ($1 >= 5 && $1 <= 3600))); }
+
+# install_sampler: after install_units. Never fails the worker install: a host without its
+# samples still serves sandboxes. Every step is best effort: the first that fails (a file write, a
+# systemctl call) stops the sampler's install with a WARNING naming it, and the worker install goes
+# on. A re-run retries. The worker's own steps are not best effort, so a systemd that cannot
+# daemon-reload fails the worker install a few lines later anyway.
+install_sampler() {
+  local n="$SBX_SAMPLER_INTERVAL_S" v f
+  if ((n == 0)); then
+    remove_sampler
+    return 0
+  fi
+  for f in sampler.sh sbx-sampler.service sbx-sampler.timer; do
+    [[ -f "$SCRIPT_DIR/$f" ]] || { echo "WARNING: no $SCRIPT_DIR/$f beside this script: host sampler not installed" >&2; return 0; }
+  done
+  for v in SBX_SRV SBX_LIBEXEC_DIR SBX_UNIT_DIR SBX_ENV_DIR; do
+    [[ "${!v}" =~ $PLAIN_PATH_RE ]] ||
+      { echo "WARNING: $v='${!v}' is not a plain absolute path (it goes into a unit file): host sampler not installed" >&2; return 0; }
+  done
+  SAMPLER_STEP=''
+  if install_sampler_steps "$n"; then
+    log "sbx-sampler.timer enabled (every $n s); its samples: journalctl -u sbx-sampler -o cat --since -5min | jq -c 'select(.sampler == \"sample\")'"
+  else
+    echo "WARNING: the host sampler's install failed at: $SAMPLER_STEP; the worker installs without it (re-run this install to retry; status.sh --host shows the timer's state)" >&2
+  fi
+  return 0
+}
+
+# install_sampler_steps N: the steps, each one's failure returned (set -e does not apply inside a
+# function tested by `if`), with SAMPLER_STEP naming the step that failed.
+install_sampler_steps() {
+  local n="$1" f
+  # Recorded first, so an uninstall removes whatever a step that fails later left behind.
+  SAMPLER_STEP="record the files in $SBX_ENV_DIR/manifest"
+  while read -r f; do record "sampler $f" || return 1; done < <(sampler_files)
+  SAMPLER_STEP="install -d $SBX_LIBEXEC_DIR $SBX_UNIT_DIR"
+  install -d -m 0755 "$SBX_LIBEXEC_DIR" "$SBX_UNIT_DIR" || return 1
+  SAMPLER_STEP="install $SBX_LIBEXEC_DIR/sbx-sampler.sh"
+  install -m 0755 "$SCRIPT_DIR/sampler.sh" "$SBX_LIBEXEC_DIR/sbx-sampler.sh" || return 1
+  # As the janitor's: the source's comments go (they name the default paths), this host's paths in.
+  SAMPLER_STEP="write $SBX_UNIT_DIR/sbx-sampler.service"
+  {
+    printf '# Installed by deploy/sbx/install-host.sh from deploy/sbx/sbx-sampler.service.\n'
+    sed -e '/^#/d' -e "s#/etc/sbx#$SBX_ENV_DIR#g" -e "s#/srv/sbx#$SBX_SRV#g" \
+      -e "s#/usr/local/libexec#$SBX_LIBEXEC_DIR#g" "$SCRIPT_DIR/sbx-sampler.service"
+  } 2>/dev/null >"$SBX_UNIT_DIR/sbx-sampler.service" || return 1
+  SAMPLER_STEP="write $SBX_UNIT_DIR/sbx-sampler.timer"
+  {
+    printf '# Installed by deploy/sbx/install-host.sh from deploy/sbx/sbx-sampler.timer (every %s s).\n' "$n"
+    sed -e '/^#/d' -e "s#^OnUnitActiveSec=.*#OnUnitActiveSec=${n}s#" -e "s#^Description=.*#Description=Sample the SBX0 host every $n seconds#" \
+      "$SCRIPT_DIR/sbx-sampler.timer"
+  } 2>/dev/null >"$SBX_UNIT_DIR/sbx-sampler.timer" || return 1
+  SAMPLER_STEP="chmod the units"
+  chmod 0644 "$SBX_UNIT_DIR/sbx-sampler.service" "$SBX_UNIT_DIR/sbx-sampler.timer" || return 1
+  SAMPLER_STEP='systemctl daemon-reload'
+  systemctl daemon-reload || return 1
+  # enable, then restart rather than enable --now: a re-install with another interval must re-arm
+  # a timer that is already running.
+  SAMPLER_STEP='systemctl enable sbx-sampler.timer'
+  systemctl enable sbx-sampler.timer || return 1
+  SAMPLER_STEP='systemctl restart sbx-sampler.timer'
+  systemctl restart sbx-sampler.timer || return 1
+}
+
+# remove_sampler: what the manifest lists as `sampler <path>`; a host whose manifest is gone keeps
+# whatever is there, as remove_shared_units does.
+remove_sampler() {
+  local kind path
+  [[ -f "$SBX_ENV_DIR/manifest" ]] && grep -q '^sampler ' "$SBX_ENV_DIR/manifest" || return 0
+  systemctl disable --now sbx-sampler.timer || true
+  systemctl stop sbx-sampler.service || true
+  # The preserved RuntimeDirectory (its record of reported failures), while the unit is still loaded.
+  systemctl clean --what=runtime sbx-sampler.service || true
+  while read -r kind path; do
+    [[ "$kind" == sampler && -n "$path" ]] || continue
+    rm -f "$path"
+    drop_manifest_lines -x -e "sampler $path"
+    log "removed $path"
+  done < <(grep '^sampler ' "$SBX_ENV_DIR/manifest" || true)
+  systemctl daemon-reload || true
+}
+
 # validate_worker reads and checks the bundle and the flags, setting W_ID, W_ADDR, W_TOK, W_IDLE,
 # W_IMAGE_MB, W_IDLE_CEILING and (check_snapshot_ram) W_GUEST_MB, and (check_template_record) W_RECORD and
 # W_TEMPLATE. It writes nothing and touches no unit, so a refusal comes before install_egress starts one.
@@ -818,6 +918,7 @@ remove_shared_units() {
     log "removed $path (no SBX0 worker left on this host)"
   done < <(grep '^unit ' "$SBX_ENV_DIR/manifest" || true)
   remove_read_ahead
+  remove_sampler
   remove_egress
 }
 
@@ -1006,6 +1107,8 @@ main() {
   if [[ -n "$EGRESS_BUNDLE" ]]; then install_egress_credentials; return; fi
   valid_read_ahead "$SBX_READ_AHEAD_KB" ||
     die "SBX_READ_AHEAD_KB='$SBX_READ_AHEAD_KB' must be a whole number of KiB from 0 (leave the device alone) to 16384"
+  valid_sampler_interval "$SBX_SAMPLER_INTERVAL_S" ||
+    die "SBX_SAMPLER_INTERVAL_S='$SBX_SAMPLER_INTERVAL_S' must be whole seconds from 5 to 3600, or 0 (no host sampler)"
   [[ "$SBX_WORKER_AT_BOOT" =~ ^[01]$ ]] ||
     die "SBX_WORKER_AT_BOOT='$SBX_WORKER_AT_BOOT' must be 1 (start the worker at boot, the default) or 0 (do not; under a host agent)"
   [[ -n "$BUNDLE" ]] || die 'usage: install-host.sh BUNDLE_DIR --snapshot IMAGE [--budget-mb N] [--no-egress] | --uninstall ID [--keep-shared] | --janitor DIR | --uninstall-janitor | --egress DIR | --uninstall-egress | --egress-ca-out'
@@ -1013,6 +1116,7 @@ main() {
   [[ -n "$NO_EGRESS" ]] || install_egress
   install_units
   install_read_ahead
+  install_sampler
   install_worker
 }
 

@@ -231,7 +231,8 @@ in `pool-N` cgroups beside the unit's own, which a stop does not reach, so after
 those of that worker's slice and waits for them to empty ([the runbook](RUNBOOK.md#10-a-kvm-host-outage)).
 `install-host.sh --uninstall <id>` is the undo: it removes everything the install recorded in
 `/etc/sbx/manifest` for that worker (its unit instance, slice, env file and CA). The last uninstall on
-a host also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh` and `sbx.slice`. Workspace data under
+a host also removes the shared `sbx-worker@.service`, `sbx-reap-vms.sh`, `sbx.slice` and the host
+sampler (below); with `--keep-shared` it keeps them. Workspace data under
 `/srv/sbx/workspaces/<id>` and its jail `/srv/sbx/jail/j<12 hex of the id>` is kept; remove it by hand when no sandbox needs
 it.
 
@@ -242,6 +243,16 @@ snapshot's memory file faster, and installs `sbx-read-ahead.service` to set it a
 setting is device-wide: anything else on that volume (another Moca tier, other sandboxes) reads ahead
 as much. The last uninstall writes the device's earlier value back:
 [the runbook](RUNBOOK.md#snapshot-read-ahead).
+
+A worker install also installs the **host sampler**: `/usr/local/libexec/sbx-sampler.sh`,
+`sbx-sampler.service` and `sbx-sampler.timer` (enabled, whatever `SBX_WORKER_AT_BOOT` says). Every `SBX_SAMPLER_INTERVAL_S` seconds
+(default 15; 5-3600; `0` installs none and removes an installed one) it writes one JSON line to the
+journal: the host's load average, memory and swap, CPU, memory and I/O pressure (PSI), the workspace
+filesystem's bytes and inodes, the `sbx.slice` cgroup's CPU, memory and I/O, and per worker its
+running VMs, its memory budget and, when it runs with `SH_DIAG_STATS_ADDR`, the committed bytes
+and refusals from its `/stats`. It reads `/proc` and the cgroup files and needs nothing beyond the
+worker install's own tools (`curl` only for `/stats`). It needs no bundle, so there is no flag for
+it; it is shared like the template unit. Reading it: [the runbook](RUNBOOK.md#the-host-sampler).
 
 **A template's snapshot and worker from a container image** are what
 `deploy/sbx/template-onboarding/template-build.sh` (on the KVM host: the snapshot, checked in a
@@ -308,8 +319,8 @@ supervisor Route, in the generated folder) or the router's is not publicly trust
 
 `deploy/sbx/status.sh --env-file <file>` reports, read-only, which workers are attached, the live
 and retained sandboxes, and the last hour's Exec latency and error rate from the relay's audit lines.
-On a KVM host, `sudo deploy/sbx/status.sh --host` reports the units, the workspace disk and the
-janitor's last run (see [the runbook](RUNBOOK.md#8-status-and-the-audit-lines)).
+On a KVM host, `sudo deploy/sbx/status.sh --host` reports the units, the workspace disk, the
+janitor's last run and one host sample (see [the runbook](RUNBOOK.md#8-status-and-the-audit-lines)).
 
 ## 4. Users
 
