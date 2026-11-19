@@ -68,14 +68,38 @@ them to `sbx-settings`, which the control plane reads:
 
 | Variable             | Default    | Rule                                                                                                                                                                                                                                                                                                                                                                               |
 | -------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SBX_MODES_ALLOWED`  | `per-exec` | the modes a user may pick (`SH_SANDBOX_MODES_ALLOWED`), a comma list of `per-exec`, `lease` and `lease+processes`, no spaces. `per-exec` is always allowed, listed or not. Keep the default until the lease gate below is passed                                                                                                                                                   |
+| `SBX_MODES_ALLOWED`  | `per-exec` | the modes a user may pick (`SH_SANDBOX_MODES_ALLOWED`), a comma list of `per-exec`, `lease` and `lease+processes`, no spaces. `per-exec` is always allowed, listed or not. `lease` is experimental (below); keep `lease+processes` off                                                                                                                                             |
 | `SBX_IDLE_CEILING_S` | 1800       | 300-86400: the longest lease idle timeout an owner may set, in seconds (`SH_SANDBOX_IDLE_CEILING_S`). An owner who sets none gets the worker's default, 300 s. It also goes into every worker bundle as `SH_LEASE_IDLE_CEILING_S`, so the workers clamp alike: after a change, re-run `install-host.sh` with the new bundle on every host (a running worker keeps its old ceiling) |
 
-**Lease mode stays off by default.** It stays off until plan 4's live smoke test passes and the
-[SBX security review](../../notes/sandbox-security-review.md) has its lease section (lease-mode spec
-§11). A microVM worker serves lease mode on its own once its snapshot advertises `lease-v1`, so the
-control plane's list is the only switch. After that gate, an operator opts in to level 1 with
-`SBX_MODES_ALLOWED=per-exec,lease` and a re-run of `setup.sh`.
+**Lease mode is experimental and off by default.** In v0.11.0 an operator may opt in to level 1
+(`lease`) with `SBX_MODES_ALLOWED=per-exec,lease` and a re-run of `setup.sh`. It becomes supported,
+and a candidate for the default, once its live smoke test ([the runbook](runbook.md) §13, step 8)
+passes on your deployment and the [SBX security review](../../notes/sandbox-security-review.md)
+has its lease section signed off (lease-mode spec §11). A microVM worker serves lease mode on its
+own once its snapshot advertises `lease-v1`, so the control plane's list is the only switch. Before
+you opt in:
+
+- **Snapshots.** Build them with the current `build-snapshot.sh`, so they advertise `lease-v1` and
+  `balloon-fpr-v1`. A worker whose snapshot lacks the balloon still serves leases, but warns at
+  start: its guests never return freed memory to the host.
+- **Workers.** Upgrade every worker host first, and re-run `install-host.sh` with the new bundle
+  whenever `SBX_IDLE_CEILING_S` changes (a running worker keeps its old ceiling).
+- **The janitor.** `SBX_JANITOR_WAIT_MINUTES` must exceed the token lifetime plus 30 s plus
+  `SBX_IDLE_CEILING_S`, or `setup.sh` refuses (the janitor's wait, below). The defaults pass.
+
+**Known limits of the experimental lease (level 1).** They come from the lease-mode measurement
+on bare metal (E17b), and none affects `per-exec` sandboxes:
+
+- **A lease VM's memory stays near its ceiling.** Free-page reporting returns what a command frees,
+  but the guest keeps its page cache, so an idle lease is charged close to its full guest RAM. On a
+  memory-bound host, leases fit fewer sessions than their working sets suggest. Under pressure the
+  worker reclaims the lease idle the longest before it refuses new work.
+- **Cancelling a running command ends its lease.** A client that aborts an Exec (Ctrl-C) ends the
+  lease (`agent_dead`); the next command starts a new guest. `/workspace` is kept.
+- **Workspaces stay at or below 2048 MiB.** The golden snapshot's workspace drive is 2 GiB, and a
+  restored guest cannot mount a larger image
+  ([#907](https://github.com/rossoctl/moca/issues/907)): `setup.sh` and `install-host.sh` refuse
+  a larger `SBX_WORKSPACE_IMAGE_MB`.
 
 **Keep `lease+processes` (level 2) off** until the security review's level-2 section,
 §7 of the [security review](../../notes/sandbox-security-review.md), is signed off (it is a

@@ -7,6 +7,10 @@ sidebar_position: 8
 > **Preview.** The sandbox service is implemented, but not yet declared Stable; interfaces and
 > limits may change.
 
+> **Experimental.** Lease mode is new in v0.11.0 and off unless your deployment's operator turns
+> it on. `lease` may be offered as an experiment; `lease+processes` stays off until its security
+> review is signed off. See [Known limits](#known-limits).
+
 By default a sandbox runs **per-exec**: every command gets a fresh VM, and only `/workspace` carries
 over. A **lease mode** keeps the guest between commands instead, so the page cache stays warm, and
 `/tmp`, `/var` and installs outside `/workspace` survive until the lease ends.
@@ -52,6 +56,30 @@ mocactl sbx reset [ID]                  # end the lease now: the next command st
 - `mocactl sbx` and its MCP server show each lease event as one line, for example
   `[sandbox] guest restarted (idle, 14:02): ...` when a lease ended because it was idle.
 
+## When a lease ends
+
+A lease ends in one of these ways, and `mocactl sbx` and its MCP server print a line saying why
+(for example `[sandbox] guest restarted (idle, 14:02): ...`):
+
+- **No command for the idle timeout** (300 s unless you set `--idle-timeout`). It counts from the
+  end of the last command. An open agent session does not keep a lease alive on its own.
+- **The agent went away.** While your agent runs, `mocactl sbx mcp` tells the sandbox every 30 s
+  that it is still there. If 2 minutes pass without that signal (the agent exited, the laptop went
+  to sleep, the network dropped), the lease ends without waiting for the idle timeout. A lease with
+  no client keepalive (from `mocactl sbx exec`, `run` or `shell`, or a `sandbox/v1` client that
+  leaves `Exec.keepalive` false) ends by the idle timeout only. A client that sets it, and calls
+  `LeaseKeepalive` every 30 s, gets the 2-minute rule too ([Lease mode](direct-api.md#lease-mode)).
+- **It ran too long.** After 8 hours (4 hours at `lease+processes`, unless your operator changed
+  it) the lease is _expiring_: commands still run, each with a warning, and the lease ends at the
+  next idle moment, or 30 minutes later at the latest.
+- **The host ran short of memory.** The lease idle the longest is reclaimed first; one running a
+  command never is.
+- **You ended it**, with `mocactl sbx reset` or a change to `per-exec`.
+- **The worker restarted** (an upgrade, a host reboot).
+
+Whatever the reason, `/workspace` is kept and the next command starts a new lease; `/tmp`, `/var`,
+installs outside `/workspace` and tracked processes are gone.
+
 ## Run a process that outlives the command (`lease+processes`)
 
 Only a tracked process survives the command that started it. Anything else a command starts in the
@@ -71,6 +99,16 @@ mocactl sbx proc stop web                                          # TERM, then 
 - On a terminal, `proc logs` removes control sequences; `--raw` keeps them, and piped output is
   always as written.
 - When the lease ends, its tracked processes end with it.
+
+## Known limits
+
+Lease mode is experimental in v0.11.0:
+
+- **Cancelling a running command ends the lease.** If you or your agent abort a command (Ctrl-C),
+  the lease ends with it and the next command starts a new guest. `/workspace` is kept.
+- **A lease holds its guest's memory while it lives**, including files it has read. Your operator
+  may keep the idle timeout short, or the mode off, on a busy host.
+- **At most 4 tracked processes** run at once at `lease+processes`, unless your operator changed it.
 
 ## From your own code
 
