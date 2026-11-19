@@ -61,7 +61,9 @@ The `hosts` list in `GET /v1/templates` is empty until a host agent reports, whi
   `moca-sbx-template-spec/1` document; its guest size is `guest_ram_mb` or its alias `guest_mb`,
   never both, and an `id` or `image` inside it must equal the create's. `gateRecord` is the gate
   record file, byte for byte. The whole body is at most 1 MiB. `visibility` defaults to
-  `deployment`.
+  `deployment`, except on a self-attested create (a profile with `selfAttest` and a gate record
+  the policy does not trust): that one is stored `private`, and an explicit `deployment` is refused
+  `409 self_attested`.
 - **The answer** is `202 {templateId, buildId: null, build, status: queued}`; follow `build`, the
   handle. A policy refusal is `422 policy_refused` with `rule`, and nothing is queued.
 - **Reuse.** The same image, spec, profile and gate record as a build of your own template that

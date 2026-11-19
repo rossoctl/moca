@@ -30,8 +30,10 @@ This page is the model behind `mocactl sbx templates`. To make and use a templat
   listens. It reports what the host holds, claims queued builds, builds and probes them, reports
   the result, and starts or stops the workers the control plane wants on that host
   ([The template host agent](../../operate/sandbox-service/runbook.md#the-template-host-agent)).
-- **A worker runs only while someone holds an activation lease.** An **activation lease** is a
-  claim one subject holds on one build, granted for 60 s to one day and renewed by activating
+- **A host-built build's worker runs only while someone holds an activation lease.** A build the
+  deployment declares itself (`SH_SANDBOX_TEMPLATES`, an `imported:` id) is not host-managed:
+  it needs no lease, and activating it is refused (`400 invalid_request`). An **activation lease**
+  is a claim one subject holds on one build, granted for 60 s to one day and renewed by activating
   again, without limit. The control plane places a leased build on a host that holds its snapshot,
   within that host's active limit, memory headroom and start pacing. It never evicts a leased
   build to make room.
