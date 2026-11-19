@@ -90,7 +90,7 @@ Tokens and gate records are kept only as their sha256, and hosts and build-log t
 length, so a record can be shared. `mocactl run "prompt" --record F` writes the same record for a
 Moca Pi session's calls ([CLI reference](../../harness/reference/cli-mocactl.md)). When you report a
 problem, your operator may ask you to rerun the command with `--record` and send the file
-([the runbook](../../../deploy/sbx/RUNBOOK.md#reproducing-a-members-issue) says what they collect
+([the runbook](../../operate/sandbox-service/runbook.md#reproducing-a-members-issue) says what they collect
 besides it).
 
 **For admins.** `mocactl sbx admin subjects enroll|unenroll|grant|revoke` reads the current value

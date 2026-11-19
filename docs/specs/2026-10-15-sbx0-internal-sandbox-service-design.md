@@ -744,9 +744,9 @@ Each one carries `bash`, `git`, `tar`, `ripgrep` and its toolchain, and is pinne
 > then self-serve through the API), is documented in the template onboarding guide,
 > `deploy/sbx/template-onboarding/GUIDE.md`, and designed in the template lifecycle spec,
 > `2026-11-03-template-lifecycle-and-provenance-design.md`. The operator steps are
-> [RUNBOOK §5](../../deploy/sbx/RUNBOOK.md#5-adding-updating-and-removing-a-template), and the live
+> [RUNBOOK §5](../operate/sandbox-service/runbook.md#5-adding-updating-and-removing-a-template), and the live
 > check that each template's sandboxes run on its own worker is
-> [RUNBOOK §14](../../deploy/sbx/RUNBOOK.md#14-checking-the-templates). Nothing here changes: one
+> [RUNBOOK §14](../operate/sandbox-service/runbook.md#14-checking-the-templates). Nothing here changes: one
 > worker still serves one template's snapshot.
 
 **`deploy/sbx/install-host.sh <bundle-dir>`** installs or updates one template unit from its bundle.

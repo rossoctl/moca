@@ -33,7 +33,7 @@ re-run the install line above (or with `MOCACTL_VERSION=edge` for the newest bui
 ## Log in and bring a repository up
 
 You need the URL of your sandbox service deployment, `https://<api host>`: moca is self-hosted,
-so it is the deployment you or your team run ([install](../../../deploy/sbx/README.md)).
+so it is the deployment you or your team run ([install](../../operate/sandbox-service/install.md)).
 
 **Log in** with GitHub's device flow. The URL is remembered, so this is the only time you pass it:
 

@@ -134,7 +134,7 @@
 # [+ api-ca.crt], for install-host.sh --janitor) and, with SBX_EGRESS_CREDENTIALS=1, egress/<host id>/
 # (egress.env, egress.token [+ api-ca.crt], for install-host.sh --egress). Copy each bundle straight to its host and delete
 # the copy. With SBX_TEMPLATE_STORE=1 and SBX_TEMPLATE_HOSTS, also host-agent/<host id>/
-# (host-agent.env, host-agent.token [+ api-ca.crt]) for deploy/sbx/host-agent.sh (the RUNBOOK's host
+# (host-agent.env, host-agent.token [+ api-ca.crt]) for deploy/sbx/host-agent.sh (the runbook's (docs/operate/sandbox-service/runbook.md) host
 # agent section). Users log in with `mocactl sbx login`; nothing here is handed to them. With
 # SBX_PROFILE=combined all of it goes to deploy/sbx/.generated-<SBX_NAMESPACE>/ instead, with
 # moca-ca.crt (the supervisor Route's self-signed certificate, the CA its clients trust, e.g.
@@ -646,7 +646,7 @@ check_unknown_bundles() {
 # Without SBX_REDIS_IMAGE the overlay runs the base's Valkey 9, which cannot read RDB format 12 (what
 # Redis 7.4 writes): a namespace whose redis StatefulSet runs another image would crash-loop redis-0
 # once switched (#811). So that is refused, before anything is applied; a fresh namespace (no
-# StatefulSet) and one already on Valkey pass. RUNBOOK §2.
+# StatefulSet) and one already on Valkey pass. docs/operate/sandbox-service/runbook.md §2.
 check_redis_image() {
   [[ -z "${SBX_REDIS_IMAGE:-}" ]] || return 0
   local json image repo
@@ -658,7 +658,7 @@ check_redis_image() {
   repo="${image%%@*}"
   [[ "${repo##*/}" != *:* ]] || repo="${repo%:*}"
   [[ "$repo" != *valkey/valkey* ]] || return 0
-  die "StatefulSet redis in $NS runs $image, not Valkey, and Valkey 9 (the default without SBX_REDIS_IMAGE) cannot read the RDB format 12 Redis 7.4 writes: redis-0 would crash-loop. Until the data is migrated, set SBX_REDIS_IMAGE to that image pinned by digest (repository[:tag]@sha256:<digest>; the running digest: kubectl -n $NS get pod redis-0 -o jsonpath='{.status.containerStatuses[0].imageID}'). See deploy/sbx/RUNBOOK.md §2"
+  die "StatefulSet redis in $NS runs $image, not Valkey, and Valkey 9 (the default without SBX_REDIS_IMAGE) cannot read the RDB format 12 Redis 7.4 writes: redis-0 would crash-loop. Until the data is migrated, set SBX_REDIS_IMAGE to that image pinned by digest (repository[:tag]@sha256:<digest>; the running digest: kubectl -n $NS get pod redis-0 -o jsonpath='{.status.containerStatuses[0].imageID}'). See docs/operate/sandbox-service/runbook.md §2"
 }
 
 # SBX_PROFILE=combined in an SBX0 namespace would add the harness's keys to its moca-mu1 and switch
@@ -978,7 +978,7 @@ apply_configmap() {
 # rolls the pod that reads it): SETTINGS_HASH, the control plane's, covers every setting, the public
 # keyset and the certificates; RELAY_HASH covers only the relay's (ocp-sbx/patch-relay.yaml: the
 # issuer and the in-flight cap) with the keyset and the certificates. So a template, subject or quota
-# change rolls the control plane alone and leaves running Execs be (RUNBOOK §5). Runs after
+# change rolls the control plane alone and leaves running Execs be (docs/operate/sandbox-service/runbook.md §5). Runs after
 # route_cert: it reads exec-ca.crt.
 ensure_settings() {
   local ca='' moca sbx relay keys attach_crt exec_crt moca_crt egress hosts
@@ -1302,7 +1302,7 @@ write_egress_bundles() {
   done
 }
 
-# The host-agent bundle of each template host (the RUNBOOK's host agent section): host-agent.env (the API URL and the
+# The host-agent bundle of each template host (the runbook's (docs/operate/sandbox-service/runbook.md) host agent section): host-agent.env (the API URL and the
 # host id; no secret), host-agent.token (the host's bearer alone, no newline) and, with
 # SBX_API_CA_FILE, api-ca.crt. A host no longer listed loses its directory.
 write_store_bundles() {
@@ -1333,7 +1333,7 @@ write_store_bundles() {
     done
   )
   for id in $STORE_HOSTS; do
-    log "host-agent bundle: $GEN/host-agent/$id  (copy to host $id, install host-agent.sh as the RUNBOOK's host agent section says, delete the copy)"
+    log "host-agent bundle: $GEN/host-agent/$id  (copy to host $id, install host-agent.sh as the runbook's (docs/operate/sandbox-service/runbook.md) host agent section says, delete the copy)"
   done
 }
 

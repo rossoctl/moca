@@ -46,11 +46,11 @@ flowchart LR
   relay, so a sandbox needs no inbound route. Both can run each command in its own Firecracker
   microVM.
   ([Sandboxes and tiers](harness/concepts/sandboxes-and-tiers.md),
-  [Install the sandbox service](../deploy/sbx/README.md))
+  [Install the sandbox service](operate/sandbox-service/install.md))
 - **One control plane, three profiles.** The same control-plane component serves the harness, the
   sandbox service, or both (`SH_ROUTE_PROFILE` = `harness`, `sandbox` or `combined`). With
   `combined`, one deployment serves sessions and sandboxes from a single template store.
-  ([One control plane for both](../deploy/sbx/README.md#one-control-plane-for-sessions-and-sandboxes))
+  ([One control plane for both](operate/sandbox-service/install.md#one-control-plane-for-sessions-and-sandboxes))
 - **Two different "sandboxes".** A harness session runs its tools in the harness's own sandbox. A
   sandbox-service workspace is a separate thing: `mocactl sbx` commands neither see nor manage a
   harness session's sandbox. The [glossary](glossary.md) defines both.
