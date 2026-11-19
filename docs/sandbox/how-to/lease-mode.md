@@ -65,9 +65,10 @@ A lease ends in one of these ways, and `mocactl sbx` and its MCP server print a 
   end of the last command. An open agent session does not keep a lease alive on its own.
 - **The agent went away.** While your agent runs, `mocactl sbx mcp` tells the sandbox every 30 s
   that it is still there. If 2 minutes pass without that signal (the agent exited, the laptop went
-  to sleep, the network dropped), the lease ends without waiting for the idle timeout. A lease
-  started from `mocactl sbx exec`, `run`, `shell` or your own `sandbox/v1` code has no such signal
-  and ends by the idle timeout only.
+  to sleep, the network dropped), the lease ends without waiting for the idle timeout. A lease with
+  no client keepalive (from `mocactl sbx exec`, `run` or `shell`, or a `sandbox/v1` client that
+  leaves `Exec.keepalive` false) ends by the idle timeout only. A client that sets it, and calls
+  `LeaseKeepalive` every 30 s, gets the 2-minute rule too ([Lease mode](direct-api.md#lease-mode)).
 - **It ran too long.** After 8 hours (4 hours at `lease+processes`, unless your operator changed
   it) the lease is _expiring_: commands still run, each with a warning, and the lease ends at the
   next idle moment, or 30 minutes later at the latest.
