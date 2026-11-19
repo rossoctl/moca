@@ -20,6 +20,13 @@ once contrasted with has been removed (ADR-0041).
   backend that enforces `isolate=strict`. `setup-vm.sh` refuses a podman that rejects the option,
   but cannot detect one that stores it without enforcing it. Isolation was verified live on
   netavark 1.17.2.
+  - Ubuntu 24.04 packages netavark 1.4.0: podman stores `isolate=strict`, then the first sandbox
+    fails to start with `netavark: unable to parse "isolate": provided string was not true or
+false`, after the env files, units, Redis and the network are already in place. Install a
+    netavark of 1.17.2 or later first. The static release binaries (`netavark.gz` and
+    `aardvark-dns.gz` from the netavark and aardvark-dns releases) work when installed as
+    `/usr/local/libexec/podman/netavark` and `/usr/local/libexec/podman/aardvark-dns`, which
+    podman searches before `/usr/lib/podman`; `podman info` then reports the new version.
   - Some distributions package no podman; Amazon Linux 2023 is one. A static build such as
     [podman-static](https://github.com/mgoltzsche/podman-static) installs under `/usr/local`, and
     `sudo`'s `secure_path` there drops `/usr/local/bin`. `setup-vm.sh` then stops with
@@ -835,6 +842,11 @@ There is no uninstall script. These steps undo what `setup-vm.sh` installs, in t
 Step 4 deletes every session and every stored credential for good: back up first
 ([Redis persistence](#redis-persistence)) if you may want them.
 
+These steps were run on 2026-11-19 against a host installed by `setup-vm.sh` at `main` `175a09a9`
+(Ubuntu 24.04 on an AWS `m7i.metal-24xl`, with the supervisor and the control plane running): every
+command succeeded, and afterwards no moca unit, container, network, volume, nftables table,
+directory or user was left.
+
 1. **Stop and remove the units** (the firewall unit has no stop action, so step 2 removes its
    table):
 
@@ -857,6 +869,9 @@ Step 4 deletes every session and every stored credential for good: back up first
    sudo podman network rm moca-sandbox
    ```
 
+   podman's own firewall tables (`ip nat` and `ip filter`, with netavark's `NETAVARK_*` chains,
+   managed by iptables-nft) stay. They hold no moca rule; leave them to podman.
+
 4. **Delete the data.** Redis's named volume holds every session; the control plane's file store
    holds every stored credential (`SH_CREDENTIAL_DIR` in `control-plane.env`, by default
    `/var/lib/moca-control-plane`):
@@ -872,6 +887,10 @@ Step 4 deletes every session and every stored credential for good: back up first
 6. **Optionally**, remove what was there before the install: the `harness` user
    (`sudo userdel harness`), the checkout (`/opt/serverless-harness` by default), and the images
    (`sudo podman rmi ghcr.io/rossoctl/moca-remote-worker:latest docker.io/valkey/valkey:9-alpine`).
+   Every `setup-vm.sh` run pulls the sandbox image again, so an earlier pull that a newer `latest`
+   replaced is left untagged, and `rmi` by tag does not reach it: `sudo podman images --filter
+dangling=true` lists such images, and `sudo podman rmi <image id>` removes one
+   (`sudo podman image prune` removes every untagged image on the host, moca's or not).
    `setup-vm.sh` also enables `podman-restart.service`, which other containers on the host may
    rely on: leave it enabled unless nothing else uses it.
 
