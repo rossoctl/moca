@@ -7,6 +7,9 @@ sidebar_position: 7
 > **Preview.** The sandbox service is implemented, but not yet declared Stable; interfaces and
 > limits may change.
 
+New to templates? [Make a template from a container image](template-from-image.md) walks through a
+first one, step by step; this page is the reference for every command.
+
 A template is the image a sandbox's VM boots: its tools, and its seed (what fills `/workspace`).
 Beyond the ones your operator provides, you can make your own from an image pinned by digest
 (`repository@sha256:<64 hex>`) and a spec (`moca-sbx-template-spec/1`; samples in

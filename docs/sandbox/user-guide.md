@@ -41,6 +41,7 @@ handling](concepts/isolation.md).
 | [What `sbx up` changes in your repository](how-to/agent-configuration.md) | the agent configuration it writes, `--cortex`, and undoing it with `sbx rm`   |
 | [Work with a sandbox](how-to/work-with-a-sandbox.md)                      | `push`, `run`, `put`, `ls`, the shell, and what persists between calls        |
 | [Use credentials](how-to/egress-credentials.md)                           | egress credentials for GitHub and other allowlisted services                  |
+| [Make a template from a container image](how-to/template-from-image.md)   | a first template, step by step, from `python:3.12-slim`                       |
 | [Make your own templates](how-to/templates.md)                            | a template from an image pinned by digest                                     |
 | [Keep a guest between commands (lease mode)](how-to/lease-mode.md)        | `--mode lease` and `lease+processes`, `sbx reset`, tracked processes          |
 | [Call the sandbox API from your own code](how-to/direct-api.md)           | `sbx env`, `sbx token`, and the `sandbox/v1` gRPC API                         |
