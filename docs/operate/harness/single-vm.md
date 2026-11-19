@@ -12,7 +12,7 @@ Linux VM running the supervisor, the relay and the MU1 control plane under syste
 the sandbox containers as podman containers alongside them. The Knative/KEDA deployment path this
 once contrasted with has been removed (ADR-0041).
 
-> P4 microVM tier on the same host: see [deploy/microvm/P4-ON-P6.md](../../../deploy/microvm/P4-ON-P6.md).
+> P4 microVM tier on the same host: see [MicroVM tier (P4)](microvm-tier.md).
 
 ## Prerequisites
 
@@ -640,7 +640,7 @@ in a per-run directory. It passes only if:
 
 Run it on the VM, as root, on a host with container sandboxes. It refuses to run while a microVM
 worker is in the pool, because that tier reaches only `moca-egress`'s allowlist, without credentials
-([P4-ON-P6.md](../../../deploy/microvm/P4-ON-P6.md), "Guest egress").
+([MicroVM tier (P4)](microvm-tier.md), "Guest egress").
 
 ```bash
 # The user's own credential, from a root-only file holding exactly one line, the key alone (an

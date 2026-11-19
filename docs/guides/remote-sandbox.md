@@ -117,7 +117,7 @@ sudo deploy/microvm/setup-microvm.sh --remote ~/moca-p4-<id>
 
 The host needs outbound TCP 443 to the relay Route. `setup.sh` refuses this on Kind and on the single-namespace OpenShift
 target. To revoke a host, remove its id from `SH_P4_SANDBOX_IDS`; restarting the relay drops attached hosts. See
-[`deploy/k8s/README.md`](../operate/harness/kubernetes.md) and [P4 on P6](../../deploy/microvm/P4-ON-P6.md).
+[`deploy/k8s/README.md`](../operate/harness/kubernetes.md) and [P4 on P6](../operate/harness/microvm-tier.md).
 
 ## Not supported
 

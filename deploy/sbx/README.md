@@ -198,7 +198,7 @@ Otherwise every janitor run logs `skipped`.
 
 ## 2. KVM host side
 
-The host needs what `deploy/microvm/P4-ON-P6.md` lists for P4 (`/dev/kvm`, Firecracker, jailer),
+The host needs what [MicroVM tier (P4)](../../docs/operate/harness/microvm-tier.md) lists for P4 (`/dev/kvm`, Firecracker, jailer),
 the sandbox service's own `microvm-worker` build at `SBX_WORKER_BIN` (below), `/usr/local/bin/moca-egress` (the
 install refuses without it, unless `--no-egress`) and outbound TCP 443 to the attach host. Build each template's snapshot under
 `/srv/sbx/snapshots/<image>` with `deploy/microvm/build-snapshot.sh`, then per worker:

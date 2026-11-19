@@ -935,7 +935,7 @@ copy the `rm` only reports that nothing is there.
 
 ### 11.2 Install a host
 
-The host needs what `deploy/microvm/P4-ON-P6.md` lists for P4 (`/dev/kvm`, Firecracker and jailer,
+The host needs what [MicroVM tier (P4)](microvm-tier.md) lists for P4 (`/dev/kvm`, Firecracker and jailer,
 a golden snapshot, Go or `MICROVM_BIN`) and outbound TCP 443 to the relay Route host. Check that
 first with `curl -v https://moca-relay-moca.<apps domain>`: a completed TLS handshake proves it is
 reachable, even when curl then stops at a certificate verification error (as it does with the

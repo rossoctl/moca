@@ -22,7 +22,7 @@ gitignored).
    `SBX_GITHUB_CLIENT_ID`.
 3. **The snapshots.** On the KVM host, one golden snapshot per template, built with
    `deploy/microvm/build-snapshot.sh --out /srv/sbx/snapshots/<image>`
-   ([P4-ON-P6](../microvm/P4-ON-P6.md) has the full command). Every curated template carries `bash`,
+   ([MicroVM tier (P4)](../../docs/operate/harness/microvm-tier.md) has the full command). Every curated template carries `bash`,
    `git`, `tar` and `ripgrep`.
    Build them with a `build-snapshot.sh` from P4.1 or later: an older snapshot has no guest egress
    listener (see [Guest egress](#guest-egress)). The host also needs `/usr/local/bin/moca-egress`
@@ -315,7 +315,7 @@ on for its whole life, whatever later happens to its template's entry.
 1. Build its snapshot on the KVM host (§1 step 3), named `<image>`. An image built from a container
    image for a benchmark (one that refuses agent commits, with a read-only rootfs) usually needs
    `build-snapshot.sh --skip-git-identity-check --guest-home /tmp/home`, and `--vcpus N
---guest-ram-mb M` for its size ([P4-ON-P6](../microvm/P4-ON-P6.md#build-the-golden-snapshot)).
+--guest-ram-mb M` for its size ([MicroVM tier (P4)](../../docs/operate/harness/microvm-tier.md#build-the-golden-snapshot)).
 2. Pick a worker id (`^[A-Za-z_][A-Za-z0-9_]*$`, say `sbx_node22`) and add it to `SBX_WORKERS`.
 3. Add its entry, `{ "id", "worker", "description", "tools" }`, to `SBX_TEMPLATES_FILE`. One
    template per worker; every worker in the list.
@@ -799,7 +799,7 @@ agent's sandbox instructions carry the rule there. The allowlist below is where 
 - **`--no-egress`** installs a worker without `MOCA_EGRESS_CONTROL_SOCK` and installs no egress unit:
   the worker behaves as before egress existed, and the guest has no network.
 - **Snapshot:** a golden snapshot built before P4.1 has no guest egress listener. Rebuild it with
-  `build-snapshot.sh` for egress to work ([P4-ON-P6](../microvm/P4-ON-P6.md#guest-egress-p41-277)).
+  `build-snapshot.sh` for egress to work ([MicroVM tier (P4)](../../docs/operate/harness/microvm-tier.md#guest-egress-p41-277)).
 - **If it fails to start,** the install names `journalctl -u moca-egress` (often a bad
   `/etc/sbx/moca-egress.env`). Fix it and re-run `install-host.sh`.
 - **Ownership is by content.** The manifest records a digest of the unit it installed. If another

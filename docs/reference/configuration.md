@@ -4,7 +4,7 @@
 > historical prefixes (`SH_*`, `KAGENTI_*`, `MOCA_*`); they are listed as they exist in the code.
 > Each row is taken from the code that reads it. The deployment READMEs ([`deploy/vm`](../operate/harness/single-vm.md),
 > [`deploy/k8s`](../operate/harness/kubernetes.md), [`deploy/compose`](../operate/harness/compose.md),
-> [`deploy/microvm`](../../deploy/microvm/P4-ON-P6.md)) say how each path sets these; the env
+> [`deploy/microvm`](../operate/harness/microvm-tier.md)) say how each path sets these; the env
 > templates are in `deploy/vm/env/*.env.example`.
 
 ## Conventions

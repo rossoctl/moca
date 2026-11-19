@@ -7,7 +7,7 @@
 # the new token through a systemd drop-in that loads a separate env file.
 #
 # Prerequisites: P6 installed and running; /dev/kvm; Firecracker + jailer in /usr/local/bin; a golden
-# snapshot at $MICROVM_SNAPSHOT_DIR (build-rootfs.sh, then build-snapshot.sh -- see P4-ON-P6.md);
+# snapshot at $MICROVM_SNAPSHOT_DIR (build-rootfs.sh, then build-snapshot.sh -- see docs/operate/harness/microvm-tier.md);
 # Go, unless MICROVM_BIN (and MOCA_EGRESS_BIN) name prebuilt binaries.
 #
 # A HOST WITH CONTAINER SANDBOXES TOO (P6.3, docs/specs/2026-10-04-p6-on-kubernetes-slice3-design.md
@@ -212,7 +212,7 @@ preflight() {
       die "no installed P6 found ($SH_ENV_DIR/relay.env, $SH_UNIT_DIR/sh-relay.service); run deploy/vm/setup-vm.sh first"
   fi
   [[ -f "$MICROVM_SNAPSHOT_DIR/manifest.json" ]] ||
-    die "no golden snapshot at $MICROVM_SNAPSHOT_DIR; build one with deploy/microvm/build-rootfs.sh then build-snapshot.sh (deploy/microvm/P4-ON-P6.md)"
+    die "no golden snapshot at $MICROVM_SNAPSHOT_DIR; build one with deploy/microvm/build-rootfs.sh then build-snapshot.sh (docs/operate/harness/microvm-tier.md)"
   # Remote: MIXED stays 0. This host's own containers, if any, attach to its own relay, which the
   # remote worker does not use, so the local P6 is container-only and untiered (install_tiers removes
   # what an earlier mixed run wrote); the cluster's setup.sh tiers the cluster's stack.

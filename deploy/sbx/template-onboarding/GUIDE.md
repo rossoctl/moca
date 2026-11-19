@@ -861,7 +861,7 @@ Moca's own agent sessions (Moca Pi, P6) can name a template too: `mocactl run --
 sandboxTemplate=ID`. A worker serves a template when `SANDBOX_TEMPLATE` is set; a session with no
 template never lands on one; the harness runs the seed once, before the agent's first tool call.
 A templated P4 worker is installed beside the main one with `setup-microvm.sh --template ID
---snapshot DIR`; set-up is in [`P4-ON-P6.md`](../../microvm/P4-ON-P6.md), "A templated P4 worker".
+--snapshot DIR`; set-up is in [MicroVM tier (P4)](../../../docs/operate/harness/microvm-tier.md), "A templated P4 worker".
 Only one worker per host may use guest egress (moca-egress keys VMs by id, which workers share), so
 the installer refuses `--egress` beside another worker that uses it.
 Checked live on a Moca-VM (P6+P4), with a scripted mock model: a session naming
@@ -936,7 +936,7 @@ budget allows far fewer commands at once than memory holds: raise `--budget-mb` 
 4 GiB guest). With snapshots on a general-purpose cloud block volume of about 125 MB/s, cold 4 GiB
 starts one at a time took 78 s on average (at most 120 s; the runbook's cold-start pacing has the
 measurement). Two settings shorten it: the verify cache,
-which spares the re-hash of files already checked on the host (`P4-ON-P6.md`), and
+which spares the re-hash of files already checked on the host ([MicroVM tier (P4)](../../../docs/operate/harness/microvm-tier.md)), and
 `install-host.sh`'s snapshot read-ahead (`SBX_READ_AHEAD_KB`, the runbook's "Snapshot read-ahead").
 A host starts at most `SBX_START_CONCURRENCY` workers at once; a client's activation waits its turn
 (`activating`, `queued`, §4b.4).

@@ -71,7 +71,7 @@
       want no anonymous spend.
 - [ ] **Publish ports on loopback only** (the shipped file already does for the supervisor and control plane).
 
-## MicroVM tier ([`deploy/microvm`](../../deploy/microvm/P4-ON-P6.md))
+## MicroVM tier ([`deploy/microvm`](../operate/harness/microvm-tier.md))
 
 - [ ] **Use it where you need network isolation, not user isolation.** The guest has no network device and reaches only `moca-egress`'s allowlist, but nothing binds a
       workspace key to a user.

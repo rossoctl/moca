@@ -13,7 +13,7 @@
 # When deploy/sbx/template-onboarding/template-build.sh wrote a template record for IMAGE
 # ($SBX_SRV/templates/IMAGE.json), the worker env carries SH_TEMPLATE_RECORD and SANDBOX_TEMPLATE, so
 # the worker checks that record against its snapshot at start; a record for another worker is refused.
-# Needs firecracker, jailer and moca-egress in /usr/local/bin (deploy/microvm/P4-ON-P6.md; moca-egress:
+# Needs firecracker, jailer and moca-egress in /usr/local/bin (docs/operate/harness/microvm-tier.md; moca-egress:
 # CGO_ENABLED=0 go build -o /usr/local/bin/moca-egress ./remote-worker/cmd/moca-egress), and microvm-worker.
 # SBX_WORKER_BIN (an absolute path; default /usr/local/libexec/sbx/microvm-worker, SBX0's own build)
 # is the microvm-worker SBX0's workers run, never deploy/microvm's /usr/local/bin one, so SBX0 beside

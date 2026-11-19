@@ -110,7 +110,7 @@ sandboxes() { podman ps --format '{{.Names}}' --filter 'name=^sh-sandbox-' --fil
 # never unlinks, so an empty record survives -- one per run, forever. Nothing but this subject is
 # ever touched: the name is the sha256[:16] of THIS run's subject, which no other subject can hash
 # to, and the file must parse as a document holding no credentials.
-# A control-plane route that deleted an empty subject would let this (and P4-ON-P6.md's smoke) stop
+# A control-plane route that deleted an empty subject would let this (and docs/operate/harness/microvm-tier.md's smoke) stop
 # reaching into the store; until then both do it by hand.
 drop_record() {
   local dir hash f
@@ -204,7 +204,7 @@ code="$(curl -sS -o /dev/null -w '%{http_code}' "$CP/readyz" 2>/dev/null || true
 [[ "$code" == 200 ]] && ok "control plane $CP/readyz" || ko "control plane $CP/readyz answered '${code:-nothing}'"
 boxes="$(sandboxes | grep -c . || true)"
 [[ "$boxes" -ge 1 ]] && ok "$boxes running sh-sandbox-* container(s)" || ko "no running sh-sandbox-* container"
-# One tier per host (deploy/microvm/P4-ON-P6.md): with a microVM worker attached the turn may land in
+# One tier per host (docs/operate/harness/microvm-tier.md): with a microVM worker attached the turn may land in
 # a guest that reaches only moca-egress's allowlist, without credentials, and this smoke would fail for a
 # reason that is not the one it tests.
 # Read first, filtered second: a failed read must not look like an empty, all-container pool.
@@ -213,7 +213,7 @@ if ! records="$(podman exec sh-redis redis-cli HKEYS sh:sandbox:records 2>"$OUT/
 else
   others="$(grep -v '^sh-sandbox-' <<<"$records" | grep -v '^$' || true)"
   [[ -z "$others" ]] && ok "every pool record is a container sandbox" ||
-    ko "the pool holds non-container records ($(tr '\n' ' ' <<<"$others")): a microVM guest reaches only moca-egress's allowlist (#277); go back to containers (deploy/microvm/P4-ON-P6.md)"
+    ko "the pool holds non-container records ($(tr '\n' ' ' <<<"$others")): a microVM guest reaches only moca-egress's allowlist (#277); go back to containers (docs/operate/harness/microvm-tier.md)"
 fi
 if [[ "$FAIL" -ne 0 ]]; then
   printf '\n=== Results: %s passed, %s failed (preconditions; no turn run) ===\n' "$PASS" "$FAIL"

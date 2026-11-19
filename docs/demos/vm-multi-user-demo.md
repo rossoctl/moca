@@ -21,7 +21,7 @@ that run's, trimmed.
 
 The steps come from three verified pieces: the two-user acceptance runbook
 ([`vm-two-user-acceptance.md`](./vm-two-user-acceptance.md), #403), the P4 tier on a P6 host
-([`deploy/microvm/P4-ON-P6.md`](../../deploy/microvm/P4-ON-P6.md), #376 and #409), and the
+([MicroVM tier (P4)](../operate/harness/microvm-tier.md), #376 and #409), and the
 research turn ("[A research turn](../operate/harness/single-vm.md#a-research-turn-curl-and-git-in-the-sandbox)" on the Single VM page, and
 `deploy/vm/research-smoke.sh`, #411).
 
@@ -38,7 +38,7 @@ user 1, and one person with two GitHub accounts can play both (1a, the trap).
 
 **Order matters.** The container tier comes first (Acts 1 to 3), the microVM tier last (Act 4).
 A host may run both tiers at once: each session then stays in the tier it was created in and
-returns to its sandbox (`deploy/microvm/P4-ON-P6.md`, "Container sandboxes and P4 on one host").
+returns to its sandbox ([MicroVM tier (P4)](../operate/harness/microvm-tier.md), "Container sandboxes and P4 on one host").
 This demo still switches the host to P4 only for Act 4. Going back to containers means re-running
 `setup-vm.sh`, which forgot every session on the 2026-10-01 run because it recreated Redis with no
 volume; since #410 Redis keeps its data on a named volume and a matching container is left running,
@@ -66,7 +66,7 @@ installs, so the commands on this page run as written. If `sudo podman version` 
 `sudo` command here, as in `sudo env PATH="/usr/local/bin:$PATH" podman …`. Before `sudo` it does
 nothing, because sudo looks commands up in its `secure_path`, not the caller's `PATH`. That includes
 4b's `sudo timeout … sh -c '… podman …'`. Without it, that loop prints
-`podman: not found` for 60 s and exits 124 (`deploy/microvm/P4-ON-P6.md`, "Prerequisites").
+`podman: not found` for 60 s and exits 124 ([MicroVM tier (P4)](../operate/harness/microvm-tier.md), "Prerequisites").
 
 ## Act 0 — Preparation (operator, the day before)
 
@@ -115,12 +115,12 @@ sandboxes to `github.com` and `nodejs.org`.
 ### 0b. Install the P4 tier, rehearse it, then park it
 
 The microVM worker is installed now, while nobody depends on the sessions, and stopped until
-Act 4. Follow `deploy/microvm/P4-ON-P6.md`:
+Act 4. Follow [MicroVM tier (P4)](../operate/harness/microvm-tier.md):
 
 1. **Build the golden snapshot** ("Build the golden snapshot"), from the image 0a reported. The
    container sandboxes can keep running for this.
 2. **Remove the container sandboxes and install the worker.** The demo removes them so that Act 4
-   shows a P4-only host. A host may keep both tiers instead (`P4-ON-P6.md`, "Container sandboxes
+   shows a P4-only host. A host may keep both tiers instead ([MicroVM tier (P4)](../operate/harness/microvm-tier.md), "Container sandboxes
    and P4 on one host"), and `setup-microvm.sh` then makes it tiered:
 
    ```bash
@@ -184,7 +184,7 @@ The run passed 13/13 on a raw Anthropic key. It leaves its minted subject's empt
 > sessions (#410), and a re-run while the microVM worker is enabled starts the containers next to
 > it, so both tiers attach. Until a `setup-microvm.sh` re-run makes the host tiered, a new session
 > may land in either tier (each still returns to its sandbox); after it, each session stays in the
-> tier it was created in (`deploy/microvm/P4-ON-P6.md`, "Container sandboxes and P4 on one host").
+> tier it was created in ([MicroVM tier (P4)](../operate/harness/microvm-tier.md), "Container sandboxes and P4 on one host").
 > Either way the host is no longer the P4-only one Act 4 shows.
 
 ### 0c. The participants' SSH accounts
@@ -713,7 +713,7 @@ Say these in the room. They are what stops someone over-promising.
   to the least-loaded sandbox of its tier, on an empty workspace, and the turn says so
   (`workspace reset: …`); it never crosses tiers.
 - **Both tiers on one host are not shown.** A host may run both: each session stays in the tier it
-  was created in (`sandboxTier`) and returns to its sandbox (`deploy/microvm/P4-ON-P6.md`,
+  was created in (`sandboxTier`) and returns to its sandbox ([MicroVM tier (P4)](../operate/harness/microvm-tier.md),
   "Container sandboxes and P4 on one host"). This demo switches to P4 only for Act 4 instead.
 - **Plain HTTP.** The SSH tunnel is the confidentiality. There is no TLS.
 - **Ownership holds at the API only.** Redis (`127.0.0.1:6379`) and the supervisor's admin listener
@@ -739,7 +739,7 @@ to 9 come from the 2026-10-01 run.
 | 4   | **`setup-vm.sh` never pulls the sandbox image.** A host keeps running whatever `:latest` it pulled first. The rig's predated #372 (`HOME=/workspace`).                                                                                                                                                                       | Fixed (#414): `setup-vm.sh` and `build-rootfs.sh` pull before use and log the image id they resolved to; a failed pull stops the run, `SH_SKIP_PULL=1` accepts the local copy. |
 | 5   | **The guest has no git identity.** On the P4 tier, the agent's first `git commit` fails (`exit=128`) until it sets one. The container tier's #372 image has a writable `HOME`, but no identity either.                                                                                                                       | Fixed (#463): `/etc/gitconfig` in the image.                                                                                                                                   |
 | 6   | **Sessions show only their first prompt.** Two users running the same prompt get identical-looking lists, so 3a cannot be shown in the TUI. The rows also read `0 turns · local history` after a headless `mocactl run`.                                                                                                     | #417: show a short session id; count turns from the server. #406 adds `sessions`.                                                                                              |
-| 7   | **`research-smoke.sh` leaves its minted subject's empty record** in `/var/lib/moca-control-plane/`. It deletes the credential, session and files, but not the record.                                                                                                                                                        | #418: delete it on exit, as `P4-ON-P6.md`'s cleanup does by hand for its subjects.                                                                                             |
+| 7   | **`research-smoke.sh` leaves its minted subject's empty record** in `/var/lib/moca-control-plane/`. It deletes the credential, session and files, but not the record.                                                                                                                                                        | #418: delete it on exit, as [MicroVM tier (P4)](../operate/harness/microvm-tier.md)'s cleanup does by hand for its subjects.                                                   |
 | 8   | **No headless view of a turn's tool calls.** 2a needs `--json` and `jq` to show the room the commands.                                                                                                                                                                                                                       | Fixed (#419): `mocactl run --show-tools`; 2a uses it and the `jq` filter is gone.                                                                                              |
 | 9   | **One identity per `XDG_CONFIG_HOME`**, and the device flow approves for whichever account the browser is signed into. Playing two users on one machine needs two config directories and a private browser window (1a, 1b).                                                                                                  | #404: `mocactl --profile`.                                                                                                                                                     |
 | 10  | **MI1 S2's first-subject pin** will refuse user 2 under `single`.                                                                                                                                                                                                                                                            | #407: `v0.5.1` until S5, then `multi`.                                                                                                                                         |
@@ -797,7 +797,7 @@ laptops' `-O exit` above. Then delete their `Match` block from `/etc/ssh/sshd_co
 with `sudo sshd -t && { sudo systemctl reload ssh 2>/dev/null || sudo systemctl reload sshd; }`.
 
 The research directories went with the containers, which the re-run recreated. To remove the P4
-tier entirely, follow `deploy/microvm/P4-ON-P6.md`, "Uninstall". Delete the OAuth app when the
+tier entirely, follow [MicroVM tier (P4)](../operate/harness/microvm-tier.md), "Uninstall". Delete the OAuth app when the
 demo is over.
 
 A host that was P4-only before the demo goes back to P4-only instead: skip the re-run above, and

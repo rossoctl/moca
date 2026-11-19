@@ -3,7 +3,7 @@
 #
 # Drives real harness turns through the P6 supervisor on a P4 host and checks that they ran in
 # microVMs (#369 acceptance). Needs the supervisor pointed at a model that follows the P4-SMOKE-*
-# scripts -- deploy/microvm/mock-anthropic.mjs via SH_MODEL_CUSTOM/SH_MODEL_BASE_URL (P4-ON-P6.md).
+# scripts -- deploy/microvm/mock-anthropic.mjs via SH_MODEL_CUSTOM/SH_MODEL_BASE_URL (docs/operate/harness/microvm-tier.md).
 # By default it posts unauthenticated /turn calls, for a P6 install with SH_REQUIRE_AUTH=false.
 #
 # --auth drives every turn through the real `mocactl run` instead, on a host with the control plane
