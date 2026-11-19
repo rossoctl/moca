@@ -911,7 +911,7 @@ Nor does it claim, for the control plane:
   `v0.5.1` (`docs/demos/vm-two-user-acceptance.md`, #407). On the credential side `multi` no longer
   refuses async turns from this release, provided the control plane carries the grant ring and the
   inference listener; `setup-vm.sh` configures neither, so enabling `multi` is three deliberate
-  edits to `/etc/moca/control-plane.env` and a `systemctl restart moca-control-plane`:
+  edits to `/etc/serverless-harness/control-plane.env` and a `systemctl restart sh-control-plane.service`:
   1. `MOCA_GRANT_SIGNING_KEY` — an Ed25519 PKCS#8 key, and NOT the one in
      `SH_SESSION_TOKEN_PRIVATE_KEY` (a shared key refuses to boot).
   2. `MOCA_INFERENCE_ADDR` — the listener's bind address, e.g. `127.0.0.1:3130` while the workers

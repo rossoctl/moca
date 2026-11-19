@@ -46,7 +46,7 @@ run proves the real login.
 
 A VM brought up by `deploy/vm/setup-vm.sh` (item A, #366), with the control plane running and the
 supervisor started. Use a GitHub OAuth app with **Enable Device Flow** ticked
-(`deploy/vm/README.md`, "The GitHub OAuth app"). On the default SSH-tunnel topology, run setup
+([Single VM](../operate/harness/single-vm.md#the-github-oauth-app), "The GitHub OAuth app"). On the default SSH-tunnel topology, run setup
 with both control-plane settings. On a fresh VM this is the **second** run, once `SH_RELAY_TOKEN`
 is set; the first stops at that check (README, "Bring it up"):
 
