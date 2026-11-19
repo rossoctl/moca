@@ -141,6 +141,9 @@ default_egress_allow() {
 # is refused; the image size and the idle ceiling default to microvm-worker's own, which are also
 # setup.sh's (a bundle from before the lease policy came from a control plane on the same 1800 s).
 DEFAULT_IMAGE_MB=2048
+# The largest SH_WORKSPACE_IMAGE_MB a worker can use: the golden snapshot's workspace drive (#907; setup.sh's
+# SNAPSHOT_WORKSPACE_MB says why). A larger image cannot be mounted by a restored guest.
+SNAPSHOT_WORKSPACE_MB=2048
 DEFAULT_IDLE_CEILING_S=1800
 DEFAULT_BUDGET_MB=8192
 # The unit's own values (sbx-worker@.service: SH_STANDBY_DEPTH, SH_MEMORY_RESERVE_MB) and the VMM's
@@ -718,6 +721,8 @@ validate_worker() {
   image_mb="$(env_value SH_WORKSPACE_IMAGE_MB "$env")"
   image_mb="${image_mb:-$DEFAULT_IMAGE_MB}"
   [[ "$image_mb" =~ ^[1-9][0-9]*$ ]] || die "SH_WORKSPACE_IMAGE_MB in $env must be a whole number of MiB"
+  ((image_mb <= SNAPSHOT_WORKSPACE_MB)) ||
+    die "SH_WORKSPACE_IMAGE_MB in $env ($image_mb) is larger than the snapshot's $SNAPSHOT_WORKSPACE_MB MiB workspace drive (deploy/microvm/build-snapshot.sh WORKSPACE_IMAGE_BYTES): a restored guest cannot mount the image and the worker would never attach (#907)"
   # Plain path characters only: it is written into ExecStart with sed, where # or & would break it.
   [[ "$SBX_WORKER_BIN" =~ ^/[A-Za-z0-9._/-]+$ && -x "$SBX_WORKER_BIN" ]] ||
     die "no worker binary $SBX_WORKER_BIN: build it with CGO_ENABLED=0 go build -o $SBX_WORKER_BIN ./remote-worker/cmd/microvm-worker (SBX_WORKER_BIN must be an absolute path of plain characters: letters, digits, . _ - /)"

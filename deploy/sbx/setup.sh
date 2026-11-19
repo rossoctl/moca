@@ -172,6 +172,12 @@ SUBJECTS_RE="^($GITHUB_SUBJECT|$OIDC_SUBJECT)(,($GITHUB_SUBJECT|$OIDC_SUBJECT))*
 # SBX_WORKSPACE_FS_GIB x 1024 x 8 in 64-bit shell arithmetic: six digits for the factors of the first
 # (< 10^13) and nine for the filesystem size (< 10^13) keep both far from wrapping.
 COUNT6_RE='^[1-9][0-9]{0,5}$'
+# The largest SBX_WORKSPACE_IMAGE_MB a worker can use (#907): a Firecracker guest restored from the golden
+# snapshot keeps the workspace drive size its vmstate recorded, deploy/microvm/build-snapshot.sh's
+# WORKSPACE_IMAGE_BYTES (2 GiB), so it cannot mount a larger image: the worker's startup probe fails
+# ('mount /workspace exited 32') and the worker never attaches. install-host.sh holds the same value;
+# deploy/sbx/tests/setup.test.sh checks both against build-snapshot.sh.
+SNAPSHOT_WORKSPACE_MB=2048
 COUNT9_RE='^[1-9][0-9]{0,8}$'
 HOST_RE='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
 MODE_RE='(per-exec|lease|lease\+processes)'
@@ -278,6 +284,8 @@ validate() {
   for v in SBX_MAX_PER_SUBJECT SBX_MAX_TOTAL SBX_WORKSPACE_IMAGE_MB; do
     [[ "${!v:-}" =~ $COUNT6_RE ]] || die "$v must be a positive whole number of at most six digits"
   done
+  ((SBX_WORKSPACE_IMAGE_MB <= SNAPSHOT_WORKSPACE_MB)) ||
+    die "SBX_WORKSPACE_IMAGE_MB ($SBX_WORKSPACE_IMAGE_MB) is larger than the snapshot's $SNAPSHOT_WORKSPACE_MB MiB workspace drive (deploy/microvm/build-snapshot.sh WORKSPACE_IMAGE_BYTES): a restored guest cannot mount the image and the worker never attaches (#907)"
   [[ "${SBX_WORKSPACE_FS_GIB:-}" =~ $COUNT9_RE ]] ||
     die 'SBX_WORKSPACE_FS_GIB must be a positive whole number of at most nine digits'
   # Workspace disk is not admission-controlled on the worker (SBX0 §5.3): the total quota is the
