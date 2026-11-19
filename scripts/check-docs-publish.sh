@@ -12,7 +12,7 @@
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
-EXCLUDED='^docs/(specs|notes|plans|archive|demos|adrs)/|^docs/REORG-PLAN\.md$|^docs/\.publish-denylist$|^docs/_internal/'
+EXCLUDED='^docs/(specs|notes|plans|archive|demos|adrs)/|^docs/\.publish-denylist$|^docs/_internal/'
 
 patterns="$(mktemp)"
 trap 'rm -f "$patterns"' EXIT

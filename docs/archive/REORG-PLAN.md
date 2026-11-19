@@ -1,5 +1,12 @@
 # moca documentation reorganization plan
 
+> **Historical (2026-11-19).** Superseded by the docs migration that published moca's docs on
+> rossoctl.dev/moca (rossoctl/.github#227; rossoctl/moca#881, #884, #885, #899, #905, #906, #910,
+> #911, #913, #914, #916, #917 and the reference/project change that archived this file). The
+> structure it proposed is now `docs/` itself: Get started, the sandbox service and harness
+> sections, Deploy and operate, Reference and Project. Kept as a record; its line numbers refer to
+> the tree it audited.
+
 > Provenance: audited against `upstream/main` b009079 on 2026-10-12, after PRs #485 and #486 merged (ADR-0041 Knative/KEDA deprecation; P6-first README/CLAUDE.md flip). Line numbers refer to that tree. Items marked _(unverified)_ were not confirmed. Findings fixed by #485/#486 or by PR 1 (#488) are marked FIXED in 4.0.
 
 ## 1. Executive summary
