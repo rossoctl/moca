@@ -132,8 +132,10 @@ hands each connection to a warm [worker](#worker), sessions are durable in Redis
 tools run in a harness [sandbox](#sandbox). Its sibling capability is the
 [sandbox service](#sandbox-service).
 
-Narrower uses of the word: the `@moca/harness` package (`harness/`) is only the adapter between
-Pi's `SessionStorageBackend` and the Redis-backed session log; and names such as
+Narrower uses of the word: the `@moca/harness` package (`harness/`) is the turn-execution library
+the worker (`@moca/server`) and the sandbox relay import: `runTurn`, `run-leaf`, turn streaming,
+the audit log, pool records and sandbox selection (the Pi session-log adapter,
+`BufferedRedisBackend`, is one module in it); and names such as
 `~/.serverless-harness`, `/etc/serverless-harness` and the `SH_*` variables keep the project's
 historical prefix.
 
