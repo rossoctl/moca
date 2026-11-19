@@ -716,7 +716,10 @@ proxy's `DynamicUser` needs no group). While `moca-egress` is down, restores fai
   overwrites the file. To change it, edit the file, then `systemctl restart moca-egress`. A bare
   `MOCA_EGRESS_ALLOW=*` (nothing else on the line) is allow-everything mode: every destination is
   permitted, private and local addresses included, with only the always-refused tier (cloud
-  metadata endpoints, link-local, multicast) kept. For trusted research rigs only. The restart
+  metadata endpoints, link-local, multicast) kept. That includes the host's own loopback
+  (`127.0.0.0/8`, `::1`) and interface addresses: a guest can reach every service listening on the
+  host. Don't use it on a host that runs anything else, or where loopback services trust the local
+  network. For trusted research rigs only. The restart
   severs open tunnels (the guest must retry). The worker's control client notices the restart on its
   own and re-registers every live VM within seconds, with no Exec needed; a guest that connects in
   that gap waits in the socket backlog and is served once the VM is re-registered.
