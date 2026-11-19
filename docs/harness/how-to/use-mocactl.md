@@ -90,16 +90,17 @@ printf %s "$KEY" | mocactl credentials add NAME --host HOST [--host HOST ...] \
 mocactl credentials delete NAME [--json]    # exit 1 if you own no credential of that name
 ```
 
-> **Preview.** `mocactl spawn`, `mocactl subagents`, and `mocactl get` are implemented but not
-> yet declared Stable; flags, ledger format, and output shapes may change. Follow-ups tracked
-> under the subagent commands issue: `watch`, `approve`/`reject`, `follow-up`, and a
-> configurable concurrency cap.
+> **Preview.** `mocactl spawn`, `mocactl subagents`, `mocactl watch` and `mocactl get` are
+> implemented but not yet declared Stable; flags, ledger format, and output shapes may change.
+> One follow-up is still tracked under the subagent commands issue: `approve`/`reject` for a
+> subagent that stops at a gate.
 
 ```bash
 mocactl spawn "prompt" [--config sha256:…] --kind prompt|solve \
   [--repo URL --ref REF] [--tag T] [--label L] [--json]  # fork a detached subagent; prints its sessionId
 mocactl spawn --prompt-file FILE [--kind prompt|solve] [...]  # read the prompt from FILE instead of argv
 mocactl subagents [--tag T] [--json]        # list spawned subagents + current honest state
+mocactl watch [--tag T] [--json]            # one line per state change, until all are finished
 mocactl get SESSIONID [--out DIR] [--json]  # write result files + bounded summary
 mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]  # run it on a workload's context
 ```
@@ -142,6 +143,15 @@ spawn you own is listed, oldest first by dispatch time. A client-side fetch cuto
 worker _after the request landed_ (undici's 5-min `headersTimeout` is the common one) is
 reconciled on the next poll instead of reported as failed; a connect-phase failure
 (`ECONNREFUSED`, DNS, TLS) is still terminal, since the server never saw the request.
+
+`mocactl watch` is `subagents` as a stream: it sweeps the same rows the same way and prints one
+line per state change, exiting 0 once every row it watches is finished — `done`, `failed`,
+`paused`, or `unknown` for one that will never produce a result. The first sweep reports every
+row, so watching a batch that is already over says so. It polls every 5 seconds and re-reads the
+ledger each time, so a `spawn --tag T` from another terminal joins a running `watch --tag T`:
+spawn a few, watch, spawn more. One line per event is what a coding agent's background monitor
+wants (Claude Code's Monitor tool, for one) — with `--json` each line is its own JSON object, so
+nothing has to be parsed twice. Ctrl-C ends the watch; the subagents keep running.
 
 `mocactl get SESSIONID` fetches a terminal result and writes files to `--out DIR` (default: cwd):
 `<sid>.text` for a prompt response, `<sid>.patch` for a solve result (with a trailing newline
@@ -286,8 +296,9 @@ sends `contextWritable: true` and records `writable` in the ledger row, which
 
 stdout carries only the result; every message goes to stderr, including "no sessions" for an
 empty list. Without `--json` a listing is an aligned table with a header row, made terminal-safe.
-Times are UTC. With `--json` stdout is one JSON document and one line; `run` and `doctor` keep
-their own shapes. These shapes are stable: fields may be added, but none is renamed or removed.
+Times are UTC. With `--json` stdout is one JSON document and one line; `run`, `doctor` and `watch`
+keep their own shapes (`watch` emits one object per line as events arrive). These shapes are
+stable: fields may be added, but none is renamed or removed.
 
 | Command              | `--json` on stdout                                                                                                                                  |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -298,6 +309,7 @@ their own shapes. These shapes are stable: fields may be added, but none is rena
 | `credentials delete` | `{"name","status":"deleted"}`                                                                                                                       |
 | `spawn`              | `{"type":"session","sessionId","pid"}`                                                                                                              |
 | `subagents`          | `{"subagents":[{"sessionId","tag","kind","state","detail","bundle","workload","submittedAt"}]}`                                                     |
+| `watch`              | NDJSON, one event per line: `{"sessionId","tag","label"?,"kind","state","detail","at"}`                                                             |
 | `get`                | `{"sessionId","status","files":["<path>",…],"reason"?,"message"?}`                                                                                  |
 | `workloads create`   | `{"workloadId","status","contextType","revision","files","bytes","sandboxes"?,"mount"?}`                                                            |
 | `workloads list`     | `{"workloads":[{"workloadId","status","contextType","workspace","createdAt","revision","sandboxes","error"?}]}`, `null` unset, `createdAt` ISO 8601 |

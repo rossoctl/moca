@@ -1,4 +1,4 @@
-/** `mocactl spawn | subagents | get`, built on the leaf-turn transport and subagent ledger. */
+/** `mocactl spawn | subagents | watch | get`, built on the leaf-turn transport and subagent ledger. */
 import { spawn as spawnChild } from 'node:child_process';
 import { writeFileSync, mkdirSync, existsSync, openSync, closeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -24,6 +24,7 @@ import {
   isTerminalState,
   mapHonestState,
   terminalFromBody,
+  type HonestState,
   type LeafEnvelope,
   type LeafResultBody,
   type StateView,
@@ -541,44 +542,7 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
     if (opts.json) io.out(JSON.stringify({ subagents: [] }) + '\n');
     return 0;
   }
-  const now = rt.now();
-  const views: Array<{ record: LedgerRecord; view: StateView }> = [];
-  for (const r of records) {
-    // Ledger is authoritative past terminal: /runs/status's 24h TTL would otherwise regress
-    // `done` to `unknown` once the server-side record ages out.
-    if (isTerminalState(r.lastKnownState)) {
-      views.push({ record: r, view: { state: r.lastKnownState, detail: r.stateDetail } });
-      continue;
-    }
-    // An async row counts as alive while the turn is non-terminal: the turn record IS its liveness,
-    // so the 60 s child-exit grace — which exists to cover a dead child's result write — never
-    // applies to one.
-    const alive = r.turnId !== undefined || (r.childPid !== undefined && isAlive(r.childPid));
-    const observedAt = alive ? now : r.stateObservedAt;
-    let raw: LeafResultBody | 'queued';
-    try {
-      if (r.turnId !== undefined) {
-        raw = await turns.readTurnState(r.sessionId, r.turnId, opts.signal);
-      } else {
-        const token = await rt.cp.mintSessionToken(r.sessionId);
-        raw = await transport.readLeafState(r.sessionId, token.token, opts.signal);
-      }
-    } catch (err) {
-      // One row's failure doesn't fail the list.
-      views.push({ record: r, view: { state: 'unknown', detail: describeError(err) } });
-      continue;
-    }
-    views.push({
-      record: r,
-      view: mapHonestState(raw, { alive, observedAt }, now, DEFAULT_UNKNOWN_GRACE_MS),
-    });
-  }
-  // Persist any state changes so the next `subagents` call starts closer to the truth.
-  for (const { record, view } of views) {
-    if (view.state !== record.lastKnownState || view.detail !== record.stateDetail) {
-      ledger.updateState(record.sessionId, view.state, { detail: view.detail, now });
-    }
-  }
+  const views = await sweepStates(rt, { ledger, transport, turns, records, signal: opts.signal });
   if (opts.json) {
     io.out(
       JSON.stringify({
@@ -611,6 +575,170 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
   ]);
   io.out(renderTable([header, ...rows]));
   return 0;
+}
+
+// --- watch ---
+
+export interface WatchOptions {
+  tag?: string;
+  json: boolean;
+  signal?: AbortSignal;
+  /** Test seams, as on `subagents`. */
+  ledger?: Ledger;
+  transport?: LeafTransport;
+  turns?: Pick<AsyncTurnTransport, 'readTurnState'>;
+}
+
+/**
+ * shortcut: fixed interval, one read per non-final row per tick — `watch` is a background monitor,
+ * not an interactive wait, so it polls slower than `get --wait`. Revisit when the owner-scoped
+ * event stream (#392) lands and this can be a subscription instead.
+ */
+const WATCH_POLL_MS = 5_000;
+
+/** Behind a call so a second check further down the loop isn't narrowed away as unreachable. */
+const aborted = (signal?: AbortSignal): boolean => signal?.aborted === true;
+
+/** Final for watching: nothing further is coming, so there is nothing left to report on this row. */
+function isFinalForWatch(state: HonestState): boolean {
+  // `unknown` is not `isTerminalState` — a later read could still find a result — but it is the
+  // client's "no result is coming": a child that exited without writing one past the 60 s grace, or
+  // a status read that failed. `watch` has to end, so it ends on the line that says so, and a
+  // monitor that wants another look re-runs it.
+  return isTerminalState(state) || state === 'unknown';
+}
+
+/**
+ * One line per state change until every watched subagent is final. Written for a coding agent's
+ * background monitor (Claude Code's Monitor tool), where each stdout line becomes one event.
+ */
+export async function cmdWatch(rt: Runtime, io: Io, opts: WatchOptions): Promise<number> {
+  if (!requireReady(rt, io)) return 2;
+  initLedger(rt.paths.subagentsFile);
+  const ledger = opts.ledger ?? openLedger(rt.paths.subagentsFile);
+  const transport = opts.transport ?? new LeafTransport(rt.harness, rt.fetchImpl);
+  const turns = opts.turns ?? new AsyncTurnTransport(rt.cp);
+  const match = (r: LedgerRecord): boolean => (opts.tag ? r.tag === opts.tag : true);
+  if (!ledger.readAll().some(match)) {
+    io.err('no subagents' + (opts.tag ? ` with tag '${sanitizeRemote(opts.tag)}'` : ''));
+    return 0;
+  }
+  // What was last printed per session, so only changes produce a line. The first sweep therefore
+  // reports every row: watching a batch that is already over should say so, not print nothing.
+  const printed = new Map<string, string>();
+  for (;;) {
+    // Re-read each tick so a `spawn --tag T` from another terminal joins a running `watch --tag T`,
+    // which is how a coding agent fans out: spawn some, watch, spawn more.
+    const records = ledger.readAll().filter(match);
+    const views = await sweepStates(rt, { ledger, transport, turns, records, signal: opts.signal });
+    // A Ctrl-C lands in the in-flight read, which the sweep reports as `unknown` — final, so the
+    // loop below would print it and exit 0. The signal, not the aborted read, is the answer.
+    if (aborted(opts.signal)) return 130;
+    for (const { record, view } of views) {
+      const line = view.state + ' ' + (view.detail ?? '');
+      if (printed.get(record.sessionId) === line) continue;
+      printed.set(record.sessionId, line);
+      io.out(watchLine(record, view, rt.now(), opts.json));
+    }
+    if (views.every(({ view }) => isFinalForWatch(view.state))) return 0;
+    await rt.sleep(WATCH_POLL_MS, opts.signal);
+    // `sleep` resolves on abort rather than rejecting, so without this the loop would go round once
+    // more and turn a Ctrl-C into a full sweep of failed reads.
+    if (aborted(opts.signal)) return 130;
+  }
+}
+
+/** One event: NDJSON under `--json` (same field names as `subagents --json`), else one text line. */
+function watchLine(record: LedgerRecord, view: StateView, at: number, json: boolean): string {
+  if (json) {
+    return (
+      JSON.stringify({
+        sessionId: record.sessionId,
+        tag: record.tag ?? null,
+        ...(record.label ? { label: record.label } : {}),
+        kind: record.envelope.kind,
+        state: view.state,
+        detail: view.detail ?? null,
+        at,
+      }) + '\n'
+    );
+  }
+  const name = record.label ?? record.tag;
+  // Padded to the longest state ('running') so the session ids line up in a terminal.
+  return (
+    [
+      view.state.padEnd(7),
+      sanitizeRemote(record.sessionId),
+      name ? sanitizeRemote(name) : undefined,
+      view.detail ? `(${sanitizeRemote(view.detail)})` : undefined,
+    ]
+      .filter((p) => p !== undefined)
+      .join('  ') + '\n'
+  );
+}
+
+/** A ledger row joined with the state just read for it. */
+interface RowView {
+  record: LedgerRecord;
+  view: StateView;
+}
+
+/**
+ * One state read per row — routed to whichever backend holds that leaf — mapped to an honest
+ * state and persisted, so the next call starts closer to the truth. Shared by `subagents` (one
+ * sweep, then render) and `watch` (a sweep per tick).
+ */
+async function sweepStates(
+  rt: Runtime & Required<Pick<Runtime, 'cp' | 'harness'>>,
+  deps: {
+    ledger: Ledger;
+    transport: LeafTransport;
+    turns: Pick<AsyncTurnTransport, 'readTurnState'>;
+    records: LedgerRecord[];
+    signal?: AbortSignal;
+  },
+): Promise<RowView[]> {
+  const now = rt.now();
+  const views: RowView[] = [];
+  for (const r of deps.records) {
+    // Ledger is authoritative past terminal: /runs/status's 24h TTL would otherwise regress
+    // `done` to `unknown` once the server-side record ages out.
+    if (isTerminalState(r.lastKnownState)) {
+      views.push({ record: r, view: { state: r.lastKnownState, detail: r.stateDetail } });
+      continue;
+    }
+    // An async row counts as alive while the turn is non-terminal: the turn record IS its liveness,
+    // so the 60 s child-exit grace — which exists to cover a dead child's result write — never
+    // applies to one.
+    const alive = r.turnId !== undefined || (r.childPid !== undefined && isAlive(r.childPid));
+    const observedAt = alive ? now : r.stateObservedAt;
+    let raw: LeafResultBody | 'queued';
+    try {
+      if (r.turnId !== undefined) {
+        raw = await deps.turns.readTurnState(r.sessionId, r.turnId, deps.signal);
+      } else {
+        const token = await rt.cp.mintSessionToken(r.sessionId);
+        raw = await deps.transport.readLeafState(r.sessionId, token.token, deps.signal);
+      }
+    } catch (err) {
+      // One row's failure doesn't fail the list.
+      views.push({ record: r, view: { state: 'unknown', detail: describeError(err) } });
+      continue;
+    }
+    views.push({
+      record: r,
+      view: mapHonestState(raw, { alive, observedAt }, now, DEFAULT_UNKNOWN_GRACE_MS),
+    });
+  }
+  // An interrupted sweep records nothing: the abort arrives in the catch above as `unknown`, and a
+  // read that never finished is not an observation to persist.
+  if (deps.signal?.aborted === true) return views;
+  for (const { record, view } of views) {
+    if (view.state !== record.lastKnownState || view.detail !== record.stateDetail) {
+      deps.ledger.updateState(record.sessionId, view.state, { detail: view.detail, now });
+    }
+  }
+  return views;
 }
 
 /** `kill(pid, 0)` liveness probe. OS pid-reuse is the known blind spot — see spec §5. */
