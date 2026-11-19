@@ -4,10 +4,12 @@ sidebar_position: 1
 
 # Docker Compose (trial)
 
-> **Preview, trial only.** This path is a trial by design and will not be promoted to Stable. For production see
+> **Preview.** The Docker Compose trial is implemented but not yet declared Stable; interfaces
+> and limits may change. Known limits: [What the trial does not claim](#what-the-trial-does-not-claim).
+> It is a trial by design and will not be promoted to Stable. For production see
 > [`deploy/vm/`](../../../deploy/vm/README.md) or [`deploy/k8s/`](../../../deploy/k8s/README.md); labels are explained in [Maturity and lifecycle](../../reference/maturity-and-lifecycle.md).
 
-A five-minute, no-root way to run the P6 runtime on a dev machine: the supervisor (with its worker
+A five-minute, no-root way to run the P6 (process-manager) runtime on a dev machine: the supervisor (with its worker
 pool), the sandbox relay, Redis and one remote-worker sandbox, under Docker Compose. Optionally, add
 the MU1 control plane that [`mocactl`](../../../packages/mocactl) logs in through (see
 "[Using mocactl](#using-mocactl-the-control-plane)").
@@ -235,7 +237,7 @@ directory runs the new images under the old compose file, which does not hand th
   from each other on the Docker engine only (see "What runs" above).
 - **One sandbox.** To add another, copy the `sandbox` service with a new `SANDBOX_ID`. Replicas
   would all share one id and collide on a single `sh:sandbox:records` entry.
-- **No Firecracker/KVM tier.** P4 stays bare-metal/systemd-only.
+- **No Firecracker/KVM tier.** The P4 microVM tier stays bare-metal/systemd-only.
 
 ## Detachable turns
 
