@@ -1,10 +1,14 @@
+---
+sidebar_position: 5
+---
+
 # Manage multi-user sessions
 
-> **Preview.** For the single-VM deployment ([`deploy/vm`](../operate/harness/single-vm.md)), the path the multi-user demos
-> were run on. Commands are taken from [`docs/demos/vm-two-user-acceptance.md`](../demos/vm-two-user-acceptance.md) and
-> [`vm-multi-user-demo.md`](../demos/vm-multi-user-demo.md), which were run by one person with two GitHub accounts on
+> **Preview.** For the single-VM deployment ([`deploy/vm`](single-vm.md)), the path the multi-user demos
+> were run on. Commands are taken from [`docs/demos/vm-two-user-acceptance.md`](../../demos/vm-two-user-acceptance.md) and
+> [`vm-multi-user-demo.md`](../../demos/vm-multi-user-demo.md), which were run by one person with two GitHub accounts on
 > one laptop. Two people on two laptops was not tried. I have not re-run them. Read the
-> [security model](../reference/security-model.md) and [multi-user concepts](../harness/concepts/multi-user.md) first: ownership is enforced at the API, but sandboxes are not
+> [security model](../../reference/security-model.md) and [multi-user concepts](../../harness/concepts/multi-user.md) first: ownership is enforced at the API, but sandboxes are not
 > isolated between users.
 
 ## Before you start
@@ -100,7 +104,7 @@ mocactl run "hello, reply with one short sentence"       # prints "session <id>"
 mocactl run "what did I just say?" --session <id>
 ```
 
-Each `XDG_CONFIG_HOME` holds one identity. See the [`mocactl` reference](../harness/reference/cli-mocactl.md) for flags.
+Each `XDG_CONFIG_HOME` holds one identity. See the [`mocactl` reference](../../harness/reference/cli-mocactl.md) for flags.
 
 ### Optional: an operator fallback key
 
@@ -123,7 +127,7 @@ created on the fallback keeps using it.
 ## 2. Verify isolation
 
 Each user runs these against their own session, then swaps ids with the other. The helpers `ids_set`, `probe` and
-`not_mine` are defined in Act 2 of [`vm-two-user-acceptance.md`](../demos/vm-two-user-acceptance.md); copy them from there.
+`not_mine` are defined in Act 2 of [`vm-two-user-acceptance.md`](../../demos/vm-two-user-acceptance.md); copy them from there.
 
 - **Session lists are disjoint:** `mocactl sessions --json | jq -r '.sessions[].sessionId'` shows only your own.
 - **Another user's session answers 404**, the same as one that never existed, for a read, a delete and a token mint:
@@ -180,7 +184,7 @@ mocactl run --new --option sandboxTier=microvm "In your sandbox: ..."
 `--option` is ignored when resuming. The tier is fixed for the session's life and never crosses tiers. With several tiers
 and no choice, the server default applies. The container tier has network access and per-session directories under one `/workspace`, which are not isolated from
 each other; the microVM tier has no network device and reaches only an allowlist of hosts, through the
-host's proxy ([Sandboxes and tiers](../harness/concepts/sandboxes-and-tiers.md)).
+host's proxy ([Sandboxes and tiers](../../harness/concepts/sandboxes-and-tiers.md)).
 
 ## 5. Choose a model
 
@@ -210,7 +214,7 @@ own scheme (`<endpoint>/v1/models` when its host is `api.anthropic.com`, `<endpo
 It calls only `api.anthropic.com`, the default endpoint's host, and the hosts in `SH_MODEL_CATALOG_HOSTS`: add each
 other gateway host your users' credentials name. Egress policies must allow those calls. A host outside the
 allow-list, or a call that fails, lists nothing (`model_catalog_unavailable`), and a chosen model is accepted
-unverified. See [Configuration: control plane](../reference/configuration.md#control-plane).
+unverified. See [Configuration: control plane](../../reference/configuration.md#control-plane).
 
 ## 6. Revoke access
 

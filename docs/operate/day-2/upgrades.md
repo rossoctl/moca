@@ -1,6 +1,6 @@
 # Upgrades
 
-> **Preview.** For P6 on Kubernetes ([`deploy/k8s`](../operate/harness/kubernetes.md)). The repository documents no
+> **Preview.** For P6 on Kubernetes ([`deploy/k8s`](../harness/kubernetes.md)). The repository documents no
 > rollback procedure; what is below is what the scripts and manifests do.
 
 ## Upgrading means passing a new image
@@ -69,8 +69,8 @@ period is only an outer bound. Practically:
   turns run without the skills and report no error. Every later harness applies it, so the order matters only when upgrading from before v0.5.0 or to a release that changes the
   bundle format ([#510](https://github.com/rossoctl/moca/issues/510)). Nothing enforces this order, and the
   supervisor, control plane and relay use the same image, so one `--image` bump moves all three and they roll in
-  parallel (the rule is in [ADR-0038](../adrs/0038-mocactl-config-bundle-promotion.md) and the
-  [promote guide](../harness/how-to/promote-claude-workflow.md)). For a release whose notes say it changes config-bundle handling, roll the supervisor
+  parallel (the rule is in [ADR-0038](../../adrs/0038-mocactl-config-bundle-promotion.md) and the
+  [promote guide](../../harness/how-to/promote-claude-workflow.md)). For a release whose notes say it changes config-bundle handling, roll the supervisor
   first (see below). Do not split the image to get this ordering.
 - **Tier lists must match.** `SH_SANDBOX_TIERS` and `SH_SANDBOX_DEFAULT_TIER` are read by both from the same
   ConfigMap.
@@ -78,7 +78,7 @@ period is only an outer bound. Practically:
   start. The check runs in the background once the process is serving: it retries until Redis answers, and a process
   that finds a version newer than it knows then exits with the reason in its log. A rollback past a schema change is
   not supported: the older release exits once Redis answers only if the newer one raised the stored version, which
-  each release that bumps it decides ([change policy](../reference/change-policy.md#version-markers)).
+  each release that bumps it decides ([change policy](../../reference/change-policy.md#version-markers)).
   There is no migration tool: new fields are handled by tolerant reads, and every release so far writes version 1.
   An absent key, with any `sh:` data, means version 1. The key has no TTL: keep Redis on a `noeviction` or
   `volatile-*` eviction policy (an `allkeys-*` policy can evict it), and after a `FLUSHALL` or a restore that lost
@@ -123,7 +123,7 @@ that use a promoted bundle.
 
 ## Upgrade notes
 
-Changes that alter a default or what a re-run of `setup.sh` writes ([change policy](../reference/change-policy.md),
+Changes that alter a default or what a re-run of `setup.sh` writes ([change policy](../../reference/change-policy.md),
 rule 5).
 
 - **A turn is told when its session's workspace was reset

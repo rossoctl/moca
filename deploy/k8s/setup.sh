@@ -13,7 +13,7 @@
 # means the control plane's default, 20; 0 is off) are written to moca-settings, and the client
 # secret must already sit in a Secret
 # named moca-oidc, key SH_OIDC_CLIENT_SECRET -- setup.sh never touches it; see
-# docs/guides/oidc-login.md),
+# docs/operate/oidc-login.md),
 # SH_SANDBOX_COUNT (default 2, at most 4 digits; 0 runs no container sandboxes), SH_WAIT_SECONDS
 # (default 120), SH_P4_SANDBOX_IDS (ocp only: comma-separated IDs of P4 microVM hosts outside the cluster, each
 # attaching to the relay over TLS; with SH_SANDBOX_COUNT>0 too, the stack is tiered

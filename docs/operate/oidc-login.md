@@ -1,3 +1,7 @@
+---
+sidebar_position: 3
+---
+
 # Logging in with an OIDC provider
 
 The control plane's default identity provider is GitHub's OAuth device flow. A deployment in front

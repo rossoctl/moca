@@ -1,6 +1,6 @@
 # Hardening checklist
 
-> **Preview.** A checklist for operators, drawn from the [security model](../reference/security-model.md); read that
+> **Preview.** A checklist for operators, drawn from the [security model](../../reference/security-model.md); read that
 > page for the reasons. Items marked _(documented)_ are stated in the deployment READMEs; the rest follow from the
 > code. None of this makes mutually distrusting users safe on one deployment: the per-session isolation design (MI1)
 > is not built, so give each trust domain its own deployment.
@@ -30,7 +30,7 @@
 - [ ] **Rotate tokens deliberately.** Access tokens last 15 minutes and are never revoked, so shorten
       `SH_API_TOKEN_TTL_SECONDS` if you need faster revocation.
 
-## Kubernetes ([`deploy/k8s`](../operate/harness/kubernetes.md))
+## Kubernetes ([`deploy/k8s`](../harness/kubernetes.md))
 
 - [ ] **Use a CNI that enforces NetworkPolicy** (kind 0.24 or later, or OVN-Kubernetes). On one that does not, every
       isolation rule is open _(documented)_. Run the smoke test's isolation claim to check.
@@ -49,7 +49,7 @@
 - [ ] **On OpenShift, supply a real certificate** (`--tls-cert`/`--tls-key`, or `--tls-secret` on the `ocp-single` target only) instead of the
       self-signed fallback, and remember the control plane's Route terminates TLS at the router.
 
-## Single VM ([`deploy/vm`](../operate/harness/single-vm.md))
+## Single VM ([`deploy/vm`](../harness/single-vm.md))
 
 - [ ] **Restrict access to ports 8080 and 8090.** Use the README's SSH `Match User` block, or a firewall allowlist. An
       allowlist sends tokens in clear. The supervisor binds all interfaces regardless of the sandbox firewall, as does
@@ -64,14 +64,14 @@
 - [ ] **If you add the microVM tier,** run its worker under a hardened unit; the shipped one runs as root with no
       systemd sandboxing. Keep its relay token separate (the installer does this).
 
-## Docker Compose ([`deploy/compose`](../operate/harness/compose.md))
+## Docker Compose ([`deploy/compose`](../harness/compose.md))
 
 - [ ] **Treat it as a trial.** Redis has no password, sandboxes have internet access, and there are no resource limits.
 - [ ] **Set `SH_REQUIRE_AUTH=true` as soon as you add the control plane**, and remove `ANTHROPIC_*` from `.env` if you
       want no anonymous spend.
 - [ ] **Publish ports on loopback only** (the shipped file already does for the supervisor and control plane).
 
-## MicroVM tier ([`deploy/microvm`](../operate/harness/microvm-tier.md))
+## MicroVM tier ([`deploy/microvm`](../harness/microvm-tier.md))
 
 - [ ] **Use it where you need network isolation, not user isolation.** The guest has no network device and reaches only `moca-egress`'s allowlist, but nothing binds a
       workspace key to a user.
@@ -82,4 +82,4 @@
 
 ## Reporting a problem
 
-Report vulnerabilities privately; see [`SECURITY.md`](../../SECURITY.md).
+Report vulnerabilities privately; see [`SECURITY.md`](../../../SECURITY.md).

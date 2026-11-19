@@ -3,7 +3,7 @@
 > **Preview.** Describes P6 on `main` as of 2026-10-13: what each component holds, who can reach it, and what is and
 > is not enforced. Every claim comes from code or a manifest unless marked _(documented only)_ (a README, ADR or spec
 > says so; I did not find it in code), _(designed, not built)_, or _(inferred)_. To report a vulnerability see
-> [`SECURITY.md`](../../SECURITY.md); for a checklist see [Hardening](../operations/hardening.md).
+> [`SECURITY.md`](../../SECURITY.md); for a checklist see [Hardening](../operate/day-2/hardening.md).
 
 ## Read this first
 
@@ -204,7 +204,7 @@ per-connection hand-off and the turn cap; that is a correctness constraint, not 
 The control plane records credential issuance, the operator fallback, session create and delete, credential writes,
 bundle uploads and refresh-token decisions in a Redis stream, with names and ids but never secret values. Errors leave
 the control plane as opaque codes. A search of the obvious paths found no logging of tokens or headers, but that was a
-grep, not an audit. See [Observability](../operations/observability.md#the-audit-stream).
+grep, not an audit. See [Observability](../operate/day-2/observability.md#the-audit-stream).
 
 ## Supply chain
 

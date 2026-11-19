@@ -65,7 +65,7 @@ OpenShift Routes:
 
 ## After install
 
-- [Day-2 operations](../operations/index.md): observability, sizing and scaling, upgrades,
+- [Day-2 operations](day-2/index.md): observability, sizing and scaling, upgrades,
   Redis backup, hardening, troubleshooting.
 - [Security model](../reference/security-model.md): what each deployment isolates, and what it doesn't.
 - [Sandbox service runbook](sandbox-service/runbook.md): users, templates, key rotation, outages.
