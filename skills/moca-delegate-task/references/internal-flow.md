@@ -29,4 +29,4 @@ and storage). Context Service stores the context; it never creates sandboxes.
    the Context (`DELETE /internal{ctx}`).
 
 `{ctx}` is `/v1/namespaces/{ns}/contexts/{name}`. For the server-side details (limits, caching,
-error codes) see [Context Service and workloads](../../../docs/context-service.md).
+error codes) see [Context Service and workloads](../../../docs/harness/how-to/workloads.md).

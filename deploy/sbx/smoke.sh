@@ -135,7 +135,7 @@ PROMPT='The test suite fails (python3 -m unittest). Fix it with a minimal change
 [[ -n "${SBX_API_URL:-}" ]] || die "set SBX_API_URL=https://<api host> (the sandbox control plane)"
 [[ "$SBX_API_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] || die "SBX_API_URL must be https://<api host> (got '$SBX_API_URL')"
 homecheck() { # homecheck VAR: a set variable naming a directory
-  [[ -n "${!1:-}" ]] || die "set $1 to a HOME already logged in with \`mocactl sbx login\` (see deploy/sbx/RUNBOOK.md, Live smoke)"
+  [[ -n "${!1:-}" ]] || die "set $1 to a HOME already logged in with \`mocactl sbx login\` (see docs/operate/sandbox-service/runbook.md, Live smoke)"
   [[ -d "${!1}" ]] || die "$1='${!1}' is not a directory"
 }
 homecheck SBX_SMOKE_HOME_A
@@ -348,7 +348,7 @@ as() { local u="$1"; shift; "$WORK/bin-$u/mocactl" sbx "$@"; }
 # The usage line, wherever it is: since #599 a paragraph on what a sandbox is comes before it, while
 # an older mocactl (v0.7.0 on) prints it first. A mocactl without sbx prints the general usage.
 help="$(as a --help 2>/dev/null </dev/null)" || true
-grep -qxF 'usage (the sandbox service, SBX0):' <<<"$help" ||
+grep -qxE 'usage \(the sandbox service(, SBX0)?\):' <<<"$help" ||
   die "$MOCACTL has no \`mocactl sbx\` (its \`sbx --help\` begins '${help%%$'\n'*}'): use the edge channel or a build of this branch"
 
 # --- The direct client (steps 2 and 4) -------------------------------------------------------
@@ -363,7 +363,7 @@ if want 2 || want 4; then
   elif [[ -f "$SRC/docs/api/examples/sandbox/v1/sandbox_pb2_grpc.py" ]]; then
     PYPATH="$SRC/docs/api/examples"
   else
-    die "cannot generate the sandbox/v1 stubs: $PY needs grpcio-tools (see docs/api/sandbox-v1-direct-client.md)"
+    die "cannot generate the sandbox/v1 stubs: $PY needs grpcio-tools (see docs/sandbox/how-to/direct-api.md)"
   fi
 fi
 # key=value lines, never the token. `exec` calls the example client's own _exec with the caller's
@@ -505,7 +505,7 @@ in_repo() { local r="$1" old="$PWD"; shift; cd "$r" || { RC=1; return 0; }; "$@"
 # --- Preflight: both logins work, and are two users -----------------------------------------
 
 x ls-a as a ls
-[[ "$RC" == 0 ]] || die "user A (SBX_SMOKE_HOME_A) cannot list sandboxes: $(lastline "$LOGS/ls-a.err") (see deploy/sbx/RUNBOOK.md, Live smoke)"
+[[ "$RC" == 0 ]] || die "user A (SBX_SMOKE_HOME_A) cannot list sandboxes: $(lastline "$LOGS/ls-a.err") (see docs/operate/sandbox-service/runbook.md, Live smoke)"
 if want 2 || ((CRED_B)); then
   x ls-b as b ls
   [[ "$RC" == 0 ]] || die "user B (SBX_SMOKE_HOME_B) cannot list sandboxes: $(lastline "$LOGS/ls-b.err")"
@@ -936,7 +936,7 @@ step9() {
   ttyx "create-procs-$N" "$WORK/bin-a/mocactl" sbx create --template "$TEMPLATE" --name "$RUN-$N-procs" --mode lease+processes --json
   f="$LOGS/create-procs-$N.out"
   # 403 mode_not_allowed, as in step 8: level 2 is off by default, and stays off until its section
-  # of docs/sbx/security-review.md is signed off.
+  # of docs/notes/sandbox-security-review.md is signed off.
   if [[ "$RC" != 0 ]] && grep -q 'is not allowed on this deployment' "$f"; then WHY='lease+processes not allowed'; return 3; fi
   read -r id mode setmode code <<<"$(lease_created "$f")"
   [[ "${id:-}" =~ $ID_RE ]] && record a "$id" ||

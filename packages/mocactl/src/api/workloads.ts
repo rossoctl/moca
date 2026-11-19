@@ -1,5 +1,5 @@
 /**
- * Client for the harness's `/workloads` routes (docs/context-service.md) and the one-time upload
+ * Client for the harness's `/workloads` routes (docs/harness/how-to/workloads.md) and the one-time upload
  * of a context file straight to Context Service. The routes take the user's API token; the upload
  * takes only the grant's own token.
  */
@@ -56,7 +56,7 @@ export interface Workload {
 
 export interface CreateWorkloadRequest {
   name?: string;
-  /** Phase 2 (docs/context-service.md, "Own sandboxes"): sandboxes of the workload's own. */
+  /** Phase 2 (docs/harness/how-to/workloads.md, "Own sandboxes"): sandboxes of the workload's own. */
   sandboxes?: { count: number };
   /** Needs `sandboxes`: mount the context from the workload's own PVC instead of copying it. */
   workspace?: { mount: WorkloadMount };

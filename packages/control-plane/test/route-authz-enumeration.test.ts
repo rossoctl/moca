@@ -52,7 +52,7 @@ describe('§9.3 test 2 — route-table enumeration', () => {
   });
 
   it('makes every api-scoped non-session route reject a missing principal', async () => {
-    const routes = ROUTES.filter((r) => r.auth === 'api' && !r.sessionScoped);
+    const routes = ROUTES.filter((r) => ['api', 'admin'].includes(r.auth) && !r.sessionScoped);
     expect(routes.length).toBeGreaterThan(2);
     for (const route of routes) {
       const d = makeDeps();

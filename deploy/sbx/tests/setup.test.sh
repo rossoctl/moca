@@ -233,6 +233,7 @@ refusals=(
   'export SBX_MODES_ALLOWED=lease+processes SBX_IDLE_CEILING_S=2700 SBX_JANITOR_WAIT_MINUTES=60 => SBX_JANITOR_WAIT_MINUTES \(3600 s\) must exceed .* \(3630 s\)'
   'export SBX_MODES_ALLOWED=per-exec,lease SBX_TOKEN_TTL_MINUTES=60 => SBX_JANITOR_WAIT_MINUTES \(3900 s\) must exceed .* \(5430 s\)'
   'export SBX_WORKSPACE_IMAGE_MB=-1 => SBX_WORKSPACE_IMAGE_MB must be a positive whole number'
+  "export SBX_WORKSPACE_IMAGE_MB=2049 => SBX_WORKSPACE_IMAGE_MB \\(2049\\) is larger than the snapshot's 2048 MiB workspace drive .*#907"
   'export SBX_MAX_TOTAL=999999999 SBX_WORKSPACE_IMAGE_MB=999999999 SBX_WORKSPACE_FS_GIB=999999999 => SBX_MAX_TOTAL must be'
   'export SBX_MAX_TOTAL=1 SBX_WORKSPACE_IMAGE_MB=999999999 SBX_WORKSPACE_FS_GIB=999999999 => SBX_WORKSPACE_IMAGE_MB must be'
   'export SBX_MAX_PER_SUBJECT=999999999 => SBX_MAX_PER_SUBJECT must be'
@@ -264,6 +265,17 @@ for r in "${refusals[@]}"; do
   ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
 done
 pass 'refuses missing or malformed inputs before applying anything, each saying why'
+
+# #907: the workspace-size cap in setup.sh and install-host.sh is the golden snapshot's workspace drive,
+# deploy/microvm/build-snapshot.sh's WORKSPACE_IMAGE_BYTES. Changing one without the others fails here.
+snap_mb="$(sed -n 's/^WORKSPACE_IMAGE_BYTES=\$((\(.*\)))$/\1/p' "$SRC/deploy/microvm/build-snapshot.sh")"
+[[ -n "$snap_mb" ]] || fail 'no WORKSPACE_IMAGE_BYTES=$((...)) line in deploy/microvm/build-snapshot.sh'
+snap_mb=$(((snap_mb) / 1024 / 1024))
+for f in "$SRC/deploy/sbx/setup.sh" "$SRC/deploy/sbx/install-host.sh"; do
+  cap="$(sed -n 's/^SNAPSHOT_WORKSPACE_MB=\([0-9]*\)$/\1/p' "$f")"
+  [[ "$cap" == "$snap_mb" ]] || fail "$f: SNAPSHOT_WORKSPACE_MB=$cap, but build-snapshot.sh's workspace drive is $snap_mb MiB"
+done
+pass "the workspace-size cap in setup.sh and install-host.sh is build-snapshot.sh's $snap_mb MiB workspace drive (#907)"
 
 # An openssl without Ed25519 (LibreSSL, OpenSSL < 1.1.1) is refused before anything is applied.
 mkdir -p "$TMP/oldssl"
@@ -407,8 +419,14 @@ jtok="$(secret_val moca-mu1 SH_JANITOR_TOKEN)"
 [[ "$jtok" =~ ^[0-9a-f]{64}$ ]] || fail 'no 64-hex SH_JANITOR_TOKEN in moca-mu1'
 mu1_applies="$(grep '^secret moca-mu1 ' "$MOCK_STATE/applies.log")"
 [[ -n "$mu1_applies" ]] || fail 'moca-mu1 was never applied'
-! grep -vx 'secret moca-mu1 SH_JANITOR_TOKEN,SH_SESSION_TOKEN_PRIVATE_KEY' <<<"$mu1_applies" ||
+! grep -vx 'secret moca-mu1 SH_INSTALLER_TOKEN,SH_JANITOR_TOKEN,SH_SESSION_TOKEN_PRIVATE_KEY' <<<"$mu1_applies" ||
   fail "an apply of moca-mu1 omits a key (server-side apply would prune it): $(sort -u <<<"$mu1_applies")"
+# The installer token (SH_INSTALLER_TOKEN): generated once like the janitor's, in every apply,
+# 64 hex, and NEVER written into any bundle or file outside the Secret -- it is the operator's.
+itok="$(secret_val moca-mu1 SH_INSTALLER_TOKEN)"
+[[ "$itok" =~ ^[0-9a-f]{64}$ ]] || fail 'no 64-hex SH_INSTALLER_TOKEN in moca-mu1'
+! find "$GEN" -type f -exec grep -lF "$itok" {} + 2>/dev/null | grep -q . ||
+  fail 'the installer token leaked into a generated bundle or file'
 JB="$GEN/janitor"
 mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 [[ -f "$JB/janitor.env" && -f "$JB/janitor.token" ]] || fail 'no janitor bundle (janitor.env + janitor.token)'
@@ -727,7 +745,7 @@ grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 
 pass 'with no worker bundles, SBX_LOWER_WORKSPACE_IDLE=1 under a live maximum is a host change: refused unless acknowledged (528h; off: 216h)'
 
 # 4b'. A template, subject or quota change is the control plane's alone: it rolls the control plane
-# and not the relay, so running Execs survive it (RUNBOOK §5).
+# and not the relay, so running Execs survive it (docs/operate/sandbox-service/runbook.md §5).
 run_setup export SBX_TEMPLATES_FILE="$TMP/one.json" SBX_ALLOWED_SUBJECTS='github:1' SBX_MAX_PER_SUBJECT=7 ||
   fail 'a run with one template, one subject and a new quota failed'
 render
@@ -990,7 +1008,7 @@ raw_val() { jq -r --arg k "$2" '.data[$k] // empty' "$MOCK_STATE/secret-$1.json"
 # The set of Secret names ever applied, and the ConfigMap keys: what "the applied object set" means here.
 applied_names() { awk '{print $1, $2}' "$MOCK_STATE/applies.log" | sort -u | tr '\n' ';'; }
 
-# 13b. The oidc identity provider (docs/guides/oidc-login-w3id.md): the settings the base's env
+# 13b. The oidc identity provider (docs/guides/oidc-login.md): the settings the base's env
 # wiring reads, the oidc: subject grammar, no GitHub client id required, and the settings hash
 # stamped (the pod rolls). The client secret never appears: it is the operator's moca-oidc Secret,
 # untouched.
@@ -1517,7 +1535,7 @@ for unset_it in 'unset SBX_REDIS_IMAGE' 'export SBX_REDIS_IMAGE='; do
   ! run_setup eval "$unset_it" || fail "switched a Redis 7 namespace to Valkey ($unset_it)"
   grep -qF "$R7" "$TMP/out" || fail "the Redis 7 refusal does not name the current image ($unset_it)"
   grep -q 'set SBX_REDIS_IMAGE to that image pinned by digest' "$TMP/out" || fail 'the Redis 7 refusal does not say to set SBX_REDIS_IMAGE'
-  grep -q 'RUNBOOK.md §2' "$TMP/out" || fail 'the Redis 7 refusal does not point to RUNBOOK §2'
+  grep -q 'docs/operate/sandbox-service/runbook.md §2' "$TMP/out" || fail 'the Redis 7 refusal does not point to docs/operate/sandbox-service/runbook.md §2'
   ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'changed something before refusing to switch Redis 7 to Valkey'
   [[ ! -f "$K" ]] || fail 'applied an overlay before refusing to switch Redis 7 to Valkey'
 done

@@ -6,14 +6,14 @@ plan behind them is [`REORG-PLAN.md`](REORG-PLAN.md).
 
 ## Where things go
 
-| Content                                        | Home                                                                                  |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------- |
-| How to install or run one deployment path      | Next to its scripts: `deploy/<path>/README.md`                                        |
-| Which path to pick, cross-path overview        | `docs/get-started/`                                                                   |
-| One decision and its alternatives              | An ADR in `docs/adrs/` (immutable apart from the Status line and a Revisions section) |
-| A design and its reasoning                     | A spec in `docs/specs/`, registered in `docs/specs/README.md`                         |
-| Throwaway implementation checklist             | A plan; plans are local and gitignored (`docs/plans/README.md`)                       |
-| Working notes, runbooks, measurement write-ups | `docs/notes/`                                                                         |
+| Content                                        | Home                                                                                                                                                                             |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| How to install or run one deployment path      | A page in `docs/operate/` (`harness/<path>.md`, or under `sandbox-service/`); its `deploy/<path>/README.md` keeps a pointer and what applies to a checkout (local builds, tests) |
+| Which path to pick, cross-path overview        | `docs/get-started/`                                                                                                                                                              |
+| One decision and its alternatives              | An ADR in `docs/adrs/` (immutable apart from the Status line and a Revisions section)                                                                                            |
+| A design and its reasoning                     | A spec in `docs/specs/`, registered in `docs/specs/README.md`                                                                                                                    |
+| Throwaway implementation checklist             | A plan; plans are local and gitignored (`docs/plans/README.md`)                                                                                                                  |
+| Working notes, runbooks, measurement write-ups | `docs/notes/`                                                                                                                                                                    |
 
 Do not put design reasoning in a how-to or install steps in a spec. Keep concept and reference
 content free of Knative/KEDA specifics: put substrate differences in a per-path table, or in a
@@ -22,7 +22,7 @@ clearly marked "Legacy" note, so removing the Legacy path deletes a row instead 
 ## Maturity labels and banners
 
 Every install path, guide and reference page states **Stable**, **Preview** or **Legacy** (meanings
-in the [documentation map](index.md#maturity-labels)). The label must agree with the milestone
+in the [Maturity and lifecycle](reference/maturity-and-lifecycle.md)). The label must agree with the milestone
 registry; if it does not, fix the registry in the same change.
 
 Use this banner verbatim, changing only the bracketed parts.

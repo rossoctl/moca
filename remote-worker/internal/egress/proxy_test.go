@@ -363,6 +363,67 @@ func TestIdentityComesFromTheAcceptingSocket(t *testing.T) {
 	}
 }
 
+// Allow-everything mode: a host that is off the allowlist and resolves to a
+// private address still tunnels -- the allowlist is off and CheckAddr runs with an
+// all-covering permit list, so only its always-refused tier remains.
+func TestAllowAllTunnelsOffAllowlistAndPrivate(t *testing.T) {
+	up := newTCPUpstream(t, echo)
+	h := newHarness(t, "up.test:443", func(c *Config) {
+		c.AllowAll = true
+		c.PermitCIDRs = nil // 127.0.0.1 would need a permit without AllowAll
+	})
+	h.res.set("evil.test", "127.0.0.1", "10.0.0.5")
+	c := dial(t, h.register("vm-1", "run-a"))
+	connect(t, c, fmt.Sprintf("evil.test:%d", up.port))
+	c.Write([]byte("ping"))
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(c, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("echo %q, %v", buf, err)
+	}
+	c.Close()
+	e := h.sink.waitEvent(t, DecisionTunnel)
+	if e.Host != "evil.test" || e.Status != 200 {
+		t.Fatalf("event %+v", e)
+	}
+}
+
+// Allow-everything mode keeps the always-refused tier: the cloud metadata endpoints (AWS
+// IMDSv4/v6, and the IPv6 form an allowlist could not name anyway) and link-local are refused
+// exactly as with a configured list -- agent code runs on untrusted content, so it must not
+// fetch the host's instance credentials whatever the operator permitted (review #886).
+func TestAllowAllStillRefusesCloudMetadata(t *testing.T) {
+	h := newHarness(t, "up.test:443", func(c *Config) {
+		c.AllowAll = true
+		c.PermitCIDRs = nil
+	})
+	path := h.register("vm-1", "run-a")
+	// An IPv6 literal in a CONNECT authority is bracketed, as a client sends it; the refusal
+	// names the address itself, unbracketed.
+	for _, addr := range []string{"169.254.169.254", "[fd00:ec2::254]", "[fe80::1]"} {
+		name := strings.Trim(addr, "[]")
+		resp, body := roundTrip(t, dial(t, path), fmt.Sprintf("CONNECT %s:80 HTTP/1.1\r\n\r\n", addr))
+		assertRefusal(t, resp, body, 403, DecisionDestinationPrivate, name)
+	}
+}
+
+// NewProxy accepts an empty Allow only with AllowAll: the allow-everything mode's Config is
+// built without a list (ConfigFromEnv sets none), while an ordinary Config with no list is the
+// misconfiguration it always was (review #886).
+func TestNewProxyEmptyAllowOnlyWithAllowAll(t *testing.T) {
+	res := newResolver()
+	// Every field but the allowlist, in both shapes: NewProxy's other validations must not
+	// shadow the one under test.
+	base := Config{Resolver: res, Credentials: NoCredentials{}, Audit: &recSink{}, DialTimeout: time.Second,
+		MaxConnsPerVM: 8, MaxRequestsPerSession: 100}
+	if _, err := NewProxy(Config{AllowAll: true, Resolver: res, Credentials: NoCredentials{}, Audit: &recSink{},
+		DialTimeout: time.Second, MaxConnsPerVM: 8, MaxRequestsPerSession: 100}); err != nil {
+		t.Fatalf("allow-all with no allowlist: %v", err)
+	}
+	if _, err := NewProxy(base); err == nil || err.Error() != "egress: empty allowlist" {
+		t.Fatalf("empty allowlist without allow-all: %v", err)
+	}
+}
+
 func TestOffAllowlistIsANamed403(t *testing.T) {
 	up := newTCPUpstream(t, echo)
 	h := newHarness(t, fmt.Sprintf("up.test:%d", up.port), nil)

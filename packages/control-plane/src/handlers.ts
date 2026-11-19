@@ -128,6 +128,12 @@ export interface CpConfig {
   refreshReuseGraceSeconds: number;
   /** The shared bearer the data plane presents to /internal/credentials (spec §5.3.1). */
   exchangeToken?: string;
+  /**
+   * `SH_INSTALLER_TOKEN` (a credential, at least 32 characters): a static operator bearer that
+   * acts as the synthetic `installer` subject on the members routes (enrollment and roles) and
+   * nowhere else. Absent refuses it everywhere -- fail-closed, like the janitor's.
+   */
+  installerToken?: string;
   /** Deployment-level gateway origin, used when a credential carries no `endpoint` (spec §6.2). */
   defaultInferenceEndpoint?: string;
   /**
@@ -769,7 +775,7 @@ export function indexPage(profile: RouteProfile, version?: string): string {
       ? [
           'For sandboxes, log in with:',
           '  mocactl sbx login --control-plane-url <this URL>',
-          `  (guide: ${GUIDE}/sbx/user-guide.md)`,
+          `  (guide: ${GUIDE}/sandbox/user-guide.md)`,
         ]
       : []),
     ...(harness

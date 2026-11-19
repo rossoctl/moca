@@ -35,6 +35,7 @@ export type WorkerToSupervisor =
       asyncReclaims?: number;
       asyncDeadLetters?: number;
       asyncClaimDeniedFull?: number;
+      asyncDeferredSubject?: number;
       asyncQueueDepth?: number;
       asyncOldestAgeMs?: number;
     };
@@ -59,11 +60,12 @@ export interface WorkerTelemetry {
 export interface TelemetryAggregates {
   readonly leaseSaturation: number;
   readonly fileOpP95Ms: number;
-  /** §7's four async counts, summed over the workers that reported them. */
+  /** §7's async counts, summed over the workers that reported them. */
   readonly asyncClaims: number;
   readonly asyncReclaims: number;
   readonly asyncDeadLetters: number;
   readonly asyncClaimDeniedFull: number;
+  readonly asyncDeferredSubject: number;
   /**
    * Queue depth and oldest-entry age, from SLOT 0 ONLY (§9.2). They describe Redis, not a worker,
    * and §7 wants them once per deployment; this package cannot query Redis itself. NaN while slot 0
@@ -132,6 +134,7 @@ interface Slot {
   asyncReclaims: number;
   asyncDeadLetters: number;
   asyncClaimDeniedFull: number;
+  asyncDeferredSubject: number;
   asyncQueueDepth: number;
   asyncOldestAgeMs: number;
 }
@@ -231,6 +234,7 @@ export class WorkerPool {
       asyncReclaims: sum((s) => s.asyncReclaims),
       asyncDeadLetters: sum((s) => s.asyncDeadLetters),
       asyncClaimDeniedFull: sum((s) => s.asyncClaimDeniedFull),
+      asyncDeferredSubject: sum((s) => s.asyncDeferredSubject),
       asyncQueueDepth: zero?.asyncQueueDepth ?? Number.NaN,
       asyncOldestAgeMs: zero?.asyncOldestAgeMs ?? Number.NaN,
     };
@@ -388,6 +392,7 @@ export class WorkerPool {
       asyncReclaims: NaN,
       asyncDeadLetters: NaN,
       asyncClaimDeniedFull: NaN,
+      asyncDeferredSubject: NaN,
       asyncQueueDepth: NaN,
       asyncOldestAgeMs: NaN,
     };
@@ -444,6 +449,8 @@ export class WorkerPool {
         if (msg.asyncDeadLetters !== undefined) slot.asyncDeadLetters = msg.asyncDeadLetters;
         if (msg.asyncClaimDeniedFull !== undefined)
           slot.asyncClaimDeniedFull = msg.asyncClaimDeniedFull;
+        if (msg.asyncDeferredSubject !== undefined)
+          slot.asyncDeferredSubject = msg.asyncDeferredSubject;
         if (msg.asyncQueueDepth !== undefined) slot.asyncQueueDepth = msg.asyncQueueDepth;
         if (msg.asyncOldestAgeMs !== undefined) slot.asyncOldestAgeMs = msg.asyncOldestAgeMs;
         return;

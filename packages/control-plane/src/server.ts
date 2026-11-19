@@ -5,10 +5,11 @@ import { isIP } from 'node:net';
 import { CpError, writeError } from './errors.js';
 import type { EgressHost } from './egress-config.js';
 import { checkExchangeAuth, checkStaticBearer } from './exchange.js';
+import { INSTALLER_SUBJECT } from './identity.js';
 import { HANDLERS, apiIssuer, type CpDeps, type RequestCtx } from './handlers.js';
 import { membershipNow } from './handler-util.js';
 import { matchRoute, type RouteSpec, bodyLimitFor } from './routes.js';
-import { verifyToken } from './token.js';
+import { verifyToken, type TokenClaims } from './token.js';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
@@ -108,6 +109,25 @@ function authorize(route: RouteSpec, req: IncomingMessage, deps: CpDeps, ctx: Re
     checkExchangeAuth(presented, deps.config.exchangeToken);
     ctx.exchangeAuthorized = true;
     return;
+  }
+  if (route.auth === 'admin') {
+    // The members routes: an admin's API token, or the installer's static bearer. The bearer is
+    // checked first, timing-safe over fixed-length digests and fail-closed (an unset
+    // SH_INSTALLER_TOKEN matches nothing); a match mints the synthetic INSTALLER_SUBJECT principal
+    // with the admin role -- a subject form SUBJECT_RE refuses, so no login can ever mint it, and
+    // onAllowList admits the role, so the enrollment gate holds. A non-matching bearer falls
+    // through to the shared API-token verification below, where a non-token is refused as before.
+    if (
+      presented &&
+      deps.config.installerToken &&
+      timingSafeEqual(
+        createHash('sha256').update(presented).digest(),
+        createHash('sha256').update(deps.config.installerToken).digest(),
+      )
+    ) {
+      ctx.principal = { sub: INSTALLER_SUBJECT, roles: ['admin'] } as TokenClaims;
+      return;
+    }
   }
   if (route.auth === 'janitor') {
     // The host janitor's SH_JANITOR_TOKEN, and nothing else: a user's or an admin's API token is

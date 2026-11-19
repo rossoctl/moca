@@ -451,7 +451,7 @@ registered build that later turns out wrong.
   write and a policy write that sends `expect` never drop each other's change. A policy write
   without `expect` is last-writer-wins: it replaces the policy as sent, overrides included. The
   precondition is opt-in, as a quota write's is; the documented path
-  ([RUNBOOK](../../deploy/sbx/RUNBOOK.md) §5, writing the policy) sends it. It is
+  ([RUNBOOK](../operate/sandbox-service/runbook.md) §5, writing the policy) sends it. It is
   enforced at once, on the next create, queued build and
   activation: a subject's limits are its override, else the default (§6.2). A quota holds
   `templates`, `buildsQueued` and `active`, and `owned` optionally: an override without `owned`

@@ -1,6 +1,6 @@
 # ADR-0047: P6 async fan-out is a drain loop inside the turn worker, sharing its admission budget
 
-- **Status:** Accepted (2026-11-12; M1 and M3 implemented by #704, #713, #717, #765; M2, which lifts the single-tenancy gate, owed) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-11-17; all three milestones implemented — M1 by #704, #713, #717, M2 by #788, #807, #822 (`turn_exp`, grant-at-dequeue, the single-tenancy gate lifted), M3 by #765 — with per-turn budgets, running-turn cancel and the per-worker half of per-subject fairness by #391) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-11-05
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-11-05-p6-async-fan-out-design.md`](../specs/2026-11-05-p6-async-fan-out-design.md)
@@ -12,7 +12,7 @@
 
 ## Context
 
-Async fan-out — Archetype A of [`../concepts/dispatch-archetypes.md`](../concepts/dispatch-archetypes.md)
+Async fan-out — Archetype A of [`../concepts/dispatch-archetypes.md`](../harness/concepts/dispatch-archetypes.md)
 — is submitting N leaf turns that run later, draining them at a concurrency cap below N, and
 collecting per-leaf results. Its only implementation was `leaf-job.ts`, a Redis Streams drainer run
 as a KEDA `ScaledJob`, and it existed on the Knative/KEDA deployment path alone.
@@ -70,6 +70,17 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   would make it a negotiation. The clamp lives in the control plane at mint, never in a value the
   worker or the caller supplies, since §3 assumes a misbehaving client and an unclamped request
   would hand that client control of its own credential's lifetime.
+
+  **Amended by #391: the worker now ENFORCES that instant, and `caps.costUsd` is refused.** The
+  clamp decided when the grant stops working; it did not stop the leaf, which the first cut left to
+  die of 401s. The worker's watchdog aborts at `turn_exp` as sent — never recomputed from
+  `caps.wallClock`, so there is no second copy of the clamp — and the leaf reports
+  `failed: budget`. `caps.tokens` is enforced on the other side, inside the leaf, by the budget
+  voter the `SH_BUDGET_TOKENS` deployment default already arms; a turn's own cap can only narrow
+  that default, never raise it (`resolveBudgetLimit` takes the tighter of the two). The
+  third cap, `costUsd`, is refused at submission with `400 invalid_request`: there is no price table
+  in the runtime, so accepting it promised an enforcement that silently never happened.
+
 - **The turn record outlives its result.** Its TTL is `LEAF_RESULT_TTL_SECONDS` plus a margin, set
   when the turn goes terminal, not at creation; a non-terminal record carries no TTL and the
   reaper's `lost` transition is what guarantees every record eventually becomes terminal. Deriving
@@ -102,6 +113,18 @@ queue carries a turn id and nothing else; the leaf's credentials are minted when
   `cancelled` and the drain loop skips it at claim; a `running` leaf runs to completion and the call
   answers `409`. Interrupting a running leaf needs a cancel signal addressed to one specific worker,
   which does not exist for async — interactive cancel (ADR-0040) rides the turn's own connection.
+
+  **Amended by #391: `running` turns are cancellable, and that machinery was never needed.** The
+  premise was wrong: the worker already builds its own `TurnStore` on `REDIS_URL` to finalize
+  records, so the control plane and the worker share one keyspace and a flag is enough. The
+  `DELETE` on a `running` record sets `cancelRequested` and leaves the state at `running` — every
+  redelivery CAS is written against the open states, so a new state name would strand a reclaimed
+  entry — and answers `202`, because cancel stays best-effort and a leaf that finishes first stays
+  finished. The job runner polls the flag every 2 s beside the heartbeat it already runs and aborts
+  the leaf's signal; `aborted` maps to the record state `cancelled` as it always did. `409` now
+  means only "already terminal". This holds while records and results share a keyspace; a tenanted
+  M2 that splits them needs the flag delivered another way.
+
 - **Revive `packages/work-queue` _and_ `harness/src/leaf-job-runner.ts` from `38aa2146`** behind the
   existing `WorkQueue` interface, with the KEDA-era parity audit (#689) recorded below rather than
   assumed. The runner is not optional detail: its `processOne` holds the `touch` heartbeat that keeps
@@ -208,7 +231,9 @@ never-submitted and reaped-as-lost.
   synchronous path (the admission fix below); two is a migration rather than a cost.
 - **Full cancellation, including running leaves.** Rejected for this design as new
   control-plane-to-specific-worker machinery; the per-turn caps already bound how long a leaf runs,
-  so it is a latency improvement, not a containment property. Recorded as owed.
+  so it is a latency improvement, not a containment property. Recorded as owed. (**Taken in #391**
+  once it turned out no machinery was required — the two sides share a keyspace, so the rejection
+  was pricing a transport that need not be built. See the amendment above.)
 - **Abort the in-flight leaf on drain, as `armDetachedDrain` does for a detached interactive turn.**
   An interactive turn aborts because a client is waiting on a stream; nobody waits on an async leaf,
   so redelivery is strictly better. A 1800 s leaf cannot finish in a 20 s grace window regardless.
@@ -268,11 +293,18 @@ never-submitted and reaped-as-lost.
   question inside it stays open and belongs to #388: whether refresh past `turn_exp` is refused
   outright (MI1 §6.2's current rule, and what M2 should ship) or whether a provably-still-running
   leaf may extend once — the §6.2 heartbeat is what such an extension would key off, since it
-  already proves liveness. Also owed: cancelling a running leaf; result retention beyond 24 h and
-  richer artifacts; per-class concurrency caps, for which `async_claim_denied_full` against
-  interactive `429`s is the measurement that would justify them; the documentation updates in #690
-  (ADR-0041's "Still owed" note, the Archetype A row, the `async_removed` entry); and the wording
-  amendment where MU1 §4.2 and MI1 §6.5/§10 still say "owned `/v1/runs`" against #279's resolution.
+  already proves liveness. Also owed (result retention and richer artifacts were done in #390,
+  cancelling a running leaf in #391, and per-subject fairness PARTLY — a claim-time check that reads
+  the entry's owner and hands a capped owner's entry back unrun and unpenalised, since the queue is
+  one FIFO stream and a claim reveals the owner only after it is taken, which binds an owner's mixed
+  sync+async load but not an async-only backlog; spec §12 records both that limit and the 90 s
+  latency the defer buys): the cluster-wide half of per-subject fairness; per-turn cost attribution
+  (#859, #391's split-out half, which wants the price table #391 established does not exist);
+  per-class concurrency caps, for which `async_claim_denied_full` against interactive `429`s is the
+  measurement that would justify them; the documentation updates in #690 (ADR-0041's "Still owed"
+  note, the Archetype A row, the `async_removed` entry); and the wording amendment where MU1 §4.2
+  and MI1 §6.5/§10 still say "owned `/v1/runs`" against #279's resolution. `/v1/batches` is no
+  longer owed: #537 decided against it (spec §4.4).
 
 ---
 

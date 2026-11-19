@@ -152,11 +152,17 @@ describe('the route table', () => {
     // nothing under /v1 accepts scope `turn:write` (plan gap #7).
     // The named exceptions: discovery (public config, read before login, GET-only), and the host
     // janitor's read, which takes the janitor's bearer instead (SBX0 §8.3), and moca-egress's lookup,
-    // which takes its host's egress token (SBX0.2b §4.2).
+    // which takes its host's egress token (SBX0.2b §4.2), and the members routes, which take an
+    // admin's api token or the installer's static bearer (SH_INSTALLER_TOKEN).
     const EXEMPT = new Map([
       ['GET /v1/discovery', 'none'],
       ['GET /v1/janitor/sandboxes', 'janitor'],
       ['POST /v1/egress/credential', 'egress'],
+      ['GET /v1/subjects', 'admin'],
+      ['PUT /v1/subjects/{subject}', 'admin'],
+      ['DELETE /v1/subjects/{subject}', 'admin'],
+      ['PUT /v1/subjects/{subject}/roles/admin', 'admin'],
+      ['DELETE /v1/subjects/{subject}/roles/admin', 'admin'],
     ]);
     const wrong = ROUTES.filter(
       (r) =>

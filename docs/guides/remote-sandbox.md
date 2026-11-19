@@ -1,12 +1,12 @@
 # Attach a remote sandbox
 
 > **Preview.** A sandbox is a `remote-worker` that **dials out** to the relay, so it can live on another host with no
-> inbound route ([Brain and hands](../concepts/brain-and-hands.md)). Only two remote arrangements are documented for
+> inbound route ([Brain and hands](../harness/concepts/brain-and-hands.md)). Only two remote arrangements are documented for
 > P6: extra container sandboxes on the same host or cluster, and a microVM host attached to an OpenShift relay. Running
 > a container sandbox on an unrelated host against a P6 relay is not documented anywhere; the recipe in step 2 is
-> assembled from the pieces and **has not been run**. Read [Sandboxes and tiers](../concepts/sandboxes-and-tiers.md) and
+> assembled from the pieces and **has not been run**. Read [Sandboxes and tiers](../harness/concepts/sandboxes-and-tiers.md) and
 > the [security model](../reference/security-model.md#isolation-by-tier) and the
-> [multi-user isolation notes](../concepts/multi-user.md#isolation-between-users-today) first: a sandbox you attach joins the
+> [multi-user isolation notes](../harness/concepts/multi-user.md#isolation-between-users-today) first: a sandbox you attach joins the
 > shared pool and is not bound to any user.
 
 ## What the worker needs
@@ -117,7 +117,7 @@ sudo deploy/microvm/setup-microvm.sh --remote ~/moca-p4-<id>
 
 The host needs outbound TCP 443 to the relay Route. `setup.sh` refuses this on Kind and on the single-namespace OpenShift
 target. To revoke a host, remove its id from `SH_P4_SANDBOX_IDS`; restarting the relay drops attached hosts. See
-[`deploy/k8s/README.md`](../../deploy/k8s/README.md) and [P4 on P6](../../deploy/microvm/P4-ON-P6.md).
+[`deploy/k8s/README.md`](../operate/harness/kubernetes.md) and [P4 on P6](../operate/harness/microvm-tier.md).
 
 ## Not supported
 

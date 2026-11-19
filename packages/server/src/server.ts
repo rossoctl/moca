@@ -103,6 +103,9 @@ export function buildConfig(auth?: TurnAuth | null): TurnConfig {
       ...(auth.sandboxBuildId ? { sandboxBuildId: auth.sandboxBuildId } : {}),
       // sessionModel, never model: runLeaf strips sessionModel, so /runs keeps its envelope's or the env's model.
       ...(auth.model ? { sessionModel: auth.model } : {}),
+      // The async claim's `caps.tokens` (#391). Absent for a sync turn, which then reads
+      // SH_BUDGET_TOKENS exactly as before.
+      ...(auth.budgetTokens ? { budgetTokens: auth.budgetTokens } : {}),
       ...server,
     };
   }
@@ -122,7 +125,10 @@ const turnAuthDeps = () => turnAuthDepsFromEnv(process.env);
 // The per-subject in-flight count (#360, MI1 §13). Process-wide, like the turn registry: every
 // worker (and the standalone tier) holds its own, so the cap bounds a subject to `cap` slots per
 // worker rather than per host — see subject-quota.ts for why that trade is the right interim.
-const subjectCounter = new SubjectCounter();
+//
+// Exported for `worker.ts` to hand to the async drain (#391): async leaves and interactive turns
+// are the same subject's work and must count against one number, or the cap bounds neither.
+export const subjectCounter = new SubjectCounter();
 
 // Detachable turns (turn-reattach spec §4). Read per request, like the keyset: a deployment flips
 // it with an env change and a restart, and tests flip it per test.

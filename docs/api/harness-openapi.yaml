@@ -6,7 +6,7 @@
 #
 # Scope, mirroring the control-plane document's own boundary note: only the client-facing
 # surface. The handler also serves the workload lifecycle (/workloads — off unless the operator
-# enables it, see docs/context-service.md) and the deprecated pre-rename paths (/run-leaf,
+# enables it, see docs/harness/how-to/workloads.md) and the deprecated pre-rename paths (/run-leaf,
 # /run-leaf/status) — listed in src/routes.ts as surface: 'internal' and not described here.
 # The unprefixed /turn and /runs ARE described: supported, frozen aliases of /v1/turn and /v1/runs
 # (docs/reference/change-policy.md, decision 3; #507), whose request body and responses are $refs
@@ -15,7 +15,7 @@
 openapi: 3.1.0
 info:
   title: MOCA harness (data plane)
-  version: 1.5.0
+  version: 1.7.0
   description: |
     The agent execution tier: HTTP server and P6 workers that run turns and jobs against sandboxed
     workspaces. It is a separate deployable from the control plane, and a client that knows only
@@ -212,7 +212,10 @@ paths:
           description: |
             subject_quota_exceeded — the authenticated subject already holds
             SH_TURNS_PER_SUBJECT in-flight turns on this worker (default half the per-worker
-            turn cap). Distinct from the supervisor's pre-hand-off `overloaded` 429, which has
+            turn cap), counting the subject's running QUEUED turns as well as its interactive
+            ones: one owner's async fan-out and its /turn traffic share one per-subject budget
+            (#391), so a caller can be refused here while its own queued leaves are running.
+            Distinct from the supervisor's pre-hand-off `overloaded` 429, which has
             no error body: this one names the caller's own share, so a client can tell "you are
             over your share" from "the host is full". Carries Retry-After. No quota is
             configured (neither SH_TURNS_PER_SUBJECT nor SH_TURNS_PER_WORKER set) or the caller
@@ -475,12 +478,19 @@ paths:
         (ADR-0041), whose KEDA drainer consumed the queue, and is answered 400 async_removed. This
         route is not restored (#687) — it is unauthenticated when `SH_REQUIRE_AUTH` is off. Its
         replacement is the authenticated `POST /v1/sessions/{id}/turns` with `async: true`
-        (ADR-0047, #686), designed and not yet implemented.
+        (ADR-0047, #686), which has shipped.
+
+        A client disconnect does not cancel the run: it finishes and persists its result record,
+        which `GET /runs/status` serves afterwards, so submit-then-poll is supported here. This is
+        permanent, not interim (ADR-0028). `POST /v1/turn` is the opposite and aborts on
+        disconnect, unless the turn is detachable (see DETACHABLE TURNS below, which is the one
+        `/turn` that outlives its client). A run that must survive a worker restart belongs on
+        async turns, which have redelivery.
 
         `sandboxPoolSelector` is internal routing state and is deleted at the request boundary —
         never settable by an external caller. A synchronous prompt run naming a `workloadId` runs
         with that workload's frozen context, which Moca copies read-only into the sandbox; the
-        session token's user must own the workload (docs/context-service.md). With workloads off
+        session token's user must own the workload (docs/harness/how-to/workloads.md). With workloads off
         it is refused with 501 workload_runs_unavailable rather than run on the default pool; a
         synchronous one without a token is 401 token_required.
         `contextWritable: true` gives that run its own writable copy of the context instead,
@@ -566,7 +576,7 @@ paths:
           description: |
             internal_error — not retryable as-is. workloads_misconfigured — the run named a
             workloadId, but the operator's Context Service settings are missing or unsafe
-            (docs/context-service.md).
+            (docs/harness/how-to/workloads.md).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -741,6 +751,12 @@ components:
         response: { type: string }
         stopReason: { type: string }
         errorMessage: { type: string }
+        budgetExceeded:
+          type: boolean
+          description: |
+            `true` when the turn's token cap was reached and tool calls were refused from then on
+            (#391). Reported because the loop itself stops with `stopReason: "end_turn"` in that
+            case, so the cap firing is otherwise invisible to the caller. Absent when it did not.
         usage: { $ref: '#/components/schemas/LeafUsage' }
         sandbox: { $ref: '#/components/schemas/TurnPlacement' }
         workspace: { $ref: '#/components/schemas/TurnWorkspace' }
@@ -763,11 +779,15 @@ components:
         workspaceReset:
           type: object
           description: |
-            Why the session's files moved — the tier is `sandbox.tier` above (and on the SSE
-            frame). `retiered`: the sandbox now serves another tier or sandbox template.
+            Why the session's earlier files are gone — the tier is `sandbox.tier` above (and on
+            the SSE frame). `detached`: the session's sandbox `from` is gone and the session moved.
+            `retiered`: the sandbox now serves another tier or sandbox template. `reclaimed`: the
+            session is still on `from`, but its workspace there no longer holds the harness's
+            marker file, most often because the worker reclaimed the idle workspace
+            (SH_WORKSPACE_IDLE). Clients ignore a reason they do not know.
           properties:
             from: { type: string }
-            reason: { type: string, enum: [detached, retiered] }
+            reason: { type: string, enum: [detached, retiered, reclaimed] }
     TurnWorkspace:
       type: object
       description: |
@@ -895,14 +915,19 @@ components:
       type: object
       required: [type, sessionId, from, tier, reason]
       description: |
-        First frame of a turn whose sandbox is not the one the session's previous turn used, so
-        the user learns at the turn itself why earlier files are gone (P6.3).
+        First frame of a turn whose workspace is not the one the session's previous turn left,
+        so the user learns at the turn itself why earlier files are gone: its sandbox is not the
+        one the previous turn used (`detached`, `retiered`; P6.3), or it is, but the workspace
+        there lost the session's marker (`reclaimed`, #338). `from` is the sandbox the files
+        were on; for `reclaimed` that is the turn's own sandbox (empty when the turn has none to
+        name). The model is told as well, in a message of its own beside the turn's prompt,
+        which is left as sent.
       properties:
         type: { type: string, enum: [workspace_reset] }
         sessionId: { type: string }
         from: { type: string }
         tier: { type: string }
-        reason: { type: string, enum: [detached, retiered] }
+        reason: { type: string, enum: [detached, retiered, reclaimed] }
     FrameDone:
       type: object
       required: [type, sessionId, stopReason]
@@ -923,6 +948,12 @@ components:
         sessionId: { type: string }
         stopReason: { type: string }
         errorMessage: { type: string }
+        budgetExceeded:
+          type: boolean
+          description: |
+            `true` when the turn's token cap was reached and tool calls were refused from then on
+            (#391). Reported because the loop itself stops with `stopReason: "end_turn"` in that
+            case, so the cap firing is otherwise invisible to the caller. Absent when it did not.
         usage: { $ref: '#/components/schemas/LeafUsage' }
         sandbox: { $ref: '#/components/schemas/TurnPlacement' }
         workspace: { $ref: '#/components/schemas/TurnWorkspace' }
@@ -1086,7 +1117,11 @@ components:
             status: { type: string, enum: [failed] }
             reason:
               type: string
-              enum: [no_verdict, invalid_verdict, bad_inputs, error, saturated]
+              enum: [no_verdict, invalid_verdict, bad_inputs, error, saturated, budget]
+              description: |
+                `budget` (#391): the turn spent a cap its caller set -- its token cap, or the wall
+                clock the control plane anchored at dequeue -- and the leaf was stopped. Terminal
+                like the other deterministic reasons; only `error` and `saturated` are retried.
             message: { type: string }
     RunStatus:
       oneOf:

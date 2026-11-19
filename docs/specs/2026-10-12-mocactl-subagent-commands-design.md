@@ -22,7 +22,7 @@ that survives its own exit, and later re-joins the result.
 
 The three commands and their flags are documented in
 [`packages/mocactl/README.md`](../../packages/mocactl/README.md) and
-[`docs/reference/cli-mocactl.md`](../reference/cli-mocactl.md); this section covers the
+[`docs/harness/reference/cli-mocactl.md`](../harness/reference/cli-mocactl.md); this section covers the
 decisions behind them.
 
 ### 2.1 `mocactl spawn` — fork a detached leaf-turn worker
@@ -132,7 +132,7 @@ a `child exited; waiting for result` detail. `/runs/status` returns `200 {status
 
 ## 3. Error handling
 
-See [`docs/reference/cli-mocactl.md`](../reference/cli-mocactl.md) for validation exit
+See [`docs/harness/reference/cli-mocactl.md`](../harness/reference/cli-mocactl.md) for validation exit
 codes. Behavioral notes:
 
 - `createSession` failure: no ledger row written, exit `1`. Fork failure (sync throw or

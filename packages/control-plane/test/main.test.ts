@@ -511,6 +511,7 @@ describe('the control plane`s secrets as systemd credentials (deploy/vm)', () =>
       'MOCA_GRANT_SIGNING_KEY',
       'SH_CREDENTIAL_KEK',
       'SH_EXCHANGE_TOKEN',
+      'SH_INSTALLER_TOKEN',
       'SH_JANITOR_TOKEN',
       'SH_OIDC_CLIENT_SECRET',
       'SH_OPERATOR_INFERENCE_TOKEN',

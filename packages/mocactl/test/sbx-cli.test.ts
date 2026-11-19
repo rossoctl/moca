@@ -70,7 +70,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
           'An sbx sandbox is a workspace on the sandbox service, made from a template',
         ),
       ).toBe(true);
-      const about = text.slice(0, text.indexOf('usage (the sandbox service, SBX0):'));
+      const about = text.slice(0, text.indexOf('usage (the sandbox service):'));
       const flat = about.replace(/\s+/g, ' ');
       // What the commands really do: copies made by up and push, the configuration up writes,
       // Bob's local tools left live, the agent's edits back by pull, how long a sandbox lasts,
@@ -103,7 +103,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       const text = io.errs.join('\n');
       expect(text).toMatch(/^sbx: |^Unknown option/);
       // The whole usage for an unknown command, the command's own for a misused one (#867).
-      expect(text).toMatch(/\nusage( \(the sandbox service, SBX0\))?:\n/);
+      expect(text).toMatch(/\nusage( \(the sandbox service\))?:\n/);
       expect(text).not.toContain('An sbx sandbox is');
     }
   });

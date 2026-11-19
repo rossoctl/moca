@@ -648,7 +648,7 @@ be running)`.
 - `POST /v1/sandboxes` accepts `mode` and `idleTimeoutS`. `PUT /v1/sandboxes/{id}/mode` changes
   them. Both need the owner's **user API token**. A sandbox token is never enough. Operator policy
   (`SH_SANDBOX_MODES_ALLOWED`) decides which modes a user may pick. Its default is `per-exec` until
-  `docs/sbx/security-review.md` has its lease section (§11) and plan 4's live smoke test passes;
+  `docs/notes/sandbox-security-review.md` has its lease section (§11) and plan 4's live smoke test passes;
   then `per-exec,lease`. Level 2 stays off until the security review covers it. The worker has no
   opt-in of its own, so this list is the switch.
 - Every change writes an audit record: who, old mode, new mode, epoch.
@@ -1051,7 +1051,7 @@ built from the plan-5 branch, with `lease-v1` and `lease-processes-v1`: the gues
 tests passed, and the whole `-run TestGate` suite passed, 76 of 76, none skipped, with no
 Firecracker process left behind. That was the second run. The first found two defects, both fixed
 before it: the agent's PID 1 exited on an interrupted vsock accept, and the host wrapped the
-process kinds in its command template (`docs/sbx/security-review.md` §7.3).
+process kinds in its command template (`docs/notes/sandbox-security-review.md` §7.3).
 
 ## 10. Validation: E17
 
@@ -1088,10 +1088,10 @@ What changes against per-`Exec`, and what bounds it:
 | An Exec could tamper with its own teardown (cgroup migration, the agent) or inject into a tracked process                                                  | Unprivileged Exec uid, a separate uid per tracked process, no capabilities, `no_new_privs`, a seccomp filter on `ptrace` and `process_vm_*`, root-owned cgroup tree, non-dumpable agent, setuid bits stripped, no user namespaces (§3.3, `TestGateLeasePrivilege`)                                      |
 | A tracked process runs code it loads from the workspace (a dev server with hot reload), so a later Exec can change what it runs by editing files           | Accepted. The workspace is the channel the agent works through. The strict rule bounds which _processes_ exist and are visible, not what code a visible process loads. `process_list` shows each tracked process; `process_stop` and `reset` end it                                                     |
 
-The security review of SBX0 (`docs/sbx/security-review.md`) gets a lease section before level 1
+The security review of SBX0 (`docs/notes/sandbox-security-review.md`) gets a lease section before level 1
 reaches the cohort, and a level-2 section before level 2 is allowed by policy.
 
-**As built (plan 5).** The level-2 section is `docs/sbx/security-review.md` §7, a **draft** that
+**As built (plan 5).** The level-2 section is `docs/notes/sandbox-security-review.md` §7, a **draft** that
 needs the security owner's sign-off. Until then `lease+processes` stays out of
 `SH_SANDBOX_MODES_ALLOWED`, and plan 5 changes no default. Beside the bounds above, the relay
 checks ahead of the worker: it refuses a process kind on a token whose `mode` claim is not

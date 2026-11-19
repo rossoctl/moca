@@ -279,6 +279,7 @@ describe('selectPoolSandbox remote dispatch', () => {
 
     expect(sel?.transport).toBeDefined();
     expect(seen?.opts?.workspaceKey).toBe('sess-1');
+    expect(sel?.workspaceKey).toBe('sess-1');
     // ...and the lease itself is taken under the holder, not the session id.
     expect(lease.acquired).toEqual(['sbx-remote-1']);
     expect(lease.acquiredHolders).toEqual(['sess-1:11111111-2222-3333-4444-555555555555']);
@@ -313,6 +314,8 @@ describe('selectPoolSandbox remote dispatch', () => {
     );
     expect(sel?.transport).toBeDefined();
     expect(seen?.opts?.workspaceKey).toBe('');
+    // And the selection says so, so no turn marks a workspace its Execs never reach (#338).
+    expect(sel?.workspaceKey).toBe('');
   });
 
   // A record without WORKSPACE_SUBDIR_CAPABILITY (the microVM worker is one such; its launcher

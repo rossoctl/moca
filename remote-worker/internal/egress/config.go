@@ -65,11 +65,19 @@ func ConfigFromEnv(get func(string) string) (Config, ControlConfig, error) {
 	if allowRaw == "" {
 		return cfg, cc, fmt.Errorf("%s is required", envAllow)
 	}
-	allow, err := ParseAllow(allowRaw)
-	if err != nil {
-		return cfg, cc, fmt.Errorf("%s: %w", envAllow, err)
+	// "*" alone is the allow-everything mode (Config.AllowAll): every
+	// destination restriction is off. It is recognised before ParseAllow,
+	// which keeps refusing "*" as an ordinary list entry -- "*,example.com"
+	// and a list that is only separators remain errors.
+	var err error
+	if allowRaw == "*" {
+		cfg.AllowAll = true
+	} else {
+		cfg.Allow, err = ParseAllow(allowRaw)
+		if err != nil {
+			return cfg, cc, fmt.Errorf("%s: %w", envAllow, err)
+		}
 	}
-	cfg.Allow = allow
 
 	for _, item := range strings.Split(get(envPermit), ",") {
 		item = strings.TrimSpace(item)

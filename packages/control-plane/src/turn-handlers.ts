@@ -216,6 +216,15 @@ export const TURN_HANDLERS: Record<string, Handler> = {
         turnId: turn.turnId,
         state: turn.state,
         attempts: turn.attempts,
+        // Only while a cancel is in flight (#391): the state is still `running`, and this is how a
+        // poller tells "running" from "running, stopping".
+        //
+        // Gated on the STATE, not on the flag alone. The flag is never cleared -- `toTerminal` keeps
+        // the whole record for the status read's TTL -- so a leaf that finished before it noticed the
+        // cancel would otherwise report `done` plus `cancelRequested: true` forever, which reads as
+        // "still stopping" on a turn that is over. The contract (openapi.yaml) says this field is
+        // present only on a running turn, so terminality drops it.
+        ...(turn.cancelRequested && turn.state === 'running' ? { cancelRequested: true } : {}),
         // PROJECTED, not the stored record (#390): the patch and the assistant text are fetched as
         // artifacts instead, so the RESPONSE is bounded whatever the leaf produced.
         //
@@ -266,9 +275,11 @@ export const TURN_HANDLERS: Record<string, Handler> = {
 
   /**
    * DELETE /v1/sessions/{id}/turns/{turnId} (§4.5). A `queued` turn flips to `cancelled` and the
-   * drain loop drops it at claim. Anything else is a 409 naming the state: a running leaf is NOT
-   * interrupted, because interrupting one needs control-plane-to-specific-worker machinery that does
-   * not exist (interactive cancel rides the turn's own connection; async has none). Owed in §12.
+   * drain loop drops it at claim. A `running` one is REQUESTED (#391): the record keeps its state
+   * and carries `cancelRequested`, the worker holding the leaf polls it, aborts the run and
+   * finalizes `cancelled`. Both answer 202, because both are accepted-not-done: a leaf that
+   * finishes before it notices stays finished, and the caller polls the status read either way.
+   * Anything else is a 409 naming the state.
    */
   cancelTurn: async (ctx, deps) => {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
@@ -276,17 +287,25 @@ export const TURN_HANDLERS: Record<string, Handler> = {
     const { turns } = service(deps);
     const outcome = await turns.cancel(turn.turnId, deps.now());
     if (outcome === 'conflict') {
+      // The state as `cancel` left it, not as this request first read it: a turn that went terminal
+      // between the two would otherwise be refused as the `queued` it no longer is, and 409 is the
+      // one answer a caller is meant to stop on.
+      const fresh = await service(deps).turns.get(turn.turnId);
       throw new CpError(
         'turn_not_cancellable',
-        `this turn is '${turn.state}'; only a queued turn can be cancelled`,
+        `this turn is '${fresh?.state ?? turn.state}'; only a queued or running turn can be cancelled`,
       );
     }
     await auditBestEffort(deps, 'turn_cancelled', turn.turnId, {
       subject: rec.owner,
       sessionId: rec.sessionId,
       turnId: turn.turnId,
-      decision: 'turn_cancelled',
+      decision: outcome === 'cancelling' ? 'turn_cancel_requested' : 'turn_cancelled',
     });
-    return { status: 202, body: { turnId: turn.turnId, state: 'cancelled' } };
+    // `state` is the record's own, so a requested cancel reports `running` and never a state the
+    // status read cannot also return.
+    return outcome === 'cancelling'
+      ? { status: 202, body: { turnId: turn.turnId, state: 'running', cancelRequested: true } }
+      : { status: 202, body: { turnId: turn.turnId, state: 'cancelled' } };
   },
 };

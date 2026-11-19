@@ -100,25 +100,30 @@ describe('metricsBody', () => {
     expect(body.env).not.toHaveProperty('AWS_SECRET_ACCESS_KEY');
   });
 
-  it('surfaces the four async counts, summed across workers', () => {
+  it('surfaces the five async counts, summed across workers', () => {
     const h = ready();
     h.forked[0]!.stats({
       asyncClaims: 7,
       asyncReclaims: 1,
       asyncDeadLetters: 0,
       asyncClaimDeniedFull: 3,
+      asyncDeferredSubject: 4,
     });
     h.forked[1]!.stats({
       asyncClaims: 5,
       asyncReclaims: 2,
       asyncDeadLetters: 1,
       asyncClaimDeniedFull: 0,
+      asyncDeferredSubject: 2,
     });
     expect(metricsBody(h.pool, {}).counters).toMatchObject({
       async_claims: 12,
       async_reclaims: 3,
       async_dead_letters: 1,
       async_claim_denied_full: 3,
+      // #391's fairness signal: the whole worker -> pool -> /metrics path, since an operator reads
+      // this number to tell "the per-owner cap is pacing a submitter" from "nothing is deferred".
+      async_deferred_subject: 6,
     });
   });
 

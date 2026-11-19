@@ -447,9 +447,14 @@ export function sessionPodCwd(
   return `${stripTrailingSlashes(podCwd)}/${sessionId}`;
 }
 
+/**
+ * Why a session's earlier files are gone. `detached` and `retiered`: the session moved off `from`
+ * (P6.3 spec §4). `reclaimed`: it did not move, but the workspace on `from`, its sandbox still, no
+ * longer carries the session's marker (#338; workspace-marker.ts), most often after an idle reclaim.
+ */
 export interface WorkspaceReset {
   from: string;
-  reason: 'detached' | 'retiered';
+  reason: 'detached' | 'retiered' | 'reclaimed';
 }
 
 export interface SelectedSandbox {
@@ -465,6 +470,12 @@ export interface SelectedSandbox {
   tier?: string;
   /** Present when this selection moved the session off its previous sandbox (P6.3 spec §4, §6). */
   workspaceReset?: WorkspaceReset;
+  /**
+   * The `workspace_key` this sandbox's Execs carry: the session id, or '' when it was dropped (a
+   * workload run that writes only in its context view), in which case there is no session
+   * workspace to mark (#338).
+   */
+  workspaceKey: string;
 }
 
 export interface SelectDeps {
@@ -773,6 +784,10 @@ async function select(
       // optional only because `sessionPodCwd` takes `SandboxRecord | undefined`.
       const rec = grpcById.get(name);
       const make = deps.makeTransport ?? GrpcRelayTransport;
+      const workspaceKey =
+        agentWritesInContext && rec?.capabilities.includes(WORKSPACE_SUBDIR_CAPABILITY)
+          ? ''
+          : sessionId;
       const transport = make(
         name,
         (deps.makeExecClient ?? ((id: string) => defaultExecClient(id, env)))(name),
@@ -791,15 +806,13 @@ async function select(
         // advertise it and refuses an empty key; today's workload deployments default to the
         // container tier, but the capability gate protects correctness regardless of default.
         {
-          workspaceKey:
-            agentWritesInContext && rec?.capabilities.includes(WORKSPACE_SUBDIR_CAPABILITY)
-              ? ''
-              : sessionId,
+          workspaceKey,
           ...(workload ? { workload } : {}),
         },
       );
       return {
         transport,
+        workspaceKey,
         podCwd: sessionPodCwd(podCwd, rec, sessionId),
         sandboxId: name,
         tier,
@@ -933,6 +946,11 @@ async function select(
     // Another first turn of this session claimed a different sandbox between our read and our claim.
     // Converge on it, once: two concurrent turns of one session must share one workspace.
     await got.release().catch(() => {});
+    // And close the channel `take()` opened for it, or this path leaks one per losing claim -- #894
+    // one caller up. The `raced` branch below is reached from a 503 the client retries, so it is the
+    // concurrency path that repeats hardest. Nothing is outstanding on it: `take()` neither seeds nor
+    // execs. Best effort, like the release: the loser still has to converge on the winner.
+    await got.transport.close().catch(() => {});
     if (raced) throw new SandboxAffinityPendingError(winner.sandboxId, 0);
     return select(env, headCwd, sessionId, opts, deps, true);
   }

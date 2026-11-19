@@ -110,6 +110,28 @@ describe('reduceFrame', () => {
       "workspace reset: sandbox 'c-0' is gone; this turn runs on a fresh workspace",
     );
   });
+
+  it('a reclaimed workspace says the session stayed on its sandbox (#338)', () => {
+    const frame = {
+      type: 'workspace_reset' as const,
+      sessionId: 's',
+      from: 'c-0',
+      tier: 'container',
+      reason: 'reclaimed' as const,
+    };
+    const notice = reduceFrame(EMPTY_BLOCKS, frame).blocks.find((b) => b.kind === 'notice') as {
+      text: string;
+    };
+    expect(notice.text).toBe(
+      "workspace reset: the session's workspace on sandbox 'c-0' was reclaimed, so files from " +
+        "earlier turns are gone; this turn runs on a fresh workspace in tier 'container'",
+    );
+    // No sandbox id to name (a turn on an injected sandbox): none is printed.
+    const bare = reduceFrame(EMPTY_BLOCKS, { ...frame, from: '', tier: '' }).blocks.find(
+      (b) => b.kind === 'notice',
+    ) as { text: string };
+    expect(bare.text).not.toContain("''");
+  });
 });
 
 describe('queued prompts', () => {

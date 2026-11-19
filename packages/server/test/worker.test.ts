@@ -398,6 +398,7 @@ describe('startStatsReporter', () => {
         asyncReclaims: 1,
         asyncDeadLetters: 0,
         asyncClaimDeniedFull: 1,
+        asyncDeferredSubject: 2,
         asyncQueueDepth: 12,
         asyncOldestAgeMs: 4_000,
       }),
@@ -410,6 +411,7 @@ describe('startStatsReporter', () => {
       asyncReclaims: 1,
       asyncDeadLetters: 0,
       asyncClaimDeniedFull: 1,
+      asyncDeferredSubject: 2,
       asyncQueueDepth: 12,
       asyncOldestAgeMs: 4_000,
     });

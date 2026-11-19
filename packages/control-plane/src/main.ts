@@ -28,6 +28,7 @@ import { FileCredentialStore } from './file-store.js';
 import { startInferenceProxy } from './inference-proxy.js';
 import {
   adminSubjectsFromEnv,
+  INSTALLER_SUBJECT,
   GithubOAuthProvider,
   TestUserProvider,
   testUsersFromEnv,
@@ -293,7 +294,7 @@ export function checkGrantRedemption(
  * (`LoadCredential=`, MI1 §6.7) rather than an env line; everywhere else, as today, from the env.
  */
 // prettier-ignore
-export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN', 'SH_JANITOR_TOKEN', 'SH_TEST_USER_SECRET', 'SH_OIDC_CLIENT_SECRET', 'MOCA_GRANT_SIGNING_KEY'] as const;
+export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN', 'SH_JANITOR_TOKEN', 'SH_INSTALLER_TOKEN', 'SH_TEST_USER_SECRET', 'SH_OIDC_CLIENT_SECRET', 'MOCA_GRANT_SIGNING_KEY'] as const;
 
 /** The API, session and refresh token lifetimes, shared by both route profiles. */
 function tokenTtlsFromEnv(
@@ -450,12 +451,20 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
     );
   }
   const sandbox = sandboxConfigFromEnv(env);
+  // The installer's static bearer (SH_INSTALLER_TOKEN): optional, but a configured one under 32
+  // characters refuses the boot, exactly as the janitor's does (it travels in an HTTP header).
+  const installerToken = env.SH_INSTALLER_TOKEN || undefined;
+  if (installerToken !== undefined && installerToken.length < 32) {
+    throw new Error('SH_INSTALLER_TOKEN must be at least 32 characters');
+  }
   const config: CpConfig = {
     routeProfile: 'sandbox',
     sandbox,
-    // Distinct from the janitor's and every egress host's bearer (host-config.ts).
+    installerToken,
+    // Distinct from the janitor's, the installer's and every egress host's bearer.
     templateHosts: templateHostsFromEnv(env, [
       ...(sandbox.janitorToken ? [sandbox.janitorToken] : []),
+      ...(installerToken ? [installerToken] : []),
       ...(sandbox.egress?.hosts.map((h) => h.token) ?? []),
     ]),
     ...tokenTtlsFromEnv(env),
@@ -737,7 +746,13 @@ export function templateCatalogFromEnv(
       provenance,
       bootstrap: {
         allowed: config.sandbox?.allowedSubjects ?? [],
-        admins: adminSubjectsFromEnv(env.SH_ADMIN_SUBJECTS),
+        // The installer acts as a settings-named admin: changing enrollment and roles is exactly
+        // what its bearer is for, and settingsAdmin (member-handlers.ts) admits settings admins
+        // alone so the API never widens access beyond them.
+        admins: [
+          ...adminSubjectsFromEnv(env.SH_ADMIN_SUBJECTS),
+          ...(config.installerToken ? [INSTALLER_SUBJECT] : []),
+        ],
       },
     }),
   };

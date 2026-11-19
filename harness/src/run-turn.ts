@@ -37,7 +37,7 @@ import {
   type WorkspaceReset,
 } from './select-sandbox.js';
 import { checkpointExtension } from './checkpoint-extension.js';
-import { budgetVoterExtension, branchSpend } from './budget-voter.js';
+import { budgetVoterExtension, branchSpend, resolveBudgetLimit } from './budget-voter.js';
 import { AMBIENT_KEY_SENTINEL } from './ambient-sentinel.js';
 import { toolChoiceExtension } from './tool-choice-extension.js';
 import { promptCacheExtension } from './prompt-cache-extension.js';
@@ -50,6 +50,12 @@ import { leaseTimings } from './lease-timings.js';
 import { attachPromotedConfig, type AttachedPromotedConfig } from './promoted-config.js';
 import { compactIfOverflowing } from './pre-prompt-compaction.js';
 import { recordModelSwitch } from './model-switch-record.js';
+import {
+  checkWorkspaceMarker,
+  workspaceResetNoteExtension,
+  type SessionWorkspace,
+  type WorkspaceMarkerCheck,
+} from './workspace-marker.js';
 
 // Re-exported because they are now part of executeTurn's CONTRACT: since /turn leases from the pool,
 // every caller of executeTurn can be handed these errors and needs to distinguish them from a generic
@@ -129,6 +135,11 @@ export interface TurnSandbox {
   podCwd: string;
   /** The sandbox's id, named in the model's prompt. */
   sandboxId?: string;
+  /**
+   * The session's own workspace in this sandbox, when it has one (a non-empty `workspace_key`):
+   * what the turn's workspace marker check reads and writes (#338). Absent: no check.
+   */
+  workspace?: SessionWorkspace;
 }
 
 /**
@@ -136,6 +147,11 @@ export interface TurnSandbox {
  * took the lease, which is what makes `heartbeat`/`release` safe to drive unconditionally: for an
  * injected sandbox the caller owns the lease, and renewing or returning someone else's would let
  * one turn release the sandbox another turn is still executing in.
+ *
+ * `closeTransport` follows the same ownership rule for the same reason. It stays a SEPARATE member
+ * rather than folding into `release` so the injected path is a pair of no-ops instead of a
+ * conditional inside `release`: the two resources are owned together, but a leaf keeps using the
+ * transport it injected after this turn hands the lease back.
  */
 export interface AcquiredTurnSandbox {
   sandbox: TurnSandbox | null;
@@ -144,6 +160,19 @@ export interface AcquiredTurnSandbox {
   heartbeat: () => Promise<void>;
   /** Return this call's lease. A no-op unless `leased`. */
   release: () => Promise<void>;
+  /**
+   * Close the gRPC channel this call opened. A no-op for an injected sandbox (the caller owns it)
+   * and when no sandbox resolved.
+   *
+   * Without this, `/turn` leaked one channel per turn (#894). `GrpcRelayTransport.close()` existed
+   * and `run-leaf.ts` called it, but this interface had no way to reach it, so the one caller that
+   * owns the transport it opens never closed it. The retention is not visible from the call site:
+   * grpc-js shares subchannels globally by target+credentials, so the dead channels held only a
+   * handful of sockets while one live `Subchannel`'s `stateListeners` Set accumulated an entry — and
+   * a whole channel graph — per turn. Measured at ~15-19 KB per turn per worker, ~10 GB/hour at 149
+   * turns/s, which is what made every RSS-derived capacity figure for this tier unusable.
+   */
+  closeTransport: () => Promise<void>;
   placement?: TurnPlacement;
 }
 
@@ -308,7 +337,18 @@ export async function acquireTurnSandbox(
   template?: { id: string; seed?: string; seedSource?: 'build' | 'declared'; build?: string },
 ): Promise<AcquiredTurnSandbox> {
   const noop = async () => {};
-  if (injected) return { sandbox: injected, leased: false, heartbeat: noop, release: noop };
+  // Injected: the caller (a prompt leaf) owns both the lease and the transport, and closes the
+  // transport itself (run-leaf.ts:713, :903, :968, :1118, :1191, :1319). Closing it here too would
+  // break run-leaf's "closes it exactly once" contract and tear the channel out from under the
+  // leaf's own converge and cleanup execs, which run AFTER this turn returns.
+  if (injected)
+    return {
+      sandbox: injected,
+      leased: false,
+      heartbeat: noop,
+      release: noop,
+      closeTransport: noop,
+    };
 
   // Same knobs and defaults as every leaf's call, deliberately: two lease conventions for one lease
   // store is how a cap means different things depending on which path took it. That is now ONE shared
@@ -338,7 +378,15 @@ export async function acquireTurnSandbox(
     },
     deps,
   );
-  if (!selected) return { sandbox: null, leased: false, heartbeat: noop, release: noop };
+  if (!selected)
+    return { sandbox: null, leased: false, heartbeat: noop, release: noop, closeTransport: noop };
+
+  // `async` rather than `() => selected.transport.close()`: a close that throws SYNCHRONOUSLY has no
+  // promise for the caller's `.catch` to attach to, and would replace the error that explains the
+  // turn's failure with its own. As a rejection it is swallowed where it should be.
+  const closeTransport = async () => {
+    await selected.transport.close();
+  };
   // A templated workspace is seeded before the turn's first tool call (session-templates spec §5).
   // The lease is held: a seed that throws must return it, as every other failure after the acquire.
   if (template?.seed) {
@@ -352,6 +400,10 @@ export async function acquireTurnSandbox(
       await seedWorkspace(selected.transport, template.id, template.seed, selected.podCwd);
     } catch (err) {
       await selected.release().catch(() => {});
+      // The caller never gets a `closeTransport` for a throwing acquire, so this path has to close
+      // its own channel or a failing seed leaks one per attempt -- the same defect as #894, on the
+      // error path that retries hardest.
+      await closeTransport().catch(() => {});
       throw err;
     } finally {
       clearInterval(renew);
@@ -367,10 +419,16 @@ export async function acquireTurnSandbox(
       transport: selected.transport,
       podCwd: selected.podCwd,
       sandboxId: selected.sandboxId,
+      ...(selected.workspaceKey
+        ? { workspace: { key: selected.workspaceKey, dir: selected.podCwd } }
+        : {}),
     },
     leased: true,
     heartbeat: selected.heartbeat,
     release: selected.release,
+    // Idempotent on the far side (GrpcRelayTransport's `closed` flag), so this stays correct if a
+    // future exit path ever closes twice.
+    closeTransport,
     placement: {
       sandboxId: selected.sandboxId,
       tier: selected.tier ?? '',
@@ -580,7 +638,10 @@ export async function withWorkspacePatch(
   return { ...result, workspace };
 }
 
-/** The `workspace_reset` frame for a placement that moved the session, else null (P6.3 spec §6). */
+/**
+ * The `workspace_reset` frame for a placement whose workspace was reset (P6.3 spec §6: the session
+ * moved; #338: its workspace on the same sandbox lost its marker), else null.
+ */
 export function placementFrame(
   sessionId: string,
   p: TurnPlacement | undefined,
@@ -603,6 +664,27 @@ function placementView(p: TurnPlacement): NonNullable<TurnResult['sandbox']> {
     ...(p.seed ? { seed: p.seed } : {}),
     ...(p.workspaceReset ? { workspaceReset: p.workspaceReset } : {}),
   };
+}
+
+/**
+ * Fold the workspace marker's verdict into the turn's placement (#338). A `reset` verdict on a
+ * placement that already carries a reset (the session moved, so of course its new workspace has no
+ * marker) keeps that reset: it is the cause. Otherwise it is `reclaimed`, from the sandbox the
+ * session is still on. `reset` is what the turn reports, with or without a placement (an injected
+ * sandbox has none).
+ */
+export function withMarkerVerdict(
+  placement: TurnPlacement | undefined,
+  verdict: WorkspaceMarkerCheck['verdict'] | undefined,
+  sandboxId: string | undefined,
+): { placement: TurnPlacement | undefined; reset: WorkspaceReset | undefined } {
+  if (placement?.workspaceReset) return { placement, reset: placement.workspaceReset };
+  if (verdict !== 'reset') return { placement, reset: undefined };
+  const reset: WorkspaceReset = {
+    from: placement?.sandboxId ?? sandboxId ?? '',
+    reason: 'reclaimed',
+  };
+  return { placement: placement ? { ...placement, workspaceReset: reset } : undefined, reset };
 }
 
 /** The result, plus where the turn ran -- what a JSON caller and the runtime report read. */
@@ -702,6 +784,13 @@ export interface TurnConfig {
    * `model` above is also read by /runs, which must not inherit an id pi's registry may not know.
    */
   sessionModel?: SessionModelSpec;
+  /**
+   * This turn's token cap -- an async turn's `caps.tokens`, carried through the dequeue exchange
+   * (#391). A CEILING, not an override: `resolveBudgetLimit` takes the tighter of this and
+   * SH_BUDGET_TOKENS, so a submitter can narrow the deployment's limit and never raise it. Absent ⇒
+   * the env var alone, as before.
+   */
+  budgetTokens?: number;
 }
 
 export interface ModelSelection {
@@ -952,6 +1041,13 @@ export interface TurnResult {
   sandbox?: { id: string; tier: string; seed?: TurnSeed; workspaceReset?: WorkspaceReset };
   /** A templated session's workspace patch after the turn (session-templates spec §5.1). */
   workspace?: TurnWorkspace;
+  /**
+   * The token cap fired and tool calls were blocked (#391). `stopReason` is NOT 'error': pi's loop
+   * ends the turn normally when every call is refused, so without this field a turn that spent its
+   * whole budget and did nothing looks like a turn that chose to answer. A prompt leaf maps it to
+   * `failed: budget`; `/v1/turn` reports it and keeps the response it did get.
+   */
+  budgetExceeded?: boolean;
 }
 
 /**
@@ -1292,15 +1388,31 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
 
   let attached: AttachedPromotedConfig | undefined;
   try {
+    // The workspace marker (#338): one Exec before the agent runs, and before the placement is
+    // reported, so a reset it finds is in the placement, the frame and the result alike. Never
+    // throws; an Exec that fails is logged and gives no verdict.
+    const sessionId = opened.sessionManager.getSessionId();
+    const marker = acquired.sandbox?.workspace
+      ? await checkWorkspaceMarker(
+          acquired.sandbox.transport,
+          acquired.sandbox.workspace,
+          opened.sessionManager,
+          acquired.sandbox.sandboxId ?? 'its sandbox',
+        )
+      : undefined;
+    const { placement, reset } = withMarkerVerdict(
+      acquired.placement,
+      marker?.verdict,
+      acquired.sandbox?.sandboxId,
+    );
     // First, so a turn that fails anywhere after this still has its placement recorded -- see
     // `onPlacement`. Inside the try for the same reason as the frame below: a throwing callback must
     // still release the lease.
-    if (acquired.placement) input.onPlacement?.(placementView(acquired.placement));
+    if (placement) input.onPlacement?.(placementView(placement));
     // After the renewal timer is armed: fetching and overlaying a multi-MB bundle can outlast a lease.
     // Before the reset frame: that frame flushes the SSE headers, and a missing bundle must still be a
     // plain 410, not an error frame.
     if (input.configRef && !input.promotedConfig) {
-      const sessionId = opened.sessionManager.getSessionId();
       attached = await attachPromotedConfig({
         digest: input.configRef,
         sessionId,
@@ -1314,15 +1426,23 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     // headers: a later pre-content failure then degrades to an error frame instead of a status code,
     // which is the same regime as any failure after the first token. Inside the try, so a sink that
     // throws still releases the lease below.
-    const resetFrame = placementFrame(opened.sessionManager.getSessionId(), acquired.placement);
+    // An injected sandbox has no placement, so its reset (a prompt leaf's) is framed here directly.
+    const resetFrame =
+      placementFrame(sessionId, placement) ??
+      (reset
+        ? placementFrame(sessionId, { sandboxId: '', tier: '', workspaceReset: reset })
+        : null);
     if (resetFrame) input.onEvent?.(resetFrame);
+    // The model is told too, whatever the cause: its earlier files are gone. As its own message,
+    // never in the prompt, which must reach Pi as sent (see WORKSPACE_RESET_NOTE).
     const result = withPlacement(
       await executeTurnCore(
         attached ? { ...input, promotedConfig: attached.promotedConfig } : input,
         acquired.sandbox,
         opened,
+        { marker, resetNote: reset !== undefined },
       ),
-      acquired.placement,
+      placement,
     );
     // A templated session's end state, while the lease is still held and renewed (spec §5.1).
     return await withWorkspacePatch(result, acquired, input.config?.sandboxTemplate, process.env);
@@ -1332,6 +1452,15 @@ export async function executeTurn(input: ExecuteTurnInput): Promise<TurnResult> 
     await attached?.detach().catch(() => {});
     if (leaseRenewal) clearInterval(leaseRenewal);
     await acquired.release().catch(() => {});
+    // Release before close, matching run-leaf. By the time this finally runs the turn has fully
+    // unwound and no exec is outstanding on either path, so the only real difference between the two
+    // orders is consistency -- and keeping them identical means an ordering bug, if there is one, is
+    // one bug in two places rather than a divergence to explain.
+    //
+    // Swallowed like release() and for the same reason: teardown must not turn a completed turn into
+    // a failed one. A failed close costs this worker one retained channel; throwing here costs a
+    // turn that did its work and reports an error.
+    await acquired.closeTransport().catch(() => {});
   }
 }
 
@@ -1387,14 +1516,18 @@ async function executeTurnCore(
   input: ExecuteTurnInput,
   turnSandbox: TurnSandbox | null,
   opened: OpenedTurnSession,
+  workspace: { marker?: WorkspaceMarkerCheck; resetNote?: boolean } = {},
 ): Promise<TurnResult> {
   const { prompt, config } = input;
   const cwd = config?.cwd ?? process.cwd();
   // Opened by executeTurn ahead of the pool acquire, so a missing session 404s before any lease work.
   const { store, backend, sessionManager } = opened;
 
-  const budgetLimit = Number(process.env.SH_BUDGET_TOKENS);
+  // The tighter of this turn's own `caps.tokens` and the deployment's SH_BUDGET_TOKENS (#391);
+  // undefined when neither is set.
+  const budgetLimit = resolveBudgetLimit(config?.budgetTokens);
   const budgetMargin = Number(process.env.SH_BUDGET_MARGIN);
+  let budgetExceeded = false;
   // acquireTurnSandbox (called by executeTurn, which owns the lease lifecycle) hands back exactly
   // k8sSandboxExtension's argument, and it is passed on untransformed below — so a leased
   // transport cannot be dropped by a field-by-field rebuild here.
@@ -1421,8 +1554,10 @@ async function executeTurnCore(
     // SH_PROMPT_CACHE / SH_GATEWAY_CACHE (#754). Built here, not inside pi's loader, so a refused
     // value throws out of the turn; with both unset it registers nothing.
     promptCacheExtension(),
+    // A reset workspace (#338): the note goes to the model beside the prompt, not inside it.
+    ...(workspace.resetNote ? [workspaceResetNoteExtension()] : []),
   ];
-  if (Number.isFinite(budgetLimit) && budgetLimit > 0) {
+  if (budgetLimit !== undefined) {
     // session_start is not emitted in the headless path, so compute the pre-turn baseline
     // (cumulative spend already on the loaded branch) here and inject it into the voter.
     const budgetBaseline = branchSpend(sessionManager) ?? 0;
@@ -1430,6 +1565,9 @@ async function executeTurnCore(
       budgetVoterExtension(sessionManager, {
         limit: budgetLimit,
         baseline: budgetBaseline,
+        onExceeded: () => {
+          budgetExceeded = true;
+        },
         ...(Number.isFinite(budgetMargin) && budgetMargin > 0 ? { margin: budgetMargin } : {}),
       }),
     );
@@ -1485,6 +1623,10 @@ async function executeTurnCore(
     // only on a turn that runs, so an aborted one records no switch it never made (R11).
     recordModelSwitch(sessionManager, model);
     await session.prompt(prompt);
+    // Only after the agent ran (and so after the model got any reset note), and before the flush,
+    // so its record is in this turn's durable entries. A turn aborted before its prompt, or one that
+    // throws, never gets here and leaves the marker as the check found it (#338). Never throws.
+    await workspace.marker?.finish();
     const lastMessage = session.state.messages.at(-1) as AssistantMessage | undefined;
     if (lastMessage?.role === 'assistant') {
       stopReason = lastMessage.stopReason ?? 'end_turn';
@@ -1528,6 +1670,7 @@ async function executeTurnCore(
     stopReason,
     ...(errorMessage ? { errorMessage } : {}),
     ...(usage ? { usage } : {}),
+    ...(budgetExceeded ? { budgetExceeded: true } : {}),
   };
 }
 

@@ -75,6 +75,27 @@ describe('every server entry point runs the same boot function (MI1 R2)', () => 
   });
 });
 
+describe('one SubjectCounter per worker process, shared by both paths (#391)', () => {
+  // The per-owner cap is only correct if the sync /turn route and the async drain count into the
+  // SAME in-process counter: two instances would let one owner hold 2x the cap, half of it
+  // invisible to each check. The arming happens in worker.ts's `isMainModule` block, which no
+  // in-process test reaches, and the integration test builds its own counter to drive processOne
+  // directly -- so nothing else pins this. Source-level, like the boot-call checks above.
+  it('server.ts constructs exactly one, and the sync route acquires on it', () => {
+    expect(serverSrc.match(/new SubjectCounter\(/g)).toHaveLength(1);
+    expect(serverSrc).toMatch(/^export const subjectCounter = new SubjectCounter\(\);/m);
+    expect(serverSrc).toMatch(/subjectCounter\.acquire\(/);
+  });
+  it('the worker arms the drain with that instance, and never builds its own', () => {
+    // The whole argument object, not just the identifier: `subjects: new SubjectCounter()` here
+    // would still mention `subjectCounter` in the import above and pass a looser check.
+    expect(src).toMatch(
+      /armAsyncLeafWorker\(\{\s*counter: runtime\.counter,\s*subjects: subjectCounter,?\s*\}\)/,
+    );
+    expect(src).not.toMatch(/new SubjectCounter\(/);
+  });
+});
+
 describe('the P6 worker validates the sandbox tiers at boot (P6.3 spec §3.4)', () => {
   // The selection reads the knobs per call, so without a boot check a typo passes /health and
   // fails the first turn -- the shape the SH_SANDBOX_DISCOVERY check closed.

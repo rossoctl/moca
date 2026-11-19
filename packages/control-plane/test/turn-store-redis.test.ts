@@ -106,20 +106,22 @@ describe('TurnStore CAS races (redis)', () => {
     await done();
   });
 
-  it('refuses a cancel whose read saw `queued` but whose write lands after a claim', async () => {
+  it('turns a cancel that raced a claim into a cancel REQUEST, not a refusal', async () => {
     const { store, now, done } = await isolated();
     await store.create(rec({ turnId: 't-cancel' }));
     // `cancel` is started FIRST, so its HGETALL is on the wire before `markRunning`'s EVAL: it reads
-    // `queued` and then tries to write a record that has since gone `running`. Only the CAS catches
-    // that -- cancel's own `rec.state !== 'queued'` check already passed. Without it the turn would
-    // read `cancelled` while a worker was running it, which §4.5 forbids.
+    // `queued` and then tries to write a record that has since gone `running`. The CAS catches that
+    // -- without it the turn would read `cancelled` while a worker was running it, which §4.5
+    // forbids -- and the second pass then re-reads and takes the running path. A 409 here would be a
+    // lie the caller is meant to stop on: the turn is cancellable, it just started a millisecond ago.
     const [cancelled, claim] = await Promise.all([
       store.cancel('t-cancel', now),
       store.markRunning('t-cancel', 1),
     ]);
     expect(claim).toBe('ok');
-    expect(cancelled).toBe('conflict');
+    expect(cancelled).toBe('cancelling');
     expect((await store.get('t-cancel'))?.state).toBe('running');
+    expect(await store.cancelRequested('t-cancel')).toBe(true);
     await done();
   });
 });

@@ -11,7 +11,7 @@
 #   SMOKE_MODEL_KIND   bearer (default; a gateway token) or api-key (a raw Anthropic key)
 # The prompts spell their commands out in words, so a real model runs the same claims; the mock
 # keys on the K8S-SMOKE-* markers alone. Reaches everything by port-forward, on every target: the
-# OCP Route path is exercised by the demo run (README "Demo on OpenShift"), not here -- except the
+# OCP Route path is exercised by the demo run (docs/operate/harness/kubernetes.md "Demo on OpenShift"), not here -- except the
 # relay Route, which --tier p4 probes directly (claim P6).
 #
 # --tier p4 (ocp only; docs/specs/2026-10-04-p6-on-kubernetes-slice2-design.md §6): a stack whose
@@ -87,7 +87,7 @@ wait_for() { local n="$1"; shift; for _ in $(seq "$n"); do "$@" && return 0; sle
 note() { echo "  note $1"; }
 summary() { printf '\nPASS=%s FAIL=%s\n' "$PASS" "$FAIL"; [[ "$FAIL" == 0 ]]; }
 
-# kind-ci runs the in-pod mock model; ocp-single has no mock (README §12.2), so its smoke needs a
+# kind-ci runs the in-pod mock model; ocp-single has no mock (docs/operate/harness/kubernetes.md §12.2), so its smoke needs a
 # real model credential like --target ocp does.
 if [[ "$TARGET" == kind-ci ]]; then
   : "${SMOKE_MODEL_URL:=http://127.0.0.1:18099}" "${SMOKE_MODEL_TOKEN:=mock-not-a-secret}"
@@ -189,7 +189,7 @@ if [[ "$TIER" == p4 ]]; then
   if [[ "$setup_read" == 0 ]]; then
     ko "could not read configmap moca-setup: $(head -c 300 "$OUT/p2-setup.err" 2>/dev/null)"
   elif [[ -z "$ids" ]]; then
-    ko "moca-setup holds no SH_P4_SANDBOX_IDS: this stack has no P4 tier (README \"P4 on Kubernetes\")"
+    ko "moca-setup holds no SH_P4_SANDBOX_IDS: this stack has no P4 tier (docs/operate/harness/kubernetes.md \"P4 on Kubernetes\")"
   elif [[ -n "$bad" ]]; then
     ko "moca-setup SH_P4_SANDBOX_IDS holds invalid id(s):$bad (setup.sh writes only ids matching $idre)"
   elif [[ -n "$missing" ]]; then
@@ -513,10 +513,10 @@ elif [[ "$TARGET" == ocp-single ]]; then
   # The three-namespace ocp target enforces this; on a shared cluster a cluster-level network
   # allowance can admit the apiserver endpoint past the namespace's policies (on ROKS, the
   # node-local proxy 172.20.0.1:2040, inside the excepted 172.16.0.0/12). The sandbox mounts no
-  # ServiceAccount token, so the API refuses it either way. README §12.3.
-  note "kubernetes.default.svc:443 is $r (a cluster-level network allowance can admit it past the namespace's policies; the sandbox holds no ServiceAccount token — README §12.3)"
+  # ServiceAccount token, so the API refuses it either way. docs/operate/harness/kubernetes.md §12.3.
+  note "kubernetes.default.svc:443 is $r (a cluster-level network allowance can admit it past the namespace's policies; the sandbox holds no ServiceAccount token — docs/operate/harness/kubernetes.md §12.3)"
 else
-  note "kubernetes.default.svc:443 is $r (single-node kind: kindnet does not filter node-local traffic; enforced on OCP — README Troubleshooting)"
+  note "kubernetes.default.svc:443 is $r (single-node kind: kindnet does not filter node-local traffic; enforced on OCP — docs/operate/harness/kubernetes.md Troubleshooting)"
 fi
 r="$(probe sandbox-relay-attach.$NS.svc 9443)"
 [[ "$r" == OPEN ]] || { iso_ok=0; ko "sandbox-relay-attach:9443 is $r (want OPEN)"; }
@@ -541,9 +541,9 @@ fi
 # neither can learn which pod the Service or the queue then handed it to. That is the right pod only
 # at one replica (every overlay here ships `replicas: 1`); above one, the delete would interrupt
 # nothing and the claim would fail a healthy stack. So both SKIP there. Read once: nothing scales
-# this deployment (README §4), so the count cannot change mid-run. An unreadable count counts as 1 --
+# this deployment (docs/operate/harness/kubernetes.md §4), so the count cannot change mid-run. An unreadable count counts as 1 --
 # a guard that cannot read itself must not silently cancel two claims.
-# Both numbers, and the larger wins. `.spec.replicas` is the operator's intent and the one README §14
+# Both numbers, and the larger wins. `.spec.replicas` is the operator's intent and the one docs/operate/harness/kubernetes.md §14
 # says to set to 1; `.status.readyReplicas` catches a pod that is up from an earlier spec but not yet
 # counted, or a surge pod mid-rollout (base `maxSurge: 1`). Neither alone is the number of drain loops
 # running: a spurious skip costs a note, a spurious FAIL costs someone a bisect.
@@ -659,7 +659,7 @@ spread="$(printf '%s\n' ${aff_first[@]+"${aff_first[@]}"} | sort -u | grep -c . 
 ((!aff_ok)) || [[ "$spread" -ge 2 ]] ||
   note "the first turns all landed on one sandbox, so this run could not tell affinity from luck"
 
-# The async leaf consumer (#688, ADR-0047, README §14). Opt-in: setup.sh writes SH_ASYNC_DRAIN to
+# The async leaf consumer (#688, ADR-0047, docs/operate/harness/kubernetes.md §14). Opt-in: setup.sh writes SH_ASYNC_DRAIN to
 # moca-settings only when it was asked for, so an absent key means this stack runs no drain and both
 # claims below are SKIPPED rather than failed. A failed read is not an absent key (the tiers read
 # above is the same rule): an unreadable moca-settings cannot say "the drain is off".
@@ -671,7 +671,7 @@ claim 13 "five async leaves, on a stack that runs two at a time, all reach a res
 if [[ "$async_drain" == unreadable ]]; then
   ko "could not read configmap moca-settings (SH_ASYNC_DRAIN): $(head -c 300 "$OUT/async.err" 2>/dev/null)"
 elif [[ "$async_drain" != 1 ]]; then
-  note "SH_ASYNC_DRAIN is unset on this stack, so no worker drains the queue: skipped (README §14.1)"
+  note "SH_ASYNC_DRAIN is unset on this stack, so no worker drains the queue: skipped (docs/operate/harness/kubernetes.md §14.1)"
 else
   # Five SESSIONS, not five turns on one: idempotencyKey defaults to the session id, so siblings on
   # one session would all be deduplicated onto the first turn (spec §4.3).
@@ -739,7 +739,7 @@ else
   # '', and neither is evidence of an armed worker. One message for both, because the reading alone
   # cannot tell them apart -- and claiming one of them would send the reader to the wrong place.
   if [[ ! "$depth" =~ ^[0-9]+$ ]]; then
-    ko "the admin port answered async_queue_depth='${depth:-<nothing>}', not a number: either no worker reported the gauge (so SH_ASYNC_DRAIN=1 reached none of them, README §14.1) or $ADMIN/metrics is unreachable"
+    ko "the admin port answered async_queue_depth='${depth:-<nothing>}', not a number: either no worker reported the gauge (so SH_ASYNC_DRAIN=1 reached none of them, docs/operate/harness/kubernetes.md §14.1) or $ADMIN/metrics is unreachable"
   elif ((!async_ok)); then
     ko "could not submit $async_n async leaves (above)"
   elif [[ -n "$bad" ]]; then

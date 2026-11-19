@@ -1,6 +1,6 @@
 # ADR-0042: Offer the P4 tier to an internal cohort on `sandbox/v1` as it is, behind per-sandbox tokens from a control-plane `sandbox` profile
 
-- **Status:** Accepted (2026-10-20; live acceptance recorded in [docs/sbx/security-review.md](../sbx/security-review.md)) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
+- **Status:** Accepted (2026-10-20; live acceptance recorded in [docs/notes/sandbox-security-review.md](../notes/sandbox-security-review.md)) <!-- Proposed → Accepted → Superseded by ADR-NNNN / Deprecated -->
 - **Date:** 2026-10-15
 - **Deciders:** MOCA team
 - **Spec:** [`../specs/2026-10-15-sbx0-internal-sandbox-service-design.md`](../specs/2026-10-15-sbx0-internal-sandbox-service-design.md)

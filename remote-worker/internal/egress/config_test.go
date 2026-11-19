@@ -58,6 +58,23 @@ func TestConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigAllowAll(t *testing.T) {
+	cfg, _, err := ConfigFromEnv(envMap(map[string]string{"MOCA_EGRESS_ALLOW": "*"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AllowAll || len(cfg.Allow) != 0 {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	// "*" stays an ordinary-list error everywhere else: mixed, padded, alone
+	// beside separators. Only the bare, trimmed sentinel is allow-all.
+	for _, v := range []string{"*,a.example", "a.example,*", " * * ", "*,", ",*"} {
+		if _, _, err := ConfigFromEnv(envMap(map[string]string{"MOCA_EGRESS_ALLOW": v})); err == nil {
+			t.Fatalf("%q: want an error", v)
+		}
+	}
+}
+
 func TestConfigParsesOverrides(t *testing.T) {
 	cfg, cc, err := ConfigFromEnv(envMap(map[string]string{
 		"MOCA_EGRESS_ALLOW":                    "a.example:443",

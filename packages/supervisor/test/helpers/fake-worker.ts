@@ -63,6 +63,7 @@ export class FakeWorker extends EventEmitter implements WorkerHandle {
     asyncReclaims?: number;
     asyncDeadLetters?: number;
     asyncClaimDeniedFull?: number;
+    asyncDeferredSubject?: number;
     asyncQueueDepth?: number;
     asyncOldestAgeMs?: number;
   }): void {

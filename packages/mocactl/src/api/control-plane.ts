@@ -2,6 +2,7 @@ import { ApiError, TOKEN_CODES, errorFromResponse, networkError } from './errors
 import { trimTrailingSlashes } from './url.js';
 import type {
   ApiLogin,
+  CancelledTurn,
   ConfigBundleSummary,
   ControlPlaneApi,
   CreateSessionRequest,
@@ -231,8 +232,10 @@ export class ControlPlaneClient implements ControlPlaneApi {
     );
   }
 
-  async cancelTurn(sessionId: string, turnId: string): Promise<void> {
-    await this.request(
+  cancelTurn(sessionId: string, turnId: string): Promise<CancelledTurn> {
+    // The 202 BODY is the answer, not just the status: a running turn was only asked to stop, and a
+    // caller that discarded this could not tell the user which of the two happened (#391).
+    return this.json(
       'DELETE',
       `/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`,
     );

@@ -1,8 +1,8 @@
 """sbx: an EXAMPLE of a thin command-line client for one sandbox, built on sandbox_v1_client.py.
 
-The supported CLI is `mocactl sbx run` and `put` (SBX0 1c); this file shows how little a client
+The supported CLI is `mocactl sbx run` and `put` (sandbox-service spec, phase 1c); this file shows how little a client
 needs. Every command runs in a fresh microVM over the workspace, and nothing runs on the local
-machine. See sandbox-v1-direct-client.md.
+machine. See docs/sandbox/how-to/direct-api.md.
 
     sbx run [COMMAND...]      run COMMAND (or, with no arguments, the script on stdin) in /workspace
     sbx put PATH              write stdin to PATH in the workspace (parent directories created)

@@ -299,11 +299,18 @@ describe('async turns (ADR-0047)', () => {
   it('cancels a queued turn and surfaces the 409 as a typed error', async () => {
     const { fetch, calls } = scriptedFetch(
       json({ turnId: 't1', state: 'cancelled' }),
-      json({ error: 'turn_not_cancellable', message: "this turn is 'running'" }, 409),
+      json({ turnId: 't2', state: 'running', cancelRequested: true }),
+      json({ error: 'turn_not_cancellable', message: "this turn is 'done'" }, 409),
     );
     const c = client(fetch);
-    await c.cancelTurn('s1', 't1');
+    expect(await c.cancelTurn('s1', 't1')).toEqual({ turnId: 't1', state: 'cancelled' });
     expect(calls[0]!.method).toBe('DELETE');
+    // A running turn is only ASKED to stop, and the caller must be able to say so (#391).
+    expect(await c.cancelTurn('s1', 't2')).toEqual({
+      turnId: 't2',
+      state: 'running',
+      cancelRequested: true,
+    });
     // A caller must be able to branch on "it was already running" without parsing prose.
     await expect(c.cancelTurn('s1', 't1')).rejects.toMatchObject({
       code: 'turn_not_cancellable',

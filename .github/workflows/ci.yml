@@ -151,35 +151,65 @@ jobs:
   # array under `set -u`, which breaks every 3.2 run, and nothing in CI could see it -- it was
   # caught in review. This job is the thing that sees it.
   #
-  # Three suites, not `make test-deploy`: four of the other suites use bash 4 constructs by
-  # design. The list lives in the Makefile target, so it cannot drift from what contributors
-  # reproduce locally with one command.
+  # bash 3.2.57 is built from the GNU tarball on Linux rather than run on macos-latest (#901):
+  # the macOS pool is scarce, the job sat queued with no steps until it was cancelled, and every
+  # PR needed a manual re-run. The bugs this job exists for are interpreter bugs, not macOS ones.
+  # The real /bin/bash is still tested, on main and nightly, by deploy-bash32-macos.yml.
+  #
+  # Not `make test-deploy`: four of the other suites use bash 4 constructs by design. The list
+  # lives in the Makefile target, so it cannot drift from what contributors reproduce locally
+  # with one command.
   deploy-scripts-bash32:
-    runs-on: macos-latest
+    # Pinned, not -latest: the build is a 2007 interpreter against the image's gcc/glibc, which
+    # is what breaks when -latest rolls forward. Bump on purpose.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      BASH32_VERSION: 3.2.57
+      BASH32_SHA256: 3fa9daf85ebf35068f090ce51283ddeeb3c75eb5bc70b1a4a7cb05868bfe06a4
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # The target skips when /bin/bash is not 3.x, so without this check an Apple bump would
-      # turn this job into a green no-op that reads as coverage. Fail loudly instead.
-      - name: Confirm /bin/bash is 3.x
+      - name: Cache bash 3.2
+        id: bash32-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/bash32
+          key: bash32-${{ runner.os }}-${{ runner.arch }}-${{ env.BASH32_VERSION }}-${{ env.BASH32_SHA256 }}
+
+      # gnu89 via CC, not CFLAGS: the build-time helpers (mkbuiltins) ignore CFLAGS, and under
+      # the runner's gnu23 default their K&R `xmalloc ()` declarations mean "no arguments".
+      - name: Build bash 3.2
+        if: steps.bash32-cache.outputs.cache-hit != 'true'
         run: |
-          v="$(/bin/bash --version | head -1)"
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLO --retry 3 --retry-delay 2 "https://ftp.gnu.org/gnu/bash/bash-${BASH32_VERSION}.tar.gz"
+          echo "${BASH32_SHA256}  bash-${BASH32_VERSION}.tar.gz" | sha256sum -c -
+          tar xzf "bash-${BASH32_VERSION}.tar.gz"
+          cd "bash-${BASH32_VERSION}"
+          CC="gcc -std=gnu89" CFLAGS="-w" ./configure --prefix="$HOME/bash32" --without-bash-malloc
+          make -j"$(nproc)"
+          make install
+
+      # The target skips when $BASH32 is not 3.x, so without this check a build that silently
+      # produced something else would turn this job into a green no-op that reads as coverage.
+      - name: Confirm the interpreter is 3.2
+        run: |
+          v="$("$HOME/bash32/bin/bash" --version | head -1)"
           echo "$v"
           case "$v" in
-          *"version 3."*) ;;
-          *) echo "::error title=/bin/bash is no longer 3.x::$v -- this job no longer tests bash 3.2. The runner image changed or macOS shipped a newer bash; re-point the job, or drop it and say why on #440."; exit 1 ;;
+          *"version 3.2."*) ;;
+          *) echo "::error title=not bash 3.2::$v -- this job no longer tests bash 3.2"; exit 1 ;;
           esac
 
       # deploy/microvm/tests/setup-microvm.test.sh guards its `shellcheck "$SCRIPT"` with
-      # `command -v shellcheck`, so without this the check silently skips and asserts nothing.
-      # jq is already on the runner image, and the suites pass against the stock LibreSSL at
-      # /usr/bin/openssl, so neither of those needs installing.
-      - name: Install shellcheck
-        run: brew install shellcheck
+      # `command -v shellcheck`; it is on the runner image, but check, so it cannot skip silently.
+      - name: Confirm shellcheck is present
+        run: shellcheck --version
 
-      - name: Run the 3.2-safe deploy shell tests on /bin/bash
-        run: make test-deploy-bash32
+      - name: Run the 3.2-safe deploy shell tests on bash 3.2
+        run: make test-deploy-bash32 BASH32="$HOME/bash32/bin/bash"
 
   # Spec §8's correctness gates for the microVM tier, and an explicit statement of the half
   # of them this runner cannot exercise. Six of them need /dev/kvm AND a golden snapshot
@@ -321,7 +351,12 @@ jobs:
       - name: Check Markdown links
         run: python3 scripts/check-doc-links.py
 
-      # The sandbox/v1 direct-client examples' offline tests (docs/api/sandbox-v1-direct-client.md):
+      # rossoctl.dev publishes docs/ (less the design records) and skips its whole Moca section
+      # when a published file matches docs/.publish-denylist: fail here first.
+      - name: Check the published docs against the denylist
+        run: scripts/check-docs-publish.sh
+
+      # The sandbox/v1 direct-client examples' offline tests (docs/sandbox/how-to/direct-api.md):
       # no network beyond pip, no relay. The runner's own python3, so no unpinned setup action;
       # grpcio pinned to the versions the tests were written against.
       - name: Test the sandbox/v1 Python examples

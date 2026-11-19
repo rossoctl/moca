@@ -27,7 +27,8 @@
 #   - then, for each SBX_STATUS_HOSTS target, the host side's lines prefixed `host TARGET `.
 #
 # The host side (root: it reads /etc/sbx/janitor.env, 0600, and the system journal) prints:
-#   - unit sbx-worker@<id>.service and unit sbx-janitor.timer: `systemctl is-active`;
+#   - unit sbx-worker@<id>.service, unit sbx-janitor.timer and unit sbx-sampler.timer:
+#     `systemctl is-active`;
 #   - workspace filesystem: `df -hP $SBX_SRV/workspaces`;
 #   - janitor last run: its last summary (or skipped) line in the journal;
 #   - janitor wait: SBX_JANITOR_AGE from the INSTALLED janitor.env, with a WARNING when it does not
@@ -41,7 +42,13 @@
 #     such an idle for the bundles it writes; a host not reinstalled afterwards still runs the old
 #     one. The cluster side passes SH_SANDBOX_MAX_LIFETIME_SECONDS (or, as the control plane does
 #     when it is unset, SH_SANDBOX_LIFETIME_SECONDS).
-# SBX_ENV_DIR and SBX_SRV default to /etc/sbx and /srv/sbx, as install-host.sh's do.
+#   - host sample: one run of the host sampler (#857 R2), the same JSON line sbx-sampler.timer writes
+#     to the journal every 15 s (load, memory, PSI, workspace bytes and inodes, sbx.slice, and per
+#     worker its VMs, budget and /stats), preceded by a `host sample error` line per failing kind.
+#     It runs $SBX_LIBEXEC_DIR/sbx-sampler.sh, the one a worker install put there, or else the
+#     sampler.sh beside this script (a checkout), so the view and the series are one code path.
+# SBX_ENV_DIR, SBX_SRV and SBX_LIBEXEC_DIR default to /etc/sbx, /srv/sbx and /usr/local/libexec,
+# as install-host.sh's do.
 #
 # Exit: 0 whenever it could report, even when something was unreachable (that is reported as
 # `unavailable` or `unreachable`); 2 for a usage or settings error.
@@ -69,8 +76,10 @@ host_units() {
     state="$(systemctl is-active "$u" </dev/null 2>/dev/null)" || true
     say "unit $u" "${state:-unknown}"
   done
-  state="$(systemctl is-active sbx-janitor.timer </dev/null 2>/dev/null)" || true
-  say 'unit sbx-janitor.timer' "${state:-unknown}"
+  for u in sbx-janitor.timer sbx-sampler.timer; do
+    state="$(systemctl is-active "$u" </dev/null 2>/dev/null)" || true
+    say "unit $u" "${state:-unknown}"
+  done
 }
 
 host_disk() {
@@ -143,6 +152,25 @@ host_worker_idle() {
   done
 }
 
+host_sample() {
+  local s="$SBX_LIBEXEC_DIR/sbx-sampler.sh" here="${BASH_SOURCE[0]:-}" out line n=0
+  # Piped over ssh (bash -s) there is no script path, so only the installed sampler.
+  [[ -f "$s" || "$here" != */* || ! -f "${here%/*}/sampler.sh" ]] || s="${here%/*}/sampler.sh"
+  if [[ ! -f "$s" ]]; then
+    say 'host sample' "unavailable (no $s: a worker install puts it there, unless SBX_SAMPLER_INTERVAL_S=0)"
+    return 0
+  fi
+  # No state directory: every failing kind is printed, not only those new since the timer's last run.
+  out="$(SBX_SAMPLER_STATE_DIR='' "$BASH" "$s" </dev/null 2>/dev/null)" || true
+  while IFS= read -r line; do
+    case "$line" in
+    '{"sampler":"sample"'*) say 'host sample' "$line"; n=1 ;;
+    '{"sampler":"error"'*) say 'host sample error' "$line" ;;
+    esac
+  done <<<"$out"
+  ((n)) || say 'host sample' "unavailable ($s printed no sample)"
+}
+
 host_main() {
   local ttl='' max=''
   while (($#)); do
@@ -160,11 +188,13 @@ host_main() {
     *) die "unknown argument: $1 (usage: $USAGE)" ;;
     esac
   done
-  : "${SBX_ENV_DIR:=/etc/sbx}" "${SBX_SRV:=/srv/sbx}"
+  : "${SBX_ENV_DIR:=/etc/sbx}" "${SBX_SRV:=/srv/sbx}" "${SBX_LIBEXEC_DIR:=/usr/local/libexec}"
+  export SBX_ENV_DIR SBX_SRV
   host_units
   host_disk
   host_janitor "$ttl"
   host_worker_idle "$max"
+  host_sample
 }
 
 # ---------------------------------------------------------------------------------------------

@@ -11,7 +11,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_LOG="$TMP/mock.log" MOCK_STATE="$TMP/state" SH_WAIT_SECONDS=2
 # Sticky input: a value in the caller's shell would be a GIVEN default tier in every run below.
-unset SH_SANDBOX_DEFAULT_TIER SH_SANDBOX_EGRESS_EXCEPT
+unset SH_SANDBOX_DEFAULT_TIER SH_SANDBOX_EGRESS_EXCEPT SH_WORKSPACE_IDLE
 REAL_PATH="$PATH"
 export REAL_PATH
 # The bash that launched this suite, not the first one on PATH (#440): `/bin/bash setup.test.sh`
@@ -444,8 +444,9 @@ grep -q '^  - ../../overlays/kind$' "$MOCK_STATE/applied-kustomization.yaml" || 
 # and the token lifetimes are written on every run too ('' when untiered, defaulted or empty, as
 # here), so the hash input is the same nineteen keys on every stack (SH_TEST_USERS is '0' unless an
 # operator asked for test users, ADR-0045; SH_TRUSTED_PROXY_HOPS is '1' unless one set another).
-[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__ConfigMap__moca-settings.json")" == '["LEAF_RESULT_TTL_SECONDS","SH_ADMIN_SUBJECTS","SH_ALLOW_OPERATOR_FALLBACK","SH_API_TOKEN_TTL_SECONDS","SH_ASYNC_DRAIN","SH_GITHUB_CLIENT_ID","SH_IDENTITY_PROVIDER","SH_MODEL_CATALOG_HOSTS","SH_OIDC_CLIENT_ID","SH_OIDC_ISSUER","SH_OIDC_MAX_PENDING_PER_SOURCE","SH_OIDC_REDIRECT_URI","SH_OIDC_SCOPE","SH_PUBLIC_HARNESS_URL","SH_SANDBOX_DEFAULT_TIER","SH_SANDBOX_TIERS","SH_SESSION_TOKEN_TTL_SECONDS","SH_TEST_USERS","SH_TRUSTED_PROXY_HOPS"]' ]] ||
-  fail 'moca-settings must hold exactly the nineteen keys the control plane and the supervisor reference'
+# The twentieth, SH_WORKSPACE_IDLE (#338), is the sandboxes': kept here, mirrored to their namespace.
+[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__ConfigMap__moca-settings.json")" == '["LEAF_RESULT_TTL_SECONDS","SH_ADMIN_SUBJECTS","SH_ALLOW_OPERATOR_FALLBACK","SH_API_TOKEN_TTL_SECONDS","SH_ASYNC_DRAIN","SH_GITHUB_CLIENT_ID","SH_IDENTITY_PROVIDER","SH_MODEL_CATALOG_HOSTS","SH_OIDC_CLIENT_ID","SH_OIDC_ISSUER","SH_OIDC_MAX_PENDING_PER_SOURCE","SH_OIDC_REDIRECT_URI","SH_OIDC_SCOPE","SH_PUBLIC_HARNESS_URL","SH_SANDBOX_DEFAULT_TIER","SH_SANDBOX_TIERS","SH_SESSION_TOKEN_TTL_SECONDS","SH_TEST_USERS","SH_TRUSTED_PROXY_HOPS","SH_WORKSPACE_IDLE"]' ]] ||
+  fail 'moca-settings must hold exactly the twenty keys the control plane, the supervisor and the sandboxes reference'
 [[ -z "$(setting SH_SANDBOX_TIERS)" && -z "$(setting SH_SANDBOX_DEFAULT_TIER)" ]] || fail 'kind is never tiered'
 expect_out 'port-forward svc/moca-supervisor 8080:8080'
 pass 'kind: generated overlay applied; control plane held at 0 without a client id; access printed'
@@ -673,6 +674,48 @@ h2="$(settings_hash)"
 [[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.b ]] || fail 'the new client id was not written'
 pass 'the settings hash is stable for unchanged settings and changes with them (Review Focus 2)'
 
+# #338: SH_WORKSPACE_IDLE, the container sandboxes' idle reclaim. Stored in moca-settings (sticky,
+# defaulting to 8h like deploy/microvm), mirrored to moca-sandbox-settings in the sandbox namespace
+# (a configMapKeyRef reads only its own), and stamped on the sandbox pod template ALONE: a change
+# rolls the sandboxes, never the control plane or the supervisor, which do not read it.
+sbx_idle() { jq -c '.data' "$MOCK_STATE/moca-sandbox__ConfigMap__moca-sandbox-settings.json"; }
+idle_ann() {
+  gen | awk '/^  - target: /{ on = index($0, "kind: StatefulSet, name: moca-sandbox }") > 0; next } /^[^ ]/{ on = 0 } on' |
+    grep -oE 'moca.dev/workspace-idle: "[^"]*"' | cut -d'"' -f2
+}
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+[[ "$(setting SH_WORKSPACE_IDLE)" == 8h ]] || fail "the idle must default to 8h, got '$(setting SH_WORKSPACE_IDLE)'"
+[[ "$(sbx_idle)" == '{"SH_WORKSPACE_IDLE":"8h"}' ]] || fail "moca-sandbox-settings must hold the idle alone, got '$(sbx_idle)'"
+[[ "$(idle_ann)" == 8h ]] || fail "the sandbox pod template must carry the idle once, got '$(idle_ann)'"
+[[ "$(settings_hash)" == "$h1" ]] || fail 'the default idle moved the settings hash'
+gen | grep -qF 'moca.dev/workspace-idle: "8h", moca.dev/image-id: "sha256:1-moca-remote-worker:local"' ||
+  fail 'on kind the idle and the sandbox image ID must share the one annotations add'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKSPACE_IDLE=1h30m; expect_ok --target kind --skip-build)
+[[ "$(setting SH_WORKSPACE_IDLE)" == 1h30m && "$(sbx_idle)" == '{"SH_WORKSPACE_IDLE":"1h30m"}' ]] ||
+  fail 'a given idle did not land in both ConfigMaps'
+[[ "$(idle_ann)" == 1h30m ]] || fail 'a changed idle did not change the sandbox pod template (it would not roll them)'
+[[ "$(settings_hash)" == "$h1" ]] || fail 'a changed idle changed the settings hash (it would roll the control plane for nothing)'
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+[[ "$(setting SH_WORKSPACE_IDLE)" == 1h30m && "$(idle_ann)" == 1h30m ]] || fail 'a re-run dropped the stored idle'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKSPACE_IDLE=''; expect_ok --target kind --skip-build)
+[[ "$(setting SH_WORKSPACE_IDLE)" == 8h && "$(idle_ann)" == 8h ]] || fail 'set-but-empty did not return the idle to 8h'
+# The worker refuses to boot on what Go's time.ParseDuration refuses or reads as <= 0 (`30`, `-1m`,
+# `0h`); setup.sh also refuses what Go would take but a lifetime has no use for (a fraction, a sign).
+for bad in 30 -1m 0h 0m0s 1d 8H 1.5h +8h 30m1h 1h_ '8h ' 1234567h; do
+  (export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKSPACE_IDLE="$bad"; expect_fail --target kind --skip-build)
+  expect_out "SH_WORKSPACE_IDLE='$bad' must be a positive duration"
+done
+[[ "$(setting SH_WORKSPACE_IDLE)" == 8h ]] || fail 'a refused idle was written'
+# A bad STORED value (a hand edit) is refused too, naming moca-settings and how to clear it.
+jq '.data.SH_WORKSPACE_IDLE = "30"' "$MOCK_STATE/moca__ConfigMap__moca-settings.json" >"$TMP/cm.json" &&
+  mv "$TMP/cm.json" "$MOCK_STATE/moca__ConfigMap__moca-settings.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --skip-build)
+expect_out "moca-settings holds SH_WORKSPACE_IDLE='30'"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKSPACE_IDLE=''; expect_ok --target kind --skip-build)
+[[ "$(setting SH_WORKSPACE_IDLE)" == 8h ]] || fail 'set-but-empty did not clear a bad stored idle'
+pass 'SH_WORKSPACE_IDLE: 8h by default, sticky, clearable and validated; mirrored to the sandbox namespace; rolls only the sandboxes (#338)'
+
 # The retry case: a run that wrote client id B and then failed before the roll. Nothing is
 # remembered between runs, so the next run renders B's hash and the apply still rolls the pods.
 reset_state
@@ -723,7 +766,7 @@ ci_h="$(settings_hash)"
 [[ "$(replicas_of moca-control-plane)" == 0 ]] || fail 'kind ran the control plane on the kind-ci placeholder id (#429)'
 expect_out 'no SH_GITHUB_CLIENT_ID'
 # The other half: the filter must not cost kind-ci its convergence. It re-derives the same string,
-# so a second kind-ci run still hashes identically and rolls no pod (README §"re-run ... converges").
+# so a second kind-ci run still hashes identically and rolls no pod (docs/operate/harness/kubernetes.md, "re-run ... converges").
 expect_ok --target kind-ci --skip-build
 [[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.k8s-smoke-unused ]] || fail 'the kind-ci placeholder was not re-derived after a kind run cleared it'
 [[ "$(settings_hash)" == "$ci_h" ]] || fail 'a kind-ci re-run changed the settings hash (it would roll the control plane for nothing)'
@@ -901,10 +944,11 @@ pass '--relay-tls-cert/--relay-tls-key: ocp only, a pair, a value each; --help l
 # Bash 3.2 compatibility: normalize_p4_ids must work on bash < 4.4 with set -u
 # The bug: unset empty array with "set -u" causes "parts[@]: unbound variable".
 # Tests the exact call paths: empty input, all-comma input, mixed spaces/commas, and real parse_args path.
-if [[ -x /bin/bash ]]; then
-  bash3_version="$(/bin/bash --version 2>&1 | head -1)"
+BASH3="${BASH32:-/bin/bash}"
+if [[ -x "$BASH3" ]]; then
+  bash3_version="$("$BASH3" --version 2>&1 | head -1)"
   if [[ "$bash3_version" == *"version 3."* ]]; then
-    test_output=$(/bin/bash -euo pipefail -c "
+    test_output=$("$BASH3" -euo pipefail -c "
       SH_SOURCE_ONLY=1
       . '$SETUP'
       # Test each problematic input path under bash 3.2 with set -u
@@ -929,7 +973,7 @@ if [[ -x /bin/bash ]]; then
     echo "skip - bash 3.2 not available (version is: $bash3_version)"
   fi
 else
-  echo "skip - bash 3.2 not available at /bin/bash"
+  echo "skip - bash 3.2 not available at $BASH3"
 fi
 
 reset_state
@@ -1118,7 +1162,7 @@ expect_out 'kubectl -n moca-single port-forward svc/moca-supervisor'
 ! grep -q 'https://' "$TMP/out" || fail 'ocp-single printed an https URL; it has no Routes'
 pass 'ocp-single: access is printed as port-forward commands, never a Route URL'
 
-echo "== ocp-single: optional Routes (SH_ROUTE_DOMAIN, README §12.5)"
+echo "== ocp-single: optional Routes (SH_ROUTE_DOMAIN, docs/operate/harness/kubernetes.md §12.5)"
 reset_state
 # A preinstalled kubernetes.io/tls Secret, as an operator's wildcard certificate would be.
 jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace: "moca-single"},
@@ -1357,8 +1401,11 @@ jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace
 for k in SH_SINGLE_NAMESPACE SH_ROUTE_DOMAIN SH_TLS_SECRET SH_SANDBOX_DEFAULT_TIER SH_SANDBOX_COUNT; do
   setup_cm moca-single | jq -e --arg k "$k" '.data | has($k)' >/dev/null || fail "ocp-single with Routes: moca-setup lacks $k"
 done
-[[ "$(jq -r '.data | keys | length' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == 19 ]] ||
-  fail 'ocp-single with Routes: moca-settings does not hold exactly nineteen keys'
+[[ "$(jq -r '.data | keys | length' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == 20 ]] ||
+  fail 'ocp-single with Routes: moca-settings does not hold exactly twenty keys'
+# One namespace: the sandboxes' copy sits beside moca-settings under its own name, never over it.
+[[ "$(jq -c '.data' "$MOCK_STATE/moca-single__ConfigMap__moca-sandbox-settings.json")" == '{"SH_WORKSPACE_IDLE":"8h"}' ]] ||
+  fail 'ocp-single with Routes: moca-sandbox-settings is not in the one namespace with the default idle'
 [[ "$(jq -r '.data.SH_PUBLIC_HARNESS_URL' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == https://moca.example.test ]] ||
   fail 'ocp-single with Routes: SH_PUBLIC_HARNESS_URL is not the supervisor Route'
 [[ "$(annotation_adds moca-control-plane)" == 1 && "$(annotation_adds moca-supervisor)" == 1 ]] ||
@@ -1891,11 +1938,21 @@ if [[ -f "$REPO_ROOT/.github/workflows/ci.yml" && -f "$REPO_ROOT/Makefile" ]]; t
     fail 'test-deploy-bash32 no longer lists this suite, so macOS CI stopped covering setup.sh (#440)'
   grep -q '^  deploy-scripts-bash32:' "$REPO_ROOT/.github/workflows/ci.yml" ||
     fail 'ci.yml has no deploy-scripts-bash32 job -- bash 3.2 is no longer tested on any PR (#440)'
-  grep -q 'runs-on: macos-latest' "$REPO_ROOT/.github/workflows/ci.yml" ||
-    fail 'ci.yml has no macOS runner, so /bin/bash 3.2 is unreachable in CI (#440)'
-  grep -qF 'make test-deploy-bash32' "$REPO_ROOT/.github/workflows/ci.yml" ||
-    fail 'the macOS job no longer runs make test-deploy-bash32 (#440)'
-  pass 'the macOS bash 3.2 job and its Makefile target are still wired to this suite'
+  # With BASH32=: on the Linux runner /bin/bash is 5.x, so a bare `make test-deploy-bash32`
+  # skips with exit 0 and the job would stay green while testing nothing.
+  grep -qE 'make test-deploy-bash32 .*BASH32=' "$REPO_ROOT/.github/workflows/ci.yml" ||
+    fail 'the PR bash 3.2 job no longer runs make test-deploy-bash32 with BASH32= -- on Linux it would silently skip (#440)'
+  # The real-macOS run moved off the PR path to its own workflow (#901): a scarce macOS pool
+  # starved PRs. It must still exist, on the real /bin/bash.
+  grep -q 'runs-on: macos-latest' "$REPO_ROOT/.github/workflows/deploy-bash32-macos.yml" ||
+    fail 'deploy-bash32-macos.yml has no macOS runner, so the real /bin/bash 3.2 is untested (#901)'
+  grep -qF 'make test-deploy-bash32' "$REPO_ROOT/.github/workflows/deploy-bash32-macos.yml" ||
+    fail 'the macOS workflow no longer runs make test-deploy-bash32 (#901)'
+  # The triggers too: without them the workflow is valid, wired, and never runs.
+  macos_wf="$REPO_ROOT/.github/workflows/deploy-bash32-macos.yml"
+  grep -q '^  push:' "$macos_wf" && grep -q '^  schedule:' "$macos_wf" ||
+    fail 'deploy-bash32-macos.yml lost its push or schedule trigger, so it never runs (#901)'
+  pass 'the bash 3.2 PR job, the macOS workflow and the Makefile target are still wired to this suite'
 else
   echo "skip - not run from a repository checkout, so the CI wiring cannot be checked"
 fi

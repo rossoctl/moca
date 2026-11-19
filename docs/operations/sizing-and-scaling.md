@@ -10,7 +10,7 @@ One supervisor pod runs `SH_WORKERS` workers, each allowing `SH_TURNS_PER_WORKER
 manifest pins **2 workers and 4 turns per worker**, so a pod serves up to **8 concurrent turns**; beyond that it
 answers `429 {"error":"overloaded"}` with `Retry-After: 1` before reading the request. Only `POST /turn` and
 `POST /v1/turn` count toward the cap, but the supervisor checks saturation once per connection, before reading any
-bytes, so while a pod is saturated **every** connection on the data port gets the 429, `/v1/runs` included. See [Session multiplexing](../concepts/session-multiplexing.md).
+bytes, so while a pod is saturated **every** connection on the data port gets the 429, `/v1/runs` included. See [Session multiplexing](../harness/concepts/session-multiplexing.md).
 
 Change the worker count, the CPU limit and the memory request together: the manifest pins W with a CPU limit of 2
 (about one CPU per worker) and a memory request of at least W x 256Mi (a manifest test enforces that), plus about 256Mi of headroom, which is
@@ -36,7 +36,11 @@ advice in the deploy README and not tested. If `SH_WORKERS` were unset, W would 
 - **One user cannot take every slot:** each authenticated subject is capped at `SH_TURNS_PER_SUBJECT` in-flight turns
   per worker (default half of S), refused with 429 `subject_quota_exceeded` and `Retry-After` — a different code from
   the pool-wide `overloaded` 429. The cap is per worker, so a subject's host-wide share is `cap/S`, not the knob value
-  itself.
+  itself. Async turns count against the same number (#391): an entry claimed past its owner's cap is handed back to the
+  queue unrun, counted as `async_deferred_subject`, so an owner whose fan-out is running cannot also fill the worker
+  with interactive turns. It does **not** pace an async-only drain: a worker runs one queued leaf at a time, so async
+  work alone never reaches the cap, and the queue is one FIFO stream — one owner's deep backlog still delays another
+  owner's async turn, which needs a cluster-wide per-owner count and is open on #391.
 - **More sandboxes:** set `SH_SANDBOX_COUNT` for `setup.sh` (default 2, sticky). Each pod's sandbox id is its pod
   name. Each sandbox accepts up to `KAGENTI_SANDBOX_CAP` concurrent leases (the manifest sets 4; the code default is
   20), so container capacity is roughly sandboxes x 4 concurrent turns. A pool with no free slot returns 503

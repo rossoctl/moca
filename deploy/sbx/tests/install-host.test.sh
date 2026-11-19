@@ -17,6 +17,8 @@ pass() { echo "ok - $*"; }
 cat >"$TMP/bin/systemctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
+# MOCK_SYSTEMCTL_FAIL: the one call (its exact arguments) that fails.
+[[ -z "${MOCK_SYSTEMCTL_FAIL:-}" || "$*" != "$MOCK_SYSTEMCTL_FAIL" ]] || { echo "mock systemctl: $* failed" >&2; exit 1; }
 [[ "$1" == show ]] && { echo "InvocationID=abc123"; exit 0; }
 # enable and disable keep each unit's boot state as a file in MOCK_ENABLED_DIR (the unit is the last
 # argument: `disable --now UNIT` too), so a test can check what a re-install leaves enabled.
@@ -86,7 +88,7 @@ grep -q 'no snapshot' "$TMP/out" || fail 'missing-snapshot refusal does not say 
 b="$(bundle sbx_bad)"; sed -i.bak 's/^SANDBOX_TOKEN=.*/SANDBOX_TOKEN=short/' "$b/worker.env"
 ! bash "$INSTALL" "$b" --snapshot default >"$TMP/out" 2>&1 || fail 'accepted a malformed token'
 ! grep -q 'short' "$TMP/out" || fail 'the refusal printed the token value'
-for extra in 'SH_WORKSPACE_IDLE=9d' 'SH_WORKSPACE_IDLE=0h' 'SH_WORKSPACE_IMAGE_MB=2g' 'SH_WORKSPACE_IMAGE_MB=0' \
+for extra in 'SH_WORKSPACE_IDLE=9d' 'SH_WORKSPACE_IDLE=0h' 'SH_WORKSPACE_IMAGE_MB=2g' 'SH_WORKSPACE_IMAGE_MB=0' 'SH_WORKSPACE_IMAGE_MB=2049' \
   'SH_LEASE_IDLE_CEILING_S=30m' 'SH_LEASE_IDLE_CEILING_S=1.5' 'SH_LEASE_IDLE_CEILING_S=0' 'SH_LEASE_IDLE_CEILING_S=299' 'SH_LEASE_IDLE_CEILING_S=86401' 'SH_LEASE_IDLE_CEILING_S= '; do
   : >"$MOCK_LOG"
   # The bad line last: env_value takes the last one, so it overrides the valid idle before it.
@@ -105,12 +107,12 @@ grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" && grep -q 'deploy/sbx/setup.sh' "$TMP/ou
   fail 'accepted a ceiling above 86400 s'
 grep -q 'SH_LEASE_IDLE_CEILING_S in .* must be a whole number of seconds, 300-86400' "$TMP/out" ||
   fail "the ceiling refusal does not name 300-86400: $(cat "$TMP/out")"
-pass 'refuses a missing snapshot, a missing --snapshot, a malformed token (without printing it), a missing or bad idle, a bad image size or idle ceiling'
+pass 'refuses a missing snapshot, a missing --snapshot, a malformed token (without printing it), a missing or bad idle, a bad or too large (#907) image size or idle ceiling'
 
 # py312 has a template record (template-build.sh's); default has none.
 mkdir -p "$SBX_SRV/templates" && printf '{\n  "schema": "moca-sbx-template/1",\n  "id": "py312",\n  "worker": "sbx_py312"\n}\n' >"$SBX_SRV/templates/py312.json"
 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_default'
-bash "$INSTALL" "$(bundle sbx_py312 $'SH_WORKSPACE_IDLE=240h\nSH_WORKSPACE_IMAGE_MB=4096\nSH_LEASE_IDLE_CEILING_S=3600\n')" --snapshot py312 --budget-mb 8192 \
+bash "$INSTALL" "$(bundle sbx_py312 $'SH_WORKSPACE_IDLE=240h\nSH_WORKSPACE_IMAGE_MB=1536\nSH_LEASE_IDLE_CEILING_S=3600\n')" --snapshot py312 --budget-mb 8192 \
   >"$TMP/out" 2>&1 || fail 'install sbx_py312'
 
 A="$SBX_ENV_DIR/workers/sbx_default.env" B="$SBX_ENV_DIR/workers/sbx_py312.env"
@@ -121,7 +123,7 @@ done
 grep -qx 'SH_WORKSPACE_IDLE=216h' "$A" || fail "$A: SH_WORKSPACE_IDLE is not the bundle's 216h"
 grep -qx 'SH_WORKSPACE_IMAGE_MB=2048' "$A" || fail "$A: SH_WORKSPACE_IMAGE_MB is not the bundle's 2048"
 grep -qx 'SH_WORKSPACE_IDLE=240h' "$B" || fail "$B: SH_WORKSPACE_IDLE is not the bundle's 240h"
-grep -qx 'SH_WORKSPACE_IMAGE_MB=4096' "$B" || fail "$B: SH_WORKSPACE_IMAGE_MB is not the bundle's 4096"
+grep -qx 'SH_WORKSPACE_IMAGE_MB=1536' "$B" || fail "$B: SH_WORKSPACE_IMAGE_MB is not the bundle's 1536"
 grep -qx 'SH_LEASE_IDLE_CEILING_S=1800' "$A" || fail "$A: SH_LEASE_IDLE_CEILING_S is not the bundle's 1800"
 grep -qx 'SH_LEASE_IDLE_CEILING_S=3600' "$B" || fail "$B: SH_LEASE_IDLE_CEILING_S is not the bundle's 3600"
 [[ "$(grep -c '^SH_LEASE_IDLE_CEILING_S=' "$B")" == 1 ]] || fail "$B: SH_LEASE_IDLE_CEILING_S written twice"
@@ -1148,3 +1150,102 @@ else
   echo 'skip - a value the device does not take (running as root)'
 fi
 [[ ! -s "$EM" ]] || fail "manifest not empty at the end of the read-ahead block: $(cat "$EM")"
+
+# The host sampler (#857, R2): every worker install installs it and enables its timer, as shared
+# files (`sampler <path>`): one of two uninstalls and --keep-shared keep it, the last plain
+# --uninstall removes it. SBX_SAMPLER_INTERVAL_S is the timer's interval; 0 removes it.
+unset MOCK_FINDMNT_MAJMIN
+SS="$SBX_LIBEXEC_DIR/sbx-sampler.sh" SU="$SBX_UNIT_DIR/sbx-sampler.service" ST="$SBX_UNIT_DIR/sbx-sampler.timer"
+for bad in abc 4 3601 015 -1 1.5 ' 15'; do
+  : >"$MOCK_LOG"
+  ! SBX_SAMPLER_INTERVAL_S="$bad" bash "$INSTALL" "$(bundle sbx_sm)" --snapshot default >"$TMP/out" 2>&1 || fail "accepted SBX_SAMPLER_INTERVAL_S='$bad'"
+  grep -q 'SBX_SAMPLER_INTERVAL_S=' "$TMP/out" || fail "the '$bad' refusal does not name SBX_SAMPLER_INTERVAL_S"
+  ! grep -q systemctl "$MOCK_LOG" || fail "touched systemd before refusing SBX_SAMPLER_INTERVAL_S='$bad'"
+  [[ ! -e "$SS" && ! -e "$SBX_ENV_DIR/workers/sbx_sm.env" ]] || fail "wrote files before refusing SBX_SAMPLER_INTERVAL_S='$bad'"
+done
+pass 'refuses an SBX_SAMPLER_INTERVAL_S that is not 0 or 5..3600 in decimal before touching anything'
+
+: >"$MOCK_LOG"
+bash "$INSTALL" "$(bundle sbx_sm)" --snapshot default >"$TMP/out" 2>&1 || fail 'install with the default sampler'
+cmp -s "$SS" "$SRC/deploy/sbx/sampler.sh" && [[ "$(mode "$SS")" == 755 ]] || fail 'the sampler is not installed 0755'
+grep -qx "ExecStart=$SS" "$SU" || fail 'the service does not run the installed sampler'
+grep -qx "Environment=SBX_ENV_DIR=$SBX_ENV_DIR" "$SU" && grep -qx "Environment=SBX_SRV=$SBX_SRV" "$SU" || fail 'the service does not name the env dir and srv'
+for l in Type=oneshot RuntimeDirectory=sbx-sampler LogLevelMax=notice; do grep -qx "$l" "$SU" || fail "the service lacks $l"; done
+! grep -q '/etc/sbx\|/srv/sbx\|/usr/local/libexec' "$SU" || fail "the service keeps a default path: $(grep -n '/etc/sbx\|/srv/sbx\|/usr/local/libexec' "$SU")"
+[[ "$(grep -c '^#' "$SU")" == 1 && "$(grep -c '^#' "$ST")" == 1 ]] || fail 'the installed units kept the source comments'
+grep -qx 'OnUnitActiveSec=15s' "$ST" && grep -qx 'AccuracySec=1s' "$ST" || fail "the timer: $(cat "$ST")"
+for f in "$SS" "$SU" "$ST"; do grep -qx "sampler $f" "$EM" || fail "the manifest lacks sampler $f: $(cat "$EM")"; done
+! grep -q '^unit .*sampler' "$EM" || fail 'the sampler is recorded as a unit line'
+grep -A1 -x 'systemctl daemon-reload' "$MOCK_LOG" | grep -qx 'systemctl enable sbx-sampler.timer' || fail "the timer is not enabled after a daemon-reload: $(cat "$MOCK_LOG")"
+t="$(grep -nx 'systemctl restart sbx-sampler.timer' "$MOCK_LOG" | cut -d: -f1)"
+w="$(grep -nx 'systemctl restart sbx-worker@sbx_sm.service' "$MOCK_LOG" | cut -d: -f1)"
+[[ -n "$t" && -n "$w" && "$t" -lt "$w" ]] || fail "the sampler timer not (re)started before the worker ('$t', '$w')"
+grep -qF 'sbx-sampler.timer enabled (every 15 s)' "$TMP/out" || fail 'the install does not say the sampler is on'
+# The installed sampler runs from its unit's environment and prints its sample, whatever this
+# machine's /proc is.
+SBX_ENV_DIR="$SBX_ENV_DIR" SBX_SRV="$SBX_SRV" SBX_SYS_ROOT="$TMP/nosys" "$SS" >"$TMP/sample" 2>&1 || fail 'the installed sampler failed'
+grep -q '^{"sampler":"sample",.*"workers":\[{"wrk":"sbx_sm","vms":0,"memory_current":null,"budget_mb":8192,' "$TMP/sample" ||
+  fail "the installed sampler's sample: $(cat "$TMP/sample")"
+pass 'a worker install installs the 0755 sampler and both units with this host'"'"'s paths, records them as sampler, enables and restarts the timer'
+
+# A re-run with another interval rewrites the timer and re-arms it; nothing is recorded twice.
+: >"$MOCK_LOG"
+SBX_SAMPLER_INTERVAL_S=60 bash "$INSTALL" "$(bundle sbx_sm)" --snapshot default >"$TMP/out" 2>&1 || fail 're-run with 60'
+grep -qx 'OnUnitActiveSec=60s' "$ST" && [[ "$(grep -c '^OnUnitActiveSec=' "$ST")" == 1 ]] || fail "the timer is not every 60 s: $(cat "$ST")"
+grep -qx 'Description=Sample the SBX0 host every 60 seconds' "$ST" || fail 'the timer description keeps 15 s'
+grep -qx 'systemctl restart sbx-sampler.timer' "$MOCK_LOG" || fail 'a re-run with another interval does not re-arm the timer'
+[[ "$(grep -c '^sampler ' "$EM")" == 3 ]] || fail "a re-run recorded sampler lines twice: $(cat "$EM")"
+pass 'a re-run with SBX_SAMPLER_INTERVAL_S=60 rewrites and re-arms the timer, records nothing twice'
+
+# One of two workers going, and the last with --keep-shared, keep it; the plain --uninstall removes it.
+bash "$INSTALL" "$(bundle sbx_sm2)" --snapshot default >"$TMP/out" 2>&1 || fail 'install a second worker'
+bash "$INSTALL" --uninstall sbx_sm2 >"$TMP/out" 2>&1 || fail 'uninstall one of two'
+[[ -f "$SS" && -f "$SU" && -f "$ST" ]] || fail 'uninstalling one of two workers removed the sampler'
+: >"$MOCK_LOG"
+bash "$INSTALL" --uninstall sbx_sm --keep-shared >"$TMP/out" 2>&1 || fail 'the last uninstall with --keep-shared'
+[[ -f "$SS" && -f "$SU" && -f "$ST" && "$(grep -c '^sampler ' "$EM")" == 3 ]] || fail '--keep-shared removed the sampler'
+! grep -q 'sbx-sampler' "$MOCK_LOG" || fail '--keep-shared touched the sampler units'
+: >"$MOCK_LOG"
+bash "$INSTALL" --uninstall sbx_sm >"$TMP/out" 2>&1 || fail 'the plain uninstall after --keep-shared'
+[[ ! -e "$SS" && ! -e "$SU" && ! -e "$ST" ]] || fail 'the last plain uninstall left a sampler file'
+grep -qx 'systemctl disable --now sbx-sampler.timer' "$MOCK_LOG" || fail 'the sampler timer was not disabled and stopped'
+grep -qx 'systemctl clean --what=runtime sbx-sampler.service' "$MOCK_LOG" || fail "the sampler's runtime directory was not cleaned"
+c="$(grep -nx 'systemctl clean --what=runtime sbx-sampler.service' "$MOCK_LOG" | cut -d: -f1)"
+r="$(grep -nx 'systemctl daemon-reload' "$MOCK_LOG" | head -1 | cut -d: -f1)"
+[[ "$c" -lt "$r" ]] || fail 'the runtime directory is cleaned after the unit is unloaded'
+[[ ! -s "$EM" ]] || fail "the manifest is not empty after the last uninstall: $(cat "$EM")"
+pass 'one of two uninstalls and --keep-shared keep the sampler; the last plain uninstall disables, cleans and removes it'
+
+# SBX_SAMPLER_INTERVAL_S=0: an installed sampler goes; on a host without one, none is installed.
+bash "$INSTALL" "$(bundle sbx_sm)" --snapshot default >"$TMP/out" 2>&1 || fail 'install with the sampler'
+: >"$MOCK_LOG"
+SBX_SAMPLER_INTERVAL_S=0 bash "$INSTALL" "$(bundle sbx_sm)" --snapshot default >"$TMP/out" 2>&1 || fail 're-run with 0'
+[[ ! -e "$SS" && ! -e "$SU" && ! -e "$ST" ]] && ! grep -q '^sampler ' "$EM" || fail '0 did not remove the sampler'
+grep -qx 'systemctl disable --now sbx-sampler.timer' "$MOCK_LOG" || fail '0 did not stop the timer'
+bash "$INSTALL" --uninstall sbx_sm >"$TMP/out" 2>&1 || fail 'uninstall after 0'
+: >"$MOCK_LOG"
+SBX_SAMPLER_INTERVAL_S=0 bash "$INSTALL" "$(bundle sbx_sm)" --snapshot default >"$TMP/out" 2>&1 || fail 'install with 0'
+[[ ! -e "$SS" ]] && ! grep -q 'sbx-sampler' "$MOCK_LOG" || fail '0 installed a sampler or touched its units'
+bash "$INSTALL" --uninstall sbx_sm >"$TMP/out" 2>&1 || fail 'the last uninstall'
+[[ ! -s "$EM" ]] || fail "manifest not empty at the end of the sampler block: $(cat "$EM")"
+pass 'SBX_SAMPLER_INTERVAL_S=0 removes an installed sampler, and on a clean host installs none'
+
+# A sampler step that fails (a systemctl call, a unit file it cannot write) is a WARNING naming the
+# step; the worker install goes on, its worker started and attached.
+for case in 'enable sbx-sampler.timer' 'restart sbx-sampler.timer' write; do
+  : >"$MOCK_LOG"
+  if [[ "$case" == write ]]; then mkdir -p "$ST"; else export MOCK_SYSTEMCTL_FAIL="$case"; fi
+  bash "$INSTALL" "$(bundle sbx_sm)" --snapshot default >"$TMP/out" 2>&1 || fail "a failed sampler step ($case) failed the worker install"
+  unset MOCK_SYSTEMCTL_FAIL
+  want="systemctl $case"
+  [[ "$case" != write ]] || want="write $ST"
+  grep -qF "WARNING: the host sampler's install failed at: $want; the worker installs without it" "$TMP/out" ||
+    fail "no warning naming the failed step ($case): $(cat "$TMP/out")"
+  grep -qx 'systemctl restart sbx-worker@sbx_sm.service' "$MOCK_LOG" && grep -q 'sbx-worker@sbx_sm attached to the relay' "$TMP/out" ||
+    fail "the worker was not started after a failed sampler step ($case)"
+  ! grep -qF 'sbx-sampler.timer enabled' "$TMP/out" || fail "said the sampler is on after a failed step ($case)"
+  [[ "$case" != write ]] || rmdir "$ST"
+  bash "$INSTALL" --uninstall sbx_sm >"$TMP/out" 2>&1 || fail "uninstall after a failed sampler step ($case)"
+  [[ ! -e "$SS" && ! -e "$SU" && ! -e "$ST" && ! -s "$EM" ]] || fail "the uninstall left sampler files or lines after a failed step ($case): $(cat "$EM")"
+done
+pass 'a failed sampler step (enable, restart, a unit file write) warns with the step and never fails the worker install; the uninstall cleans up'

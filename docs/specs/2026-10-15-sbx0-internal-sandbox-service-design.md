@@ -1,7 +1,7 @@
 # SBX0: a minimal sandbox service for an internal cohort, on the existing `sandbox/v1` API — Design
 
 Version: 1.1 — October 16, 2026 (review of rossoctl/moca#546)
-Status: Accepted (2026-10-20; live acceptance recorded in [docs/sbx/security-review.md](../sbx/security-review.md))
+Status: Accepted (2026-10-20; live acceptance recorded in [docs/notes/sandbox-security-review.md](../notes/sandbox-security-review.md))
 Milestone: **SBX0**, registered in [the milestone registry](README.md) (new `SBX` track).
 Decision record: [ADR-0042](../adrs/0042-sbx0-sandbox-service-on-sandbox-v1.md).
 
@@ -489,12 +489,17 @@ persistence follows the existing `base/redis.yaml`.
 - **`pull --apply` refuses a patch that writes `.git`, `.sbx/` or the agent-configuration and
   local-hook files** (`.mcp.json`, `.claude/`, `opencode.json(c)`, `.opencode/`, `.codex/`,
   `.agents/` (Codex CLI's repo skills), `.pi/` (Pi loads project-local `extensions/`, `skills/` and
-  `prompts/`), `.bob/` (IBM Bob's settings, which can start MCP servers),
-  `.vscode/tasks.json`, `.vscode/settings.json`, `.husky/`, `.envrc`, or `.vscode`
-  itself), on either side of a rename or copy, at any depth and under case and Unicode folding. A
-  change to a steering file — `CLAUDE.md`, `AGENTS.md`, `AGENTS.override.md` (Codex reads it in
-  preference to `AGENTS.md`) or `.bobrules` (IBM Bob's, which `sbx up` does not write, so a change
-  to it is all change) — outside the `sbx up` block is applied with a warning.
+  `prompts/`), `.bob/` (IBM Bob's settings, which can start MCP servers), `.vscode/tasks.json`,
+  `.vscode/settings.json`, `.husky/`, `.envrc`, or `.vscode` itself), on either side of a rename or
+  copy, at any depth and under case and Unicode folding; also the in-tree `core.hooksPath`
+  directory, git directory and git config files (`include.path` ones too), as git reports them,
+  through symlinks, and anything inside a submodule or nested repository (a parent directory holding
+  `.git`). When the git directory is the tree's root, every path in it is refused. Not refused, and
+  a non-goal: an in-tree file that a git config value runs (`core.fsmonitor`, `filter.*.clean` and
+  `smudge`, `diff.*.textconv`, `core.sshCommand`, a `!` alias); review it in the patch like any
+  other script. A change to a steering file — `CLAUDE.md`, `AGENTS.md`, `AGENTS.override.md` (Codex
+  reads it in preference to `AGENTS.md`) or `.bobrules` (IBM Bob's, which `sbx up` does not write,
+  so a change to it is all change) — outside the `sbx up` block is applied with a warning.
 - **"Changes not yet pulled"** means the tree differs from `refs/sbx/baseline` (a superset of a
   non-empty porcelain status that also counts the agent's own commits), or the workspace holds files
   with no baseline.
@@ -630,7 +635,7 @@ nothing here changes, and moca does not need Cortex.
 **Published:**
 
 - `proto/sandbox/v1/sandbox.proto`, unchanged;
-- the direct-client guide (`docs/api/sandbox-v1-direct-client.md`) and a Python example client
+- the direct-client guide (`docs/sandbox/how-to/direct-api.md`) and a Python example client
   (`docs/api/examples/sandbox_v1_client.py`). Both are **new on `main` in 1b**, adapted for sandbox
   tokens from the prototype branch's versions.
 
@@ -739,9 +744,9 @@ Each one carries `bash`, `git`, `tar`, `ripgrep` and its toolchain, and is pinne
 > then self-serve through the API), is documented in the template onboarding guide,
 > `deploy/sbx/template-onboarding/GUIDE.md`, and designed in the template lifecycle spec,
 > `2026-11-03-template-lifecycle-and-provenance-design.md`. The operator steps are
-> [RUNBOOK §5](../../deploy/sbx/RUNBOOK.md#5-adding-updating-and-removing-a-template), and the live
+> [RUNBOOK §5](../operate/sandbox-service/runbook.md#5-adding-updating-and-removing-a-template), and the live
 > check that each template's sandboxes run on its own worker is
-> [RUNBOOK §14](../../deploy/sbx/RUNBOOK.md#14-checking-the-templates). Nothing here changes: one
+> [RUNBOOK §14](../operate/sandbox-service/runbook.md#14-checking-the-templates). Nothing here changes: one
 > worker still serves one template's snapshot.
 
 **`deploy/sbx/install-host.sh <bundle-dir>`** installs or updates one template unit from its bundle.

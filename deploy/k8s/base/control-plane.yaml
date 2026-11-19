@@ -82,7 +82,7 @@ spec:
             - name: SH_TEST_USERS
               valueFrom:
                 { configMapKeyRef: { name: moca-settings, key: SH_TEST_USERS, optional: true } }
-            # The oidc identity provider (docs/guides/oidc-login-w3id.md): all optional, so a
+            # The oidc identity provider (docs/guides/oidc-login.md): all optional, so a
             # GitHub stack renders exactly as before -- an empty SH_IDENTITY_PROVIDER is the
             # control plane's `github` default. The client secret is NOT an env var (MI1 §6.7:
             # every kubectl child inherits the environment): it is a FILE under

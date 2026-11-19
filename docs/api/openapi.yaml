@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.29.0
+  version: 1.31.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -42,14 +42,22 @@ components:
       type: http
       scheme: bearer
       description: |
-        The sandbox host janitor's `SH_JANITOR_TOKEN` (SBX0 §8.3); admits GET /v1/janitor/sandboxes
+        The sandbox host janitor's `SH_JANITOR_TOKEN` (sandbox-service spec §8.3); admits GET /v1/janitor/sandboxes
         only. No user or admin API token is accepted there, and with none configured every call is
         refused.
+    installerToken:
+      type: http
+      scheme: bearer
+      description: |
+        The operator's static `SH_INSTALLER_TOKEN` (sandbox members API): admits the /v1/subjects
+        routes only, acting as the synthetic `installer` subject with the admin role. With none
+        configured every call is refused. An admin's API token is accepted on the same routes
+        instead.
     egress:
       type: http
       scheme: bearer
       description: |
-        One KVM host's egress token (`SH_EGRESS_TOKEN_<ID>`, SBX0.2b §4.2); admits
+        One KVM host's egress token (`SH_EGRESS_TOKEN_<ID>`, egress-credentials spec §4.2); admits
         POST /v1/egress/credential only. Compared against every configured host; no user,
         admin or janitor token is accepted there.
     hostToken:
@@ -304,11 +312,18 @@ components:
           description: |
             deliveries so far, DESCRIPTIVE only: the queue's delivery count is the sole authority for
             retry exhaustion. `0` while queued.
+        cancelRequested:
+          type: boolean
+          description: |
+            present and `true` only on a `running` turn a `DELETE` has asked to stop (#391): the
+            request is in flight and the worker has not yet reported. The turn reaches `cancelled`
+            on its own; absent otherwise.
         result:
           type: object
           description: |
             the leaf's result, absent until one is written. Its own `status` may read `aborted`, which
-            has no corresponding turn `state` -- such a turn reads `state: "failed"`.
+            has no corresponding turn `state` -- such a turn reads `state: "cancelled"`, since a leaf
+            that aborted stopped because something asked it to.
 
             BOUNDED: this is a projection of the stored result, not the result itself. The turn's
             OUTPUT -- a solve leaf's patch, a prompt leaf's assistant text -- is never inlined here,
@@ -349,7 +364,12 @@ components:
                     type: string
                     description: the capture's own digest, when the leaf recorded one
             gate: { type: object }
-            reason: { type: string }
+            reason:
+              type: string
+              description: |
+                on `failed` only, the leaf's own reason (harness-openapi.yaml). `budget` means the
+                turn spent one of its `caps` -- its token cap, or the wall clock -- and was stopped
+                (#391).
             seed:
               type: object
               description: |
@@ -484,7 +504,7 @@ components:
             in arrival order. The empty log's is the sha256 of no bytes.
     Sandbox:
       type: object
-      description: A sandbox (SBX0 §5.1). Times are epoch seconds.
+      description: A sandbox (sandbox-service spec §5.1). Times are epoch seconds.
       required:
         [
           id,
@@ -544,7 +564,7 @@ components:
             reads and lists do not move it. Unset, it stays fixed at create. The maximum caps each
             extension, not the sandbox's age: one with activity inside every idle lifetime does not
             expire. Expiry is computed: past it, the sandbox reads as terminated / expired
-            everywhere and refuses to mint (SBX0 §5.2; idle-lifetime spec §3); an activity after the
+            everywhere and refuses to mint (sandbox-service spec §5.2; idle-lifetime spec §3); an activity after the
             deadline is refused and does not revive it.
         terminatedAt:
           type: [integer, 'null']
@@ -1038,7 +1058,7 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
     NotEnrolled:
-      description: '`not_enrolled`: the caller is not in SH_ALLOWED_SUBJECTS (SBX0 §4.2)'
+      description: '`not_enrolled`: the caller is not in SH_ALLOWED_SUBJECTS (sandbox-service spec §4.2)'
       content:
         application/json:
           schema: { $ref: '#/components/schemas/Error' }
@@ -1131,7 +1151,7 @@ paths:
         `sandboxTiers` (P6.3) is always present; a control plane that predates P6.3 omits it.
         `version` is always present; a control plane that predates advertising one omits it.
         `profile` names the control plane's route profile; on `sandbox`, `execEndpoint` and `execCa`
-        say where to send Exec and which CA to trust (SBX0 §4.1). A `sandbox` control plane answers
+        say where to send Exec and which CA to trust (sandbox-service spec §4.1). A `sandbox` control plane answers
         only `profile`, `execEndpoint` and, when the exec certificate is self-issued, `execCa`;
         templates are at the fixed `/v1/templates`. A control plane that predates profiles omits
         `profile`, and is a `harness` one.
@@ -1190,7 +1210,7 @@ paths:
                         type: string
                         description: combined profile only -- PEM of a self-issued exec certificate
                   - type: object
-                    description: the sandbox profile (SBX0 §4.1)
+                    description: the sandbox profile (sandbox-service spec §4.1)
                     required: [profile, execEndpoint]
                     additionalProperties: false
                     properties:
@@ -1301,7 +1321,7 @@ paths:
         '403':
           description: |
             Sandbox profile only: `not_enrolled` -- the approving GitHub account is not in
-            SH_ALLOWED_SUBJECTS and is not an admin (SBX0 §4.2). No refresh family is issued. The
+            SH_ALLOWED_SUBJECTS and is not an admin (sandbox-service spec §4.2). No refresh family is issued. The
             `message` names the caller's own subject (`github:<id>`) for an operator to enroll.
           content:
             application/json:
@@ -1509,7 +1529,7 @@ paths:
         '403':
           description: |
             Sandbox profile only: `not_enrolled` -- the login's subject was removed from
-            SH_ALLOWED_SUBJECTS since it logged in (SBX0 §4.2). The control plane revokes the login
+            SH_ALLOWED_SUBJECTS since it logged in (sandbox-service spec §4.2). The control plane revokes the login
             (audited `refresh_revoked`, reason `not_enrolled`), so the refresh token presented is
             refused from then on; the client should forget it. The `message` names the subject.
           content:
@@ -1881,11 +1901,15 @@ paths:
                       tier: { type: [string, 'null'] }
                       workspaceReset:
                         type: [object, 'null']
-                        description: when, and from which sandbox, the session last lost its workspace
+                        description: when, and on which sandbox, the session last lost its workspace
                         required: [at, from]
                         properties:
                           at: { type: number, description: epoch ms }
-                          from: { type: string, description: the sandbox the session left }
+                          from:
+                            type: string
+                            description: |
+                              the sandbox the session left or, when its workspace was reclaimed
+                              where it is, the sandbox it is still on
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
   /v1/sessions/{id}/models:
@@ -1944,7 +1968,7 @@ paths:
         `202` with the EXISTING turn id.
 
         Interactive turns do not come through here: they stream over the harness's own
-        `POST /turns` with a session token (docs/reference/http-api.md).
+        `POST /turns` with a session token (docs/harness/reference/http-api.md).
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sessionId' }]
       requestBody:
@@ -1978,13 +2002,27 @@ paths:
                 caps:
                   type: object
                   description: |
-                    per-turn budget ceilings, recorded on the turn record for the worker that runs it
-                    (ADR-0047 §5.1); a cap above the deployment's own limit does not raise it. Not
-                    enforced yet: no worker reads them, so a turn runs to the deployment's limits
-                    whatever it names (#391).
+                    per-turn budget ceilings, recorded on the turn record and enforced by the worker
+                    that runs it (ADR-0047 §5.1, #391); a cap above the deployment's own limit does
+                    not raise it. A turn that spends either cap ends `failed` with
+                    `result.reason: "budget"`.
+
+                    `tokens` bounds this turn's assistant token spend and is enforced inside the run:
+                    once it is reached, further tool calls are refused. `wallClock` bounds the turn
+                    from the moment a worker dequeues it, clamped to the deployment's
+                    `MOCA_TURN_MAX_S`.
+
+                    Both are PER DELIVERY. A worker that dies mid-leaf has its turn redelivered, and
+                    the retry gets a fresh token budget and a fresh wall clock anchored at its own
+                    dequeue -- a retry must not fail on its predecessor's spend. So the aggregate
+                    across a turn's deliveries can reach the cap times the delivery limit (three).
+                    Size `tokens` as a per-attempt ceiling, not a total.
+
+                    There is no `costUsd`: a present one is a 400 `invalid_request`. It was recorded
+                    and never enforceable -- nothing here prices a token -- and silently ignoring a
+                    spend cap is worse than refusing it. Use `tokens`.
                   properties:
                     tokens: { type: integer }
-                    costUsd: { type: number }
                     wallClock: { type: integer, description: seconds }
       responses:
         '202':
@@ -2045,20 +2083,27 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
     delete:
       operationId: cancelTurn
-      summary: Cancel a QUEUED async turn
+      summary: Cancel a queued or running async turn
       description: |
-        A queued turn flips to `cancelled` and the drain loop drops it when it would have claimed it.
-        A RUNNING turn is NOT interrupted and answers `409`: interrupting one needs
-        control-plane-to-worker machinery that does not exist, because interactive cancel rides the
-        turn's own connection and an async turn has none (ADR-0047 §4.5). Let it finish and read its
-        result.
+        A QUEUED turn flips to `cancelled` at once, and the drain loop drops it when it would have
+        claimed it.
+
+        A RUNNING turn is asked to stop (ADR-0047 §4.5, #391): the record keeps `state: "running"`
+        and gains `cancelRequested: true`, and the worker running it stops the leaf within a few
+        seconds, releasing its sandbox. The turn then reads `cancelled`, like a queued one. Poll
+        `GET …/turns/{turnId}` for that; this route does not wait.
+
+        Best-effort on purpose, which is why both answers are `202` rather than `200`: a leaf that
+        finishes first stays finished, with its own terminal state and its result intact.
+
+        Anything already terminal is `409`.
       security: [{ sessionToken: [] }]
       parameters:
         - { $ref: '#/components/parameters/sessionId' }
         - { $ref: '#/components/parameters/turnId' }
       responses:
         '202':
-          description: cancelled
+          description: cancelled (queued), or the cancel requested (running)
           content:
             application/json:
               schema:
@@ -2066,11 +2111,17 @@ paths:
                 required: [turnId, state]
                 properties:
                   turnId: { type: string }
-                  state: { type: string, enum: [cancelled] }
+                  state: { type: string, enum: [cancelled, running] }
+                  cancelRequested:
+                    type: boolean
+                    description: |
+                      `true` only in the running case, where the state is still `running`: the stop
+                      has been requested and not yet observed.
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
-          description: '`turn_not_cancellable`: the turn is not queued. The message names its state.'
+          description: |
+            `turn_not_cancellable`: the turn is already terminal. The message names its state.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
@@ -2292,7 +2343,7 @@ paths:
       description: |
         Both profiles (template lifecycle spec §4.1): a sandbox client and a session's brain read
         the same templates. On the sandbox profile, enrolled subjects and admins only
-        (`403 not_enrolled`, SBX0 §4.2); on the harness profile, any logged-in subject, and a
+        (`403 not_enrolled`, sandbox-service spec §4.2); on the harness profile, any logged-in subject, and a
         deployment that declares no templates lists none. Each template adds its owner,
         visibility, onboarding state, readiness, tags and builds (template lifecycle spec §3, §4);
         the first three fields are unchanged, so an older client reads the list as before. With
@@ -3380,7 +3431,7 @@ paths:
         default) and its use: templates owned (with a build registered or on its
         way there), builds queued, building or probing, builds the caller holds a live activation
         lease on (§6.3), and template ids owned in any status (`owned`). On the sandbox profile,
-        `sandboxes` is SBX0's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and
+        `sandboxes` is the sandbox service's per-subject cap on live sandboxes (`SH_SANDBOX_MAX_PER_SUBJECT`) and
         the caller's live ones; absent elsewhere. Needs SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       responses:
@@ -3973,7 +4024,7 @@ paths:
         Enrollment and roles spec §4. Any admin may read it. A subject is enrolled by the deployment's
         settings (`source: env`: SH_ALLOWED_SUBJECTS, SH_ADMIN_SUBJECTS) or through this API
         (`source: api`). Roles are evaluated per request: an API grant past its `until` is not listed.
-      security: [{ sessionToken: [] }]
+      security: [{ sessionToken: [] }, { installerToken: [] }]
       responses:
         '200':
           description: the subjects
@@ -4005,7 +4056,7 @@ paths:
         and so does enrolling one the settings enroll (SH_ALLOWED_SUBJECTS or SH_ADMIN_SUBJECTS): it is
         answered unchanged (`record: null`), so the store never holds an enrollment hidden behind the
         settings.
-      security: [{ sessionToken: [] }]
+      security: [{ sessionToken: [] }, { installerToken: [] }]
       parameters:
         - name: subject
           in: path
@@ -4054,7 +4105,7 @@ paths:
         the settings can't be unenrolled here: `409 bootstrap_subject`. A subject holding an admin grant
         is enrolled by it, so unenrolling it would change nothing: `409 admin_granted` (revoke the role
         first).
-      security: [{ sessionToken: [] }]
+      security: [{ sessionToken: [] }, { installerToken: [] }]
       parameters:
         - name: subject
           in: path
@@ -4102,7 +4153,7 @@ paths:
         lapse by itself; the first request that
         sees it lapsed writes a `role` record `expired`, once. A grant writes a `role` record
         `granted`, naming the admin and `until`. Effective at the subject's next request.
-      security: [{ sessionToken: [] }]
+      security: [{ sessionToken: [] }, { installerToken: [] }]
       parameters:
         - name: subject
           in: path
@@ -4158,7 +4209,7 @@ paths:
         Writes a `role` record `revoked`. Refused for an admin by the settings (`409
         bootstrap_subject`) and for the caller's own role (`409 self_revoke`), so the API can't
         lock itself out.
-      security: [{ sessionToken: [] }]
+      security: [{ sessionToken: [] }, { installerToken: [] }]
       parameters:
         - name: subject
           in: path
@@ -4198,13 +4249,13 @@ paths:
   /v1/sandboxes:
     description: |
       Sandbox service control planes only (`SH_ROUTE_PROFILE=sandbox`); a MOCA control plane answers
-      404 (SBX0 §4.1).
+      404 (sandbox-service spec §4.1).
     post:
       operationId: createSandbox
       summary: Create a sandbox
       description: |
         Enrolled subjects and admins only. Does no I/O to the worker: the first Exec creates the
-        workspace, so a new sandbox always starts empty (SBX0 §5.1).
+        workspace, so a new sandbox always starts empty (sandbox-service spec §5.1).
 
         Activation on first use (template lifecycle spec §6.4), on a deployment with template hosts
         (SH_TEMPLATE_HOSTS): a sandbox is created only on an `active` build. On one that is not, the
@@ -4311,7 +4362,7 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '429':
           description: |
-            `quota_exceeded`: per-user or deployment-wide live sandboxes (SBX0 §5.3), or, on first
+            `quota_exceeded`: per-user or deployment-wide live sandboxes (sandbox-service spec §5.3), or, on first
             use, the active-template quota (`quota: active`)
           content:
             application/json:
@@ -4386,7 +4437,7 @@ paths:
       summary: Terminate a sandbox
       description: |
         Idempotent: deleting a terminated sandbox answers 200 with how it ended. The caller's own;
-        admins may delete any. The host janitor frees the workspace later (SBX0 §8.3).
+        admins may delete any. The host janitor frees the workspace later (sandbox-service spec §8.3).
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sandboxId' }]
       responses:
@@ -4415,7 +4466,7 @@ paths:
       summary: Mint a sandbox token for Exec
       description: |
         Owner only, admins included: an admin calling it on another user's sandbox gets the same
-        404 as anyone else (SBX0 §4.2). The token's `exp` is the sooner of now plus
+        404 as anyone else (sandbox-service spec §4.2). The token's `exp` is the sooner of now plus
         SH_SANDBOX_TOKEN_TTL_SECONDS and the sandbox's `expiresAt`, after an activity mint moved it
         to at least now plus the sandbox's `idleLifetimeS` (§4.3; idle-lifetime spec §4.2); the
         move happens only when SH_SANDBOX_MAX_LIFETIME_SECONDS is configured, else the deadline is
@@ -4549,7 +4600,7 @@ paths:
       summary: Change a sandbox's mode
       description: |
         Owner only, admins included: an admin calling it on another user's sandbox gets the same
-        404 as anyone else (SBX0 §4.2). Only the owner's user API token is taken: a sandbox token is
+        404 as anyone else (sandbox-service spec §4.2). Only the owner's user API token is taken: a sandbox token is
         refused (401). Every accepted call raises `modeEpoch` by 1, the same mode included, and is
         audited as `sandbox_mode_changed` (who, the old mode, the new mode, the epoch). Sandbox
         tokens minted afterwards carry the new mode and epoch. The response's `setModeToken` signs
@@ -4621,7 +4672,7 @@ paths:
       summary: Mint a set-mode token for the current mode and epoch
       description: |
         Owner only, admins included: an admin calling it on another user's sandbox gets the same
-        404 as anyone else (SBX0 §4.2). Only the owner's user API token is taken. Raises nothing:
+        404 as anyone else (sandbox-service spec §4.2). Only the owner's user API token is taken. Raises nothing:
         it signs the mode and epoch the record holds now, for a client to re-send `LeaseControl
         set_mode` when the worker reports the epoch unknown (lease-mode spec §8.2). The exception
         is a lease mode SH_SANDBOX_MODES_ALLOWED no longer lists: the sandbox is first set to
@@ -4677,7 +4728,7 @@ paths:
       summary: The host janitor's read -- every live and retained terminated sandbox
       description: |
         Sandbox service control planes only. Authenticated by `SH_JANITOR_TOKEN` alone, never a
-        user's token, and refused with none configured (SBX0 §8.3). Carries only what the janitor
+        user's token, and refused with none configured (sandbox-service spec §8.3). Carries only what the janitor
         needs to find a workspace tree.
       security: [{ janitorToken: [] }]
       responses:
@@ -4720,7 +4771,7 @@ paths:
         Sandbox service control planes with egress credentials configured only. Authenticated by
         a KVM host's egress token. Returns the sandbox OWNER's `sandbox-egress` credentials whose
         destination matches `host`, rendered to header values, sorted by port, then path prefix
-        length descending, then name. Header values are never logged or audited (SBX0.2b §4.2).
+        length descending, then name. Header values are never logged or audited (egress-credentials spec §4.2).
       security: [{ egress: [] }]
       requestBody:
         required: true
@@ -4889,7 +4940,7 @@ paths:
         `MOCA_TENANCY=single` it returns the credential resolved from the record (`mode: direct` or
         `placeholder`). Under `multi` it returns MI1 §6.1 **grants** (`mode: grant`) and never a
         credential value: `anthropicAuthToken` is the inference grant, `anthropicBaseUrl` is the
-        deployment's inference listener, and `sandboxGrant` and `turnExp` come with them. Under
+        deployment's inference listener, and `sandboxGrant` comes with them. Under
         `multi` the deployment must configure the grant ring and the listener or the control plane
         refuses to boot -- which is what replaces M1's per-request `501` (ADR-0047).
 
@@ -4954,11 +5005,11 @@ paths:
                     type: object
                     description: |
                       the per-turn budget ceilings recorded at submission, returned so a worker can
-                      enforce them without re-reading the record. No worker enforces them yet
-                      (#391). Empty when the submission named none.
+                      enforce them without re-reading the record (#391). Empty when the submission
+                      named none. `tokens` is enforced inside the run; `wallClock` is not read by the
+                      worker at all -- it is already resolved into `turnExp` below.
                     properties:
                       tokens: { type: integer }
-                      costUsd: { type: number }
                       wallClock: { type: integer, description: seconds }
                   envelope:
                     type: object
@@ -4988,9 +5039,20 @@ paths:
                   turnExp:
                     type: integer
                     description: |
-                      unix seconds, present only in `grant` mode: the absolute end of this turn,
-                      anchored at the DEQUEUE and clamped to `min(caps.wallClock, MOCA_TURN_MAX_S)`.
-                      Both grants expire at it; no refresh extends past it.
+                      unix seconds: the absolute end of THIS DELIVERY, anchored at the DEQUEUE and
+                      clamped to `min(caps.wallClock, MOCA_TURN_MAX_S)`. In `grant` mode both grants
+                      expire at it and no refresh extends past it.
+
+                      Per delivery, not per turn, because it is anchored at each dequeue: a
+                      redelivery after a worker died mid-leaf gets a fresh window, since its grants
+                      are minted here too and a deadline it had already passed would make the turn
+                      unrunnable rather than merely capped. See `caps` on the submission route for
+                      the aggregate this allows (the cap times the delivery limit).
+
+                      Returned in EVERY mode since #391, because it is also the deadline the worker
+                      enforces: it stops the leaf at this instant and ends the turn `failed` with
+                      `result.reason: "budget"`. `caps.wallClock` is never re-resolved by the worker,
+                      so a mode that omitted this would have an unenforceable wall-clock cap.
                   configRef:
                     { type: string, description: present only when the turn named a config bundle }
                   sandboxTier:

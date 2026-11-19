@@ -19,6 +19,7 @@ import { createLeafDrainLoop } from '../src/leaf-drain-loop.js';
 import { claimTurn, deadLetterTurn } from '../src/turn-claim.js';
 import { asyncFinalizeState } from '../src/async-worker.js';
 import { TurnCounter } from '../src/worker.js';
+import { SubjectCounter } from '../src/subject-quota.js';
 
 const REDIS_URL = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
 // Production timings make a faithful reclaim test wait 90 s+, which CI will not gate on. These are
@@ -126,12 +127,12 @@ async function newQueue(): Promise<RedisWorkQueue> {
  * reaches the result record too, and it appears INSIDE the envelope as well: `claimTurn` refuses a
  * claim whose envelope session id disagrees with the record's.
  */
-async function submit(): Promise<{ turnId: string; sessionId: string }> {
+async function submit(owner = `owner-${tag}`): Promise<{ turnId: string; sessionId: string }> {
   const turnId = `t-${randomUUID()}`;
   const sessionId = `sid-${tag}-${randomUUID().slice(0, 6)}`;
   await turns.create({
     turnId,
-    owner: `owner-${tag}`,
+    owner,
     tenant: 'default',
     sessionId,
     cfg: '',
@@ -222,6 +223,69 @@ describe('§8 — the drain under mixed load', () => {
 
     expect(finished).toHaveLength(ids.length);
     for (const id of ids) expect((await turns.get(id))?.state).toBe('done');
+  });
+});
+
+describe('§5.3 — two owners on one drain (#391)', () => {
+  // The guarantee that SHIPS, and the one that does not. `SubjectCounter` is per worker and
+  // in-process, and `admitOwner` is the only thing on the drain that reads it, so what is bounded is
+  // an owner's MIXED load: A's interactive turn fills A's cap, and A's queued leaves then wait while
+  // B's turn is claimed and run. An async-only backlog is NOT paced -- a worker runs one queued leaf
+  // at a time, so the drain alone never reaches a cap of max(1, S/2) and A's entries would be served
+  // in FIFO order ahead of B's. That is what the docs now say (spec §12); the cluster-wide count
+  // that would bound an async-only drain is still open on #391.
+  it("defers the owner at their cap, unrun and unpenalised, and runs the other owner's turn", async () => {
+    const cap = 1;
+    const queue = await newQueue();
+    const subjects = new SubjectCounter();
+    const a = `owner-a-${tag}`;
+    const b = `owner-b-${tag}`;
+
+    // A's backlog is enqueued FIRST, so FIFO alone would serve all three of them before B.
+    const backlog = [await submit(a), await submit(a), await submit(a)];
+    const bTurn = await submit(b);
+
+    // A's one slot is already held by an interactive /turn of theirs, taken through the SAME
+    // counter the drain checks -- which is the whole point of sharing one `SubjectCounter`.
+    const releaseASync = subjects.acquire(a, cap);
+    expect(releaseASync).not.toBeNull();
+
+    const ran: string[] = [];
+    const runLeaf = async (env: LeafEnvelope): Promise<LeafResult> => {
+      ran.push(env.sessionId);
+      return { status: 'done' } as LeafResult;
+    };
+    const job: LeafJobDeps = {
+      ...jobFor(queue, 'w-fair', runLeaf),
+      // Production's own wiring (async-worker.ts): the owner comes off the record, and the cap is
+      // checked against the counter the sync path shares.
+      admitOwner: async (turnId) => subjects.acquire(await turns.owner(turnId), cap),
+      // High on purpose: a deferred entry must not be reclaimed by the NEXT claim in this loop, or
+      // the claim order under test would be A's entries coming back round rather than B's turn.
+      minIdleMs: 60_000,
+    };
+
+    const outcomes = [];
+    for (let i = 0; i < 4; i++) outcomes.push(await processOne(job));
+
+    expect(outcomes.map((o) => o.kind)).toEqual(['deferred', 'deferred', 'deferred', 'completed']);
+    // B's turn ran, and ran FIRST: before any of A's three older entries.
+    expect(ran).toEqual([bTurn.sessionId]);
+    expect((await turns.get(bTurn.turnId))?.state).toBe('done');
+    // Unrun and unpenalised: still `queued` (no credential was ever minted for them) and no
+    // delivery was charged against their attempt budget.
+    for (const t of backlog) {
+      const rec = await turns.get(t.turnId);
+      expect(rec?.state).toBe('queued');
+      expect(rec?.attempts).toBe(0);
+    }
+
+    // And not starved: A's slot comes back when their interactive turn ends, and the backlog then
+    // drains on the ordinary reclaim path. `minIdleMs: 0` is this test standing in for the 90 s wait.
+    releaseASync?.();
+    for (let i = 0; i < 3; i++) await processOne({ ...job, minIdleMs: 0 });
+    expect(ran).toHaveLength(4);
+    for (const t of backlog) expect((await turns.get(t.turnId))?.state).toBe('done');
   });
 });
 

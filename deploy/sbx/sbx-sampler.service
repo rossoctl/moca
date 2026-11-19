@@ -1,0 +1,36 @@
+# deploy/sbx/sbx-sampler.service -- one sample of this KVM host's load (deploy/sbx/sampler.sh, #857
+# R2), started by sbx-sampler.timer. Installed with every worker by deploy/sbx/install-host.sh,
+# which rewrites /etc/sbx, /srv/sbx and /usr/local/libexec when SBX_ENV_DIR, SBX_SRV or
+# SBX_LIBEXEC_DIR differ, and removed with the last one (a plain --uninstall; --keep-shared keeps it).
+[Unit]
+Description=SBX0 host sampler: one JSON line of host, sbx.slice and worker load
+
+[Service]
+Type=oneshot
+Environment=SBX_ENV_DIR=/etc/sbx
+Environment=SBX_SRV=/srv/sbx
+ExecStart=/usr/local/libexec/sbx-sampler.sh
+# A run reads a few files and starts df twice (4 s at most each, and only once when the first
+# hangs) and curl once per worker with /stats (1 s each at most): a hung workspace filesystem
+# still ends in a sample, well inside this limit and the 15 s tick. The timer starts no run while
+# one is still active.
+TimeoutStartSec=10s
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+# Which failures it has reported already ($RUNTIME_DIRECTORY/errors), kept from one run to the
+# next, so a failure that lasts is one journal line (sampler.sh's header).
+RuntimeDirectory=sbx-sampler
+RuntimeDirectoryPreserve=yes
+# Its lines at notice, and nothing below notice from this unit: that drops PID 1's own info lines
+# about each run (starting, finished, deactivated), three every 15 s, and keeps the sample lines
+# and any failure systemd reports (warning and above).
+SyslogLevel=notice
+LogLevelMax=notice
+# It reads /proc, the cgroup tree and /etc/sbx, and talks to the workers' /stats on this host.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectControlGroups=yes

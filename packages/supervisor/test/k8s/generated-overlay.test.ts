@@ -47,6 +47,7 @@ describe.skipIf(NO_KUBECTL)('the generated OCP overlay (setup.sh write_overlay)'
         GO_SANDBOX_COUNT: '3',
         GO_CLIENT_ID: 'Iv1.generated-overlay-test',
         GO_SETTINGS_HASH: HASH,
+        GO_WORKSPACE_IDLE: '12h',
       },
       stdio: ['ignore', 'ignore', 'inherit'],
     });
@@ -101,6 +102,16 @@ describe.skipIf(NO_KUBECTL)('the generated OCP overlay (setup.sh write_overlay)'
     // The supervisor reads the sandbox tiers from moca-settings too (P6.3), so a change rolls it.
     const sup = find(objs, 'Deployment', 'moca-supervisor', 'moca');
     expect(sup.spec.template.metadata.annotations['moca.dev/settings-hash']).toBe(HASH);
+  });
+
+  it('stamps the idle reclaim on the sandbox pod template alone, so a change rolls only them (#338)', () => {
+    const sts = find(objs, 'StatefulSet', 'moca-sandbox', 'moca-sandbox');
+    expect(sts.spec.template.metadata.annotations).toEqual({ 'moca.dev/workspace-idle': '12h' });
+    // ...beside the replicas patch in the same entry, and the ConfigMap read the base sets.
+    expect(sts.spec.replicas).toBe(3);
+    expect(envVar(container(sts, 'sandbox'), 'SH_WORKSPACE_IDLE')?.valueFrom).toEqual({
+      configMapKeyRef: { name: 'moca-sandbox-settings', key: 'SH_WORKSPACE_IDLE', optional: true },
+    });
   });
 
   it('leaves the sandbox egress except list at the built-in ranges with no SH_SANDBOX_EGRESS_EXCEPT', () => {
@@ -298,6 +309,10 @@ describe.skipIf(NO_KUBECTL)(
         (c: { name: string }) => c.name === 'control-plane',
       );
       expect(cp.env).toContainEqual({ name: 'SH_SANDBOX_NAMESPACE', value: NS });
+      // The idle annotation survives ocp-single's own emptyDir patch of the sandboxes (#338).
+      const sts = find(objs, 'StatefulSet', 'moca-sandbox', NS);
+      expect(sts.spec.template.metadata.annotations).toEqual({ 'moca.dev/workspace-idle': '8h' });
+      expect(podSpec(sts).volumes).toContainEqual({ name: 'workspace', emptyDir: {} });
     });
 
     it('keeps the sandbox tiers identical on the supervisor and the control plane through the env patches (P6.3 spec §7)', () => {
@@ -357,13 +372,13 @@ describe.skipIf(NO_KUBECTL)('the generated kind overlay stamps the loaded image 
     }
   });
 
-  it('stamps the harness image ID on the relay and the sandbox image ID on the sandboxes', () => {
+  it('stamps the harness image ID on the relay and the sandbox image ID on the sandboxes, beside the default idle', () => {
     expect(
       find(objs, 'Deployment', 'sandbox-relay', 'moca').spec.template.metadata.annotations,
     ).toEqual({ 'moca.dev/image-id': HARNESS_ID });
     expect(
       find(objs, 'StatefulSet', 'moca-sandbox', 'moca-sandbox').spec.template.metadata.annotations,
-    ).toEqual({ 'moca.dev/image-id': SANDBOX_ID });
+    ).toEqual({ 'moca.dev/workspace-idle': '8h', 'moca.dev/image-id': SANDBOX_ID });
   });
 });
 

@@ -18,7 +18,7 @@
 #                           SBX_OIDC_REDIRECT_URI are (SBX_OIDC_SCOPE optional), all written to
 #                           moca-settings, which the base's env wiring reads; and the client secret
 #                           must already sit in a Secret named moca-oidc, key SH_OIDC_CLIENT_SECRET
-#                           -- setup.sh never touches it (docs/guides/oidc-login-w3id.md). Subjects
+#                           -- setup.sh never touches it (docs/guides/oidc-login.md). Subjects
 #                           in SBX_ALLOWED_SUBJECTS and SBX_ADMIN_SUBJECTS are then oidc:<provider
 #                           sub> entries, per the control plane's subject grammar; a mixed list is
 #                           accepted, so a GitHub enrollment survives the switch
@@ -127,6 +127,14 @@
 #                           SBX_MODES_ALLOWED names a lease mode, that plus SBX_IDLE_CEILING_S too
 #   SBX_API_CA_FILE         optional; a PEM CA the janitor trusts for the API Route, when that Route's
 #                           certificate (the router's default, say) is not publicly trusted
+#
+# The installer token (SH_INSTALLER_TOKEN, in moca-mu1): generated once and kept, like the janitor's.
+# A static operator bearer for the members API -- GET/PUT/DELETE /v1/subjects and its roles routes,
+# and nothing else: it cannot create sessions, run sandboxes or touch credentials. It acts as the
+# synthetic subject `installer` with the admin role, so automation (an enrollment sync, say) needs
+# no login and no refresh tokens. Read it from the Secret (kubectl get secret moca-mu1 -o
+# jsonpath='{.data.SH_INSTALLER_TOKEN}' | base64 -d); rotate it by deleting the key and re-running
+# (every pod rolls). Refused everywhere when the key is absent.
 # SBX_CLIENTS, increment 1a's static client tokens, is gone and refused.
 #
 # Re-runnable: every token, password, key and certificate is generated once and kept. A worker
@@ -142,7 +150,7 @@
 # [+ api-ca.crt], for install-host.sh --janitor) and, with SBX_EGRESS_CREDENTIALS=1, egress/<host id>/
 # (egress.env, egress.token [+ api-ca.crt], for install-host.sh --egress). Copy each bundle straight to its host and delete
 # the copy. With SBX_TEMPLATE_STORE=1 and SBX_TEMPLATE_HOSTS, also host-agent/<host id>/
-# (host-agent.env, host-agent.token [+ api-ca.crt]) for deploy/sbx/host-agent.sh (the RUNBOOK's host
+# (host-agent.env, host-agent.token [+ api-ca.crt]) for deploy/sbx/host-agent.sh (the runbook's (docs/operate/sandbox-service/runbook.md) host
 # agent section). Users log in with `mocactl sbx login`; nothing here is handed to them. With
 # SBX_PROFILE=combined all of it goes to deploy/sbx/.generated-<SBX_NAMESPACE>/ instead, with
 # moca-ca.crt (the supervisor Route's self-signed certificate, the CA its clients trust, e.g.
@@ -180,6 +188,12 @@ SUBJECTS_RE="^($GITHUB_SUBJECT|$OIDC_SUBJECT)(,($GITHUB_SUBJECT|$OIDC_SUBJECT))*
 # SBX_WORKSPACE_FS_GIB x 1024 x 8 in 64-bit shell arithmetic: six digits for the factors of the first
 # (< 10^13) and nine for the filesystem size (< 10^13) keep both far from wrapping.
 COUNT6_RE='^[1-9][0-9]{0,5}$'
+# The largest SBX_WORKSPACE_IMAGE_MB a worker can use (#907): a Firecracker guest restored from the golden
+# snapshot keeps the workspace drive size its vmstate recorded, deploy/microvm/build-snapshot.sh's
+# WORKSPACE_IMAGE_BYTES (2 GiB), so it cannot mount a larger image: the worker's startup probe fails
+# ('mount /workspace exited 32') and the worker never attaches. install-host.sh holds the same value;
+# deploy/sbx/tests/setup.test.sh checks both against build-snapshot.sh.
+SNAPSHOT_WORKSPACE_MB=2048
 COUNT9_RE='^[1-9][0-9]{0,8}$'
 HOST_RE='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
 MODE_RE='(per-exec|lease|lease\+processes)'
@@ -290,6 +304,8 @@ validate() {
   for v in SBX_MAX_PER_SUBJECT SBX_MAX_TOTAL SBX_WORKSPACE_IMAGE_MB; do
     [[ "${!v:-}" =~ $COUNT6_RE ]] || die "$v must be a positive whole number of at most six digits"
   done
+  ((SBX_WORKSPACE_IMAGE_MB <= SNAPSHOT_WORKSPACE_MB)) ||
+    die "SBX_WORKSPACE_IMAGE_MB ($SBX_WORKSPACE_IMAGE_MB) is larger than the snapshot's $SNAPSHOT_WORKSPACE_MB MiB workspace drive (deploy/microvm/build-snapshot.sh WORKSPACE_IMAGE_BYTES): a restored guest cannot mount the image and the worker never attaches (#907)"
   [[ "${SBX_WORKSPACE_FS_GIB:-}" =~ $COUNT9_RE ]] ||
     die 'SBX_WORKSPACE_FS_GIB must be a positive whole number of at most nine digits'
   # Workspace disk is not admission-controlled on the worker (SBX0 §5.3): the total quota is the
@@ -651,7 +667,7 @@ check_unknown_bundles() {
 # Without SBX_REDIS_IMAGE the overlay runs the base's Valkey 9, which cannot read RDB format 12 (what
 # Redis 7.4 writes): a namespace whose redis StatefulSet runs another image would crash-loop redis-0
 # once switched (#811). So that is refused, before anything is applied; a fresh namespace (no
-# StatefulSet) and one already on Valkey pass. RUNBOOK §2.
+# StatefulSet) and one already on Valkey pass. docs/operate/sandbox-service/runbook.md §2.
 check_redis_image() {
   [[ -z "${SBX_REDIS_IMAGE:-}" ]] || return 0
   local json image repo
@@ -663,7 +679,7 @@ check_redis_image() {
   repo="${image%%@*}"
   [[ "${repo##*/}" != *:* ]] || repo="${repo%:*}"
   [[ "$repo" != *valkey/valkey* ]] || return 0
-  die "StatefulSet redis in $NS runs $image, not Valkey, and Valkey 9 (the default without SBX_REDIS_IMAGE) cannot read the RDB format 12 Redis 7.4 writes: redis-0 would crash-loop. Until the data is migrated, set SBX_REDIS_IMAGE to that image pinned by digest (repository[:tag]@sha256:<digest>; the running digest: kubectl -n $NS get pod redis-0 -o jsonpath='{.status.containerStatuses[0].imageID}'). See deploy/sbx/RUNBOOK.md §2"
+  die "StatefulSet redis in $NS runs $image, not Valkey, and Valkey 9 (the default without SBX_REDIS_IMAGE) cannot read the RDB format 12 Redis 7.4 writes: redis-0 would crash-loop. Until the data is migrated, set SBX_REDIS_IMAGE to that image pinned by digest (repository[:tag]@sha256:<digest>; the running digest: kubectl -n $NS get pod redis-0 -o jsonpath='{.status.containerStatuses[0].imageID}'). See docs/operate/sandbox-service/runbook.md §2"
 }
 
 # SBX_STORAGE_CLASS on an existing deployment: Kubernetes forbids changing volumeClaimTemplates on
@@ -840,7 +856,7 @@ remove_client_tokens() {
 # kept). Both keys ride in the one apply: with one field manager, an apply that omitted a key would
 # prune it.
 ensure_signing_key() {
-  local json priv dir jtok foreign='' published
+  local json priv dir jtok itok foreign='' published
   json="$(secret_json moca-mu1)"
   # A moca-mu1 this script did not write is a MOCA control plane's key (a shared namespace, or a
   # copied Secret), and signing with it would tie the two stacks together: refused, below, unless
@@ -851,6 +867,7 @@ ensure_signing_key() {
   fi
   priv="$(json_value "$json" SH_SESSION_TOKEN_PRIVATE_KEY)"
   jtok="$(json_value "$json" SH_JANITOR_TOKEN)"
+  itok="$(json_value "$json" SH_INSTALLER_TOKEN)"
   # Combined: the harness's keys beside SBX0's (combined design §3.5), each generated once and kept.
   local kek='' xtok=''
   if [[ -n "$COMBINED" ]]; then
@@ -863,9 +880,15 @@ ensure_signing_key() {
     log 'generating the janitor token (SH_JANITOR_TOKEN)'
     jtok="$(rand_hex)"
   fi
+  if [[ -z "$itok" ]]; then
+    log 'generating the installer token (SH_INSTALLER_TOKEN)'
+    itok="$(rand_hex)"
+  fi
   # The control plane refuses one under 32 characters; it travels in an HTTP header file, so no space.
   [[ "$jtok" =~ ^[[:graph:]]{32,}$ ]] ||
     die 'moca-mu1 SH_JANITOR_TOKEN is not 32+ printable characters: delete the key and re-run (this rotates it)'
+  [[ "$itok" =~ ^[[:graph:]]{32,}$ ]] ||
+    die 'moca-mu1 SH_INSTALLER_TOKEN is not 32+ printable characters: delete the key and re-run (this rotates it)'
   dir="$(mktemp -d)"
   (
     trap 'rm -rf "$dir"' EXIT
@@ -887,12 +910,12 @@ ensure_signing_key() {
     if [[ -n "$COMBINED" ]]; then
       # SH_SESSION_TOKEN_PUBLIC_KEYS is what the supervisor verifies session tokens with: the same
       # <kid>:<SPKI> as sbx-token-keys (genkeys.ts's format).
-      export S_0="$priv" S_1="$jtok" S_2="$kid:$spki" S_3="$kek" S_4="$xtok"
+      export S_0="$priv" S_1="$jtok" S_2="$kid:$spki" S_3="$kek" S_4="$xtok" S_5="$itok"
       apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY SH_JANITOR_TOKEN SH_SESSION_TOKEN_PUBLIC_KEYS \
-        SH_CREDENTIAL_KEK SH_EXCHANGE_TOKEN
+        SH_CREDENTIAL_KEK SH_EXCHANGE_TOKEN SH_INSTALLER_TOKEN
     else
-      export S_0="$priv" S_1="$jtok"
-      apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY SH_JANITOR_TOKEN
+      export S_0="$priv" S_1="$jtok" S_2="$itok"
+      apply_secret moca-mu1 SH_SESSION_TOKEN_PRIVATE_KEY SH_JANITOR_TOKEN SH_INSTALLER_TOKEN
     fi
     export S_0="$kid:$spki"
     apply_secret sbx-token-keys PUBLIC_KEYS
@@ -1004,7 +1027,7 @@ apply_configmap() {
 # rolls the pod that reads it): SETTINGS_HASH, the control plane's, covers every setting, the public
 # keyset and the certificates; RELAY_HASH covers only the relay's (ocp-sbx/patch-relay.yaml: the
 # issuer and the in-flight cap) with the keyset and the certificates. So a template, subject or quota
-# change rolls the control plane alone and leaves running Execs be (RUNBOOK §5). Runs after
+# change rolls the control plane alone and leaves running Execs be (docs/operate/sandbox-service/runbook.md §5). Runs after
 # route_cert: it reads exec-ca.crt.
 ensure_settings() {
   local ca='' moca sbx relay keys attach_crt exec_crt moca_crt egress hosts
@@ -1349,7 +1372,7 @@ write_egress_bundles() {
   done
 }
 
-# The host-agent bundle of each template host (the RUNBOOK's host agent section): host-agent.env (the API URL and the
+# The host-agent bundle of each template host (the runbook's (docs/operate/sandbox-service/runbook.md) host agent section): host-agent.env (the API URL and the
 # host id; no secret), host-agent.token (the host's bearer alone, no newline) and, with
 # SBX_API_CA_FILE, api-ca.crt. A host no longer listed loses its directory.
 write_store_bundles() {
@@ -1380,7 +1403,7 @@ write_store_bundles() {
     done
   )
   for id in $STORE_HOSTS; do
-    log "host-agent bundle: $GEN/host-agent/$id  (copy to host $id, install host-agent.sh as the RUNBOOK's host agent section says, delete the copy)"
+    log "host-agent bundle: $GEN/host-agent/$id  (copy to host $id, install host-agent.sh as the runbook's (docs/operate/sandbox-service/runbook.md) host agent section says, delete the copy)"
   done
 }
 

@@ -1,6 +1,6 @@
 # Upgrades
 
-> **Preview.** For P6 on Kubernetes ([`deploy/k8s`](../../deploy/k8s/README.md)). The repository documents no
+> **Preview.** For P6 on Kubernetes ([`deploy/k8s`](../operate/harness/kubernetes.md)). The repository documents no
 > rollback procedure; what is below is what the scripts and manifests do.
 
 ## Upgrading means passing a new image
@@ -43,7 +43,8 @@ predate `/readyz`, in which case the supervisor never becomes Ready.
 | Redis         | StatefulSet, one replica                                                                             | See [Redis backup and recovery](redis-backup-recovery.md)                                                                                            |
 | Sandboxes     | StatefulSet, rolling one pod at a time (highest ordinal first), each waiting for Ready               | Pod-local workspaces are lost: a rolled or restarted sandbox resets every container session's workspace **silently**                                 |
 
-A settings change rolls the supervisor and control plane through a settings-hash annotation. Because the relay
+A settings change rolls the supervisor and control plane through a settings-hash annotation, except
+`SH_WORKSPACE_IDLE`, which rolls only the sandboxes (they read it, and nothing else does). Because the relay
 runs the harness image, any `--image` bump recreates it. The first apply of a P6.3 release also recreates the relay and
 rolls every sandbox on **every** stack, tiered or not (new environment variables on the relay and sandboxes). Do both
 at a quiet time.
@@ -69,7 +70,7 @@ period is only an outer bound. Practically:
   bundle format ([#510](https://github.com/rossoctl/moca/issues/510)). Nothing enforces this order, and the
   supervisor, control plane and relay use the same image, so one `--image` bump moves all three and they roll in
   parallel (the rule is in [ADR-0038](../adrs/0038-mocactl-config-bundle-promotion.md) and the
-  [promote guide](../guides/promote-claude-workflow.md)). For a release whose notes say it changes config-bundle handling, roll the supervisor
+  [promote guide](../harness/how-to/promote-claude-workflow.md)). For a release whose notes say it changes config-bundle handling, roll the supervisor
   first (see below). Do not split the image to get this ordering.
 - **Tier lists must match.** `SH_SANDBOX_TIERS` and `SH_SANDBOX_DEFAULT_TIER` are read by both from the same
   ConfigMap.
@@ -124,6 +125,26 @@ that use a promoted bundle.
 
 Changes that alter a default or what a re-run of `setup.sh` writes ([change policy](../reference/change-policy.md),
 rule 5).
+
+- **A turn is told when its session's workspace was reset
+  ([#338](https://github.com/rossoctl/moca/issues/338)).** The harness keeps a `.moca-session` marker in each
+  session's workspace and checks it at every turn's start: one extra Exec per turn, about 2 ms on the container
+  tier and one VM acquire (a standby restore, then its replenish) on the microVM per-exec tier. A reclaimed
+  workspace is reported as `workspace_reset` with reason `reclaimed`; a `mocactl` from before harness API 1.7.0
+  prints that as its "sandbox is gone" message, so upgrade `mocactl` to see the right one. In a git repository
+  (a worktree or submodule included) the marker is added to the repository's `info/exclude`, so `git status`,
+  `git add -A` and `git clean -fd` leave it alone.
+- **Container sandboxes keep an idle workspace for 8 hours, not 30 minutes
+  ([#338](https://github.com/rossoctl/moca/issues/338)).** The first `setup.sh` run after the upgrade writes
+  `SH_WORKSPACE_IDLE=8h` to `moca-settings` and to a new ConfigMap, `moca-sandbox-settings`, in the sandbox
+  namespace, and the sandbox pods read it. That run **rolls every `moca-sandbox` pod** once (a new env entry and a
+  `moca.dev/workspace-idle` annotation on the pod template), which resets every container session's workspace,
+  silently, so run it at a quiet time. The control plane and the supervisor do not roll for it. Workloads' sandboxes
+  take the new value when their pods next start. From then on, an idle session's files stay on the node's disk up to
+  16 times longer: disk is not admission-controlled, and the idle sweep is the only thing that frees it. To keep the
+  old behavior, re-run with `SH_WORKSPACE_IDLE=30m`. A manifest applied without `setup.sh` has no
+  `moca-sandbox-settings` and keeps the worker's 30-minute default. The reset is still silent when the sweep fires,
+  and no session end frees its workspace early: both stay open in #338.
 
 - **Login starts are bounded per client address (oidc only, [#716](https://github.com/rossoctl/moca/issues/716)).**
   Besides the 10,000 live login states in total, one client address may now hold at most

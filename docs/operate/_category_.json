@@ -1,0 +1,8 @@
+{
+  "label": "Deploy and operate",
+  "position": 6,
+  "link": {
+    "type": "doc",
+    "id": "operate/index"
+  }
+}

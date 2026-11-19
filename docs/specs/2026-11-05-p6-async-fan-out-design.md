@@ -1,8 +1,8 @@
 # P6 Async Fan-Out — Design
 
-Version: 1.7 — November 10, 2026
-Status: Proposed (M1 submission and dequeue-exchange slices built; §9.2 records the drain loop's
-implementation decisions and one correction to §5.5)
+Version: 1.8 — November 17, 2026
+Status: Proposed (M1 submission, dequeue-exchange and budget/cancel slices built; §9.2 records the
+drain loop's implementation decisions and one correction to §5.5)
 Issue: [#686](https://github.com/rossoctl/moca/issues/686) (epic); this document is the deliverable
 of its gating child [#386](https://github.com/rossoctl/moca/issues/386) (B1: spec + ADR)
 Decision record: [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md)
@@ -26,7 +26,7 @@ measured, and what proves it. Covers all three P6 deployments (`deploy/k8s`, `de
 ## 1. Problem
 
 Async fan-out — Archetype A of
-[`docs/concepts/dispatch-archetypes.md`](../concepts/dispatch-archetypes.md) — means submitting N
+[`docs/harness/concepts/dispatch-archetypes.md`](../harness/concepts/dispatch-archetypes.md) — means submitting N
 leaves that run later, draining them at a concurrency cap below N, and collecting per-leaf results.
 It is how an orchestrator dispatches work that runs for minutes without holding N long-lived HTTP
 connections.
@@ -174,6 +174,25 @@ return rejectWorkloadRun(res)` sat _before_ the auth gate, deliberately, "so eve
 Every async turn carries caps resolved at submission and stored on the turn record: tokens, cost and
 wall-clock. §6 covers enforcement.
 
+> **Amended by #391: two caps, both enforced; `costUsd` refused.** The draft's third cap had no
+> enforcement path to describe — there is no price table anywhere in the runtime and no USD
+> arithmetic — so a `caps.costUsd` on a submission was accepted and silently ignored, which is a
+> worse answer than absent. It is now refused at submission with
+> `400 invalid_request: caps.costUsd is not enforceable (no price table); use caps.tokens`. A
+> narrowing, taken while `/v1` is Preview and recorded in `docs/api/CHANGELOG.md` 1.30.0. The other
+> two are enforced on two different sides, deliberately:
+>
+> - **`caps.tokens` inside the leaf.** It rides the dequeue response onto `TurnConfig.budgetTokens`
+>   and arms the existing budget voter (`harness/src/budget-voter.ts`), which blocks tool calls once
+>   the turn's spend crosses it — the same mechanism as the `SH_BUDGET_TOKENS` deployment default,
+>   which a turn's own cap can only narrow, never raise (`resolveBudgetLimit` takes the tighter of
+>   the two). The leaf then ends `failed` with `result.reason: "budget"`.
+> - **`caps.wallClock` outside it.** It is already clamped into `turn_exp` at mint (§5.4), and the
+>   worker's watchdog aborts the leaf at that instant and nothing else. The deadline is never
+>   recomputed in the worker: the grant expires then anyway, so a leaf outrunning it would die of
+>   401s instead of reporting a clean `failed: budget`, and there is no second number to keep in
+>   step with the clamp.
+
 **The per-owner queued-turn quota, which §6.4 leans on and which has to be more than a table row.**
 It is the only containment for unbounded fan-out from a submitter §3 assumes is misbehaving, so it is
 specified here rather than left to the implementation:
@@ -315,7 +334,7 @@ from the result store as it always has, and the route above serves async callers
 > cannot be written as a loop — one cancel for the group, or one read of every result — or a caller
 > whose wall clock is set by submission round trips rather than by leaf runtime.
 
-### 4.5 Cancellation: queued only
+### 4.5 Cancellation
 
 ```
 DELETE /v1/sessions/{sessionId}/turns/{turnId}  → 202 | 409
@@ -336,6 +355,34 @@ redelivered entry's record already says `running` and must still run.
   latency improvement over waiting for the cap, not a containment property §6.4 depends on.
 
 Cancelling a running leaf is recorded as owed in §12.
+
+> **Amended by #391: a `running` turn is cancellable, and the machinery above was never needed.**
+> The paragraph's premise — that this takes a new control-plane-to-specific-worker channel — is
+> wrong for M1, because the two sides already share one Redis keyspace: the worker builds its own
+> `TurnStore` on `REDIS_URL` to finalize records (§5.5, §9.2), so it can read a flag the control
+> plane wrote. No transport, no addressing, no worker registry.
+>
+> - **The `DELETE` on a `running` record sets `cancelRequested` and leaves `state` at `running`**,
+>   answering `202 {state: "running", cancelRequested: true}`. The state must not change: every
+>   redelivery CAS (`markRunning`, `finalize`) is written against the open states, so a new state
+>   name would strand an entry reclaimed after a crash. `409 turn_not_cancellable` now means only
+>   "already terminal".
+> - **The worker notices within one poll.** Alongside the per-leaf heartbeat it already runs, the
+>   job runner ticks every 2 s on the same injectable timer seam: a set flag — or a `turn_exp` that
+>   has passed — aborts the `AbortSignal` handed to `runLeaf`. The 30 s heartbeat cannot be reused
+>   for it; it is derived from the reclaim idle time. A reclaimed `running` record is also checked
+>   once before the run, for the cancel that landed while the previous worker was dying.
+> - **202, not 200, because it stays best-effort.** A leaf that finishes before the tick stays
+>   finished. The abort's reason is the only discriminator the leaf needs: a deadline abort reports
+>   `failed: budget`, any other abort reports `aborted`, which `asyncFinalizeState` already maps to
+>   the record state `cancelled`.
+> - **The M2 caveat.** This holds exactly as long as the worker's turn records live in the same
+>   keyspace as the control plane's. A deployment that splits them (§9.1's tenanted direction) would
+>   need the flag delivered some other way, and the worker's own comment on that `TurnStore` is
+>   where that assumption is written down.
+>
+> 202 keeps the §6.4 reading intact: the caps still bound how long a leaf can run, and cancel is
+> still the latency improvement over waiting for one.
 
 ---
 
@@ -377,22 +424,23 @@ credential, no config. Everything authoritative is read from the record at deque
 makes §5.4 possible and what bounds the damage if the queue is ever read by something that should not
 have it.
 
-| Field            | Notes                                                                         |
-| ---------------- | ----------------------------------------------------------------------------- |
-| `turnId`         | opaque; the only thing in the queue                                           |
-| `owner`          | subject string, as `SessionRecord.owner` (`github:<id>`)                      |
-| `tenant`         | gates M1 (§9)                                                                 |
-| `sessionId`      | the session the turn belongs to                                               |
-| `cfg`            | bundle digest, as on the session                                              |
-| `credentialName` | a **name**, resolved server-side at dequeue — never the credential            |
-| `model`          | the session's model, copied at submission; `''` when it named none            |
-| `modelLimits`    | the catalog's limits for that model, snapshotted with it                      |
-| `sandboxTier`    | the session's **stored** tier, copied at submission; `''` resolved at dequeue |
-| `caps`           | tokens, cost, wall-clock (§4.3)                                               |
-| `idempotencyKey` | defaults to `sessionId` (§4.3)                                                |
-| `envelope`       | the `LeafEnvelope` to run                                                     |
-| `state`          | below                                                                         |
-| `attempts`       | written from the entry's `deliveryCount` at claim; descriptive (§5.4)         |
+| Field             | Notes                                                                         |
+| ----------------- | ----------------------------------------------------------------------------- |
+| `turnId`          | opaque; the only thing in the queue                                           |
+| `owner`           | subject string, as `SessionRecord.owner` (`github:<id>`)                      |
+| `tenant`          | gates M1 (§9)                                                                 |
+| `sessionId`       | the session the turn belongs to                                               |
+| `cfg`             | bundle digest, as on the session                                              |
+| `credentialName`  | a **name**, resolved server-side at dequeue — never the credential            |
+| `model`           | the session's model, copied at submission; `''` when it named none            |
+| `modelLimits`     | the catalog's limits for that model, snapshotted with it                      |
+| `sandboxTier`     | the session's **stored** tier, copied at submission; `''` resolved at dequeue |
+| `caps`            | tokens and wall-clock (§4.3; cost refused since #391)                         |
+| `idempotencyKey`  | defaults to `sessionId` (§4.3)                                                |
+| `envelope`        | the `LeafEnvelope` to run                                                     |
+| `state`           | below                                                                         |
+| `attempts`        | written from the entry's `deliveryCount` at claim; descriptive (§5.4)         |
+| `cancelRequested` | set by a `DELETE` on a `running` turn; read by the worker (§4.5, #391)        |
 
 > **`model`, `modelLimits` and `sandboxTier` added by #388's M2.** The first draft of this table
 > copied only `cfg` and `credentialName`, leaving the dequeue to read the model and the tier from the
@@ -611,7 +659,11 @@ over the cap by a factor of two. The policy:
   `turn_exp = dequeue + min(caps.wallClock ?? MOCA_TURN_MAX_S, MOCA_TURN_MAX_S)`. The `min` is the
   whole policy: a per-turn value that can only tighten. A caller asking for more is not refused —
   the request is clamped, because refusing would make a client's cap request a deployment-coupling
-  concern.
+  concern. `dequeue` is **each** dequeue, so both caps bound a DELIVERY and not a turn: a reclaimed
+  redelivery gets a fresh window and a fresh token budget, and a turn's aggregate can reach the cap
+  times `maxAttempts`. Persisting the first dequeue's deadline is the alternative and is worse — the
+  grants are minted from it, so a reclaimed delivery would get credentials already expired, making
+  the turn unretryable rather than merely capped. The contract says per delivery (openapi `caps`).
 - **An hour-long turn is therefore an operator decision, not a caller's.** Raising
   `MOCA_TURN_MAX_S` to 3600 is the supported way to get one, and it is a deliberate, auditable
   change to a deployment-wide ceiling rather than something any client can ask for. This is a
@@ -826,14 +878,25 @@ counters join that object and follow it.
 | `async_queue_depth`       | gauge | The one KEDA gave for free. Sustained growth means arrival outruns drain    |
 | `async_oldest_age_ms`     | gauge | Depth alone cannot distinguish a deep fast queue from a stalled shallow one |
 | `async_claims`            | count | Drain throughput; with depth, the arrival-vs-drain ratio                    |
-| `async_reclaims`          | count | `XAUTOCLAIM` firing. A nonzero steady rate means workers die mid-leaf       |
+| `async_reclaims`          | count | `XAUTOCLAIM` firing. Read net of `async_deferred_subject` (below)           |
 | `async_dead_letters`      | count | Entries that reached `lost` (§6.2) — always an alert, never normal          |
 | `async_claim_denied_full` | count | Claims not attempted because every slot was busy (§5.3's accepted cost)     |
+| `async_deferred_subject`  | count | Entries handed back unrun because their owner was at their cap (#391)       |
 | `async_quota_refusals`    | count | Submissions refused by §4.3's per-owner quota — the containment, firing     |
 
 `async_claim_denied_full` is the design's own stated risk made visible: §5.3 reserves no headroom, so
 a full queue can occupy every slot. If it and interactive `429`s rise together, that is the
-measurement which would justify the per-class caps §12 holds in reserve. `async_quota_refusals` is
+measurement which would justify the per-class caps §12 holds in reserve. `async_deferred_subject`
+reads against it: deferrals while slots sit idle are the per-owner cap pacing one submitter, which
+is the fairness working, while deferrals with no second owner submitting mean the cap is too low
+for this deployment's shape. It also reads against `async_reclaims`, which since #391 no longer
+means "workers die mid-leaf" on its own: a deferred entry stays in the PEL, so `XREADGROUP >` never
+offers it again and `XAUTOCLAIM` is the only way back — every turn that was ever deferred is
+therefore counted a reclaim when it finally runs. **`async_reclaims` net of
+`async_deferred_subject` is the dying-worker signal**; keeping them apart would need the drain to
+tell a hand-back's return from a crash's, and the two arrive on the same `XAUTOCLAIM` with the same
+delivery count (the defer's `RETRYCOUNT: n - 1` is exactly what the reclaim re-increments).
+`async_quota_refusals` is
 the other one that is about this design's choices rather than the queue's health — §4.3's quota is
 the single containment against a runaway submitter, so a deployment needs to see it firing to know
 whether 50 is the right number.
@@ -1151,10 +1214,41 @@ it adds is the schedule. Its design should cite this document for both.
 
 ## 12. Owed, and explicitly not here
 
-- **Cancelling a `running` leaf** (§4.5). Needs a cancel signal addressed to the one worker holding
-  it — new control-plane-to-worker machinery, since interactive cancel (ADR-0040) rides the turn's own
-  connection and async has none. The §4.3 caps bound how long a leaf runs meanwhile, so this is a
-  latency improvement rather than a missing containment property.
+- ~~**Cancelling a `running` leaf** (§4.5). Needs a cancel signal addressed to the one worker
+  holding it — new control-plane-to-worker machinery.~~ **Done in #391**: the two sides already
+  share a Redis keyspace, so the `DELETE` writes a `cancelRequested` flag the worker's 2 s watchdog
+  reads and the leaf aborts — no transport. §4.5's amendment has the shape and the M2 caveat.
+- **Per-subject fairness on the async drain.** **Partly addressed in #391, and still owed.** What
+  ships is claim-time filtering against the SYNC cap: the queue is still one FIFO stream, so the
+  worker reads the claimed entry's `owner` (one `HGET`) and, when that owner already holds
+  `SH_TURNS_PER_SUBJECT` of this worker's slots, hands the entry back **unrun and unpenalised** —
+  `XCLAIM … JUSTID RETRYCOUNT <before>`, so a defer is invisible to `maxAttempts` — and backs off as
+  it does on an empty queue. The check runs _before_ the claim handshake, so a turn that may not run
+  yet mints no credential and writes no audit entry, and it shares the sync route's one
+  `SubjectCounter` instance, so async leaves and interactive turns of one subject count against one
+  number. `async_deferred_subject` (§7) counts it. That is a real guarantee for MIXED load: an
+  owner whose fan-out is executing can no longer also fill the worker with interactive turns. A
+  deferred entry does wait up to one `minIdleMs` (90 s) before any worker may reclaim it, even if a
+  slot frees sooner: leaving IDLE high instead would have this worker's own next claim reclaim the
+  same entry (XAUTOCLAIM leads every claim), defer it again, and never reach the entries behind it.
+  Because the defer also refunds the attempt budget, nothing else bounds how often one entry can be
+  handed back, so **fairness yields after ten minutes** (`DEFER_CEILING_MS`, measured from the
+  entry's own stream id): past that the entry runs one leaf over its owner's share and logs that it
+  did, because an owner who never frees a slot would otherwise have their turn deferred forever —
+  never run, never dead-lettered, and with `turnExp` never starting, since it is anchored at a
+  dequeue that never comes. The worker-wide `SH_TURNS_PER_WORKER` cap still holds.
+  **What it is NOT, and what #391 therefore leaves open.** It does not bound an owner's share of an
+  **async-only** drain. A worker runs one queued leaf at a time (§5.3), so an owner's async turns
+  reach a cap of `max(1, ⌊S/2⌋)` only when their sync turns are in flight too; with async alone the
+  count never reaches it, nothing is ever deferred, and the single FIFO stream then serves owner A's
+  thousand-entry backlog ahead of owner B's one turn. Binding that needs a count no worker holds —
+  per-owner streams, or a cluster-wide per-owner running count checked at the dequeue exchange
+  (where the control plane already owns the records and a per-owner open-turn set). That is the
+  queue-shape question this section's per-class-caps item below also waits on, and it is why #391's
+  fourth criterion ("one subject can't take every slot") stays open.
+- **Per-turn cost attribution (#859).** #391's other half, split out: it wants the per-model price table
+  §4.3's amendment says does not exist (#359), which is the same reason `caps.costUsd` is refused
+  at submission rather than enforced.
 - ~~Result retention beyond 24 h, and richer artifacts than the current patch/text/summary.~~
   **Done in #390**: seven days by default, moved on the one knob §5.1 describes, plus a base commit
   and a diffstat on every captured patch and a `GET …/turns/{turnId}/artifacts/{kind}` route so a
@@ -1169,7 +1263,7 @@ it adds is the schedule. Its design should cite this document for both.
   limits; the one gap it names, collecting N results without N polls, belongs to #392's event
   stream.
 - Documentation: ADR-0041's "Still owed" note, the Archetype A row and section of
-  `dispatch-archetypes.md`, and the `async_removed` entry in `docs/reference/http-api.md` (#690).
+  `dispatch-archetypes.md`, and the `async_removed` entry in `docs/harness/reference/http-api.md` (#690).
   `MOCA_ASYNC_QUEUED_PER_OWNER` (§4.3) joins `docs/reference/configuration.md`'s table with the code
   that reads it, as that file's own rule requires — it lists variables as they exist in the code.
 - Retiring #380's interim sync-disconnect contract (§5.5), which belongs to #389's scope item 5. The

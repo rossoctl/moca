@@ -651,7 +651,7 @@ async function activateWorkload(
  * record for each of them, or `202 provisioning` until then (GET and a repeat activate check again).
  * A failure stays on the record as `error`, and the record stays `provisioning` for a retry. A
  * refusal no retry can fix (a 400 such as `sandboxes_count_exceeded`, or `422 workload_refused`)
- * stays the same way: the revision is frozen, so DELETE is the way out (docs/context-service.md).
+ * stays the same way: the revision is frozen, so DELETE is the way out (docs/harness/how-to/workloads.md).
  */
 async function provision(
   record: WorkloadRecord,
@@ -775,7 +775,7 @@ async function deleteWorkload(
   // This is the owner's own record, which `GET` already reports as `deleted` for a day
   // (MOCA_WORKLOAD_DELETED_TTL_SECONDS), so it reveals nothing GET does not. Another user's
   // workload is not read at all and stays `workload_not_found` -- the per-user privacy property of
-  // docs/context-service.md ("Names are per user"). Still 404: there is no live workload to delete.
+  // docs/harness/how-to/workloads.md ("Names are per user"). Still 404: there is no live workload to delete.
   if (record.status === 'deleted') return send(res, 404, { error: 'workload_already_deleted' });
   try {
     // A `deleting` record is a delete (or a create rollback) that failed midway: retry it.

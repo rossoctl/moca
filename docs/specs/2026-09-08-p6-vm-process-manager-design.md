@@ -775,7 +775,7 @@ ladder must include the single-session rung, which is also §5.2's W=1 baseline.
   duty rows §2.3 keeps apart (E6/OCP's `0.061–0.079` / `12.6–16.5`, which this design provisions from;
   E6/Kind's `0.042–0.051` / `19.7–24.0`; E7's `0.021`/`0.035` / `28.6–47.6`, superseded for
   real-converge work at `:65`).
-- [`docs/experiment-results.md`](../experiment-results.md) — E2's constant-6-entry rehydration, which
+- [`docs/archive/experiment-results.md`](../archive/experiment-results.md) — E2's constant-6-entry rehydration, which
   decides §3.4.
 - [ST](2026-07-08-sandbox-transport-grpc-design.md) · [ADR-0024](../adrs/0024-sandbox-transport-remote-exec.md)
   · [`remote-worker/DESIGN.md`](../../remote-worker/DESIGN.md) — the transport seam and the

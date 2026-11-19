@@ -1,10 +1,10 @@
 # Manage multi-user sessions
 
-> **Preview.** For the single-VM deployment ([`deploy/vm`](../../deploy/vm/README.md)), the path the multi-user demos
+> **Preview.** For the single-VM deployment ([`deploy/vm`](../operate/harness/single-vm.md)), the path the multi-user demos
 > were run on. Commands are taken from [`docs/demos/vm-two-user-acceptance.md`](../demos/vm-two-user-acceptance.md) and
 > [`vm-multi-user-demo.md`](../demos/vm-multi-user-demo.md), which were run by one person with two GitHub accounts on
 > one laptop. Two people on two laptops was not tried. I have not re-run them. Read the
-> [security model](../reference/security-model.md) and [multi-user concepts](../concepts/multi-user.md) first: ownership is enforced at the API, but sandboxes are not
+> [security model](../reference/security-model.md) and [multi-user concepts](../harness/concepts/multi-user.md) first: ownership is enforced at the API, but sandboxes are not
 > isolated between users.
 
 ## Before you start
@@ -100,7 +100,7 @@ mocactl run "hello, reply with one short sentence"       # prints "session <id>"
 mocactl run "what did I just say?" --session <id>
 ```
 
-Each `XDG_CONFIG_HOME` holds one identity. See the [`mocactl` reference](../reference/cli-mocactl.md) for flags.
+Each `XDG_CONFIG_HOME` holds one identity. See the [`mocactl` reference](../harness/reference/cli-mocactl.md) for flags.
 
 ### Optional: an operator fallback key
 
@@ -180,7 +180,7 @@ mocactl run --new --option sandboxTier=microvm "In your sandbox: ..."
 `--option` is ignored when resuming. The tier is fixed for the session's life and never crosses tiers. With several tiers
 and no choice, the server default applies. The container tier has network access and per-session directories under one `/workspace`, which are not isolated from
 each other; the microVM tier has no network device and reaches only an allowlist of hosts, through the
-host's proxy ([Sandboxes and tiers](../concepts/sandboxes-and-tiers.md)).
+host's proxy ([Sandboxes and tiers](../harness/concepts/sandboxes-and-tiers.md)).
 
 ## 5. Choose a model
 

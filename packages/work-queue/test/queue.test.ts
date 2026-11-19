@@ -64,6 +64,35 @@ describe('RedisWorkQueue', () => {
     expect(await queue.pending()).toBe(0);
   });
 
+  // The whole point of the fairness defer: an owner at their cap must not have their turns
+  // dead-lettered for having been deferred `maxAttempts` times. The delivery counter is what
+  // `processOne` reads to dead-letter, so a defer that left it incremented would fail a healthy
+  // turn for being busy.
+  it('defer leaves the entry pending with its attempt budget unspent', async () => {
+    await put('t-abc');
+    const claimed = await queue.claim('c1', { minIdleMs: 10_000 });
+    expect(claimed!.deliveryCount).toBe(1);
+
+    await queue.defer(claimed!.entryId, 'c1', claimed!.deliveryCount - 1);
+    expect(await queue.pending()).toBe(1);
+
+    // Redelivered later, still on its FIRST attempt as far as maxAttempts is concerned.
+    await new Promise((r) => setTimeout(r, 60));
+    const again = await queue.claim('c2', { minIdleMs: 50 });
+    expect(again).toMatchObject({ turnId: 't-abc', deliveryCount: 1, reclaimed: true });
+  });
+
+  // The defer resets the idle timer (see its doc): that is what stops this worker's own next claim
+  // from reclaiming the same entry, deferring it again, and never reaching the entries behind it.
+  it('defer leaves the entry un-reclaimable for minIdleMs, so the queue moves past it', async () => {
+    await put('t-busy');
+    await put('t-other');
+    const first = await queue.claim('c1', { minIdleMs: 50 });
+    await queue.defer(first!.entryId, 'c1', 0);
+
+    expect(await queue.claim('c1', { minIdleMs: 50 })).toMatchObject({ turnId: 't-other' });
+  });
+
   it('XAUTOCLAIM reclaims an abandoned entry for another consumer, flagged and counted', async () => {
     await put('t-abc');
     await queue.claim('dead', { minIdleMs: 50, blockMs: 50 });
@@ -118,6 +147,22 @@ describe('RedisWorkQueue', () => {
     // Still the reclaimer's, and still fresh: the refused touch changed nothing at all.
     const pel = await client.xPendingRange(stream, 'leaf-workers', '-', '+', 10);
     expect(pel.map((e) => String(e.consumer))).toEqual(['reclaimer']);
+  });
+
+  // Same hazard on the hand-back path: the fairness defer runs right after a claim, and a claim can
+  // already be lost (a reclaim raced it). An unconditional XCLAIM would take the entry back from its
+  // new owner AND reset the delivery counter of a turn that worker is running.
+  it('defer does not steal the entry back once another consumer has reclaimed it', async () => {
+    await put('t-abc');
+    const first = await queue.claim('stalled', { minIdleMs: 10_000 });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(await queue.claim('reclaimer', { minIdleMs: 50 })).toMatchObject({ reclaimed: true });
+
+    await queue.defer(first!.entryId, 'stalled', 0);
+    const pel = await client.xPendingRange(stream, 'leaf-workers', '-', '+', 10);
+    expect(pel.map((e) => String(e.consumer))).toEqual(['reclaimer']);
+    // The counter the reclaimer will be judged by is untouched: still its second delivery.
+    expect(pel[0]!.deliveriesCounter).toBe(2);
   });
 
   it('touch reports false for an entry that is no longer pending at all', async () => {

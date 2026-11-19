@@ -220,10 +220,15 @@ export function markSent(s: BlockState): BlockState {
 export function workspaceResetText(f: {
   from: string;
   tier: string;
-  reason: 'detached' | 'retiered';
+  reason: 'detached' | 'retiered' | 'reclaimed';
 }): string {
   // No tier when the deployment declares none: name no tier rather than print "in tier ''".
   const where = f.tier ? ` in tier '${f.tier}'` : '';
+  if (f.reason === 'reclaimed') {
+    // Same sandbox, so no move to describe; and no sandbox id when the turn has none to name.
+    const on = f.from ? ` on sandbox '${f.from}'` : '';
+    return `workspace reset: the session's workspace${on} was reclaimed, so files from earlier turns are gone; this turn runs on a fresh workspace${where}`;
+  }
   return f.reason === 'retiered'
     ? `workspace reset: sandbox '${f.from}' moved to another tier or template; this turn runs on a fresh workspace${where}`
     : `workspace reset: sandbox '${f.from}' is gone; this turn runs on a fresh workspace${where}`;

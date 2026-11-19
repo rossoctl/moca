@@ -240,6 +240,7 @@ export class TurnStore {
       attempts: Number(h.attempts ?? 0),
       createdAt: Number(h.createdAt ?? 0),
       ...(h.endedAt ? { endedAt: Number(h.endedAt) } : {}),
+      ...(h.cancelRequested === '1' ? { cancelRequested: true } : {}),
     };
   }
 
@@ -380,17 +381,65 @@ export class TurnStore {
   }
 
   /**
-   * A `queued` turn flips to `cancelled`; anything else is a conflict naming its state. A RUNNING
-   * leaf is deliberately not interrupted (§4.5): interrupting one needs a signal addressed to the
-   * single worker holding it, which does not exist.
+   * A `queued` turn flips to `cancelled` outright. A `running` one gets `cancelRequested` and STAYS
+   * `running`, answering `cancelling` (§4.5, #391): the worker holding the leaf polls the flag,
+   * aborts the run and finalizes `cancelled` itself -- so no message addressed to one particular
+   * worker is needed, only the turn record both already read. Anything else is a conflict naming
+   * its state.
+   *
+   * The state must not become a `cancelling` of its own. Every write a redelivery makes
+   * (`markRunning`, `finalize`) compare-and-sets against OPEN_STATES, so a third live state would
+   * refuse exactly the crash-reclaimed entries recovery exists for.
    */
-  async cancel(turnId: string, now: number): Promise<'cancelled' | 'conflict'> {
-    const rec = await this.get(turnId);
-    if (!rec || rec.state !== 'queued') return 'conflict';
-    // `queued` ALONE in the CAS: a claim that won the race between the read above and this write
-    // made the record `running`, and §4.5 is explicit that a running leaf is not interrupted.
-    const res = await this.toTerminal(rec, 'cancelled', now, ['queued']);
-    return res === 'ok' ? 'cancelled' : 'conflict';
+  async cancel(turnId: string, now: number): Promise<'cancelled' | 'cancelling' | 'conflict'> {
+    // Read, then CAS on the state that read saw, and on a lost CAS read again -- twice at most.
+    // Without the retry, a claim landing between the read and the `['queued']` CAS answered
+    // `conflict`, which the handler reports as a 409 meaning "already terminal": the caller stops,
+    // so the "cancelled through the flag by the caller's next DELETE" this used to rely on never
+    // happens and a running turn is uncancellable for the rest of its life. Two passes are enough
+    // because only queued → running can defeat the first, and the running CAS that follows loses
+    // only to a finalize, which is a real conflict.
+    //
+    // So falling out of the loop is an HONEST conflict, not a lost race: CAS_STATE_LUA returns 0
+    // only when the state is outside the allowed set or the record is gone, and the sole transition
+    // out of `running` is a terminal one. A third pass would re-read a turn that is already final.
+    // The 409's message is built from a FRESH read for the same reason (turn-handlers.ts).
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const rec = await this.get(turnId);
+      if (!rec) return 'conflict';
+      if (rec.state === 'running') {
+        // Already requested: idempotent, so a caller retrying a DELETE sees the same answer rather
+        // than a 409 for a cancel that is in flight.
+        if (await this.cas(this.key(turnId), ['running'], { cancelRequested: '1' }))
+          return 'cancelling';
+        continue;
+      }
+      if (rec.state !== 'queued') return 'conflict';
+      if ((await this.toTerminal(rec, 'cancelled', now, ['queued'])) === 'ok') return 'cancelled';
+    }
+    return 'conflict';
+  }
+
+  /**
+   * Has a cancel been requested for this RUNNING turn (#391)? One field, not the whole record: the
+   * worker polls this every couple of seconds for every leaf it is running, and the record carries
+   * the turn's whole envelope.
+   */
+  async cancelRequested(turnId: string): Promise<boolean> {
+    const v = await this.guard(() => this.redis.hGet(this.key(turnId), 'cancelRequested'));
+    return v === '1';
+  }
+
+  /**
+   * Who owns this turn, or '' when there is no record (#391's per-owner fairness). One field for
+   * `cancelRequested`'s reason: the async worker reads it for every entry it claims, before it
+   * decides whether that owner may run another leaf, and the whole record carries an envelope.
+   *
+   * An absent record answers '' rather than throwing: the caller's next step is the claim, which
+   * is the call that resolves what a missing record means (refused, not deferred).
+   */
+  async owner(turnId: string): Promise<string> {
+    return (await this.guard(() => this.redis.hGet(this.key(turnId), 'owner'))) ?? '';
   }
 
   /** One CAS attempt, with the transport mapped to 503 like every other call here. */
