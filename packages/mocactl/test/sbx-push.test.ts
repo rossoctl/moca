@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { MAX_STDIN_BYTES } from '@moca/sandbox-client';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BUILD_EXCLUDES,
   CHUNK_TARGET,
@@ -53,7 +53,7 @@ import {
 } from '../src/sbx/push.js';
 import { MARK_BEGIN, MARK_END } from '../src/sbx/agent-config.js';
 import { readBinding } from '../src/sbx/state.js';
-import { SBX, cleanupTmp, git, localWorkspace, repo } from './helpers/sbx.js';
+import { SBX, cleanupTmp, git, localWorkspace, repo, tmp } from './helpers/sbx.js';
 
 afterEach(cleanupTmp);
 
@@ -1192,6 +1192,194 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     // A space makes the unquoted split ambiguous: every candidate is listed.
     expect(patchSourcePaths('diff --git a/p b/q b/r\n')).toEqual(['p', 'p b/q']);
   });
+
+  // core.hooksPath names the directory git runs hooks from (relative to the working tree's root).
+  // <root> is the repository; `hooks` is a symlink to .githooks where the value is `link`.
+  const hooksValue = (r: string, v: string) => {
+    if (v === 'link') symlinkSync('.githooks', join(r, 'hooks'));
+    return v === 'link' ? 'hooks' : v.replace('<root>', r);
+  };
+  for (const [v, p] of [
+    ['.githooks', '.githooks/pre-commit'],
+    ['scripts/hooks', 'Scripts/Hooks/pre-push'],
+    ['scripts/hooks', 'scripts'],
+    ['tools/../hooks', 'hooks/commit-msg'],
+    ['link', '.githooks/post-checkout'],
+    ['<root>', 'run.sh'],
+  ] as const) {
+    it(`refuses a patch writing ${p} with core.hooksPath=${v}, with nothing changed`, async () => {
+      const r = repo();
+      git(r, 'config', 'core.hooksPath', hooksValue(r, v));
+      const tree = snapshot(r);
+      const patch = Buffer.from(creating('src/ok.py') + creating(p));
+      const err = await applyPatch(r, patch).catch((e: unknown) => e);
+      expect(err, p).toBeInstanceOf(PushError);
+      expect((err as Error).message).toContain(`${p} (`);
+      expect((err as Error).message).toContain('core.hooksPath');
+      expect(snapshot(r)).toEqual(tree);
+    });
+  }
+
+  // The tree is $HOME, as in a bare-dotfiles setup, with git's default global and XDG configs.
+  const inHome = (r: string) => {
+    vi.stubEnv('HOME', r);
+    vi.stubEnv('XDG_CONFIG_HOME', undefined);
+    vi.stubEnv('GIT_CONFIG_GLOBAL', undefined);
+  };
+  // A directory whose git answers `git var` as a git before 2.42 does for an unknown variable.
+  const gitWithoutVar = () => {
+    const d = tmp('git-');
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    writeFileSync(
+      join(d, 'git'),
+      `#!/bin/sh\n[ "$1" = var ] && { echo 'usage: git var (-l | <variable>)' >&2; exit 129; }\nexec '${real}' "$@"\n`,
+    );
+    chmodSync(join(d, 'git'), 0o755);
+    return d;
+  };
+
+  // What else git reads from the tree that could run commands: its directory and config files.
+  for (const [what, set, p] of [
+    [
+      'a git directory not named .git',
+      (r: string) => git(r, 'init', '-q', '--separate-git-dir', join(r, '.df')),
+      '.df/hooks/pre-commit',
+    ],
+    [
+      'a missing include',
+      (r: string) => git(r, 'config', 'include.path', '../shared.gitconfig'),
+      'shared.gitconfig',
+    ],
+    [
+      'a global config',
+      (r: string) => {
+        mkdirSync(join(r, 'cfg'));
+        writeFileSync(join(r, 'cfg/global'), '[x]\n\ty = 1\n');
+        vi.stubEnv('GIT_CONFIG_GLOBAL', join(r, 'cfg/global'));
+      },
+      'cfg',
+    ],
+    ['a global config not yet created, the tree being $HOME', inHome, '.gitconfig'],
+    ['an XDG config not yet created, the tree being $HOME', inHome, '.config/git/config'],
+    [
+      'a system config not yet created',
+      (r: string) => {
+        vi.stubEnv('GIT_CONFIG_NOSYSTEM', undefined);
+        vi.stubEnv('GIT_CONFIG_SYSTEM', join(r, 'etc/gitconfig'));
+      },
+      'etc/gitconfig',
+    ],
+    [
+      'a global config not yet created, with a git before 2.42',
+      (r: string) => {
+        inHome(r);
+        vi.stubEnv('PATH', `${gitWithoutVar()}:${process.env.PATH}`);
+      },
+      '.gitconfig',
+    ],
+  ] as const) {
+    it(`refuses a patch writing ${p}, ${what} in the tree`, async () => {
+      const r = repo();
+      try {
+        set(r);
+        const err = await applyPatch(r, Buffer.from(creating(p))).catch((e: unknown) => e);
+        expect(err, p).toBeInstanceOf(PushError);
+        expect((err as Error).message).toContain(`${p} (`);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  }
+
+  // Their siblings are not refused.
+  for (const [what, set, p] of [
+    [
+      'a git directory .df',
+      (r: string) => git(r, 'init', '-q', '--separate-git-dir', join(r, '.df')),
+      '.dfx/a',
+    ],
+    [
+      'a global config cfg/global',
+      (r: string) => vi.stubEnv('GIT_CONFIG_GLOBAL', join(r, 'cfg/global')),
+      'cfg2/x',
+    ],
+    ['an XDG config .config/git/config, the tree being $HOME', inHome, '.config/other'],
+  ] as const) {
+    it(`applies a patch writing ${p} beside ${what}`, async () => {
+      const r = repo();
+      try {
+        set(r);
+        await applyPatch(r, Buffer.from(creating(p)));
+        expect(existsSync(join(r, p))).toBe(true);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  }
+
+  it('refuses a patch writing hooks/pre-commit when the git directory is the tree', async () => {
+    const r = tmp('sbx-gitdir-root-');
+    git(r, 'init', '-q', '--bare', '.');
+    git(r, 'config', 'core.bare', 'false');
+    git(r, 'config', 'core.worktree', r);
+    const tree = snapshot(r);
+    const err = await applyPatch(r, Buffer.from(creating('hooks/pre-commit'))).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(PushError);
+    expect((err as Error).message).toContain('hooks/pre-commit (the git directory)');
+    expect(snapshot(r)).toEqual(tree);
+  });
+
+  // A nested repository's own hooks and config are not the tree's: nothing inside one is written.
+  for (const [what, set, p] of [
+    [
+      'a nested repository with core.hooksPath=.githooks',
+      (r: string) => {
+        git(r, 'init', '-q', 'sub');
+        git(join(r, 'sub'), 'config', 'core.hooksPath', '.githooks');
+      },
+      'sub/.githooks/pre-commit',
+    ],
+    [
+      'a nested repository with a .git file, as a submodule has',
+      (r: string) => git(r, 'init', '-q', '--separate-git-dir', tmp('gitdir-'), 'sub'),
+      'sub/deep/x',
+    ],
+  ] as const) {
+    it(`refuses a patch writing ${p}, in ${what}, with nothing changed`, async () => {
+      const r = repo();
+      set(r);
+      const tree = snapshot(r);
+      const patch = Buffer.from(creating('src/ok.py') + creating(p));
+      const err = await applyPatch(r, patch).catch((e: unknown) => e);
+      expect(err, p).toBeInstanceOf(PushError);
+      expect((err as Error).message).toContain(`${p} (in sub)`);
+      expect(snapshot(r)).toEqual(tree);
+    });
+  }
+
+  it('applies a patch writing subx/a beside the nested repository sub', async () => {
+    const r = repo();
+    git(r, 'init', '-q', 'sub');
+    await applyPatch(r, Buffer.from(creating('subx/a')));
+    expect(existsSync(join(r, 'subx/a'))).toBe(true);
+  });
+
+  for (const [v, p] of [
+    ['scripts/hooks', 'scripts/hooksx/a'],
+    ['scripts/hooks', 'scripts/other'],
+    ['<root>', 'src/pre-commit'],
+    ['/elsewhere/hooks', '.githooks/pre-commit'],
+    ['', 'pre-commit'],
+  ] as const) {
+    it(`applies a patch writing ${p} with core.hooksPath=${v}`, async () => {
+      const r = repo();
+      git(r, 'config', 'core.hooksPath', hooksValue(r, v));
+      await applyPatch(r, Buffer.from(creating(p)));
+      expect(existsSync(join(r, p))).toBe(true);
+    });
+  }
 
   it('still applies a normal source patch', async () => {
     const r = repo();

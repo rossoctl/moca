@@ -14,8 +14,8 @@ import {
   writeFileSync,
   type Stats,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { dirname, join, posix, resolve } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { gzipSync } from 'node:zlib';
 import { MAX_STDIN_BYTES, q, WORKSPACE, type Exec, type ExecResult } from '@moca/sandbox-client';
@@ -211,6 +211,162 @@ function agentConfigWhy(p: string): string | undefined {
 /** Whether a path is local agent configuration or a local hook, which a pull never writes. */
 export function isAgentConfigPath(p: string): boolean {
   return agentConfigWhy(p) !== undefined;
+}
+
+/**
+ * `p` resolved through symlinks as far as it exists, a dangling link to its target (macOS's /var
+ * is /private/var).
+ */
+function realThrough(p: string, depth = 0): string {
+  const rest: string[] = [];
+  for (let d = resolve(p); ; d = dirname(d)) {
+    try {
+      return join(realpathSync(d), ...rest.reverse());
+    } catch {
+      if (depth < 40 && lstatSync(d, { throwIfNoEntry: false })?.isSymbolicLink()) {
+        const to = resolve(realThrough(dirname(d), depth + 1), readlinkSync(d));
+        return realThrough(join(to, ...rest.reverse()), depth + 1);
+      }
+      if (dirname(d) === d) return resolve(p);
+      rest.push(basename(d));
+    }
+  }
+}
+
+/**
+ * `abs` as path components within the working tree at `root` (`[]` for the root), both as written
+ * and as resolved through symlinks; none when it is outside.
+ */
+function inTree(root: string, abs: string): string[][] {
+  const out: string[][] = [];
+  for (const [base, dir] of [
+    [root, abs],
+    [realThrough(root), realThrough(abs)],
+  ] as const) {
+    const rel = relative(base, dir);
+    if (segments(rel)[0] === '..' || isAbsolute(rel)) continue;
+    out.push(rel === '' ? [] : segments(rel));
+  }
+  return out;
+}
+
+type GitRead = {
+  segs: string[];
+  what: string;
+  /** At the tree's root, everything below is read too (a git directory), not only its entries. */
+  subtree?: boolean;
+};
+
+/**
+ * What git reads from the working tree that can make it run commands: the hooks directory
+ * `core.hooksPath` names (relative to the root, githooks(5); none when unset or empty), a git
+ * directory not named `.git`, and config files: read, included or at git's global and system
+ * locations (missing ones too).
+ */
+async function gitReads(root: string): Promise<GitRead[]> {
+  const text = async (args: string[], unset = false) => {
+    try {
+      return (await git(root, args)).toString('utf8');
+    } catch (err) {
+      if (unset && (err as { code?: unknown }).code === 1) return '';
+      throw new PushError(`cannot read git's configuration; nothing was changed (${gitText(err)})`);
+    }
+  };
+  // `-z` entries: the origin, then the key and value.
+  const entries = (s: string) => {
+    const z = s.split('\0');
+    return z.flatMap((o, i) =>
+      i % 2 === 0 && o.startsWith('file:')
+        ? [{ file: resolve(root, o.slice(5)), kv: z[i + 1]! }]
+        : [],
+    );
+  };
+  const out: GitRead[] = [];
+  const add = (abs: string, what: string, subtree = false) => {
+    for (const segs of inTree(root, abs)) out.push({ segs, what, subtree });
+  };
+  const hooks = (await text(['config', '--type=path', '--get', 'core.hooksPath'], true)).replace(
+    /\n$/,
+    '',
+  );
+  if (hooks !== '') add(resolve(root, hooks), 'the hooks directory core.hooksPath names');
+  const dirs = await text(['rev-parse', '--absolute-git-dir', '--git-common-dir']);
+  for (const d of dirs.split('\n').filter(Boolean)) {
+    add(resolve(root, d), 'the git directory', true);
+  }
+  for (const { file } of entries(await text(['config', '--list', '--show-origin', '-z']))) {
+    add(file, 'a git config file');
+  }
+  const includes = await text(
+    ['config', '--show-origin', '-z', '--type=path', '--get-regexp', '^include(if\\..+)?\\.path$'],
+    true,
+  );
+  for (const { file, kv } of entries(includes)) {
+    add(resolve(dirname(file), kv.slice(kv.indexOf('\n') + 1)), 'a git config file');
+  }
+  // The global, XDG and system config files, which git reads once they exist. `git var` (git 2.42
+  // on) names them whether or not they exist; an older git gets git-config(1)'s global and XDG
+  // locations, and GIT_CONFIG_SYSTEM when set.
+  const env = process.env;
+  const home = env.HOME ?? homedir();
+  const older: Record<string, (string | undefined)[]> = {
+    GIT_CONFIG_GLOBAL: [
+      env.GIT_CONFIG_GLOBAL,
+      join(env.XDG_CONFIG_HOME || join(home, '.config'), 'git', 'config'),
+      join(home, '.gitconfig'),
+    ],
+    GIT_CONFIG_SYSTEM: [env.GIT_CONFIG_SYSTEM],
+  };
+  for (const name of Object.keys(older)) {
+    let files: string[];
+    try {
+      files = (await git(root, ['var', name])).toString('utf8').split('\n').filter(Boolean);
+    } catch (err) {
+      const code = (err as { code?: unknown }).code;
+      if (code === 1) continue; // none enabled (GIT_CONFIG_NOSYSTEM)
+      if (code !== 129) {
+        throw new PushError(
+          `cannot read git's configuration; nothing was changed (${gitText(err)})`,
+        );
+      }
+      files = older[name]!.filter((f): f is string => Boolean(f));
+    }
+    for (const f of files) add(resolve(root, f), 'a git config file');
+  }
+  return out;
+}
+
+/**
+ * Why a path is something git reads (`reads`, from `gitReads`), or where one of its parents goes
+ * (a link there would move it); undefined when neither. For the tree's root, only its own entries
+ * unless the read is `subtree`.
+ */
+function gitReadWhy(p: string, reads: GitRead[]): string | undefined {
+  const segs = segments(p);
+  const same = (a: string, b: string) => folds(a).some((f) => folds(b).includes(f));
+  for (const { segs: d, what, subtree } of reads) {
+    if (d.length === 0) {
+      if (subtree || segs.length === 1) return what;
+      continue;
+    }
+    const n = Math.min(segs.length, d.length);
+    if (!segs.slice(0, n).every((s, i) => same(s, d[i]!))) continue;
+    return segs.length >= d.length ? what : `where ${what} goes`;
+  }
+  return undefined;
+}
+
+/**
+ * The submodule or nested repository under `root` a path is inside (a parent directory holding a
+ * `.git`), which a push never sends and whose hooks and config `gitReads` does not see.
+ */
+function nestedRepo(root: string, p: string): string | undefined {
+  const segs = segments(p);
+  for (let i = 1; i < segs.length; i++) {
+    const d = segs.slice(0, i).join('/');
+    if (lstatOrGone(join(root, d, '.git'))) return d;
+  }
+  return undefined;
 }
 
 const isPromptPath = (p: string) => folds(segments(p).at(-1)!).some((f) => PROMPT_FILES.has(f));
@@ -951,9 +1107,10 @@ async function dryRun3way(root: string, dir: string, patch: string): Promise<str
 }
 
 /**
- * Applies a pulled patch in the local repository (R6c). First, a patch that writes `.git`, the
- * `.sbx/` binding, or local agent configuration or hooks (`isAgentConfigPath`) is refused whole,
- * before git is asked to apply anything. Then:
+ * Applies a pulled patch in the local repository (R6c). First, a patch that writes `.git`, a
+ * submodule or nested repository, the `.sbx/` binding, local agent configuration or hooks
+ * (`isAgentConfigPath`), or what git reads to run commands (`gitReads`: hooks, git directory,
+ * config files) is refused whole, before git is asked to apply anything. Then:
  * 1. a plain `git apply`, which changes only the working tree and is all or nothing;
  * 2. if that fails because a file it touches has uncommitted local changes, it is refused with
  *    those files named, and nothing is changed;
@@ -987,6 +1144,17 @@ export async function applyPatch(
           'changes; nothing was changed. Look at it with mocactl sbx pull -o FILE',
       );
     }
+    const nested = touched.flatMap((p) => {
+      const d = nestedRepo(root, p);
+      return d === undefined ? [] : [`${p} (in ${d})`];
+    });
+    if (nested.length) {
+      throw new PushError(
+        `the patch writes ${list(nested)}, inside a submodule or nested repository, which a ` +
+          'push never sends and a pull never changes; nothing was changed. Look at it with ' +
+          'mocactl sbx pull -o FILE',
+      );
+    }
     const binding = touched.filter(isBindingPath);
     if (binding.length) {
       throw new PushError(
@@ -997,13 +1165,15 @@ export async function applyPatch(
     // The sandbox cannot be trusted with what runs on this machine: a patch that rewrites the
     // agent's settings (a hook, an emptied deny list) or adds an MCP server would run here at the
     // next agent start, and these files are often uncommitted, so `git diff` would not show it.
-    const config = touched.filter(isAgentConfigPath);
+    const reads = await gitReads(root);
+    const why = (p: string) => agentConfigWhy(p) ?? gitReadWhy(p, reads);
+    const config = touched.filter((p) => why(p) !== undefined);
     if (config.length) {
       throw new PushError(
-        `the patch writes ${list(config.map((p) => `${p} (${agentConfigWhy(p)})`))}: local ` +
-          'agent configuration or hooks, which could run commands on this machine, outside the ' +
-          'sandbox, so a pull never writes them; nothing was changed. Save the patch with ' +
-          'mocactl sbx pull -o FILE, review it, and apply what you want by hand ' +
+        `the patch writes ${list(config.map((p) => `${p} (${why(p)})`))}: local ` +
+          'agent configuration, hooks, or what git reads to run them, which could run commands on ' +
+          'this machine, outside the sandbox, so a pull never writes them; nothing was changed. ' +
+          'Save the patch with mocactl sbx pull -o FILE, review it, and apply what you want by hand ' +
           '(git apply --exclude=PATH FILE leaves a file out)',
       );
     }
