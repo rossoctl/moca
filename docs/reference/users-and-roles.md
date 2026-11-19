@@ -1,6 +1,6 @@
 # Users, enrollment and roles
 
-> **Preview.** Enrollment and the admin role, on every route profile, are implemented but not yet declared Stable; interfaces
+> **Preview.** Enrollment and the admin role are implemented but not yet declared Stable; interfaces
 > and limits may change. Known limits: [Design limits](#design-limits).
 
 Who a user is to the control plane, who may log in and use what, who can change that, and what is
@@ -8,7 +8,7 @@ left behind when a user goes. The procedures live elsewhere: adding and removing
 sandbox service is [runbook §4](../operate/sandbox-service/runbook.md#4-adding-or-removing-a-user),
 the first deployment is [Install the sandbox service](../operate/sandbox-service/install.md), and a
 user's own login is [Install, log in and bring a repository up](../sandbox/how-to/set-up.md). Every
-route named here is specified in [`docs/api/openapi.yaml`](../api/openapi.yaml), summarised in the
+route named here is specified in [`docs/api/openapi.yaml`](../api/openapi.yaml), summarized in the
 [HTTP API guide](../harness/reference/http-api.md#control-plane).
 
 ## Subjects
