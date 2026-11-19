@@ -1810,6 +1810,9 @@ describe("a bound sandbox's control plane (R5j)", () => {
     expect(io.errs.join('\n')).toContain(
       `that is not the control plane you logged in to (${URL_}): log in there only if you trust it`,
     );
+    expect(io.errs.join('\n')).toContain(
+      'or run `mocactl sbx up` to bind this repository to a sandbox there',
+    );
   });
 
   it('ignores a binding URL with a control character or a space, and never prints the escape', async () => {
