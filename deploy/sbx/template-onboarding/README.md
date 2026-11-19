@@ -32,15 +32,15 @@ These are part of the same flow but live with the code they belong to.
 
 **The sandbox service the templates run on** (`deploy/sbx/`):
 
-| File                                             | Role in the flow                                                                                                        |
-| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| [`../setup.sh`](../setup.sh)                     | the cluster side: mints each worker's token and bundle; a template change restarts the control plane only               |
-| [`../install-host.sh`](../install-host.sh)       | the KVM host: installs (or `--uninstall`s) a template's worker                                                          |
-| [`../host-agent.sh`](../host-agent.sh)           | the KVM host's template agent: builds queued templates, starts and stops their workers, removes retired builds          |
-| [`../templates-check.sh`](../templates-check.sh) | the live check that a client gets the template it asked for, and that templates are isolated                            |
-| [`../README.md`](../README.md)                   | installing the sandbox service                                                                                          |
-| [`../RUNBOOK.md`](../RUNBOOK.md)                 | operating it: §5 templates, [guest egress](../RUNBOOK.md#guest-egress), the template host agent, checking the templates |
-| [`../tests/`](../tests/)                         | the deploy scripts' tests (`install-host.test.sh`, `setup.test.sh`, …)                                                  |
+| File                                                                            | Role in the flow                                                                                                                                           |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`../setup.sh`](../setup.sh)                                                    | the cluster side: mints each worker's token and bundle; a template change restarts the control plane only                                                  |
+| [`../install-host.sh`](../install-host.sh)                                      | the KVM host: installs (or `--uninstall`s) a template's worker                                                                                             |
+| [`../host-agent.sh`](../host-agent.sh)                                          | the KVM host's template agent: builds queued templates, starts and stops their workers, removes retired builds                                             |
+| [`../templates-check.sh`](../templates-check.sh)                                | the live check that a client gets the template it asked for, and that templates are isolated                                                               |
+| [Install the sandbox service](../../../docs/operate/sandbox-service/install.md) | installing the sandbox service                                                                                                                             |
+| [the runbook](../../../docs/operate/sandbox-service/runbook.md)                 | operating it: §5 templates, [guest egress](../../../docs/operate/sandbox-service/runbook.md#guest-egress), the template host agent, checking the templates |
+| [`../tests/`](../tests/)                                                        | the deploy scripts' tests (`install-host.test.sh`, `setup.test.sh`, …)                                                                                     |
 
 **Snapshots** (`deploy/microvm/`):
 

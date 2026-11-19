@@ -49,7 +49,7 @@ Commands:
 ## What you cannot do locally (yet)
 
 There is no local way to run the **sandbox service**. It deploys to an OpenShift cluster plus
-one or more KVM hosts ([install](../../deploy/sbx/README.md)). To try it, deploy
+one or more KVM hosts ([install](../operate/sandbox-service/install.md)). To try it, deploy
 it, or use your team's deployment: you need its URL and a GitHub account enrolled in it. The **harness** runs locally under
 Docker Compose, as a trial.
 

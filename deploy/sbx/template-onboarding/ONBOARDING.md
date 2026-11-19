@@ -5,7 +5,7 @@ client choosing between them, is the [Template Onboarding Guide](GUIDE.md). This
 reference.
 
 This page turns a container image into a sandbox-service template that clients can ask for by id, and checks
-it. It is the long form of [RUNBOOK](../RUNBOOK.md) §5, and uses two tools, both in this folder:
+it. It is the long form of [the runbook](../../../docs/operate/sandbox-service/runbook.md) §5, and uses two tools, both in this folder:
 
 - `template-build.sh` runs on the KVM host. It turns a spec into a snapshot that has been checked
   in a microVM, plus a template record.
@@ -17,15 +17,15 @@ means building a snapshot, giving it a worker id, and installing that worker.
 
 ## The process at a glance
 
-| Step                | Where              | What                                                                    | Check                                                                          |
-| ------------------- | ------------------ | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| 0. The spec         | anywhere           | Describe the template: image by digest, guest size, egress, seed, probe | `template-build.sh` validates every field before it runs anything              |
-| 1. Build            | KVM host, root     | `template-build.sh SPEC --kernel K`: pull by digest, rootfs, snapshot   | the digest pulled matches; `/etc/hosts` as pinned; free disk                   |
-| 2. Probe            | (inside step 1)    | The seed and the probe run in a VM restored from the new snapshot       | the probe's exit code and output patterns; a failure publishes nothing         |
-| 3. Register         | operator's machine | `template-register.sh --env-file F RECORD`, then `setup.sh`             | one worker per template; the old worker is kept on an update                   |
-| 4. Install          | KVM host, root     | `install-host.sh BUNDLE --snapshot S --budget-mb N [--no-egress]`       | the worker attaches to the relay                                               |
-| 5. Live check       | operator's machine | `templates-check.sh` (RUNBOOK §14)                                      | a client creates a sandbox of the template, and its commands run on that image |
-| 6. Update or retire | both               | A new image gets a new worker; the old one drains, then `--retire`      | no live sandbox on the old worker                                              |
+| Step                | Where              | What                                                                                       | Check                                                                          |
+| ------------------- | ------------------ | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| 0. The spec         | anywhere           | Describe the template: image by digest, guest size, egress, seed, probe                    | `template-build.sh` validates every field before it runs anything              |
+| 1. Build            | KVM host, root     | `template-build.sh SPEC --kernel K`: pull by digest, rootfs, snapshot                      | the digest pulled matches; `/etc/hosts` as pinned; free disk                   |
+| 2. Probe            | (inside step 1)    | The seed and the probe run in a VM restored from the new snapshot                          | the probe's exit code and output patterns; a failure publishes nothing         |
+| 3. Register         | operator's machine | `template-register.sh --env-file F RECORD`, then `setup.sh`                                | one worker per template; the old worker is kept on an update                   |
+| 4. Install          | KVM host, root     | `install-host.sh BUNDLE --snapshot S --budget-mb N [--no-egress]`                          | the worker attaches to the relay                                               |
+| 5. Live check       | operator's machine | `templates-check.sh` ([the runbook](../../../docs/operate/sandbox-service/runbook.md) §14) | a client creates a sandbox of the template, and its commands run on that image |
+| 6. Update or retire | both               | A new image gets a new worker; the old one drains, then `--retire`                         | no live sandbox on the old worker                                              |
 
 ## 0. The spec
 
@@ -62,7 +62,7 @@ A spec is a JSON file, schema `moca-sbx-template-spec/1`:
 | `guest_home`              | Optional, a path under `/tmp`: a writable `HOME` for guest commands. The rootfs is read-only.                                                                                                                                                                                          |
 | `skip_git_identity_check` | `true` for an image that refuses agent commits on purpose (a benchmark testbed).                                                                                                                                                                                                       |
 | `guest_home_gitconfig`    | Optional, `true`: copy the image's `/root/.gitconfig` into `guest_home`, so an identity set in the image applies. Refused with `skip_git_identity_check`: an image that refuses commits must not get its root identity.                                                                |
-| `egress`                  | `false` installs the worker with `--no-egress`, so the guest has no network at all. Use it for a benchmark whose upstream fix must stay out of reach. `true` gives the host's allowlisted egress ([RUNBOOK](../RUNBOOK.md#guest-egress)).                                              |
+| `egress`                  | `false` installs the worker with `--no-egress`, so the guest has no network at all. Use it for a benchmark whose upstream fix must stay out of reach. `true` gives the host's allowlisted egress ([the runbook](../../../docs/operate/sandbox-service/runbook.md#guest-egress)).       |
 | `seed`                    | A bash command that fills a new sandbox's empty `/workspace`, or `""` for none. **The client runs it:** `mocactl sbx create --template ID --seed` on a deployment with the template store, or as its first command in each new sandbox. It is in the record so the client can read it. |
 | `probe`                   | A bash command, run after the seed in `/workspace` in the restored VM. It passes when it exits `expect_rc` and its output matches every regex in `expect`.                                                                                                                             |
 | `description`, `tools`    | The template's entry as clients list it. The build also requires each tool in `tools` (plus `bash ls cat base64 file`, the guest agent's own) to be in the image, and refuses one that is not (gating rule M3, `governance/GATING-RULES.md`).                                          |
@@ -114,7 +114,7 @@ builder's commit that holds it), for checking offline (gating rules X10 and X12,
 
 `--egress-ca` is for a template whose sandboxes use egress credentials (`egress: true` only): it bakes
 the host's interception CA, from `install-host.sh --egress-ca-out`, into the snapshot, and the record
-keeps its fingerprint ([RUNBOOK, guest egress](../RUNBOOK.md#guest-egress)). Only an operator's
+keeps its fingerprint ([the runbook, guest egress](../../../docs/operate/sandbox-service/runbook.md#guest-egress)). Only an operator's
 build bakes a CA: the host agent's self-serve builds pass no `--egress-ca`.
 
 It needs root, podman logged in to the image's registry, the kernel the host's workers run, and
@@ -166,7 +166,7 @@ writes each file whole. A re-run with nothing new changes nothing.
   in `SBX_WORKERS`, so the sandboxes it serves keep working.
 
 It refuses an env file whose `SBX_WORKERS` is not one plain line, and one that sets
-`SBX_EGRESS_HOSTS`. Edit those by hand ([RUNBOOK](../RUNBOOK.md) §5).
+`SBX_EGRESS_HOSTS`. Edit those by hand ([the runbook](../../../docs/operate/sandbox-service/runbook.md) §5).
 
 `setup.sh` mints the worker's token and writes its bundle. A template change rolls the control
 plane only, so running commands on other templates carry on.
@@ -193,7 +193,7 @@ command refused before it started and exit 75 if every try is refused (125 is an
 
 ## 5. Check it live
 
-`deploy/sbx/templates-check.sh` (RUNBOOK §14) lists the templates and creates a sandbox of each. It
+`deploy/sbx/templates-check.sh` ([the runbook](../../../docs/operate/sandbox-service/runbook.md) §14) lists the templates and creates a sandbox of each. It
 shows that each one's commands run on that template's worker, and that a token for one template
 cannot reach another's.
 
@@ -225,7 +225,7 @@ API** (template lifecycle spec §5; shown end to end on a deployment): a new bui
 /v1/templates/{id}/builds`), `default` moved onto it (`mocactl sbx templates tag ID default --build
 B`), then the old build retired (`mocactl sbx templates retire ID --build OLD`). The new build is a
 new snapshot and a new worker, and the host agent installs no worker: an operator installs it
-(steps 3-4, with the record's `snapshot`; [RUNBOOK](../RUNBOOK.md#the-template-host-agent)). A
+(steps 3-4, with the record's `snapshot`; [the runbook](../../../docs/operate/sandbox-service/runbook.md#the-template-host-agent)). A
 retire is refused while a sandbox or session still uses the build (`409 build_in_use`); after it, the
 host agent removes the worker and the snapshot, once 600 s have passed since its last sandbox ended
 (`retire --wait` waits 900 s by default). Every step is a provenance record naming who did it.

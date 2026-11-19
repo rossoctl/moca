@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy/sbx/template-onboarding/template-build.sh -- on the KVM host, turn a container image into an SBX0 template's
-# golden snapshot, checked in a microVM before it is published, and its template record (RUNBOOK §5).
+# golden snapshot, checked in a microVM before it is published, and its template record (docs/operate/sandbox-service/runbook.md §5).
 #
 #   sudo deploy/sbx/template-onboarding/template-build.sh SPEC --kernel PATH [--agent DIR] [--vmm firecracker]
 #                                     [--registry HOST] [--egress-ca PATH] [--gate-record FILE [--gate-commit SHA]]
@@ -18,7 +18,7 @@
 #
 # --egress-ca PATH bakes the KVM host's TLS-interception CA (the public certificate, from
 # `install-host.sh --egress-ca-out`) into the snapshot, for a template whose sandboxes use egress
-# credentials (RUNBOOK, guest egress). Only for a spec with egress true. The record keeps its
+# credentials (docs/operate/sandbox-service/runbook.md, guest egress). Only for a spec with egress true. The record keeps its
 # fingerprint (egress_ca_sha256), and a snapshot built with another CA, or none, is rebuilt.
 #
 # --registry HOST pulls a spec image that names no registry (`team/image@sha256:...`, as image

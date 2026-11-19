@@ -744,7 +744,7 @@ grep -qx 'SH_WORKSPACE_IDLE=768h' "$GEN/workers/sbx_default/worker.env" || fail 
 pass 'with no worker bundles, SBX_LOWER_WORKSPACE_IDLE=1 under a live maximum is a host change: refused unless acknowledged (528h; off: 216h)'
 
 # 4b'. A template, subject or quota change is the control plane's alone: it rolls the control plane
-# and not the relay, so running Execs survive it (RUNBOOK §5).
+# and not the relay, so running Execs survive it (docs/operate/sandbox-service/runbook.md §5).
 run_setup export SBX_TEMPLATES_FILE="$TMP/one.json" SBX_ALLOWED_SUBJECTS='github:1' SBX_MAX_PER_SUBJECT=7 ||
   fail 'a run with one template, one subject and a new quota failed'
 render
@@ -1450,7 +1450,7 @@ for unset_it in 'unset SBX_REDIS_IMAGE' 'export SBX_REDIS_IMAGE='; do
   ! run_setup eval "$unset_it" || fail "switched a Redis 7 namespace to Valkey ($unset_it)"
   grep -qF "$R7" "$TMP/out" || fail "the Redis 7 refusal does not name the current image ($unset_it)"
   grep -q 'set SBX_REDIS_IMAGE to that image pinned by digest' "$TMP/out" || fail 'the Redis 7 refusal does not say to set SBX_REDIS_IMAGE'
-  grep -q 'RUNBOOK.md §2' "$TMP/out" || fail 'the Redis 7 refusal does not point to RUNBOOK §2'
+  grep -q 'docs/operate/sandbox-service/runbook.md §2' "$TMP/out" || fail 'the Redis 7 refusal does not point to docs/operate/sandbox-service/runbook.md §2'
   ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'changed something before refusing to switch Redis 7 to Valkey'
   [[ ! -f "$K" ]] || fail 'applied an overlay before refusing to switch Redis 7 to Valkey'
 done

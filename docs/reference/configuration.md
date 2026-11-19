@@ -436,7 +436,7 @@ header is authoritative.
   most, in seconds: with a control plane that sends no `starting`, the agent's own starts; with one,
   a listed worker not attached after it is stuck and holds no slot; default 300), `SBX_IDLE_GRACE_S` (how long a
   released build's running worker is kept, in seconds; default 0, off; at most 86400),
-  `SBX_REGISTRY` (`deploy/sbx/RUNBOOK.md`, the template host agent). `deploy/sbx/setup.sh`'s
+  `SBX_REGISTRY` ([the runbook](../operate/sandbox-service/runbook.md), the template host agent). `deploy/sbx/setup.sh`'s
   `SBX_TEMPLATE_HOSTS` lists the hosts and writes each one's bundle.
 
 ## Known inconsistencies
