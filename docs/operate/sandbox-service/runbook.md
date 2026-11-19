@@ -649,9 +649,11 @@ the control plane stores it, one event per line (host, method, path, status, byt
 decision, credential name). `--verify` reads the log again and checks its sha256 and line count
 against the control plane's summary: `verified: N events, sha256:…` (with `INCOMPLETE: N dropped`
 when the log lost events, and `sealed` or `open (not sealed yet)`), or `NOT verified: …`, exit 1
-(`cmdEgress` and `verifyEgress` in `packages/mocactl/src/sbx/commands.ts`). Until the log is sealed,
-600 s after the sandbox ends, it can still gain events: take the copy after that, as
-[Egress records](#egress-records) explains.
+(`cmdEgress` and `verifyEgress` in `packages/mocactl/src/sbx/commands.ts`). Until the log is sealed, it can
+still gain events: take the copy after that, as [Egress records](#egress-records) explains. It is
+sealed at the host janitor's first sweep at least 600 s after the sandbox ends (`EGRESS_GRACE_S`),
+not at the 600 s themselves, so `--verify` can read `open (not sealed yet)` well past them; with no
+host janitor running (the host stopped), it stays open until one runs.
 
 **3. The control plane's, the relay's and the host's lines.** The control plane writes one
 `"event":"audit"` JSON line per decision to stdout (`packages/control-plane/src/handler-util.ts`,
@@ -746,7 +748,7 @@ The worker's `wrk` is the relay's (step 3). `sudo <checkout>/deploy/sbx/status.s
 a view of now: the units' states, the janitor's last run and one sample.
 
 **What is not stored.** No command text and no output is stored anywhere server-side. The relay's
-audit line has neither (`docs/sbx/security-review.md` §1.5 lists it as tested), unless the relay
+audit line has neither (`docs/notes/sandbox-security-review.md` §1.5 lists it as tested), unless the relay
 runs with `SH_SANDBOX_AUDIT_COMMANDS=1`, the debug flag of §8, which adds each command's first 200
 bytes as `cmd`. The egress log is the network's shape only, with paths but no bodies. The member's
 `--record` file is the only trace of what was sent, and only of the HTTP calls. What is kept, and
@@ -867,11 +869,12 @@ Paths are logged without query, fragment or userinfo, and an injected credential
   had not reached are not read.
 - **What is kept:** each event with its fields and values as the proxy wrote them (the agent decodes and
   re-encodes each one, so the bytes may differ, and the control plane stores its own canonical line), for as long as the sandbox record
-  (`SBX_RETENTION_DAYS`). A log holds at most 10,000 events (`EGRESS_LOG_CAP`, about 3 MB), and all
-  logs together at most 200,000 (`EGRESS_TOTAL_BUDGET`): with 256 MiB for Redis, egress logs take at
-  most about 64 MB. The total counts the logs that still exist, so an expired log gives its share
-  back. Each post reads the length of every retained log, so its cost grows with the number of
-  sandboxes retained with a log: small at the sandbox service's scale.
+  (`SBX_RETENTION_DAYS`). A log holds at most 10,000 events (`EGRESS_LOG_CAP`) and 4 MiB of stored lines
+  (`EGRESS_LOG_BYTES`), and all logs together at most 64 MiB of stored lines (`EGRESS_TOTAL_BYTES`),
+  inside the 256 MiB Redis has in all; Redis's own overhead per entry comes on top. The total is a
+  running sum kept by the store's append (`packages/control-plane/src/egress-log.ts`), so an expired
+  log gives its bytes back at a later append, and a post costs the same however many logs are
+  retained.
 - **Completeness:** an event over 8 KiB isn't sent (only its sandbox id is); the agent reads the journal with `--all`, so one up to 8 KiB is sent whole (without it journalctl prints a field over 4096 bytes as `null`). A journal entry whose message is not text (not UTF-8) cannot be read for its sandbox: the agent says so in an error line. A log's `dropped` counts
   those (`invalid`), events past its cap (`cap`) or past the total budget (`budget`), and the proxy's own `audit_dropped` reports, charged to every sandbox on
   the host's workers live within 60 s before each. `complete` is `dropped == 0`. The sandbox's end
@@ -879,7 +882,8 @@ Paths are logged without query, fragment or userinfo, and an injected credential
   arrive in the 600 s after the end, a later `sandbox` record with `state: egress` names the final
   log. The grader decides whether an incomplete log still counts.
 - **Check a saved copy offline:** wait until the log is sealed: `sealed` in `mocactl sbx egress ID`
-  (`summary.sealed: true` with `--json`), 600 s after the sandbox ends. Until then the control plane
+  (`summary.sealed: true` with `--json`), at the host janitor's first sweep at least 600 s after the
+  sandbox ends. Until then the control plane
   still takes the sandbox's last events, and if the log changes, the janitor's seal writes a later
   `state: egress` record that a copy saved earlier no longer matches. Then save it with
   `mocactl sbx egress ID --ndjson > log.ndjson`, take the provenance export, and run
