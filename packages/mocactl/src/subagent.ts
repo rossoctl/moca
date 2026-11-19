@@ -596,6 +596,9 @@ export interface WatchOptions {
  */
 const WATCH_POLL_MS = 5_000;
 
+/** Behind a call so a second check further down the loop isn't narrowed away as unreachable. */
+const aborted = (signal?: AbortSignal): boolean => signal?.aborted === true;
+
 /** Final for watching: nothing further is coming, so there is nothing left to report on this row. */
 function isFinalForWatch(state: HonestState): boolean {
   // `unknown` is not `isTerminalState` — a later read could still find a result — but it is the
@@ -628,8 +631,11 @@ export async function cmdWatch(rt: Runtime, io: Io, opts: WatchOptions): Promise
     // which is how a coding agent fans out: spawn some, watch, spawn more.
     const records = ledger.readAll().filter(match);
     const views = await sweepStates(rt, { ledger, transport, turns, records, signal: opts.signal });
+    // A Ctrl-C lands in the in-flight read, which the sweep reports as `unknown` — final, so the
+    // loop below would print it and exit 0. The signal, not the aborted read, is the answer.
+    if (aborted(opts.signal)) return 130;
     for (const { record, view } of views) {
-      const line = view.state + ' ' + (view.detail ?? '');
+      const line = view.state + ' ' + (view.detail ?? '');
       if (printed.get(record.sessionId) === line) continue;
       printed.set(record.sessionId, line);
       io.out(watchLine(record, view, rt.now(), opts.json));
@@ -638,7 +644,7 @@ export async function cmdWatch(rt: Runtime, io: Io, opts: WatchOptions): Promise
     await rt.sleep(WATCH_POLL_MS, opts.signal);
     // `sleep` resolves on abort rather than rejecting, so without this the loop would go round once
     // more and turn a Ctrl-C into a full sweep of failed reads.
-    if (opts.signal?.aborted === true) return 130;
+    if (aborted(opts.signal)) return 130;
   }
 }
 
@@ -724,6 +730,9 @@ async function sweepStates(
       view: mapHonestState(raw, { alive, observedAt }, now, DEFAULT_UNKNOWN_GRACE_MS),
     });
   }
+  // An interrupted sweep records nothing: the abort arrives in the catch above as `unknown`, and a
+  // read that never finished is not an observation to persist.
+  if (deps.signal?.aborted === true) return views;
   for (const { record, view } of views) {
     if (view.state !== record.lastKnownState || view.detail !== record.stateDetail) {
       deps.ledger.updateState(record.sessionId, view.state, { detail: view.detail, now });

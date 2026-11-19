@@ -207,6 +207,25 @@ describe('cmdWatch', () => {
     expect(out.join('')).toBe('failed   a  (lost)\n');
   });
 
+  it('Ctrl-C during a sweep ends the watch with 130, recording nothing', async () => {
+    const { rt } = makeRt(scratch);
+    const ledger = openLedger(rt.paths.subagentsFile, rt.now);
+    ledger.append(seedRecord({ sessionId: 'a', childPid: process.pid }));
+    const controller = new AbortController();
+    const transport = {
+      // What an aborted fetch does: the read rejects, so the row would otherwise read `unknown`.
+      readLeafState: vi.fn(async () => {
+        controller.abort();
+        throw new Error('This operation was aborted');
+      }),
+    } as unknown as LeafTransport;
+    const { io, out } = makeIo();
+    const r = await cmdWatch(rt, io, base({ ledger, transport, signal: controller.signal }));
+    expect(r).toBe(130);
+    expect(out).toEqual([]);
+    expect(openLedger(rt.paths.subagentsFile).find('a')!.lastKnownState).toBe('running');
+  });
+
   it('Ctrl-C between two polls ends the watch with 130', async () => {
     const { rt } = makeRt(scratch);
     const ledger = openLedger(rt.paths.subagentsFile, rt.now);
