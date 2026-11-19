@@ -617,8 +617,11 @@ sampler_files() { # the three files, in the order they are recorded
 }
 valid_sampler_interval() { [[ "$1" =~ ^(0|[1-9][0-9]{0,3})$ ]] && (($1 == 0 || ($1 >= 5 && $1 <= 3600))); }
 
-# install_sampler: after install_units. Like the read-ahead, never fails the worker install: a
-# host without its samples still serves sandboxes.
+# install_sampler: after install_units. Never fails the worker install: a host without its
+# samples still serves sandboxes. Every step is best effort: the first that fails (a file write, a
+# systemctl call) stops the sampler's install with a WARNING naming it, and the worker install goes
+# on. A re-run retries. The worker's own steps are not best effort, so a systemd that cannot
+# daemon-reload fails the worker install a few lines later anyway.
 install_sampler() {
   local n="$SBX_SAMPLER_INTERVAL_S" v f
   if ((n == 0)); then
@@ -632,27 +635,49 @@ install_sampler() {
     [[ "${!v}" =~ $PLAIN_PATH_RE ]] ||
       { echo "WARNING: $v='${!v}' is not a plain absolute path (it goes into a unit file): host sampler not installed" >&2; return 0; }
   done
-  install -d -m 0755 "$SBX_LIBEXEC_DIR" "$SBX_UNIT_DIR"
-  install -m 0755 "$SCRIPT_DIR/sampler.sh" "$SBX_LIBEXEC_DIR/sbx-sampler.sh"
+  SAMPLER_STEP=''
+  if install_sampler_steps "$n"; then
+    log "sbx-sampler.timer enabled (every $n s); its samples: journalctl -u sbx-sampler -o cat --since -5min | jq -c 'select(.sampler == \"sample\")'"
+  else
+    echo "WARNING: the host sampler's install failed at: $SAMPLER_STEP; the worker installs without it (re-run this install to retry; status.sh --host shows the timer's state)" >&2
+  fi
+  return 0
+}
+
+# install_sampler_steps N: the steps, each one's failure returned (set -e does not apply inside a
+# function tested by `if`), with SAMPLER_STEP naming the step that failed.
+install_sampler_steps() {
+  local n="$1" f
+  # Recorded first, so an uninstall removes whatever a step that fails later left behind.
+  SAMPLER_STEP="record the files in $SBX_ENV_DIR/manifest"
+  while read -r f; do record "sampler $f" || return 1; done < <(sampler_files)
+  SAMPLER_STEP="install -d $SBX_LIBEXEC_DIR $SBX_UNIT_DIR"
+  install -d -m 0755 "$SBX_LIBEXEC_DIR" "$SBX_UNIT_DIR" || return 1
+  SAMPLER_STEP="install $SBX_LIBEXEC_DIR/sbx-sampler.sh"
+  install -m 0755 "$SCRIPT_DIR/sampler.sh" "$SBX_LIBEXEC_DIR/sbx-sampler.sh" || return 1
   # As the janitor's: the source's comments go (they name the default paths), this host's paths in.
+  SAMPLER_STEP="write $SBX_UNIT_DIR/sbx-sampler.service"
   {
     printf '# Installed by deploy/sbx/install-host.sh from deploy/sbx/sbx-sampler.service.\n'
     sed -e '/^#/d' -e "s#/etc/sbx#$SBX_ENV_DIR#g" -e "s#/srv/sbx#$SBX_SRV#g" \
       -e "s#/usr/local/libexec#$SBX_LIBEXEC_DIR#g" "$SCRIPT_DIR/sbx-sampler.service"
-  } >"$SBX_UNIT_DIR/sbx-sampler.service"
+  } 2>/dev/null >"$SBX_UNIT_DIR/sbx-sampler.service" || return 1
+  SAMPLER_STEP="write $SBX_UNIT_DIR/sbx-sampler.timer"
   {
     printf '# Installed by deploy/sbx/install-host.sh from deploy/sbx/sbx-sampler.timer (every %s s).\n' "$n"
     sed -e '/^#/d' -e "s#^OnUnitActiveSec=.*#OnUnitActiveSec=${n}s#" -e "s#^Description=.*#Description=Sample the SBX0 host every $n seconds#" \
       "$SCRIPT_DIR/sbx-sampler.timer"
-  } >"$SBX_UNIT_DIR/sbx-sampler.timer"
-  chmod 0644 "$SBX_UNIT_DIR/sbx-sampler.service" "$SBX_UNIT_DIR/sbx-sampler.timer"
-  while read -r f; do record "sampler $f"; done < <(sampler_files)
-  systemctl daemon-reload
+  } 2>/dev/null >"$SBX_UNIT_DIR/sbx-sampler.timer" || return 1
+  SAMPLER_STEP="chmod the units"
+  chmod 0644 "$SBX_UNIT_DIR/sbx-sampler.service" "$SBX_UNIT_DIR/sbx-sampler.timer" || return 1
+  SAMPLER_STEP='systemctl daemon-reload'
+  systemctl daemon-reload || return 1
   # enable, then restart rather than enable --now: a re-install with another interval must re-arm
   # a timer that is already running.
-  systemctl enable sbx-sampler.timer
-  systemctl restart sbx-sampler.timer
-  log "sbx-sampler.timer enabled (every $n s); its samples: journalctl -u sbx-sampler -o cat --since -5min | jq -c 'select(.sampler == \"sample\")'"
+  SAMPLER_STEP='systemctl enable sbx-sampler.timer'
+  systemctl enable sbx-sampler.timer || return 1
+  SAMPLER_STEP='systemctl restart sbx-sampler.timer'
+  systemctl restart sbx-sampler.timer || return 1
 }
 
 # remove_sampler: what the manifest lists as `sampler <path>`; a host whose manifest is gone keeps

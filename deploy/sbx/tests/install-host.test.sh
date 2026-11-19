@@ -17,6 +17,8 @@ pass() { echo "ok - $*"; }
 cat >"$TMP/bin/systemctl" <<'MOCK'
 #!/usr/bin/env bash
 printf 'systemctl %s\n' "$*" >>"$MOCK_LOG"
+# MOCK_SYSTEMCTL_FAIL: the one call (its exact arguments) that fails.
+[[ -z "${MOCK_SYSTEMCTL_FAIL:-}" || "$*" != "$MOCK_SYSTEMCTL_FAIL" ]] || { echo "mock systemctl: $* failed" >&2; exit 1; }
 [[ "$1" == show ]] && { echo "InvocationID=abc123"; exit 0; }
 # enable and disable keep each unit's boot state as a file in MOCK_ENABLED_DIR (the unit is the last
 # argument: `disable --now UNIT` too), so a test can check what a re-install leaves enabled.
@@ -1227,3 +1229,23 @@ SBX_SAMPLER_INTERVAL_S=0 bash "$INSTALL" "$(bundle sbx_sm)" --snapshot default >
 bash "$INSTALL" --uninstall sbx_sm >"$TMP/out" 2>&1 || fail 'the last uninstall'
 [[ ! -s "$EM" ]] || fail "manifest not empty at the end of the sampler block: $(cat "$EM")"
 pass 'SBX_SAMPLER_INTERVAL_S=0 removes an installed sampler, and on a clean host installs none'
+
+# A sampler step that fails (a systemctl call, a unit file it cannot write) is a WARNING naming the
+# step; the worker install goes on, its worker started and attached.
+for case in 'enable sbx-sampler.timer' 'restart sbx-sampler.timer' write; do
+  : >"$MOCK_LOG"
+  if [[ "$case" == write ]]; then mkdir -p "$ST"; else export MOCK_SYSTEMCTL_FAIL="$case"; fi
+  bash "$INSTALL" "$(bundle sbx_sm)" --snapshot default >"$TMP/out" 2>&1 || fail "a failed sampler step ($case) failed the worker install"
+  unset MOCK_SYSTEMCTL_FAIL
+  want="systemctl $case"
+  [[ "$case" != write ]] || want="write $ST"
+  grep -qF "WARNING: the host sampler's install failed at: $want; the worker installs without it" "$TMP/out" ||
+    fail "no warning naming the failed step ($case): $(cat "$TMP/out")"
+  grep -qx 'systemctl restart sbx-worker@sbx_sm.service' "$MOCK_LOG" && grep -q 'sbx-worker@sbx_sm attached to the relay' "$TMP/out" ||
+    fail "the worker was not started after a failed sampler step ($case)"
+  ! grep -qF 'sbx-sampler.timer enabled' "$TMP/out" || fail "said the sampler is on after a failed step ($case)"
+  [[ "$case" != write ]] || rmdir "$ST"
+  bash "$INSTALL" --uninstall sbx_sm >"$TMP/out" 2>&1 || fail "uninstall after a failed sampler step ($case)"
+  [[ ! -e "$SS" && ! -e "$SU" && ! -e "$ST" && ! -s "$EM" ]] || fail "the uninstall left sampler files or lines after a failed step ($case): $(cat "$EM")"
+done
+pass 'a failed sampler step (enable, restart, a unit file write) warns with the step and never fails the worker install; the uninstall cleans up'
