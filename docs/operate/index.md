@@ -69,4 +69,6 @@ OpenShift Routes:
   Redis backup, hardening, troubleshooting.
 - [Security model](../reference/security-model.md): what each deployment isolates, and what it doesn't.
 - [Sandbox service runbook](sandbox-service/runbook.md): users, templates, key rotation, outages.
+- [Offer templates to every user](sandbox-service/offer-templates.md): declared templates, and
+  deployment-visible ones in the template store.
 - [Configuration reference](../reference/configuration.md): every environment variable.
