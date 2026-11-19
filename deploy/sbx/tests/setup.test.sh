@@ -55,6 +55,12 @@ case "$1 $2" in
   f="$MOCK_STATE/statefulset-$3.json"
   [[ ! -f "$f" ]] || cat "$f"
   exit 0 ;;
+'get pvc')
+  # A PVC in MOCK_STATE/pvc-NAME.json (none by default: a fresh namespace).
+  [[ "$3" != "${MOCK_FAIL_GET:-}" ]] || { echo 'Error from server (InternalError): etcdserver: request timed out' >&2; exit 1; }
+  f="$MOCK_STATE/pvc-$3.json"
+  [[ ! -f "$f" ]] || cat "$f"
+  exit 0 ;;
 'create secret')
   # create secret tls NAME -n NS --cert=F --key=F --dry-run=client -o json
   name="$4" cert='' key=''
@@ -1107,6 +1113,50 @@ redis_sts_class ''
 run_setup true || { cat "$TMP/out" >&2; fail 'the knob unset with no live class was refused'; }
 pass 'SBX_STORAGE_CLASS against an existing redis StatefulSet: both mismatch directions refused before anything applies, match and no-class pass'
 
+# 13c'''. The component claims (review round 3): PVC.spec.storageClassName is immutable once set,
+# and the render's patches apply with the same field manager as the redis one, so a live claim this
+# run renders pins the knob the same way -- refused before anything is applied, both directions.
+# A claim with no class passes against a set knob (the one transition the API allows, nil -> set),
+# and a claim this run does NOT render is neither patched nor read.
+pvc_class() {
+  jq -n --arg n "$1" --arg c "$2" '{apiVersion: "v1", kind: "PersistentVolumeClaim", metadata: {name: $n},
+    spec: (if $c == "" then {} else {storageClassName: $c} end)}' >"$MOCK_STATE/pvc-$1.json"
+}
+reset_state
+pvc_class moca-sbx-templates old-class
+! run_setup export SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd SBX_TEMPLATE_STORE=1 SBX_EGRESS_CREDENTIALS=1 ||
+  fail 'a differing class on an existing PVC was not refused'
+grep -q 'PVC moca-sbx-templates' "$TMP/out" && grep -q 'cannot be applied' "$TMP/out" ||
+  fail "the immutable-claim refusal does not say why: $(tail -2 "$TMP/out")"
+grep -q 'old-class' "$TMP/out" || fail 'the claim refusal does not name the live class'
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the claim refusal changed something first'
+reset_state
+pvc_class moca-sbx-templates ocs-storagecluster-ceph-rbd
+! run_setup export SBX_TEMPLATE_STORE=1 ||
+  fail 'the knob unset against a live claim class was not refused'
+grep -q 'SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd' "$TMP/out" ||
+  fail "the claim reverse refusal does not name the fix: $(tail -2 "$TMP/out")"
+reset_state
+pvc_class moca-sbx-templates ocs-storagecluster-ceph-rbd
+pvc_class moca-sbx-credentials ocs-storagecluster-ceph-rbd
+run_setup export SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd SBX_TEMPLATE_STORE=1 SBX_EGRESS_CREDENTIALS=1 ||
+  { cat "$TMP/out" >&2; fail 'matching classes on existing PVCs were refused'; }
+reset_state
+pvc_class moca-sbx-templates ''
+run_setup export SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd SBX_TEMPLATE_STORE=1 ||
+  { cat "$TMP/out" >&2; fail 'a classless existing PVC was refused against a set knob (nil -> set is allowed)'; }
+# A claim this run does not render (store off, so moca-sbx-templates is absent from the render) is
+# not read: no patch targets it, so a live class on it cannot be changed by this run either way.
+reset_state
+pvc_class moca-sbx-templates old-class
+: >"$MOCK_LOG"
+run_setup export SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd ||
+  { cat "$TMP/out" >&2; fail 'the base-shape run was refused by a PVC it does not render'; }
+! grep -q 'get pvc moca-sbx-templates' "$MOCK_LOG" ||
+  fail 'the preflight read a PVC this run does not render'
+pass 'SBX_STORAGE_CLASS against existing component PVCs: both mismatch directions refused before anything applies, match and classless pass, unrendered claims unread'
+
+
 # 13c''. Combined renders its own third claim (moca-credentials, the harness's file credential
 # store, pvc-credentials.yaml): the knob must reach it too, or a no-default-class cluster leaves
 # it Pending and the control plane never rolls out (review #887).
@@ -1126,6 +1176,16 @@ done
 [[ "$(jq -r '.[] | select(.kind == "StatefulSet" and .metadata.name == "redis") | .spec.volumeClaimTemplates[0].spec.storageClassName' "$TMP/render.json" 2>/dev/null)" == ocs-storagecluster-ceph-rbd ]] ||
   fail 'SBX_STORAGE_CLASS did not reach the redis volumeClaimTemplates (combined)'
 pass 'SBX_STORAGE_CLASS reaches combined'"'"'s own moca-credentials PVC beside the store and redis'
+
+# 13c''''-combined. The same preflight on combined's own claim: a live moca-credentials with a
+# differing class refuses the combined run before anything is applied (review round 3).
+reset_state
+pvc_class moca-credentials old-class
+! run_setup "${C[@]}" ||
+  fail 'a differing class on combined'"'"'s existing moca-credentials PVC was not refused'
+grep -q 'PVC moca-credentials' "$TMP/out" || fail "the combined claim refusal does not name the PVC: $(tail -2 "$TMP/out")"
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the combined claim refusal changed something first'
+pass 'SBX_STORAGE_CLASS against combined'"'"'s existing moca-credentials PVC: refused before anything applies'
 
 # 14a. Off is byte-identical: the generated kustomization.yaml, both ConfigMaps, the applied object
 # set and both hashes are today's, written out here as the golden copy (each recomputed from today's
