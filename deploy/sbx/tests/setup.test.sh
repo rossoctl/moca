@@ -1074,10 +1074,20 @@ reset_state
 redis_sts_class 'ocs-storagecluster-ceph-rbd'
 run_setup export SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd ||
   { cat "$TMP/out" >&2; fail 'a matching class on an existing StatefulSet was refused'; }
+# The reverse case (review round 2): the knob UNSET against a live class an earlier knob run
+# set. The mock does not model server-side apply dropping a field its manager no longer owns, so
+# asserting the pass would lock in the behaviour that is Forbidden on a real cluster -- this
+# expects the refusal, naming the live class.
 reset_state
 redis_sts_class 'ocs-storagecluster-ceph-rbd'
-run_setup true || { cat "$TMP/out" >&2; fail 'the knob unset on an existing StatefulSet was refused'; }
-pass 'SBX_STORAGE_CLASS against an existing redis StatefulSet: mismatch refused before anything applies, match and unset pass'
+! run_setup true || fail 'the knob unset against a live class was not refused'
+grep -q "SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd" "$TMP/out" ||
+  fail "the reverse refusal does not name the fix: $(tail -2 "$TMP/out")"
+# Knob unset and no live class (a deployment from before the knob, the common case): passes.
+reset_state
+redis_sts_class ''
+run_setup true || { cat "$TMP/out" >&2; fail 'the knob unset with no live class was refused'; }
+pass 'SBX_STORAGE_CLASS against an existing redis StatefulSet: both mismatch directions refused before anything applies, match and no-class pass'
 
 # 13c''. Combined renders its own third claim (moca-credentials, the harness's file credential
 # store, pvc-credentials.yaml): the knob must reach it too, or a no-default-class cluster leaves

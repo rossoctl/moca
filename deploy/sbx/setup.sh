@@ -80,9 +80,14 @@
 #                           only: a claim that already exists keeps the class it was created with
 #                           (an operator patches a Pending one once by hand), and a redis
 #                           StatefulSet that already exists cannot take the knob at all -- its
-#                           volumeClaimTemplates are immutable, so a mismatching run is refused
-#                           before anything is applied (check_storage_class); leave the variable
-#                           unset for that deployment, or recreate the StatefulSet and its claim.
+#                           volumeClaimTemplates are immutable, so a run whose knob disagrees with
+#                           the live template (a different class, or a class where the live
+#                           template has one and the knob is unset: the server-side apply would
+#                           DROP the field its manager owns) is refused before anything is applied
+#                           (check_storage_class). To move a deployment onto the knob, keep
+#                           SBX_STORAGE_CLASS at the live class; to change an existing class,
+#                           kubectl delete sts redis --cascade=orphan first (the pod and the
+#                           data-redis-0 claim survive; the re-run's StatefulSet adopts both).
 #   SBX_REDIS_IMAGE         optional; repository[:tag]@sha256:<digest>: the image Redis runs instead of the
 #                           base's valkey/valkey:9-alpine. For a namespace whose data a Redis 7.4 wrote
 #                           (RDB format 12, which Valkey 9 cannot read: its AOF load aborts), e.g.
@@ -670,14 +675,23 @@ check_redis_image() {
 # of a Pending claim is allowed -- but a BOUND one keeps its class, so those are the operator's
 # one-time kubectl patch, as the header says.
 check_storage_class() {
-  [[ -n "${SBX_STORAGE_CLASS:-}" ]] || return 0
   local json live
   # Captured first (errexit), as in check_redis_image: a failing get must not read as "no StatefulSet".
   json="$(kc get statefulset redis -n "$NS" --ignore-not-found -o json)"
   [[ -n "$json" ]] || return 0
   live="$(jq -r '.spec.volumeClaimTemplates[0].spec.storageClassName // empty' <<<"$json")"
-  [[ "$live" == "$SBX_STORAGE_CLASS" ]] ||
-    die "StatefulSet redis in $NS already exists with volumeClaimTemplates its API refuses to change in place (live class: '${live:-unset}'), so SBX_STORAGE_CLASS=$SBX_STORAGE_CLASS cannot be applied: leave it unset for this deployment (its claims keep the class they were created with), or recreate the StatefulSet (delete the data-redis-0 claim too -- redis data does not survive) and re-run"
+  if [[ -n "${SBX_STORAGE_CLASS:-}" ]]; then
+    # Forward: a differing (or unset) live class against a set knob is the apply the API refuses.
+    [[ "$live" == "$SBX_STORAGE_CLASS" ]] ||
+      die "StatefulSet redis in $NS already exists with volumeClaimTemplates its API refuses to change in place (live class: '${live:-unset}'), so SBX_STORAGE_CLASS=$SBX_STORAGE_CLASS cannot be applied: keep SBX_STORAGE_CLASS=$live for this deployment (its claim keeps the class it was created with), or, to change it, kubectl -n $NS delete sts redis --cascade=orphan (the pod and the data-redis-0 claim survive; a re-run's StatefulSet adopts both, and the claim keeps its class) and re-run"
+  else
+    # Reverse (review round 2): a live class can only have come from an earlier knob run
+    # (base/redis.yaml sets none), and the apply is server-side with one field manager: a run
+    # without the knob DROPS the storageClassName that manager owns, which changes
+    # volumeClaimTemplates -- the same Forbidden, partway through the object stream. Refused.
+    [[ -z "$live" ]] ||
+      die "StatefulSet redis in $NS carries storageClassName '$live' an earlier SBX_STORAGE_CLASS run set, and this run has SBX_STORAGE_CLASS unset: the apply would remove the field (server-side apply drops what its field manager no longer owns), which changes volumeClaimTemplates and is Forbidden. Set SBX_STORAGE_CLASS=$live (the claim keeps that class either way)"
+  fi
 }
 
 # SBX_PROFILE=combined in an SBX0 namespace would add the harness's keys to its moca-mu1 and switch
