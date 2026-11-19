@@ -1,7 +1,7 @@
 # deploy/k8s end to end on kind (#423): setup.sh --target kind-ci builds both images from this checkout,
 # then smoke.sh drives real turns through the in-pod mock model -- no model key needed.
 #
-# NOT a required check until it has passed ten consecutive runs on main (deploy/k8s/README.md, "CI").
+# NOT a required check until it has passed ten consecutive runs on main (docs/operate/harness/kubernetes.md, "CI").
 name: k8s-e2e
 
 on:

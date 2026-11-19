@@ -21,10 +21,10 @@
 # microvm: the tier a session gets when it names none, on a tiered stack), SH_SINGLE_NAMESPACE
 # (ocp-single only: the one namespace everything lands in; default moca-single, must already exist),
 # SH_ROUTE_DOMAIN (ocp-single only: opt in to Routes -- the public DNS domain whose hosts
-# moca.<domain> and moca-control-plane.<domain> are the Route hostnames; see README §12.5),
+# moca.<domain> and moca-control-plane.<domain> are the Route hostnames; see docs/operate/harness/kubernetes.md §12.5),
 # SH_SANDBOX_EGRESS_EXCEPT (every target: comma-separated IPv4 CIDRs the sandbox's internet egress
 # rule excepts on top of the private, CGNAT and link-local ranges -- e.g. a publicly routable node
-# network; README §6, #446), SH_API_TOKEN_TTL_SECONDS and SH_SESSION_TOKEN_TTL_SECONDS (the
+# network; docs/operate/harness/kubernetes.md §6, #446), SH_API_TOKEN_TTL_SECONDS and SH_SESSION_TOKEN_TTL_SECONDS (the
 # control plane's token lifetimes, whole seconds; empty means its defaults, 900 and 300; #432),
 # SH_MODEL_CATALOG_HOSTS (every target: comma-separated bare hostnames the control plane's model
 # catalog may contact besides api.anthropic.com and the default inference endpoint; empty, the
@@ -76,7 +76,7 @@ SBX_NS=moca-sandbox
 # default is 30m (remote-worker/internal/exec/workspace.go), which resets a HITL session that waits
 # longer than that for a person; deploy/microvm writes 8h for the same reason. A pod's /workspace
 # here is its writable layer (or an emptyDir with no sizeLimit on ocp-single), on node disk that no
-# quota bounds, so nothing gives a smaller value a reason: the idle sweep is the bound (README §2).
+# quota bounds, so nothing gives a smaller value a reason: the idle sweep is the bound (docs/operate/harness/kubernetes.md §2).
 DEFAULT_WORKSPACE_IDLE=8h
 LOCAL_HARNESS=dev.local/moca:local
 LOCAL_SANDBOX=dev.local/moca-remote-worker:local
@@ -100,9 +100,9 @@ DEFAULT_TIER_GIVEN=''
 # ADR-0045: how many test:N logins to serve. Resolved sticky in load_setup_inputs, which runs
 # before ensure_secrets (the secret) and write_settings (the count).
 TEST_USERS=0
-# ocp-single's namespace (README §12), validated in parse_args.
+# ocp-single's namespace (docs/operate/harness/kubernetes.md §12), validated in parse_args.
 SINGLE_NS=''
-# ocp-single's optional Routes (README §12.5): the public DNS domain when SH_ROUTE_DOMAIN opted in,
+# ocp-single's optional Routes (docs/operate/harness/kubernetes.md §12.5): the public DNS domain when SH_ROUTE_DOMAIN opted in,
 # empty when the stack is reached by port-forward. Validated in parse_args, resolved sticky in
 # load_setup_inputs.
 ROUTE_DOMAIN=''
@@ -215,7 +215,7 @@ parse_args() {
     [[ "$TARGET" == ocp-single ]] || die '--tls-secret applies to --target ocp-single only'
     # Not also coupled to SH_ROUTE_DOMAIN here: the domain may be the earlier run's sticky value,
     # resolved in load_setup_inputs long after parse_args. ensure_tls refuses the combination.
-  fi  # ocp-single's optional Routes (README §12.5): validated here, before anything touches a cluster.
+  fi  # ocp-single's optional Routes (docs/operate/harness/kubernetes.md §12.5): validated here, before anything touches a cluster.
   # The domain cannot be read at cluster scope with namespace rights, so it is given, not found.
   if [[ "$TARGET" == ocp-single && -n "${SH_ROUTE_DOMAIN-}" ]]; then
     [[ "$SH_ROUTE_DOMAIN" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)+$ ]] ||
@@ -225,7 +225,7 @@ parse_args() {
   # (ocp, whose hosts the cluster's apps domain sets) or none at all (kind). Only the set-and-
   # nonempty case is refused; set-and-empty on ocp-single means "Routes off" (load_setup_inputs).
   if [[ -n "${SH_ROUTE_DOMAIN-}" && "$TARGET" != ocp-single ]]; then
-    die "SH_ROUTE_DOMAIN ($SH_ROUTE_DOMAIN) needs --target ocp-single: it names the domain your namespace's Routes are served on (README §12.5)"
+    die "SH_ROUTE_DOMAIN ($SH_ROUTE_DOMAIN) needs --target ocp-single: it names the domain your namespace's Routes are served on (docs/operate/harness/kubernetes.md §12.5)"
   fi
   # ocp-single's namespace: validated here, before anything touches a cluster. It must already
   # exist -- creating one needs cluster scope, which this target assumes you lack.
@@ -342,7 +342,7 @@ valid_catalog_hosts() {
 
 is_kind() { [[ "$TARGET" == kind || "$TARGET" == kind-ci ]]; }
 
-# ocp-single: every workload, Secret, Role and policy in ONE namespace (README §12). Resolved in
+# ocp-single: every workload, Secret, Role and policy in ONE namespace (docs/operate/harness/kubernetes.md §12). Resolved in
 # parse_args (SH_SINGLE_NAMESPACE validation) and applied here, after parse_args, so TARGET is
 # known. SINGLE_NS is the validated value; NS and SBX_NS both collapse to it.
 resolve_namespaces() {
@@ -550,7 +550,7 @@ derive_tiers() {
 }
 
 # --- Sticky inputs (moca-setup) -------------------------------------------------------------------
-# A re-run is how an operator changes ONE input (README "Re-running"), so it must not reset the ones
+# A re-run is how an operator changes ONE input (docs/operate/harness/kubernetes.md "Re-running"), so it must not reset the ones
 # it is not given: without this, a rotation recipe that sets one variable rolled an OCP stack back to
 # :latest, scaled the sandboxes back to 2 and the control plane to 0. --image, --sandbox-image,
 # SH_SANDBOX_COUNT, SH_P4_SANDBOX_IDS and SH_SANDBOX_DEFAULT_TIER are kept in the non-secret ConfigMap
@@ -1583,7 +1583,7 @@ write_overlay() {
     printf '# GENERATED by deploy/k8s/setup.sh on every run. Do not edit; gitignored.\n'
     printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - ../../overlays/%s\n' "$TARGET"
     # The components: block, each entry only when its feature is on; with none, no block at all.
-    # P6.2 (spec §4.6): the relay's external path, only with P4 hosts. ocp-single's Routes (README
+    # P6.2 (spec §4.6): the relay's external path, only with P4 hosts. ocp-single's Routes (docs/operate/harness/kubernetes.md
     # §12.5), only when SH_ROUTE_DOMAIN opted in. Workload sandboxes (workload sandboxes spec §4),
     # only with SH_WORKLOAD_SANDBOXES=1, and on ocp their openshift-dns rule with them.
     local components=()
@@ -1703,7 +1703,7 @@ write_overlay() {
         printf '      spec:\n        template:\n          spec:\n            containers:\n              - name: sandbox\n                env:\n'
         printf '                  - { name: RELAY_ADDR, value: "sandbox-relay-attach.%s.svc:9443" }\n' "$NS"
       fi
-      # ocp-single's Routes (README §12.5): the component's placeholder hosts, replaced with the
+      # ocp-single's Routes (docs/operate/harness/kubernetes.md §12.5): the component's placeholder hosts, replaced with the
       # domain SH_ROUTE_DOMAIN gave; and with --tls-secret, the sidecar's volume points at the
       # preinstalled Secret by name instead of the moca-supervisor-tls the other two TLS sources
       # write (a strategic-merge patch on the volume by name; the material is never copied). Like
