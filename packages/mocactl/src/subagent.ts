@@ -690,6 +690,9 @@ async function readLeafResult(
       }
       raw = await transport.readLeafState(opts.sessionId, token.token, opts.signal);
     } catch (err) {
+      // Ctrl-C mid-read: the transport wraps the abort as a network error, which is not worth
+      // printing when the user is the one who stopped it.
+      if (opts.signal?.aborted === true) return 130;
       // Match on code, not bare status: a route/auth 404 should surface its real error.
       if (err instanceof ApiError && err.status === 404 && err.code === 'session_not_found') {
         io.err(`no session '${sanitizeRemote(opts.sessionId)}'`);
@@ -711,6 +714,9 @@ async function readLeafResult(
     // Checked before sleeping so the wait never overruns the budget.
     if (rt.now() + WAIT_POLL_MS > deadline) return 'queued';
     await rt.sleep(WAIT_POLL_MS, opts.signal);
+    // `sleep` resolves on abort rather than rejecting, so without this the loop would go round
+    // once more and turn a Ctrl-C into a mint plus a failed read.
+    if (opts.signal?.aborted === true) return 130;
   }
 }
 

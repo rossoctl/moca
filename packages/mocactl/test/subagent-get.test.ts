@@ -339,6 +339,59 @@ describe('cmdGet --wait', () => {
     expect(r).toBe(0);
     expect(sleep).toHaveBeenCalledTimes(1);
   });
+
+  it('a Ctrl-C during the sleep exits 130 instead of going round for one more read', async () => {
+    const { rt, cp } = makeRt(scratch);
+    const { io, err } = makeIo();
+    const ac = new AbortController();
+    // The real `sleep` resolves on abort rather than rejecting, so the loop has to notice by
+    // itself; aborting from inside the mock is a Ctrl-C landing mid-sleep.
+    rt.sleep = vi.fn(async () => {
+      ac.abort();
+    });
+    const transport = sequenceTransport(['queued']);
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({
+        wait: true,
+        transport,
+        outDir: scratch,
+        ledger: ledgerWith(),
+        signal: ac.signal,
+      }),
+    );
+    expect(r).toBe(130);
+    expect(transport.readLeafState).toHaveBeenCalledTimes(1);
+    expect(cp.mintSessionToken).toHaveBeenCalledTimes(1);
+    // Nothing printed: the user is the one who stopped it.
+    expect(err.join('')).toBe('');
+  });
+
+  it('a Ctrl-C mid-read exits 130 and not 1, without the wrapped network error', async () => {
+    const { rt } = makeRt(scratch);
+    const { io, err } = makeIo();
+    const ac = new AbortController();
+    const transport = {
+      readLeafState: vi.fn(async () => {
+        ac.abort();
+        throw new ApiError('harness', 0, 'network_error');
+      }),
+    } as unknown as LeafTransport;
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({
+        wait: true,
+        transport,
+        outDir: scratch,
+        ledger: ledgerWith(),
+        signal: ac.signal,
+      }),
+    );
+    expect(r).toBe(130);
+    expect(err.join('')).toBe('');
+  });
 });
 
 describe('cmdGet — paused is not success', () => {

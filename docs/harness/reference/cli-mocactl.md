@@ -288,7 +288,8 @@ hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo
   client-side (a fork failure), or its child exited without writing one, past the 60 s
   result-write grace. On the budget running out the output is what a not-finished `get` has
   always printed — `status: "queued"`, exit 1 — so `queued` and `unknown` distinguish "not yet"
-  from "never".
+  from "never". Ctrl-C ends the wait with exit 130 and no error line, whether it lands during a
+  poll or between two; the subagent itself keeps running, so a later `get` still collects it.
 - `--json`:
   - `spawn` → `{"type":"session","sessionId","pid"}`.
   - `subagents` → `{"subagents":[{"sessionId","tag","label"?,"kind","state","detail","bundle","workload","writable"?,"submittedAt"}]}` (`label` and `writable` are present only on rows dispatched with them). The non-`--json` table columns are `SESSION TAG LABEL KIND STATE BUNDLE` (`-` on unlabeled rows).
