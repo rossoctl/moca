@@ -10,8 +10,10 @@ Type=oneshot
 Environment=SBX_ENV_DIR=/etc/sbx
 Environment=SBX_SRV=/srv/sbx
 ExecStart=/usr/local/libexec/sbx-sampler.sh
-# A run reads a few files and starts df twice and curl once per worker with /stats (1 s each at
-# most): it must end well inside its 15 s tick. The timer starts no run while one is still active.
+# A run reads a few files and starts df twice (4 s at most each, and only once when the first
+# hangs) and curl once per worker with /stats (1 s each at most): a hung workspace filesystem
+# still ends in a sample, well inside this limit and the 15 s tick. The timer starts no run while
+# one is still active.
 TimeoutStartSec=10s
 Nice=10
 IOSchedulingClass=best-effort

@@ -968,7 +968,8 @@ samples its own load from then on. Every 15 s (`SBX_SAMPLER_INTERVAL_S`, 5-3600,
 15-16 s, the timer's 1 s accuracy on top) a
 oneshot, `sbx-sampler.service`, runs `/usr/local/libexec/sbx-sampler.sh` (`deploy/sbx/sampler.sh`),
 which writes one JSON line to the journal. It reads `/proc` and the cgroup files; it starts `df`
-twice and, per worker that runs with `SH_DIAG_STATS_ADDR`, one `curl` of that worker's
+twice (3 s each at most; after one that does not answer, as on a hung filesystem, it skips the
+second and reports `workspaces` null) and, per worker that runs with `SH_DIAG_STATS_ADDR`, one `curl` of that worker's
 `/stats` on this host (1 s at most; an address that is neither loopback nor a wildcard is refused, never
 curled); and it never fails its unit. A sample, shortened:
 
@@ -1030,8 +1031,8 @@ curled); and it never fails its unit. A sample, shortened:
 - **`workers`**, one per `/etc/sbx/workers/<id>.env`: `vms` is the VM cgroups in that worker's slice
   that hold a process, running and paused standby VMs alike (a stopped worker has 0);
   `memory_current` is its slice's (null when it is not running); `budget_mb` and `reserve_mb` are
-  its `SH_MAX_COMMITTED_MB` and `SH_MEMORY_RESERVE_MB`, from the running worker's environment (else
-  its env file). A VM is admitted while `committedBytes` stays within `budget_mb` minus
+  its `SH_MAX_COMMITTED_MB` and `SH_MEMORY_RESERVE_MB`, from the running worker's environment (the
+  process named `microvm-worker` in its unit's cgroup; else its env file). A VM is admitted while `committedBytes` stays within `budget_mb` minus
   `reserve_mb`. `stats` is from the worker's `/stats`, named as the worker names them, and null
   unless the worker runs with `SH_DIAG_STATS_ADDR`, which is off by default. To turn it on for one
   worker, a drop-in (an install rewrites the env file, never this), with a port of its own per

@@ -15,10 +15,11 @@
 # It reads files only: /proc/loadavg, /proc/meminfo, /proc/pressure/{cpu,memory,io}, the cgroup
 # files of sbx.slice and of each worker's sbx-<id>.slice, the worker env files and each running
 # worker's /proc/<pid>/environ. The only programs it starts are df (twice: bytes and inodes, each
-# under `timeout 5`) and, for a worker that runs with SH_DIAG_STATS_ADDR, one curl of that
-# worker's /stats on this host (1 s at most; a wildcard address is read on loopback, and an address that
-# is neither loopback nor a wildcard is refused, never curled). Nothing needs jq, so a worker host needs no more than
-# it did. Every value printed is matched as a number first and is null when it cannot be read.
+# under `timeout -k 1 3`, the second skipped when the first fails) and, for a worker that runs
+# with SH_DIAG_STATS_ADDR, one curl of that worker's /stats on this host (1 s at most; a wildcard
+# address is read on loopback, and an address that is neither loopback nor a wildcard is refused,
+# never curled). Nothing needs jq, so a worker host needs no more than it did. Every value
+# printed is matched as a number first and is null when it cannot be read.
 #
 # Output, in this order:
 #   {"sampler":"error","ts","kind","why"}   once per failure kind, when that kind starts failing
@@ -146,12 +147,20 @@ sample_psi() {
   PSI="{$out}"
 }
 
-# df_line VAR FLAG: the second line of `df -P FLAG` for the workspace root (bounded: a hung
-# filesystem must not hold the run).
+# df_line VAR FLAG: the second line of `df -P FLAG` for the workspace root; fails when df did
+# (a timeout included). Bounded: a hung filesystem must not hold the run. 3 s, then SIGKILL 1 s
+# later for a df that ignores SIGTERM: at most 4 s, and sample_workspaces skips the second call
+# after a failed first, so a hang costs one bound, well inside the unit's TimeoutStartSec=10s.
+DF_TIMEOUT=(timeout -k 1 3)
 df_line() {
   local -a t=()
-  command -v timeout >/dev/null && t=(timeout 5)
-  printf -v "$1" '%s' "$("${t[@]}" df -P "$2" -- "$SBX_SRV/workspaces" 2>/dev/null | { read -r _; read -r l; printf '%s' "${l:-}"; })"
+  local out rc
+  command -v timeout >/dev/null && t=("${DF_TIMEOUT[@]}")
+  out="$("${t[@]}" df -P "$2" -- "$SBX_SRV/workspaces" 2>/dev/null)"
+  rc=$?
+  out="${out#*$'\n'}"
+  printf -v "$1" '%s' "${out%%$'\n'*}"
+  return "$rc"
 }
 
 sample_workspaces() {
@@ -161,17 +170,23 @@ sample_workspaces() {
     fail workspaces "no $SBX_SRV/workspaces"
   else
     # Filesystem 1024-blocks Used Available Capacity Mounted-on; with -i: Inodes IUsed IFree IUse%.
-    df_line line -k
+    local rc=0
+    df_line line -k || rc=$?
     read -r -a f <<<"$line"
-    if [[ "${f[1]:-}" =~ $INT_RE && "${f[2]:-}" =~ $INT_RE && "${f[3]:-}" =~ $INT_RE ]]; then
+    if ((rc == 0)) && [[ "${f[1]:-}" =~ $INT_RE && "${f[2]:-}" =~ $INT_RE && "${f[3]:-}" =~ $INT_RE ]]; then
       bt=$((f[1] * 1024)) bu=$((f[2] * 1024)) ba=$((f[3] * 1024))
+    elif ((rc == 124 || rc == 137)); then
+      fail workspaces "df -Pk $SBX_SRV/workspaces did not answer within 3 s (a hung filesystem?)"
     else
       fail workspaces "df -Pk $SBX_SRV/workspaces failed or gave no sizes"
     fi
-    df_line line -i
-    read -r -a f <<<"$line"
-    int it "${f[1]:-}"; int iu "${f[2]:-}"; int ifr "${f[3]:-}"
-    [[ "$it$iu$ifr" != *null* ]] || fail workspaces "df -Pi $SBX_SRV/workspaces failed or gave no inode counts"
+    # The inode call only after a byte call that answered: a hung filesystem costs one bound.
+    if [[ -z "${ERR[workspaces]:-}" ]]; then
+      df_line line -i || line=''
+      read -r -a f <<<"$line"
+      int it "${f[1]:-}"; int iu "${f[2]:-}"; int ifr "${f[3]:-}"
+      [[ "$it$iu$ifr" != *null* ]] || fail workspaces "df -Pi $SBX_SRV/workspaces failed or gave no inode counts"
+    fi
   fi
   WS="{\"bytes_total\":$bt,\"bytes_used\":$bu,\"bytes_avail\":$ba,\"inodes_total\":$it,\"inodes_used\":$iu,\"inodes_free\":$ifr}"
 }
@@ -272,6 +287,26 @@ stats() {
   STATS="{\"committedBytes\":$c,\"standbyCommittedBytes\":$s,\"refusals\":$r}"
 }
 
+# worker_pid VAR PROCS: the pid in the unit's cgroup.procs whose comm is microvm-worker (the unit
+# is Type=simple, so that is its main process), or empty. Not the first line: the kernel does not
+# order cgroup.procs, and a jailer or helper there would lend its environment. Reading comm costs
+# no fork, where `systemctl show -p MainPID` is one per worker. A worker binary installed under
+# another name (SBX_WORKER_BIN) has no match: its env file is read alone.
+worker_pid() {
+  local p c=''
+  printf -v "$1" '%s' ''
+  [[ -r "$2" ]] || return 0
+  while read -r p; do
+    [[ "$p" =~ ^[1-9][0-9]*$ ]] || continue
+    c=''
+    { read -r c <"$PROC/$p/comm"; } 2>/dev/null || true
+    if [[ "$c" == microvm-worker ]]; then
+      printf -v "$1" '%s' "$p"
+      return 0
+    fi
+  done <"$2" 2>/dev/null
+}
+
 sample_workers() {
   local f id line budget reserve addr ws d vms cur v out='' b rs pid
   if [[ -d "$SBX_ENV_DIR/workers" && ! -r "$SBX_ENV_DIR/workers" ]]; then
@@ -294,11 +329,9 @@ sample_workers() {
       fail "worker:$id" "cannot read $f"
     fi
     # A running worker's own environment wins: it is what the worker uses, drop-ins included
-    # (SH_DIAG_STATS_ADDR is set in one, as the env file is rewritten by every install). Its main
-    # process is the first in the unit's cgroup (Type=simple: microvm-worker itself).
-    pid=''
-    read1 pid "$CG/sbx.slice/sbx-$id.slice/sbx-worker@$id.service/cgroup.procs" || pid=''
-    if [[ "$pid" =~ ^[1-9][0-9]*$ && -r "$PROC/$pid/environ" ]]; then
+    # (SH_DIAG_STATS_ADDR is set in one, as the env file is rewritten by every install).
+    worker_pid pid "$CG/sbx.slice/sbx-$id.slice/sbx-worker@$id.service/cgroup.procs"
+    if [[ -n "$pid" && -r "$PROC/$pid/environ" ]]; then
       while IFS= read -r -d '' line; do
         case "$line" in
         SH_MAX_COMMITTED_MB=*) budget="${line#*=}" ;;

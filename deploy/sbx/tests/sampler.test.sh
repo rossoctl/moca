@@ -15,10 +15,14 @@ BASH_BIN="$(command -v bash)"
 command -v jq >/dev/null || { echo 'skip - needs jq to read the sample lines'; exit 0; }
 
 # The mocks use builtins only, so the sampler runs with PATH=$TMP/bin and nothing else.
+# MOCK_DF_HANG: df hangs as on a dead filesystem (exec, so a SIGTERM ends it, as it ends df).
+# MOCK_REAL_TIMEOUT: the timeout mock runs the real timeout (the hung-df case), else just the command.
+REAL_TIMEOUT="$(command -v timeout || true)" SLEEP_BIN="$(command -v sleep)"
 mkdir -p "$TMP/bin"
 cat >"$TMP/bin/df" <<MOCK
 #!$BASH_BIN
 printf 'df %s\n' "\$*" >>"\$MOCK_LOG"
+[[ -z "\${MOCK_DF_HANG:-}" ]] || exec $SLEEP_BIN 30
 [[ -z "\${MOCK_DF_FAIL:-}" ]] || exit 1
 if [[ "\$2" == -i ]]; then
   printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\n/dev/nvme1n1 13107200 52000 13055200 1%% /srv\n'
@@ -35,6 +39,8 @@ MOCK
 cat >"$TMP/bin/timeout" <<MOCK
 #!$BASH_BIN
 printf 'timeout %s\n' "\$*" >>"\$MOCK_LOG"
+[[ -z "\${MOCK_REAL_TIMEOUT:-}" ]] || exec "\$MOCK_REAL_TIMEOUT" "\$@"
+while [[ "\$1" == -k ]]; do shift 2; done
 shift
 exec "\$@"
 MOCK
@@ -95,7 +101,7 @@ is '.slice' '{"cpu_usage_usec":9000000,"cpu_nr_throttled":3,"cpu_throttled_usec"
 is '.workers[0]' '{"wrk":"sbx_default","vms":3,"memory_current":4294967296,"budget_mb":8192,"reserve_mb":1024,"stats":{"committedBytes":3221225472,"standbyCommittedBytes":268435456,"refusals":{"memory-budget":2}}}'
 is '.workers[1]' '{"wrk":"sbx_py312","vms":1,"memory_current":null,"budget_mb":16384,"reserve_mb":2048,"stats":null}'
 is '.errors' '[]'
-grep -qx "timeout 5 df -P -k -- $SBX_SRV/workspaces" "$MOCK_LOG" && grep -qx "timeout 5 df -P -i -- $SBX_SRV/workspaces" "$MOCK_LOG" ||
+grep -qx "timeout -k 1 3 df -P -k -- $SBX_SRV/workspaces" "$MOCK_LOG" && grep -qx "timeout -k 1 3 df -P -i -- $SBX_SRV/workspaces" "$MOCK_LOG" ||
   fail "df is not bounded by timeout on the workspace root: $(cat "$MOCK_LOG")"
 grep -qxF "curl -fsS --max-time 1 --noproxy * http://127.0.0.1:9900/stats" "$MOCK_LOG" || fail "curl of /stats: $(grep curl "$MOCK_LOG")"
 [[ "$(grep -c '^curl ' "$MOCK_LOG")" == 1 ]] || fail 'curled a worker without SH_DIAG_STATS_ADDR'
@@ -129,12 +135,24 @@ grep -q 'http://localhost:9905/stats' "$MOCK_LOG" || fail "'localhost:9905' is n
 # A running worker's environment (a drop-in's SH_DIAG_STATS_ADDR, the unit's reserve) wins over
 # its env file, which every install rewrites.
 printf 'SH_MAX_COMMITTED_MB=8192\n' >"$SBX_ENV_DIR/workers/sbx_default.env"
-mkdir -p "$D/sbx-worker@sbx_default.service" "$P/4711"
-printf '4711\n4712\n' >"$D/sbx-worker@sbx_default.service/cgroup.procs"
+# The worker is the pid whose comm is microvm-worker, not the first line of cgroup.procs: here a
+# helper with another environment is listed first.
+mkdir -p "$D/sbx-worker@sbx_default.service" "$P/4711" "$P/4712"
+printf '4712\n4711\n' >"$D/sbx-worker@sbx_default.service/cgroup.procs"
+printf 'microvm-worker\n' >"$P/4711/comm"
 printf 'SH_MAX_COMMITTED_MB=12288\0SH_MEMORY_RESERVE_MB=1536\0SH_DIAG_STATS_ADDR=127.0.0.1:9903\0' >"$P/4711/environ"
+printf 'jailer\n' >"$P/4712/comm"
+printf 'SH_MAX_COMMITTED_MB=1\0SH_MEMORY_RESERVE_MB=2\0SH_DIAG_STATS_ADDR=127.0.0.1:9904\0' >"$P/4712/environ"
 run
 is '.workers[0] | {budget_mb, reserve_mb}' '{"budget_mb":12288,"reserve_mb":1536}'
 grep -q 'http://127.0.0.1:9903/stats' "$MOCK_LOG" || fail 'the running worker'"'"'s SH_DIAG_STATS_ADDR is not read'
+! grep -q ':9904/' "$MOCK_LOG" || fail "a helper's environment was read as the worker's"
+# No process named microvm-worker (stopped, or another binary name): the env file alone.
+printf 'jailer\n' >"$P/4711/comm"
+: >"$MOCK_LOG"
+run
+is '.workers[0] | {budget_mb, reserve_mb, stats}' '{"budget_mb":8192,"reserve_mb":1024,"stats":null}'
+! grep -q '^curl ' "$MOCK_LOG" || fail 'curled with no worker process to read SH_DIAG_STATS_ADDR from'
 rm -rf "$D"
 run
 is '.workers[0] | {vms, memory_current, budget_mb, reserve_mb, stats}' '{"vms":0,"memory_current":null,"budget_mb":8192,"reserve_mb":1024,"stats":null}'
@@ -161,6 +179,27 @@ printf '{"committedBytes":-1,"standbyCommittedBytes":0,"refusals":{}}' >"$MOCK_S
 run
 is '.workers[0].stats' 'null'
 pass 'failures: one error line per kind (two PSI files, one psi line), named in the sample, fields null'
+
+# A hung workspace filesystem (df never answers): the real timeout ends it, the inode call is
+# skipped, and the run still ends in a sample, with workspaces null and one error line, well
+# inside the unit's TimeoutStartSec=10s.
+if [[ -n "$REAL_TIMEOUT" ]] && "$REAL_TIMEOUT" -k 1 1 true 2>/dev/null; then
+  setup
+  start=$SECONDS
+  MOCK_DF_HANG=1 MOCK_REAL_TIMEOUT="$REAL_TIMEOUT" run
+  took=$((SECONDS - start))
+  ((took <= 6)) || fail "a hung df held the run ${took}s"
+  grep -qx 'TimeoutStartSec=10s' "$SRC/deploy/sbx/sbx-sampler.service" || fail 'the unit limit is not the 10 s this test assumes'
+  [[ "$(grep -c '^df ' "$MOCK_LOG")" == 1 ]] || fail "df ran more than once on a hung filesystem: $(cat "$MOCK_LOG")"
+  [[ "$(lines error)" == 1 ]] && grep -q '"kind":"workspaces","why":"df -Pk .* did not answer within 3 s' "$TMP/out" ||
+    fail "not one workspaces error line for a hung df: $(cat "$TMP/out")"
+  is '.workspaces' '{"bytes_total":null,"bytes_used":null,"bytes_avail":null,"inodes_total":null,"inodes_used":null,"inodes_free":null}'
+  is '.errors' '["workspaces"]'
+  is '.load.avg1' '0.52'
+  pass "a hung df: one bounded call (${took}s), a sample with workspaces null and one error line"
+else
+  echo 'skip - a hung df: no timeout with -k on this machine'
+fi
 
 # Garbage in every file, and nothing at all: still one valid JSON sample, exit 0, no stderr.
 setup
