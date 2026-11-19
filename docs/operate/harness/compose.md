@@ -7,7 +7,7 @@ sidebar_position: 1
 > **Preview.** The Docker Compose trial is implemented but not yet declared Stable; interfaces
 > and limits may change. Known limits: [What the trial does not claim](#what-the-trial-does-not-claim).
 > It is a trial by design and will not be promoted to Stable. For production see
-> [`deploy/vm/`](../../../deploy/vm/README.md) or [`deploy/k8s/`](../../../deploy/k8s/README.md); labels are explained in [Maturity and lifecycle](../../reference/maturity-and-lifecycle.md).
+> [`deploy/vm/`](single-vm.md) or [`deploy/k8s/`](../../../deploy/k8s/README.md); labels are explained in [Maturity and lifecycle](../../reference/maturity-and-lifecycle.md).
 
 A five-minute, no-root way to run the P6 (process-manager) runtime on a dev machine: the supervisor (with its worker
 pool), the sandbox relay, Redis and one remote-worker sandbox, under Docker Compose. Optionally, add
@@ -15,7 +15,7 @@ the MU1 control plane that [`mocactl`](../../../packages/mocactl) logs in throug
 "[Using mocactl](#using-mocactl-the-control-plane)").
 
 **This is the trial path, not the production one.** For a dedicated VM or bare metal, use
-[`deploy/vm/`](../../../deploy/vm/README.md) (`setup-vm.sh`, systemd units, podman). That path is the
+[`deploy/vm/`](single-vm.md) (`setup-vm.sh`, systemd units, podman). That path is the
 production path: it carries the systemd hardening, reboot handling and E8 run discipline this one
 deliberately leaves out. The two run the same processes with the same environment. Only the
 process manager and the addressing differ.

@@ -22,7 +22,7 @@ that run's, trimmed.
 The steps come from three verified pieces: the two-user acceptance runbook
 ([`vm-two-user-acceptance.md`](./vm-two-user-acceptance.md), #403), the P4 tier on a P6 host
 ([`deploy/microvm/P4-ON-P6.md`](../../deploy/microvm/P4-ON-P6.md), #376 and #409), and the
-research turn ("A research turn" in [`deploy/vm/README.md`](../../deploy/vm/README.md), and
+research turn ("[A research turn](../operate/harness/single-vm.md#a-research-turn-curl-and-git-in-the-sandbox)" on the Single VM page, and
 `deploy/vm/research-smoke.sh`, #411).
 
 | A shared agent deployment usually needs                          | This needs                                                                                   |
@@ -73,7 +73,7 @@ nothing, because sudo looks commands up in its `secure_path`, not the caller's `
 ### 0a. P6 with the control plane and the GitHub OAuth app
 
 Bring the VM up with `deploy/vm/setup-vm.sh` and a GitHub OAuth app with **Enable Device Flow**
-ticked (`deploy/vm/README.md`, "Bring it up" and "The GitHub OAuth app"). On the SSH-tunnel
+ticked ([Single VM](../operate/harness/single-vm.md), "Bring it up" and "The GitHub OAuth app"). On the SSH-tunnel
 topology, pass both control-plane settings. On a fresh VM this is the **second** run, once
 `SH_RELAY_TOKEN` is set:
 
@@ -167,7 +167,7 @@ Act 4. Follow `deploy/microvm/P4-ON-P6.md`:
 The relay keeps the worker's token: `setup-vm.sh` leaves `setup-microvm.sh`'s relay drop-in in
 place. So in Act 4, starting the worker is enough to attach it.
 
-**Rehearse the research turn** on the container tier ("A research turn" in `deploy/vm/README.md`),
+**Rehearse the research turn** on the container tier ("[A research turn](../operate/harness/single-vm.md#a-research-turn-curl-and-git-in-the-sandbox)" on the Single VM page),
 with a key of your own. The key file holds exactly one line, the key alone:
 
 ```bash
@@ -353,7 +353,7 @@ memory.
 
 ### 2a. User 1 asks a question only the live internet can answer
 
-The prompt is `deploy/vm/README.md`'s, with the directory made per user: on the container tier
+The prompt is the [Single VM](../operate/harness/single-vm.md#a-research-turn-curl-and-git-in-the-sandbox) page's, with the directory made per user: on the container tier
 the users share `/workspace` (2d), and `git clone` refuses a directory that already exists. User 1
 uses `research-user1`, user 2 `research-user2`:
 

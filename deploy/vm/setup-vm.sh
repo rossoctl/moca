@@ -32,7 +32,7 @@
 #                          host.containers.internal:<SH_RELAY_PORT from relay.env>). Reaching
 #                          the host from inside a container is the part of this script least
 #                          verified on real hardware -- override this if the default does not
-#                          resolve on your VM (see deploy/vm/README.md). install_sandbox_firewall
+#                          resolve on your VM (see docs/operate/harness/single-vm.md). install_sandbox_firewall
 #                          opens the port from THIS address, not SH_RELAY_PORT unconditionally,
 #                          so overriding it also changes which port the firewall opens.
 #   MOCA_SANDBOX_SUBNET    Dedicated podman network subnet for sandbox containers (default
@@ -52,12 +52,12 @@
 #                          and leaves them behind (not deleted, but unreachable). With neither, the
 #                          run STOPS and changes nothing -- the choice is offered only once, since
 #                          after either run Redis is on the named volume and there is nothing left to
-#                          adopt. See deploy/vm/README.md, "Redis persistence".
+#                          adopt. See docs/operate/harness/single-vm.md, "Redis persistence".
 #
 # Control-plane settings (optional; written into control-plane.env only where it has none yet --
 # an existing value is kept, with a warning if these disagree). sudo drops the environment, so pass
 # them through it: sudo env SH_GITHUB_CLIENT_ID=Ov23li... SH_PUBLIC_HARNESS_URL=... ./deploy/vm/setup-vm.sh
-#   SH_GITHUB_CLIENT_ID    A GitHub OAuth app's client id, device flow ENABLED (deploy/vm/README.md,
+#   SH_GITHUB_CLIENT_ID    A GitHub OAuth app's client id, device flow ENABLED (docs/operate/harness/single-vm.md,
 #                          "The GitHub OAuth app"). No client secret: the device flow needs none.
 #   SH_PUBLIC_HARNESS_URL  The harness as clients reach it, advertised by GET /v1/discovery; behind
 #                          the default SSH tunnel, http://127.0.0.1:8080.
@@ -319,7 +319,7 @@ adopt_redis_volume() {
       "sessions on the running container's ANONYMOUS volume become unreachable -- they are NOT" \
       "deleted, and podman keeps that volume until you remove it, but THIS IS THE LAST RUN THAT" \
       "CAN ADOPT THEM automatically: from here on sh-redis matches what this script starts, so a" \
-      "later SH_REDIS_ADOPT_VOLUME=1 has nothing to migrate. See deploy/vm/README.md," \
+      "later SH_REDIS_ADOPT_VOLUME=1 has nothing to migrate. See docs/operate/harness/single-vm.md," \
       "'Redis persistence', for the by-hand recipe." >&2
     return 0
     ;;
@@ -345,7 +345,7 @@ adopt_redis_volume() {
       "copying the anonymous volume's sessions over it would destroy whatever is there now" \
       "(most likely the sessions created since this host first ran the post-#410 installer)." \
       "Neither volume has been touched. If the older sessions really are the ones you want," \
-      "remove '$MOCA_REDIS_VOLUME' first, or follow the by-hand recipe in deploy/vm/README.md," \
+      "remove '$MOCA_REDIS_VOLUME' first, or follow the by-hand recipe in docs/operate/harness/single-vm.md," \
       "'Redis persistence'." >&2
     return 1
   fi
@@ -365,7 +365,7 @@ adopt_redis_volume() {
     "before this run. The half-written '$MOCA_REDIS_VOLUME' was removed, because a partial AOF in" \
     "it is exactly what Redis would then load INSTEAD of the sessions. Check 'podman logs" \
     "sh-redis-adopt' if it is still listed, then either re-run with SH_REDIS_ADOPT_VOLUME=1 or" \
-    "follow the by-hand recipe in deploy/vm/README.md, 'Redis persistence'." >&2
+    "follow the by-hand recipe in docs/operate/harness/single-vm.md, 'Redis persistence'." >&2
   return 1
 }
 
@@ -1083,7 +1083,7 @@ NFT
 }
 
 # Reaching the host's relay port from inside a container has been confirmed on one real host
-# (deploy/vm/README.md lists what was and was not verified there).
+# (docs/operate/harness/single-vm.md lists what was and was not verified there).
 # host.containers.internal is podman's documented analogue of Docker's host.docker.internal
 # (podman-run(1): the host-gateway special string), but the alias is now pinned to the
 # moca-sandbox gateway rather than podman's host-gateway value: host-gateway resolves to whatever
@@ -1290,7 +1290,7 @@ report_done() {
   fi
   if cp_configured; then
     log "control plane: http://127.0.0.1:$(env_file_value SH_CONTROL_PLANE_PORT "$SH_ENV_DIR/control-plane.env")" \
-      "on this VM (reach it through an SSH tunnel: deploy/vm/README.md, \"The control plane\")"
+      "on this VM (reach it through an SSH tunnel: docs/operate/harness/single-vm.md, \"The control plane\")"
   else
     # Not "or systemctl start": with either value missing the unit cannot boot, or boots advertising
     # no harness. Both routes below set both.

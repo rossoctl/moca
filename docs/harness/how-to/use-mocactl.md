@@ -346,7 +346,7 @@ plane older than `/v1/discovery` needs upgrading, or `--harness-url` in the mean
 If it reports that the harness does not trust this control plane, the harness is missing the
 control plane's public keyset, the exchange token, or `SH_CONTROL_PLANE_URL`/`SH_REQUIRE_AUTH`. On
 the VM/P6 path, re-run `sudo ./deploy/vm/setup-vm.sh`, which installs the control plane beside the
-supervisor and wires all four (`deploy/vm/README.md`, "The control plane"). There the exchange token
+supervisor and wires all four ([Single VM](../../operate/harness/single-vm.md#the-control-plane), "The control plane"). There the exchange token
 is a systemd credential, not a `supervisor.env` line.
 
 Resuming a session started on another machine shows no history: the control plane has no route

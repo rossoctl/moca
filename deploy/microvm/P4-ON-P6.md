@@ -87,9 +87,9 @@ worker gone, a session created in the `microvm` tier has no sandbox to run in.
 
 - **`sudo` must find podman.** podman-static installs under `/usr/local/bin`, and on some hosts
   sudo's `secure_path` leaves that out. If `sudo podman version` says `command not found`, run every
-  `sudo` command on this page as `sudo env PATH="/usr/local/bin:$PATH" …`, as `deploy/vm/README.md`
+  `sudo` command on this page as `sudo env PATH="/usr/local/bin:$PATH" …`, as `docs/operate/harness/single-vm.md`
   does for `setup-vm.sh`. The verified host's `secure_path` included `/usr/local/bin`.
-- **P6 installed and running** (`deploy/vm/README.md`). `setup-microvm.sh` needs its
+- **P6 installed and running** (`docs/operate/harness/single-vm.md`). `setup-microvm.sh` needs its
   `relay.env`, `sh-relay.service` and the `sh-redis` container.
 - **`/dev/kvm`**, cgroups v2 and no swap. Bare metal, or an instance type with nested
   virtualisation: the verified run used an `m8i.xlarge`.
@@ -761,7 +761,7 @@ proxy's `DynamicUser` needs no group). While `moca-egress` is down, restores fai
   plane's session and ownership index then reads as gone, with the workspaces orphaned under
   `/srv/workspaces` until idle reclaim). **Get this out of the way before a demo, not mid-demo**,
   and note the choice only comes up once: after either run Redis is on the named volume and there is
-  nothing left to adopt. See "Redis persistence" in `deploy/vm/README.md` for the trap in recovering
+  nothing left to adopt. See "Redis persistence" in `docs/operate/harness/single-vm.md` for the trap in recovering
   such a volume by hand — copying a `dump.rdb` into a volume whose Redis has AOF on yields a
   silently empty Redis.
 

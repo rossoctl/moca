@@ -1503,9 +1503,9 @@ pass "the adoption path ignores a container that already has a named volume"
 
 grep -qi 'named volume' "$SCRIPT" ||
   fail "start_redis must state that Redis data lives on a named volume"
-grep -qi 'appendonly' "$VM_DIR/README.md" ||
-  fail "README.md must document Redis persistence (the named volume and AOF)"
-pass "Redis persistence is documented in both the script and the README"
+grep -qi 'appendonly' "$VM_DIR/../../docs/operate/harness/single-vm.md" ||
+  fail "docs/operate/harness/single-vm.md must document Redis persistence (the named volume and AOF)"
+pass "Redis persistence is documented in both the script and the single-VM docs page"
 
 # --- admin listener (Task 11): loopback only -------------------------------------------------
 # Unauthenticated, and it echoes configuration. Bound to 0.0.0.0 on a cloud VM it is a

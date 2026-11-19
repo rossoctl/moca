@@ -115,7 +115,7 @@ The control plane advertises the harness as `http://127.0.0.1:8080` by default, 
 forward must use local port 8080. If 8080 conflicts with another local service, override it with
 `SH_PUBLIC_HARNESS_URL` at setup time (see §2's sticky settings). `mocactl` runs from a checkout
 ([`docs/harness/how-to/set-up-mocactl.md`](../../docs/harness/how-to/set-up-mocactl.md)). The GitHub OAuth app
-needs **Enable Device Flow** ticked ([`deploy/vm/README.md`](../vm/README.md), "The GitHub OAuth
+needs **Enable Device Flow** ticked ([Single VM](../../docs/operate/harness/single-vm.md#the-github-oauth-app), "The GitHub OAuth
 app").
 
 **Without `SH_GITHUB_CLIENT_ID`,** the control plane is installed with 0 replicas, because nobody
