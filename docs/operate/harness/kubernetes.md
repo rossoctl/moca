@@ -16,8 +16,8 @@ slice 1 of epic rossoctl/moca#426 (issue rossoctl/moca#423). The design is
 
 ## 1. What this is
 
-This is the sibling of [`deploy/vm/`](../../../deploy/vm/README.md) (systemd and podman on one VM) and
-[`deploy/compose/`](../../../deploy/compose/README.md) (the same processes under Docker Compose). All three run
+This is the sibling of [Single VM](single-vm.md) (systemd and podman on one VM) and
+[Docker Compose](compose.md) (the same processes under Docker Compose). All three run
 the same processes, the same environment and the same wire. Only the process manager, the
 addressing and the way isolation is enforced differ. Here, isolation comes from namespaces,
 NetworkPolicy, Secrets and pod lifecycle.
