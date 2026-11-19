@@ -76,6 +76,68 @@ const baseOpts = (over: Partial<SpawnOptions> = {}): SpawnOptions => ({
   ...over,
 });
 
+/* --- the client-side concurrency cap --- */
+
+describe('cmdSpawn — --max-concurrent', () => {
+  /** Seed `n` rows holding a slot: non-terminal, with a pid that is really alive. */
+  function seedRunning(ledger: Ledger, n: number, childPid = process.pid): void {
+    for (let i = 0; i < n; i++) {
+      ledger.append({
+        sessionId: `held-${i}`,
+        envelope: { kind: 'prompt', prompt: 'p' },
+        submittedAt: i,
+        lastKnownState: 'running',
+        stateObservedAt: i,
+        childPid,
+      });
+    }
+  }
+
+  it('refuses at the cap, before a session or a worker exists', async () => {
+    const { rt, cp } = makeRt();
+    const ledger = withLedger(rt);
+    seedRunning(ledger, 2);
+    const { io, err } = makeIo();
+    const fork = vi.fn(() => 1);
+    const r = await cmdSpawn(rt, io, baseOpts({ maxConcurrent: 2, forkFn: fork, ledger }));
+    expect(r).toBe(1);
+    expect(cp.createSession).not.toHaveBeenCalled();
+    expect(fork).not.toHaveBeenCalled();
+    expect(err.join('\n')).toContain('--max-concurrent is 2');
+  });
+
+  it('allows the dispatch below the cap', async () => {
+    const { rt, cp } = makeRt();
+    const ledger = withLedger(rt);
+    seedRunning(ledger, 1);
+    const { io } = makeIo();
+    const r = await cmdSpawn(rt, io, baseOpts({ maxConcurrent: 2, forkFn: () => 1, ledger }));
+    expect(r).toBe(0);
+    expect(cp.createSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let stale rows whose children are gone hold a slot for good', async () => {
+    const { rt } = makeRt();
+    const ledger = withLedger(rt);
+    // Pid 2^31-1 is almost certainly not alive: exactly the unreconciled-crash rows that a bare
+    // non-terminal count would wedge `spawn` on permanently.
+    seedRunning(ledger, 8, 0x7fffffff);
+    const { io } = makeIo();
+    const r = await cmdSpawn(rt, io, baseOpts({ maxConcurrent: 2, forkFn: () => 1, ledger }));
+    expect(r).toBe(0);
+  });
+
+  it('defaults to 4', async () => {
+    const { rt } = makeRt();
+    const ledger = withLedger(rt);
+    seedRunning(ledger, 4);
+    const { io, err } = makeIo();
+    const r = await cmdSpawn(rt, io, baseOpts({ forkFn: () => 1, ledger }));
+    expect(r).toBe(1);
+    expect(err.join('\n')).toContain('--max-concurrent is 4');
+  });
+});
+
 /* --- flag validation --- */
 
 describe('cmdSpawn — flag validation refuses before any session is created', () => {

@@ -60,8 +60,15 @@ usage:
   mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]
                                                  run the subagent on a workload's context
                                                  (--writable: its own copy, discarded after)
+  mocactl spawn "prompt" --max-concurrent N [...]
+                                                 refuse the dispatch when N of your subagents are
+                                                 already running (default 4)
   mocactl subagents [--tag T] [--json]            list spawned subagents + current state
   mocactl get SESSIONID [--out DIR] [--json]      write result files + bounded summary
+  mocactl get SESSIONID --wait [--timeout S]     block until the result is there, then write it
+                                                 (default 300 s; exit 1 and status 'queued' if the
+                                                 budget runs out, 'unknown' if the run is over
+                                                 without one)
   mocactl workloads create --context FILE [--name NAME] [--json]
       [--sandboxes N [--mount read-only|writable]]
                                                  upload a context file (contextctl ctx pack) to a
@@ -84,7 +91,8 @@ All flags are accepted by one parser. An unknown flag, or a missing flag value, 
 exits 2. Some flags are always rejected (exit 2) outside their command: `--consumer`, `--host` and
 `--endpoint` outside `credentials add`; `--kind` outside `credentials add` and `spawn`; `--config`
 outside `run` and `spawn`; `--repo` and `--ref` outside `spawn`; `--tag` outside `spawn` and
-`subagents`; `--label` outside `spawn`; `--out` outside `get`; `--workload` outside `spawn`;
+`subagents`; `--label` outside `spawn`; `--out`, `--wait` and `--timeout` outside `get`;
+`--max-concurrent` outside `spawn`; `--workload` outside `spawn`;
 `--prompt-file` outside `spawn`; `--record` outside `run`;
 `--context`, `--name`, `--sandboxes` and `--mount` outside `workloads create`; and `--all` outside `logout`. Other flags a
 command does not use are not rejected and may be ignored.
@@ -262,12 +270,39 @@ hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo
 - `spawn` on a sync 503 `saturated`: the worker retries up to 3 times honoring `Retry-After`,
   bounded by a 5-minute wall budget; after that the ledger row is `failed` with
   `stateDetail: 'saturated — exhausted retries'`.
-- `get` exit 2: sessionId outside `[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]`. Exit 0 only on
+- `spawn --max-concurrent N` (default 4) refuses the dispatch, exit 1, when N of your subagents are
+  already running — before the session is created and before the worker is forked, so a refused
+  dispatch costs nothing. The count is of this machine's ledger rows that are both non-terminal and
+  have a live child pid; a row whose child is gone holds no slot, so an unreconciled crash cannot
+  wedge `spawn`. The server's own pool is the real bound (a sync 503 `saturated`, retried as above).
+  Exit 2 for an `N` that is not a whole number of at least 1.
+- `get` exit 2: sessionId outside `[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]`, or `--timeout` without
+  `--wait`, or a `--timeout` that is not a whole number of seconds of at least 1. Exit 0 only on
   `responded`/`done`/`solved`; `queued`/`paused`/`failed` exit 1.
+- `get --wait [--timeout S]` blocks until the result is collectable instead of reading once, then
+  writes and summarizes it exactly as a plain `get` does — one call, result inline, for a caller
+  that spawns and collects in the same turn. It polls `GET /runs/status` every 2 s within an `S`
+  budget (default 300, never overrun) and re-mints the session token as it nears expiry, since
+  `SH_SESSION_TOKEN_TTL_SECONDS` also defaults to 300. It stops early, exit 1 and
+  `status: "unknown"`, when the ledger says no result is coming: the row already went terminal
+  client-side (a fork failure), or its child exited without writing one, past the 60 s
+  result-write grace. On the budget running out the output is what a not-finished `get` has
+  always printed — `status: "queued"`, exit 1 — so `queued` and `unknown` distinguish "not yet"
+  from "never".
 - `--json`:
   - `spawn` → `{"type":"session","sessionId","pid"}`.
   - `subagents` → `{"subagents":[{"sessionId","tag","label"?,"kind","state","detail","bundle","workload","writable"?,"submittedAt"}]}` (`label` and `writable` are present only on rows dispatched with them). The non-`--json` table columns are `SESSION TAG LABEL KIND STATE BUNDLE` (`-` on unlabeled rows).
-  - `get` → `{"sessionId","status","files":[…],"reason"?,"message"?}`.
+  - `get` → `{"sessionId","status","files":[…],"reason"?,"message"?}`, or
+    `{"sessionId","status":"queued"}` with nothing to collect, or
+    `{"sessionId","status":"unknown","detail"}` when `--wait` stops because no result is coming.
+
+### Following up on a subagent
+
+There is no `follow-up` command: `mocactl run "prompt" --session ID` already is one, on a session
+`spawn` created. It sends the new turn to `/v1/turn`, which writes no leaf result record —
+`writeResult` is called only from the `/v1/runs` handler — so the result a previous `mocactl get`
+would collect survives the follow-up rather than being overwritten. Collect first anyway if you
+want the files on disk before the session moves on.
 
 ### `workloads`
 

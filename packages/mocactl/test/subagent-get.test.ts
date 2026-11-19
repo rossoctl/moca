@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cmdGet, type GetOptions } from '../src/subagent.js';
+import type { Ledger, LedgerRecord } from '../src/core/subagent-ledger.js';
 import { LeafTransport } from '../src/transport/leaf-turn.js';
 import { ApiError } from '../src/api/errors.js';
 
@@ -14,16 +15,25 @@ function makeRt(scratch: string) {
     healthz: vi.fn(),
   };
   const harness = { baseUrl: vi.fn(async () => 'https://harness.test') };
+  // `--wait` sleeps on the runtime clock, so advancing it from `sleep` drives the poll loop
+  // without any real time passing.
+  const clock = { ms: 1 };
+  const sleep = vi.fn(async (ms: number) => {
+    clock.ms += ms;
+  });
   return {
     rt: {
       cp,
       harness,
       auth: { subject: 'alice', apiToken: 'api-tok', expiresAt: 999 },
       paths: { stateDir: scratch, subagentsFile: join(scratch, 'subagents.jsonl') },
-      now: () => 1,
+      now: () => clock.ms,
+      sleep,
       fetchImpl: fetch,
     } as any,
     cp,
+    sleep,
+    clock,
   };
 }
 
@@ -186,6 +196,148 @@ describe('cmdGet — ApiError translation', () => {
     const r = await cmdGet(rt, io, baseOpts({ transport, outDir: scratch }));
     expect(r).toBe(1);
     expect(err.join('\n')).toContain("no session 'sess-abc'");
+  });
+});
+
+/* --- --wait --- */
+
+/** Successive `readLeafState` replies; the last one repeats once the list is exhausted. */
+function sequenceTransport(resps: unknown[]): LeafTransport {
+  let i = 0;
+  return {
+    readLeafState: vi.fn(async () => resps[Math.min(i++, resps.length - 1)]),
+  } as unknown as LeafTransport;
+}
+
+/** A ledger holding at most the one row `--wait` looks up. */
+function ledgerWith(record?: LedgerRecord): Ledger {
+  return {
+    find: () => record,
+    readAll: () => (record ? [record] : []),
+    append: () => {},
+    updateState: () => {},
+    compact: () => {},
+  };
+}
+
+const runningRow = (over: Partial<LedgerRecord> = {}): LedgerRecord => ({
+  sessionId: 'sess-abc',
+  envelope: { kind: 'prompt', prompt: 'p' },
+  submittedAt: 1,
+  lastKnownState: 'running',
+  stateObservedAt: 1,
+  ...over,
+});
+
+describe('cmdGet --wait', () => {
+  it('polls past queued and collects the result in the one call', async () => {
+    const { rt, sleep } = makeRt(scratch);
+    const { io, out } = makeIo();
+    const transport = sequenceTransport([
+      'queued',
+      'queued',
+      { status: 'responded', text: 'the answer' },
+    ]);
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({ wait: true, transport, outDir: scratch, ledger: ledgerWith() }),
+    );
+    expect(r).toBe(0);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(readFileSync(join(scratch, 'sess-abc.text'), 'utf8')).toBe('the answer');
+    expect(out.join('')).toContain('the answer');
+  });
+
+  it('reads exactly once without --wait, however queued the session is', async () => {
+    const { rt, sleep } = makeRt(scratch);
+    const { io } = makeIo();
+    const transport = sequenceTransport(['queued', { status: 'responded', text: 'late' }]);
+    const r = await cmdGet(rt, io, baseOpts({ transport, outDir: scratch }));
+    expect(r).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it('gives up at --timeout with the shape a not-finished `get` already has', async () => {
+    const { rt, sleep } = makeRt(scratch);
+    const { io, out, err } = makeIo();
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({
+        json: true,
+        wait: true,
+        timeoutS: 10,
+        transport: sequenceTransport(['queued']),
+        outDir: scratch,
+        ledger: ledgerWith(),
+      }),
+    );
+    expect(r).toBe(1);
+    // A 10 s budget at a 2 s interval: five sleeps spend it exactly, and the sixth read finds no
+    // room left for another. The budget is never overrun.
+    expect(sleep).toHaveBeenCalledTimes(5);
+    expect(err.join('\n')).toContain('has not finished yet');
+    expect(JSON.parse(out[0]!.trim())).toEqual({ sessionId: 'sess-abc', status: 'queued' });
+  });
+
+  it('stops on a dead child instead of waiting out the budget, and says unknown', async () => {
+    const { rt, sleep, clock } = makeRt(scratch);
+    // Past stateObservedAt + the 60 s result-write grace, so the dead child is genuinely over.
+    clock.ms = 10_000_000;
+    const { io, out, err } = makeIo();
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({
+        json: true,
+        wait: true,
+        transport: sequenceTransport(['queued']),
+        outDir: scratch,
+        // Pid 2^31-1 is almost certainly not alive on any dev machine.
+        ledger: ledgerWith(runningRow({ childPid: 0x7fffffff })),
+      }),
+    );
+    expect(r).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(err.join('\n')).toContain('will not produce a result');
+    expect(JSON.parse(out[0]!.trim())).toMatchObject({ status: 'unknown' });
+  });
+
+  it('stops on a ledger row that already went terminal client-side (a fork failure)', async () => {
+    const { rt, sleep } = makeRt(scratch);
+    const { io, err } = makeIo();
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({
+        wait: true,
+        transport: sequenceTransport(['queued']),
+        outDir: scratch,
+        ledger: ledgerWith(runningRow({ lastKnownState: 'failed', stateDetail: 'spawn EACCES' })),
+      }),
+    );
+    expect(r).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(err.join('\n')).toContain('spawn EACCES');
+  });
+
+  it('waits on a row whose child is still alive', async () => {
+    const { rt, sleep } = makeRt(scratch);
+    const { io } = makeIo();
+    const transport = sequenceTransport(['queued', { status: 'done', text: 'ok' }]);
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({
+        wait: true,
+        transport,
+        outDir: scratch,
+        ledger: ledgerWith(runningRow({ childPid: process.pid })),
+      }),
+    );
+    expect(r).toBe(0);
+    expect(sleep).toHaveBeenCalledTimes(1);
   });
 });
 

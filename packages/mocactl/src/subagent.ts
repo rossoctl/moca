@@ -4,7 +4,7 @@ import { writeFileSync, mkdirSync, existsSync, openSync, closeSync } from 'node:
 import { join, resolve } from 'node:path';
 import { ApiError } from './api/errors.js';
 import { validWorkloadId, WorkloadsClient } from './api/workloads.js';
-import type { ControlPlaneApi, CreateSessionRequest } from './api/types.js';
+import type { ControlPlaneApi, CreateSessionRequest, SessionToken } from './api/types.js';
 import { describeError } from './core/messages.js';
 import { sanitizeRemote } from './core/sanitize.js';
 import {
@@ -40,6 +40,8 @@ const SAFE_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]$/;
  * up by key value, so shell meta or whitespace would make callers quote defensively.
  */
 const LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** `spawn --max-concurrent`'s default. Matches the VM pool cap (`deploy/vm` supervisor). */
+export const DEFAULT_MAX_CONCURRENT = 4;
 
 interface SpawnedSession {
   sessionId: string;
@@ -87,6 +89,8 @@ export interface SpawnOptions {
   workloadId?: string;
   /** Give the run its own writable copy of the workload's context (`--writable`). */
   writable?: boolean;
+  /** Refuse the dispatch when this many of this user's subagents are still running. */
+  maxConcurrent?: number;
   json: boolean;
   /** Test seams: fork + ledger injection. */
   forkFn?: (
@@ -145,6 +149,27 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
     }
   }
 
+  // The cap is checked first because it is the only preflight that costs nothing: no session, no
+  // worker and not even a round trip for a dispatch that is refused.
+  // shortcut: counts this user's ledger on this machine; the server's own pool is the real bound
+  // (503 saturated, already retried in runSpawnWorker). Revisit if the cap needs to be global.
+  const ledger = opts.ledger ?? openLedger(rt.paths.subagentsFile);
+  const cap = opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+  // Liveness-gated, not a bare non-terminal count: a stale `running` or `unknown` row — exactly
+  // what an unreconciled crash leaves behind — would otherwise hold a slot for good and wedge
+  // `spawn` permanently. A child that is gone holds nothing.
+  const running = ledger
+    .readAll()
+    .filter((r) => !isTerminalState(r.lastKnownState) && r.childPid !== undefined)
+    .filter((r) => isAlive(r.childPid!));
+  if (running.length >= cap) {
+    io.err(
+      `${running.length} subagents are already running and --max-concurrent is ${cap}; ` +
+        '`mocactl subagents` shows them, `mocactl get` collects one',
+    );
+    return 1;
+  }
+
   // Preflight, before a session or a worker exists: a run on a workload that is missing or not
   // ready would only fail later, in the detached worker.
   if (opts.workloadId !== undefined) {
@@ -182,7 +207,6 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
   }
 
   const envelope: LeafEnvelope = buildEnvelope(session.sessionId, opts);
-  const ledger = opts.ledger ?? openLedger(rt.paths.subagentsFile);
   // Record before fork so a crash in between leaves a durable row to recover from.
   const record: LedgerRecord = {
     sessionId: session.sessionId,
@@ -558,11 +582,22 @@ export interface GetOptions {
   sessionId: string;
   outDir?: string;
   json: boolean;
+  /** `--wait`: block until the result is collectable instead of reading once. */
+  wait?: boolean;
+  /** How long `--wait` blocks, in whole seconds. */
+  timeoutS?: number;
   signal?: AbortSignal;
   transport?: LeafTransport;
+  /** Test seam; otherwise the on-disk ledger, consulted only under `--wait`. */
+  ledger?: Ledger;
 }
 
 const GET_SUMMARY_LINES = 10;
+/** `--wait`'s default budget, in seconds. */
+export const DEFAULT_WAIT_TIMEOUT_S = 300;
+/** shortcut: fixed interval, no backoff — `--wait` exists for collect latency. Revisit if
+ *  server-side run events (#392) land and the poll can become a subscription. */
+const WAIT_POLL_MS = 2_000;
 
 export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<number> {
   if (!requireReady(rt, io)) return 2;
@@ -571,19 +606,10 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
     return 2;
   }
   const transport = opts.transport ?? new LeafTransport(rt.harness, rt.fetchImpl);
-  let raw: LeafResultBody | 'queued';
-  try {
-    const token = await rt.cp.mintSessionToken(opts.sessionId);
-    raw = await transport.readLeafState(opts.sessionId, token.token, opts.signal);
-  } catch (err) {
-    // Match on code, not bare status: a route/auth 404 should surface its real error.
-    if (err instanceof ApiError && err.status === 404 && err.code === 'session_not_found') {
-      io.err(`no session '${sanitizeRemote(opts.sessionId)}'`);
-      return 1;
-    }
-    io.err(describeError(err));
-    return 1;
-  }
+  const read = await readLeafResult(rt, io, opts, transport);
+  // A number is an exit code for a failure `readLeafResult` has already reported.
+  if (typeof read === 'number') return read;
+  const raw = read;
   if (raw === 'queued') {
     io.err(`session '${sanitizeRemote(opts.sessionId)}' has not finished yet`);
     if (opts.json) io.out(JSON.stringify({ sessionId: opts.sessionId, status: 'queued' }) + '\n');
@@ -634,4 +660,74 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
     io.out(sanitizeRemote(head) + (head.includes('\n') ? '\n' : ''));
   }
   return completed ? 0 : 1;
+}
+
+/**
+ * One `/runs/status` read, or — under `--wait` — polls until the session has a record, the ledger
+ * says no record is coming, or the timeout runs out. Returns the body, `'queued'` (nothing to
+ * collect, which `cmdGet` reports as it always has) or an exit code for a reported failure.
+ */
+async function readLeafResult(
+  rt: Runtime & Required<Pick<Runtime, 'cp' | 'harness'>>,
+  io: Io,
+  opts: GetOptions,
+  transport: LeafTransport,
+): Promise<LeafResultBody | 'queued' | number> {
+  const deadline = rt.now() + (opts.timeoutS ?? DEFAULT_WAIT_TIMEOUT_S) * 1000;
+  // The sessionId may well not be ours (another machine spawned it), in which case there is no row
+  // and `--wait` just polls to the deadline.
+  const record = opts.wait
+    ? (opts.ledger ?? openLedger(rt.paths.subagentsFile)).find(opts.sessionId)
+    : undefined;
+  let token: SessionToken | undefined;
+  for (;;) {
+    let raw: LeafResultBody | 'queued';
+    try {
+      // Session tokens default to a 300 s TTL (SH_SESSION_TOKEN_TTL_SECONDS) — the same as
+      // `--wait`'s default budget — so one mint up front would expire mid-wait.
+      if (token === undefined || rt.now() / 1000 >= token.expiresAt - 30) {
+        token = await rt.cp.mintSessionToken(opts.sessionId);
+      }
+      raw = await transport.readLeafState(opts.sessionId, token.token, opts.signal);
+    } catch (err) {
+      // Match on code, not bare status: a route/auth 404 should surface its real error.
+      if (err instanceof ApiError && err.status === 404 && err.code === 'session_not_found') {
+        io.err(`no session '${sanitizeRemote(opts.sessionId)}'`);
+        return 1;
+      }
+      io.err(describeError(err));
+      return 1;
+    }
+    if (raw !== 'queued' || !opts.wait) return raw;
+    const hopeless = record && noResultComing(record, rt.now());
+    if (hopeless) {
+      const detail = sanitizeRemote(hopeless);
+      io.err(`session '${sanitizeRemote(opts.sessionId)}' will not produce a result — ${detail}`);
+      if (opts.json) {
+        io.out(JSON.stringify({ sessionId: opts.sessionId, status: 'unknown', detail }) + '\n');
+      }
+      return 1;
+    }
+    // Checked before sleeping so the wait never overruns the budget.
+    if (rt.now() + WAIT_POLL_MS > deadline) return 'queued';
+    await rt.sleep(WAIT_POLL_MS, opts.signal);
+  }
+}
+
+/**
+ * Why no record will ever arrive for this ledger row, or undefined if one still might. Keeps
+ * `--wait` from sitting out its whole budget on a subagent that is already over — the two cases
+ * being a row that went terminal client-side (a fork failure, say) and a child that exited
+ * without writing a result. The ledger is authoritative past terminal for the same reason it is
+ * in `cmdSubagents`: the server's record ages out, the row does not.
+ */
+function noResultComing(record: LedgerRecord, now: number): string | undefined {
+  if (isTerminalState(record.lastKnownState)) {
+    const detail = record.stateDetail ? ` (${record.stateDetail})` : '';
+    return `the ledger has it ${record.lastKnownState}${detail}`;
+  }
+  if (record.childPid === undefined || isAlive(record.childPid)) return undefined;
+  // Same liveness + grace mapping `cmdSubagents` applies, so both commands agree on `unknown`.
+  const view = mapHonestState('queued', { alive: false, observedAt: record.stateObservedAt }, now);
+  return view.state === 'unknown' ? (view.detail ?? 'child exited with no result') : undefined;
 }
