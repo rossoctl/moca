@@ -18,8 +18,11 @@ This page is the model behind `mocactl sbx templates`. To make and use a templat
   tools it carries. A **build** turns them into one snapshot of a booted microVM, so every sandbox of
   that build starts from the same snapshot. A registered build's id is its snapshot's manifest hash
   (`sha256:…`). A build never changes: a new image or spec is a new build.
-- **A tag names a registered build.** `default` is what a bare template id names. It can be moved
-  to another build, but never removed. Moving a tag rebuilds nothing, and sandboxes and sessions
+- **A tag names a registered build.** `default` is what a bare template id names. A template's
+  **first** registered build takes `default`; a later build does not move it, so a bare id keeps
+  naming the first build until the owner moves the tag
+  (`mocactl sbx templates tag ID default --build BUILD`). It can be moved to another build, but
+  never removed. Moving a tag rebuilds nothing, and sandboxes and sessions
   already created keep their build.
 - **A policy, not a person, admits a build.** An admin writes the policy as named **profiles**
   (the gating rules a create must pass, and a size envelope). A create is checked against it before
@@ -135,6 +138,11 @@ stateDiagram-v2
   `--stop-now` skips the grace.
 - **Placement never evicts a leased build.** With no room, an activation answers
   `409 no_active_slot` with `Retry-After` (`reason: memory` when memory, not slots, is short).
+- **No host can serve it.** An activation answers `409 template_unavailable`
+  (`readiness: unavailable`) when the reference names no registered build, when no host holds the
+  build's snapshot, or when every host holding it reports a memory file of the wrong size
+  (`reason: memfile_mismatch`). No wait clears that last one; a rebuild does. Every activation
+  refusal is listed in the [Template API](../reference/templates-api.md#error-codes).
   How hosts are sized, paced and filled is in
   [the runbook](../../operate/sandbox-service/runbook.md#the-template-host-agent).
 
