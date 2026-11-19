@@ -1,6 +1,6 @@
 # Manage multi-user sessions
 
-> **Preview.** For the single-VM deployment ([`deploy/vm`](../../deploy/vm/README.md)), the path the multi-user demos
+> **Preview.** For the single-VM deployment ([`deploy/vm`](../operate/harness/single-vm.md)), the path the multi-user demos
 > were run on. Commands are taken from [`docs/demos/vm-two-user-acceptance.md`](../demos/vm-two-user-acceptance.md) and
 > [`vm-multi-user-demo.md`](../demos/vm-multi-user-demo.md), which were run by one person with two GitHub accounts on
 > one laptop. Two people on two laptops was not tried. I have not re-run them. Read the

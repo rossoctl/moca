@@ -22,7 +22,7 @@ that run's, trimmed.
 The steps come from three verified pieces: the two-user acceptance runbook
 ([`vm-two-user-acceptance.md`](./vm-two-user-acceptance.md), #403), the P4 tier on a P6 host
 ([`deploy/microvm/P4-ON-P6.md`](../../deploy/microvm/P4-ON-P6.md), #376 and #409), and the
-research turn ("A research turn" in [`deploy/vm/README.md`](../../deploy/vm/README.md), and
+research turn ("A research turn" in [`deploy/vm/README.md`](../operate/harness/single-vm.md), and
 `deploy/vm/research-smoke.sh`, #411).
 
 | A shared agent deployment usually needs                          | This needs                                                                                   |

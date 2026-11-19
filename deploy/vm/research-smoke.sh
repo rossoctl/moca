@@ -4,7 +4,7 @@
 # Live smoke for #368 (VM demo C). One user's turn on the P6 VM, on that user's OWN inference
 # credential (or the operator fallback), must run `git clone` and `curl -o` in a container sandbox and
 # answer a question only the fetched content can answer. Run it on the VM, as root:
-#   - it mints the user's API token with the control plane's own signing key, as deploy/vm/README.md
+#   - it mints the user's API token with the control plane's own signing key, as docs/operate/harness/single-vm.md
 #     "Checking it" does, so no GitHub login is needed;
 #   - it reads the ground truth from the sandbox containers with podman.
 #
@@ -27,7 +27,7 @@
 #                                     anything else as kind bearer for RESEARCH_ENDPOINT.
 #   RESEARCH_ENDPOINT                 The gateway origin a bearer token is for (required for one).
 #   RESEARCH_USE_OPERATOR_FALLBACK=1  Store no credential. The turn must then run on the operator's key
-#                                     (SH_ALLOW_OPERATOR_FALLBACK=true; deploy/vm/README.md).
+#                                     (SH_ALLOW_OPERATOR_FALLBACK=true; docs/operate/harness/single-vm.md).
 #   RESEARCH_HARNESS_URL              The supervisor (default http://127.0.0.1:8080).
 #   RESEARCH_TURN_TIMEOUT             Seconds the turn may take (default 900).
 #   SH_ENV_DIR, SH_INSTALL_DIR        As setup-vm.sh (default /etc/serverless-harness, /opt/serverless-harness).
@@ -55,7 +55,7 @@ SUBJECT="research-smoke:$RUN_ID"
 CRED_NAME=research-smoke
 FALLBACK="${RESEARCH_USE_OPERATOR_FALLBACK:-}"
 
-# research_prompt <dir>: the research turn's prompt. deploy/vm/README.md ("A research turn") carries
+# research_prompt <dir>: the research turn's prompt. docs/operate/harness/single-vm.md ("A research turn") carries
 # the same text with <dir> = /workspace/research-demo, for the demo runbook; keep the two in step.
 research_prompt() {
   cat <<EOF

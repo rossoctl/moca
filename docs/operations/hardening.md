@@ -49,7 +49,7 @@
 - [ ] **On OpenShift, supply a real certificate** (`--tls-cert`/`--tls-key`, or `--tls-secret` on the `ocp-single` target only) instead of the
       self-signed fallback, and remember the control plane's Route terminates TLS at the router.
 
-## Single VM ([`deploy/vm`](../../deploy/vm/README.md))
+## Single VM ([`deploy/vm`](../operate/harness/single-vm.md))
 
 - [ ] **Restrict access to ports 8080 and 8090.** Use the README's SSH `Match User` block, or a firewall allowlist. An
       allowlist sends tokens in clear. The supervisor binds all interfaces regardless of the sandbox firewall, as does
