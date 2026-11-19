@@ -6,7 +6,7 @@
 > they fit together and records behaviour the specs do not. Workload routes are covered in
 > [`docs/harness/how-to/workloads.md`](../how-to/workloads.md).
 
-For every error code with what a client should do about it, and the retry rules, see
+For the error codes a client meets, with what to do about each, and the retry rules, see
 [Build a client](../../api/client-guide.md).
 
 ## Two APIs
