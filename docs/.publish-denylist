@@ -7,7 +7,7 @@
 # The site's sync step (rossoctl/.github scripts/sync-docs.sh) checks every file
 # it publishes from docs/ against these patterns, and skips the whole Moca
 # section on any match, listing the files. specs/, notes/, plans/, archive/,
-# demos/, adrs/ and REORG-PLAN.md are not published, so they are not checked.
+# demos/ and adrs/ are not published, so they are not checked.
 #
 # One extended regular expression (grep -E) per line; blank lines and lines
 # starting with # are ignored. SBX[0-9] is also built into the site's check.

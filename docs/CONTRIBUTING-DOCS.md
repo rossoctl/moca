@@ -2,7 +2,8 @@
 
 Conventions for anything under `docs/`, the READMEs and `deploy/*/README*.md`. They exist so the
 docs survive the move from the Knative/KEDA deployment to P6/P4 without another restructure. The
-plan behind them is [`REORG-PLAN.md`](REORG-PLAN.md).
+plan that produced the current structure is archived as
+[`archive/REORG-PLAN.md`](archive/REORG-PLAN.md).
 
 ## Where things go
 

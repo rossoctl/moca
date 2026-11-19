@@ -83,11 +83,19 @@ image. The worker entry point lives in `packages/server/src/worker.ts`. Not to b
 
 ## sandbox
 
-The isolated environment where a session's tools run. Two tiers exist: a container, and (P4) a
-Firecracker microVM per `Exec`. A sandbox runs a `remote-worker` process that dials out to the relay,
-so it needs no inbound route ([ADR-0024](adrs/0024-sandbox-transport-remote-exec.md),
-[ADR-0035](adrs/0035-per-exec-microvm-warm-standby.md)). On the removed Knative path a sandbox was
-the single pod reached with `kubectl exec` (`sandbox-0`).
+Two different things share the word, and neither sees the other.
+
+- **A harness session's sandbox:** the isolated environment where a harness session's tools run.
+  Two tiers exist: a container, and (P4) a Firecracker microVM per `Exec`. A sandbox runs a
+  `remote-worker` process that dials out to the relay, so it needs no inbound route
+  ([ADR-0024](adrs/0024-sandbox-transport-remote-exec.md),
+  [ADR-0035](adrs/0035-per-exec-microvm-warm-standby.md)). On the removed Knative path a sandbox
+  was the single pod reached with `kubectl exec` (`sandbox-0`).
+- **A sandbox-service sandbox:** a workspace on the [sandbox service](#sandbox-service), made from
+  a [template](#template-build-and-tag), where a coding agent's commands run in isolated VMs. You
+  drive it with `mocactl sbx`; its files persist in `/workspace` between commands.
+
+The `mocactl sbx` commands neither see nor manage a harness session's sandbox.
 
 ## relay
 
@@ -110,6 +118,59 @@ than a grace period the turn moves within the tier and a workspace reset is reco
 The multi-user service (MU1) that handles login, session ownership and credential issuance, and
 exchanges a user's session token for the credentials a turn needs. `mocactl` is its terminal client
 ([ADR-0033](adrs/0033-multi-user-control-plane.md)).
+
+It is one package, `@moca/control-plane`, with three **route profiles** (`SH_ROUTE_PROFILE`):
+`harness` (the default: login, sessions, credentials, config bundles), `sandbox` (the
+[sandbox service](#sandbox-service): login, sandboxes and templates), and `combined` (both in one
+process). So "the control plane" of a sandbox-service deployment is the same package on the
+`sandbox` profile.
+
+## harness
+
+**The moca harness** is the capability that runs agent sessions: the [supervisor](#supervisor)
+hands each connection to a warm [worker](#worker), sessions are durable in Redis, and the agent's
+tools run in a harness [sandbox](#sandbox). Its sibling capability is the
+[sandbox service](#sandbox-service).
+
+Narrower uses of the word: the `@moca/harness` package (`harness/`) is only the adapter between
+Pi's `SessionStorageBackend` and the Redis-backed session log; and names such as
+`~/.serverless-harness`, `/etc/serverless-harness` and the `SH_*` variables keep the project's
+historical prefix.
+
+## sandbox service
+
+moca's other capability: a coding agent stays on the user's machine, and every command it runs
+goes to a [sandbox-service sandbox](#sandbox), each in a fresh VM, through `mocactl sbx`. It is
+deployed as a control plane on the `sandbox` [route profile](#control-plane), the relay, Redis and
+KVM hosts running `microvm-worker`; see
+[Install the sandbox service](operate/sandbox-service/install.md).
+
+## template, build and tag
+
+A **template** is what a sandbox-service sandbox is made from (`mocactl sbx templates` lists
+them). A **build** is one immutable snapshot of a template; a new build of a template does not
+change the sandboxes made from an earlier one. A **tag** names a registered build
+(`ID:TAG`, or `ID@BUILD` for a build itself); `default` is the tag used when none is given, and it
+cannot be removed; moving a tag leaves the sandboxes made earlier on their build.
+
+## activation lease
+
+On a deployment with template host agents, a build's worker runs only while someone holds an
+activation lease on it: `mocactl sbx templates activate` takes or renews one, and when the last
+lease is released (`deactivate`) the worker drains and stops, after the host's idle grace.
+
+## sandbox mode
+
+How a sandbox-service sandbox runs its commands: `per-exec` (the default, a fresh VM per
+command), `lease` (the guest is kept between commands) or `lease+processes` (tracked processes
+outlive a command too). The deployment decides which modes users may pick; see
+[Keep a guest between commands](sandbox/how-to/lease-mode.md).
+
+## subject
+
+The identity a login maps to, written `github:<numeric GitHub user id>` or `oidc:<provider sub>`.
+`SH_ADMIN_SUBJECTS` and, on the sandbox profile, `SH_ALLOWED_SUBJECTS` take subjects; a user who
+is not enrolled is told their own subject by `mocactl sbx login`.
 
 ## config bundle
 
