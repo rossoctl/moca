@@ -19,7 +19,7 @@ control plane's `/v1` API.
 - `mocactl` installed and logged in to a control plane (`mocactl login`; install steps in
   [Get started](../../get-started/index.md)).
 - A directory with a `.claude/skills` and/or `.claude/commands` tree. `mocactl promote DIR` uploads
-  those two trees; this guide covers only what [`mocactl`'s README](../../../packages/mocactl/README.md)
+  those two trees; this guide covers only what [Use mocactl](use-mocactl.md)
   documents.
 - Upgrade the harness before the control plane. An older harness ignores the bundle reference, so
   turns would run without the skills and report no error.

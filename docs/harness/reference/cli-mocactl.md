@@ -209,7 +209,7 @@ already holding its id is the point, so `workloads list ID` exits 2.
 - A table of `WORKLOAD STATUS TYPE SIZE SANDBOXES CREATED REVISION`. `CREATED` is relative
   (`4m ago`), `REVISION` is the first 12 characters, and `-` means unset — `CREATED` is `-` for a
   workload created before the harness recorded the field, which is also absent from the listing
-  (see "Upgrading" in [`../context-service.md`](../how-to/workloads.md)).
+  (see "Upgrading" in [Context Service and workloads](../how-to/workloads.md)).
 - `--json` prints one document, `{"workloads": [...]}`, with `null` for what a workload lacks and
   `createdAt` in ISO 8601.
 - With no workloads it says `no workloads` on stderr and prints no table, so
@@ -248,7 +248,7 @@ caller.
 
 ### `spawn`, `subagents`, `get`
 
-See [`packages/mocactl/README.md`](../../../packages/mocactl/README.md) and
+See [Use mocactl](../how-to/use-mocactl.md) and
 [`docs/specs/2026-10-12-mocactl-subagent-commands-design.md`](../../specs/2026-10-12-mocactl-subagent-commands-design.md)
 for behavior; this section covers only CLI-reference details.
 
@@ -271,7 +271,7 @@ hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo
 
 ### `workloads`
 
-See "Delegate with context" in [`packages/mocactl/README.md`](../../../packages/mocactl/README.md) and
+See [Delegate with context](../how-to/use-mocactl.md#delegate-with-context) and
 [`docs/harness/how-to/workloads.md`](../how-to/workloads.md). The routes are on the harness and take the API
 token. There is no list command: the harness has no list route.
 
@@ -397,5 +397,5 @@ left behind. `/promote DIR` uploads the bundle and attaches it to the next sessi
 ## Known gaps
 
 - The keys inside the Sessions, Credentials and Palette overlays are not listed here.
-- `packages/mocactl/README.md` states exit codes as `0, 1, 2, 130` for every command and documents
+- [Use mocactl](../how-to/use-mocactl.md) states exit codes as `0, 1, 2, 130` for every command and documents
   `promote`'s exit 3, but not `auth token`'s exits 3 and 4 (only `auth token` uses 4).

@@ -84,7 +84,7 @@ Not a fit today:
 - **Using the sandbox service?** You need the URL of your sandbox service deployment. Start with the
   [sandbox quickstart](sandbox/quickstart.md).
 - **Building on the harness?** Start with the [harness quickstart](harness/quickstart.md), then
-  [the mocactl README](../packages/mocactl/README.md).
+  [Use mocactl](harness/how-to/use-mocactl.md).
 - **Deploying or operating moca?** Start with [Deploy and operate](operate/index.md). It says
   which deployment delivers which capability.
 

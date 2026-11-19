@@ -39,8 +39,7 @@ step 4, and `mocactl workloads delete ID` step 5; `mocactl workloads list` shows
 It does not build the context file:
 `contextctl ctx pack <dir> -o FILE` does, which packs the directory's files under the bundle's
 `workspace/` directory. `pack` needs a Context Service with [rossoctl/context-service#56](https://github.com/rossoctl/context-service/pull/56) (workspace bundles), on the server as well as
-the client. See "Delegate with context" in
-[`packages/mocactl/README.md`](../../../packages/mocactl/README.md).
+the client. See [Delegate with context](use-mocactl.md#delegate-with-context) in Use mocactl.
 
 The routes are off by default. With them off, every `/workloads` route answers
 `501 workloads_unavailable`.

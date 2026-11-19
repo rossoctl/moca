@@ -142,9 +142,8 @@ isolation differ.
 
 ## Next
 
-- **Do more:** [First run: resume and stream](quickstart.md),
-  [the mocactl README](../../packages/mocactl/README.md),
-  [dispatch over the HTTP API](reference/http-api.md).
+- **Do more:** [Set up mocactl against the Compose trial](how-to/set-up-mocactl.md),
+  [Use mocactl](how-to/use-mocactl.md), [dispatch over the HTTP API](reference/http-api.md).
 - **Understand:** [Sessions and turns](concepts/sessions-and-turns.md),
   [Session multiplexing](concepts/session-multiplexing.md).
 - **Look up:** [HTTP API](reference/http-api.md), [mocactl](reference/cli-mocactl.md).
