@@ -1938,14 +1938,20 @@ if [[ -f "$REPO_ROOT/.github/workflows/ci.yml" && -f "$REPO_ROOT/Makefile" ]]; t
     fail 'test-deploy-bash32 no longer lists this suite, so macOS CI stopped covering setup.sh (#440)'
   grep -q '^  deploy-scripts-bash32:' "$REPO_ROOT/.github/workflows/ci.yml" ||
     fail 'ci.yml has no deploy-scripts-bash32 job -- bash 3.2 is no longer tested on any PR (#440)'
-  grep -qF 'make test-deploy-bash32' "$REPO_ROOT/.github/workflows/ci.yml" ||
-    fail 'the PR bash 3.2 job no longer runs make test-deploy-bash32 (#440)'
+  # With BASH32=: on the Linux runner /bin/bash is 5.x, so a bare `make test-deploy-bash32`
+  # skips with exit 0 and the job would stay green while testing nothing.
+  grep -qE 'make test-deploy-bash32 .*BASH32=' "$REPO_ROOT/.github/workflows/ci.yml" ||
+    fail 'the PR bash 3.2 job no longer runs make test-deploy-bash32 with BASH32= -- on Linux it would silently skip (#440)'
   # The real-macOS run moved off the PR path to its own workflow (#901): a scarce macOS pool
   # starved PRs. It must still exist, on the real /bin/bash.
   grep -q 'runs-on: macos-latest' "$REPO_ROOT/.github/workflows/deploy-bash32-macos.yml" ||
     fail 'deploy-bash32-macos.yml has no macOS runner, so the real /bin/bash 3.2 is untested (#901)'
   grep -qF 'make test-deploy-bash32' "$REPO_ROOT/.github/workflows/deploy-bash32-macos.yml" ||
     fail 'the macOS workflow no longer runs make test-deploy-bash32 (#901)'
+  # The triggers too: without them the workflow is valid, wired, and never runs.
+  macos_wf="$REPO_ROOT/.github/workflows/deploy-bash32-macos.yml"
+  grep -q '^  push:' "$macos_wf" && grep -q '^  schedule:' "$macos_wf" ||
+    fail 'deploy-bash32-macos.yml lost its push or schedule trigger, so it never runs (#901)'
   pass 'the bash 3.2 PR job, the macOS workflow and the Makefile target are still wired to this suite'
 else
   echo "skip - not run from a repository checkout, so the CI wiring cannot be checked"

@@ -160,7 +160,9 @@ jobs:
   # lives in the Makefile target, so it cannot drift from what contributors reproduce locally
   # with one command.
   deploy-scripts-bash32:
-    runs-on: ubuntu-latest
+    # Pinned, not -latest: the build is a 2007 interpreter against the image's gcc/glibc, which
+    # is what breaks when -latest rolls forward. Bump on purpose.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       BASH32_VERSION: 3.2.57
@@ -182,7 +184,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          curl -fsSLO "https://ftp.gnu.org/gnu/bash/bash-${BASH32_VERSION}.tar.gz"
+          curl -fsSLO --retry 3 --retry-delay 2 "https://ftp.gnu.org/gnu/bash/bash-${BASH32_VERSION}.tar.gz"
           echo "${BASH32_SHA256}  bash-${BASH32_VERSION}.tar.gz" | sha256sum -c -
           tar xzf "bash-${BASH32_VERSION}.tar.gz"
           cd "bash-${BASH32_VERSION}"
