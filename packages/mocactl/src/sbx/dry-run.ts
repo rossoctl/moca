@@ -10,7 +10,7 @@ import type { SbxPolicyView } from './api.js';
  */
 
 /** The template id rule (M7), as the policy's TEMPLATE_ID_RE. */
-export const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;
+const TEMPLATE_ID_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;
 
 /**
  * An image pinned by digest, as the policy's isPinnedImage (M1): the distribution reference
@@ -21,7 +21,7 @@ const DOMAIN_RE =
 const PATH_COMPONENT_RE = /^[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*$/;
 const DIGEST_RE = /^sha256:[0-9a-f]{64}$/;
 
-export function isPinnedImage(image: string): boolean {
+function isPinnedImage(image: string): boolean {
   const at = image.indexOf('@');
   if (at < 0 || !DIGEST_RE.test(image.slice(at + 1))) return false;
   const name = image.slice(0, at);
@@ -44,7 +44,7 @@ export interface DryRunInput {
   gateRecord?: string;
 }
 
-export interface DryRunResult {
+interface DryRunResult {
   rule: string;
   passed: boolean;
   message?: string;

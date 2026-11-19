@@ -576,10 +576,7 @@ function catalog(deps: CpDeps): TemplateCatalog {
  * or not the record was trusted at create (`selfAttestProfile`; `selfAttested` implies it).
  * Recomputed on every read, never stored, so an admin's promotion or removal needs no rewrite.
  */
-export function attestationOf(
-  b: TemplateBuild,
-  trusted: ReadonlySet<string>,
-): 'deployment' | 'self' {
+function attestationOf(b: TemplateBuild, trusted: ReadonlySet<string>): 'deployment' | 'self' {
   const g = b.request?.gateRecordSha256;
   const onSelfProfile = b.selfAttestProfile === true || b.selfAttested === true;
   return onSelfProfile && g !== undefined && !trusted.has(g) ? 'self' : 'deployment';
@@ -590,7 +587,7 @@ export function attestationOf(
  * builds is self-attested now, whatever is stored, so a record whose trust an admin removed narrows
  * its templates on the next read. Otherwise the stored visibility.
  */
-export function effectiveVisibility(
+function effectiveVisibility(
   d: TemplateDoc,
   trusted: ReadonlySet<string>,
 ): 'private' | 'deployment' {
@@ -2076,7 +2073,7 @@ async function rejectTemplateBuild(ctx: RequestCtx, deps: CpDeps) {
 }
 
 /** How long a client waits before retrying a create on a template still activating (§6.4). */
-export const FIRST_USE_RETRY_S = 30;
+const FIRST_USE_RETRY_S = 30;
 
 /**
  * Activation on first use (§6.4): on a deployment with host agents, a sandbox is created only on

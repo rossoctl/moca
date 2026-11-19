@@ -365,7 +365,7 @@ func TestEveryRecordCarriesItsSubstrate(t *testing.T) {
 	}
 	// Spec §7.5: raise and record the kernel limits, because they "fail at 500 VMs after
 	// working at 20, indistinguishably from a real ceiling".
-	for _, k := range []string{"RLIMIT_MEMLOCK", "RLIMIT_NOFILE", "vm.max_map_count", "pid_max"} {
+	for _, k := range []string{"RLIMIT_MEMLOCK", "RLIMIT_NOFILE", "vm.max_map_count", "pid_max", "TasksMax"} {
 		if _, ok := rec.Limits[k]; !ok {
 			t.Errorf("Limits is missing %s: %v", k, rec.Limits)
 		}

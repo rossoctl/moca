@@ -83,7 +83,7 @@ const shellArgs = (args: readonly string[]): string =>
   args.map((a) => (/^[\w,./:=-]+$/.test(a) ? a : q(a))).join(' ');
 
 /** What `cmdClaude` needs of a child process: its exit code, or why it could not start. */
-export interface ClaudeChild {
+interface ClaudeChild {
   on(event: 'exit', cb: (code: number | null) => void): unknown;
   on(event: 'error', cb: (err: NodeJS.ErrnoException) => void): unknown;
 }

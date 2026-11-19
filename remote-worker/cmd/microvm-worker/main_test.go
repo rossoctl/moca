@@ -425,7 +425,7 @@ func TestWorkerMaxConcurrentRefusesAMalformedValueInsteadOfSilentlyUsingTheDefau
 // #313 review, updated by #644. The slot count's arithmetic is now the RUNNING
 // component of the admission charge — N slots x PerVMBytes — because paused
 // standbys are charged at dirty-page cost and evict rather than fail. Since #644
-// the pool re-prices a standby at full cost when it is popped (admitPromotionLocked),
+// the pool re-prices a standby at full cost when it is popped (admitPromotionAtLocked),
 // so a host whose slots x PerVMBytes outrun the budget refuses warm acquires —
 // failed execs — as the slot count fills, and an operator who sized
 // SH_MAX_COMMITTED_MB for fewer slots must be told at startup, not discover it as

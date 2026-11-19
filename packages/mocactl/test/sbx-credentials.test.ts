@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { openSbx, sbxMain } from '../src/sbx/cli.js';
-import { addCredential, expandPreset, presetById, type Preset } from '../src/sbx/credentials.js';
+import {
+  addCredential,
+  expandPreset,
+  NOT_OFFERED,
+  presetById,
+  type Preset,
+} from '../src/sbx/credentials.js';
 import { fakeCp, setup, type Handler } from './helpers/sbx.js';
 
-const NOT_OFFERED =
-  'this sandbox service does not offer egress credentials (ask its operator to enable SBX_EGRESS_CREDENTIALS)';
 const PAT = 'ghp_x';
 const ok: Handler = () => ({ status: 204 });
 

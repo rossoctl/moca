@@ -331,10 +331,11 @@ func (p *pool) admitAtLocked(newRun bool, price int64) error {
 	return nil
 }
 
-// admitPromotionLocked re-prices one ready standby at its full PerVMBytes and
-// refuses if that would exceed the budget — the invariant that makes dirty-page
-// charging safe (#644): a host that books standbys at their measured cost must not
-// be able to promote more of them to running than it could have admitted cold.
+// admitPromotionAtLocked re-prices one ready standby at price (a per-Exec VM's
+// PerVMBytes, or a new lease VM's LeaseStartBytes; spec §6) and refuses if that
+// would exceed the budget — the invariant that makes dirty-page charging safe
+// (#644): a host that books standbys at their measured cost must not be able to
+// promote more of them to running than it could have admitted cold.
 // Called from acquire's warm path, BEFORE the pop.
 //
 // THE CHECK ITSELF IS PURE, DELIBERATELY. It mutates nothing, so a refusal leaves
@@ -356,13 +357,7 @@ func (p *pool) admitAtLocked(newRun bool, price int64) error {
 // about at startup — neither ever fires: admissions alone cannot take the running
 // component to the budget, so no promotion can either. They fire only on a
 // mis-sized or standby-saturated host, where a failed exec is the correct
-// alternative to the OOM killer arbitrating (spec §6).
-func (p *pool) admitPromotionLocked(vm VM) error {
-	return p.admitPromotionAtLocked(vm, p.perVMBytes())
-}
-
-// admitPromotionAtLocked is admitPromotionLocked re-pricing the standby at price: a
-// per-Exec VM's PerVMBytes, or a new lease VM's LeaseStartBytes (spec §6). Caller holds p.mu.
+// alternative to the OOM killer arbitrating (spec §6). Caller holds p.mu.
 func (p *pool) admitPromotionAtLocked(vm VM, price int64) error {
 	if err := p.hostFloorLocked(); err != nil {
 		return err
@@ -444,7 +439,7 @@ func (p *pool) unparkedRunsLocked() int {
 // RUNNING AND WARMING VMs are charged their full PerVMBytes: a VM that is
 // executing, or restoring in order to execute, is one Resume away from its whole
 // guest RAM and is priced accordingly. Their total is bounded twice over — by this
-// gate and by admitPromotionLocked — so the running component can never exceed the
+// gate and by admitPromotionAtLocked — so the running component can never exceed the
 // budget, which is what makes the paused component's cheaper charge safe.
 //
 // PAUSED STANDBYS are charged at DIRTY-PAGE COST (standbyChargeLocked): their
@@ -458,7 +453,7 @@ func (p *pool) unparkedRunsLocked() int {
 // AM6 stopped every microVM ladder rung on RefuseMemoryBudget with 150-178 GiB of
 // 188 still free. The full-RAM charge double-counted a hazard the slot count
 // already bounds: only WORKER_MAX_CONCURRENT VMs can run at any moment, and the
-// one-Resume-away hazard is now paid at the right moment — admitPromotionLocked
+// one-Resume-away hazard is now paid at the right moment — admitPromotionAtLocked
 // re-prices a standby at PerVMBytes at pop time. What dirty-page charging buys is
 // that the ~99% of a standby's booking that is CoW-shared page cache stops
 // consuming budget no running VM will ever claim; a standby over budget is now

@@ -81,9 +81,6 @@ const (
 	// inference endpoint thinking — because it is refreshed per read, not per
 	// request.
 	defaultIdleTimeout = 300 * time.Second
-	// defaultResponseHeaderTimeout is the idle bound: see the field's doc for
-	// why this knob does not default tighter than the bound it refines.
-	defaultResponseHeaderTimeout = defaultIdleTimeout
 	// sessionIdle is how long a session counter survives without a request.
 	sessionIdle = time.Hour
 	// sweepEvery bounds how often the lazy session sweep runs.

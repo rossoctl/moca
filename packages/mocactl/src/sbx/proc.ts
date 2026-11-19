@@ -33,7 +33,7 @@ import { printNotices } from './notices.js';
  * diagnostics to stderr. Exit 0, 1 on a refusal or failure, 130 on Ctrl-C (P5-R31).
  */
 
-export const PROC_SUBS = ['start', 'ls', 'logs', 'stop'] as const;
+const PROC_SUBS = ['start', 'ls', 'logs', 'stop'] as const;
 export type ProcSub = (typeof PROC_SUBS)[number];
 
 export type ProcArgs =
@@ -52,7 +52,7 @@ export const PROC_FLAG_OWNER = {
 } as const satisfies Record<string, ProcSub>;
 
 /** ProcessArgs.tail is a uint32: the most lines `--tail` may ask for (PR #814 review). */
-export const MAX_TAIL = 0xffffffff;
+const MAX_TAIL = 0xffffffff;
 
 /** One process as `proc ls`, `proc stop` and `get` show it: `processRow`, sanitized. */
 export const processRowText = (v: TrackedProcessView): string => sanitizeRemote(processRow(v));

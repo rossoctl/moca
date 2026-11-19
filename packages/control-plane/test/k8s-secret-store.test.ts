@@ -4,6 +4,7 @@ import { KEK_BYTES, seal } from '../src/envelope.js';
 import { parseCredentialBody, type StoredCredential } from '../src/credential-store.js';
 import { K8sSecretStore, secretNameFor, subjectHash } from '../src/k8s-secret-store.js';
 import type { RunKubectl } from '../src/kubectl.js';
+import { storeContract } from './helpers/store-contract.js';
 
 const KEK = randomBytes(KEK_BYTES); // notsecret -- generated per run
 const NS = 'sh-credentials';
@@ -91,6 +92,14 @@ function fakeCluster() {
   return { run, calls, secrets };
 }
 
+storeContract('K8sSecretStore', () => {
+  const cluster = fakeCluster();
+  return {
+    storeWith: (keks) => new K8sSecretStore({ namespace: NS, keks, run: cluster.run }),
+    raw: () => JSON.stringify([...cluster.secrets.entries()]),
+  };
+});
+
 describe('secret naming', () => {
   it('derives the object name from the subject, so every access is a get by exact name', () => {
     expect(subjectHash(ALICE)).toBe(createHash('sha256').update(ALICE).digest('hex').slice(0, 16));
@@ -116,36 +125,6 @@ describe('K8sSecretStore', () => {
   beforeEach(() => {
     cluster = fakeCluster();
     store = new K8sSecretStore({ namespace: NS, keks: [KEK], run: cluster.run });
-  });
-
-  it('round-trips a two-header binding and a host:port/prefix destination', async () => {
-    const c = cred('multi', {
-      kind: 'api-key',
-      destination: { hosts: ['svc.corp:8443/a'] },
-      secret: { key: 'k' }, // notsecret
-      binding: [
-        { header: 'X-API-Key', format: '{key}' },
-        { header: 'X-Org', format: 'acme-{key}' },
-      ],
-    });
-    await store.put(ALICE, c);
-    expect((await store.get(ALICE, 'multi'))?.descriptor).toEqual(c.descriptor);
-    expect((await store.list(ALICE)).find((d) => d.name === 'multi')).toEqual(c.descriptor);
-    expect(c.descriptor.destination.hosts).toEqual(['svc.corp:8443/a']);
-  });
-
-  it('round-trips put/get', async () => {
-    await store.put(ALICE, cred('github-work'));
-    const got = await store.get(ALICE, 'github-work');
-    expect(got?.secret).toEqual({ token: 'ghp-fake' }); // notsecret
-    expect(got?.descriptor).toEqual(cred('github-work').descriptor);
-  });
-
-  it('stores ciphertext, not the secret, in the Secret', async () => {
-    await store.put(ALICE, cred('github-work'));
-    const raw = JSON.stringify([...cluster.secrets.values()]);
-    expect(raw).not.toContain('ghp-fake'); // notsecret
-    expect(raw).toContain('v1.'); // the envelope version prefix
   });
 
   it('creates the Secret on first put and tolerates it already existing', async () => {
@@ -188,28 +167,8 @@ describe('K8sSecretStore', () => {
 
   describe('a KEK rotation, end to end through the store', () => {
     // The envelope tests prove seal/open handle a ring; these prove the store carries it, which is
-    // what an operator actually performs. Before the ring, step 2 here was a total outage that no
+    // what an operator actually performs. Before the ring, a rotation was a total outage that no
     // /v1 route could recover from -- there is deliberately no read-back, so nothing could re-seal.
-    it('still reads a credential written before the rotation, and re-seals it forward on the next write', async () => {
-      const newKek = randomBytes(KEK_BYTES);
-
-      // 1. Written under the old KEK alone.
-      await store.put(ALICE, cred('my-anthropic'));
-
-      // 2. Rotate: prepend the new KEK, keep the old one for reading.
-      const rotating = new K8sSecretStore({ namespace: NS, keks: [newKek, KEK], run: cluster.run });
-      expect((await rotating.get(ALICE, 'my-anthropic'))?.secret).toEqual({ token: 'ghp-fake' }); // notsecret
-
-      // 3. The next write re-seals under the new KEK, so the old one is no longer needed for it.
-      await rotating.put(ALICE, cred('my-anthropic'));
-      const newOnly = new K8sSecretStore({ namespace: NS, keks: [newKek], run: cluster.run });
-      expect((await newOnly.get(ALICE, 'my-anthropic'))?.secret).toEqual({ token: 'ghp-fake' }); // notsecret
-
-      // 4. And the retired KEK alone no longer opens it -- the rotation actually moved.
-      const oldOnly = new K8sSecretStore({ namespace: NS, keks: [KEK], run: cluster.run });
-      await expect(oldOnly.get(ALICE, 'my-anthropic')).rejects.toThrow(/decrypt/i);
-    });
-
     it('says out loud when a credential opened under a NON-PRIMARY key, naming the subject hash', async () => {
       // This is what makes step (c) of the rotation performable. `open` knows the ring index and used
       // to discard it, so an operator's only signal that they had dropped the retired key too early
@@ -305,18 +264,10 @@ describe('K8sSecretStore', () => {
     }
   });
 
-  it('returns null for an unknown name and for a subject with no Secret at all', async () => {
-    expect(await store.get(ALICE, 'nope')).toBeNull();
-    expect(await store.get('github:9999', 'nope')).toBeNull();
-    expect(await store.list('github:9999')).toEqual([]);
-  });
-
-  it('deletes one credential and leaves the others', async () => {
+  it('delete clears the credential`s annotations and its data key', async () => {
     await store.put(ALICE, cred('a'));
     await store.put(ALICE, cred('b'));
     await store.delete(ALICE, 'a');
-    expect(await store.get(ALICE, 'a')).toBeNull();
-    expect((await store.get(ALICE, 'b'))?.secret.token).toBe('ghp-fake'); // notsecret
     // The now-unused annotations go too, or list() would report a credential with no value.
     expect(Object.keys([...cluster.secrets.values()][0]!.annotations).join()).not.toContain('.a');
     // And the encrypted value itself is actually gone from the Secret -- not just annotation-less
@@ -324,11 +275,6 @@ describe('K8sSecretStore', () => {
     // admission-time alias for `data`) leaves the ciphertext in the object forever; only nulling
     // `data` itself removes it.
     expect([...cluster.secrets.values()][0]!.data.a).toBeUndefined();
-  });
-
-  it('deletes idempotently, including for a subject that never had a Secret', async () => {
-    await store.delete(ALICE, 'a');
-    await store.delete('github:9999', 'a');
   });
 
   it('never lists Secrets to answer list(), only gets one by name', async () => {
@@ -362,16 +308,6 @@ describe('K8sSecretStore', () => {
     function buildBobSecret(): string[] {
       return ['create', 'secret', 'generic', secretNameFor('github:9999'), '-n', NS];
     }
-  });
-
-  it('rejects ciphertext sealed under a different KEK', async () => {
-    await store.put(ALICE, cred('a'));
-    const other = new K8sSecretStore({
-      namespace: NS,
-      keks: [randomBytes(KEK_BYTES)],
-      run: cluster.run,
-    });
-    await expect(other.get(ALICE, 'a')).rejects.toThrow(/decrypt/i);
   });
 
   describe('the read cache, which is what makes a per-request redemption affordable', () => {

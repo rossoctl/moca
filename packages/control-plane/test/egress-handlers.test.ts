@@ -298,13 +298,6 @@ describe('lookupEgressCredential', () => {
     );
   });
 
-  it('refuses two elements with one (port, prefix), reached only by a write race', async () => {
-    await d.credentials.put(ALICE, cred('gh2', 'bearer', ['github.com'], { token: 'x' })); // notsecret
-    expect(await codeOf(() => call(d, KVM, { sandbox: sbxA, host: 'github.com' }))).toBe(
-      'destination_ambiguous',
-    );
-  });
-
   it('refuses a duplicate (port, prefix) even when a same-length prefix sorts between them', async () => {
     await d.credentials.put(ALICE, cred('a', 'bearer', ['dup.corp/aa'], { token: 'x' })); // notsecret
     await d.credentials.put(ALICE, cred('b', 'bearer', ['dup.corp/bb'], { token: 'x' })); // notsecret

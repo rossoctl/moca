@@ -27,26 +27,6 @@ func processPool(t *testing.T) (*pool, *leaseLauncher, *fakeClock) {
 	return leasePool(t, func(c *Config) { c.ManifestFeatures = processFeatures })
 }
 
-// processPoolOn is leasePoolOn on a level-2 snapshot: a second process over the same disk.
-func processPoolOn(t *testing.T, root string, clk *fakeClock) (*pool, *leaseLauncher) {
-	t.Helper()
-	plentyOfHostMemory(t)
-	lc := newLeaseLauncher()
-	p, err := New(Config{
-		VMM:               lc.Kind(),
-		SnapshotDir:       t.TempDir(),
-		WorkspaceRoot:     root,
-		MaxRuns:           16,
-		MaxCommittedBytes: 32 << 30,
-		ManifestFeatures:  processFeatures,
-	}, lc, clk)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	t.Cleanup(func() { _ = p.Close() })
-	return p.(*pool), lc
-}
-
 func level2Exec(cmd string, epoch uint64) Exec {
 	return Exec{Command: cmd, TimeoutS: 30, Mode: ModeLeaseProcesses, ModeEpoch: epoch}
 }
@@ -353,7 +333,7 @@ func TestLeaseEndListsTrackedProcesses(t *testing.T) {
 func TestWorkerRestartEndListsTrackedProcesses(t *testing.T) {
 	root := t.TempDir()
 	clk := newFakeClock()
-	p1, lc1 := processPoolOn(t, root, clk)
+	p1, lc1 := leasePoolOn(t, root, clk, processFeatures...)
 	tab := &fakeTable{}
 	reportTable(lc1, tab)
 	mustSetMode(t, p1, "k", ModeLeaseProcesses, 1)
@@ -366,7 +346,7 @@ func TestWorkerRestartEndListsTrackedProcesses(t *testing.T) {
 	}
 
 	clk.Advance(30 * time.Second)
-	p2, _ := processPoolOn(t, root, clk)
+	p2, _ := leasePoolOn(t, root, clk, processFeatures...)
 	ev := p2.LeaseStatus("k").Pending
 	if ev == nil || ev.Reason != LeaseEndWorkerRestart {
 		t.Fatalf("pending after the restart = %+v, want the worker_restart end", ev)
@@ -1420,7 +1400,7 @@ func TestLeaseEndSyncRefreshesTheMirror(t *testing.T) {
 	t.Run("worker_restart", func(t *testing.T) {
 		root := t.TempDir()
 		clk := newFakeClock()
-		p1, lc1 := processPoolOn(t, root, clk)
+		p1, lc1 := leasePoolOn(t, root, clk, processFeatures...)
 		tab := &fakeTable{}
 		reportTable(lc1, tab)
 		mustSetMode(t, p1, "k", ModeLeaseProcesses, 1)
@@ -1430,7 +1410,7 @@ func TestLeaseEndSyncRefreshesTheMirror(t *testing.T) {
 		if err := p1.Close(); err != nil {
 			t.Fatalf("Close: %v", err)
 		}
-		p2, _ := processPoolOn(t, root, clk)
+		p2, _ := leasePoolOn(t, root, clk, processFeatures...)
 		ev := p2.LeaseStatus("k").Pending
 		if ev == nil || ev.Reason != LeaseEndWorkerRestart || !slices.Equal(ev.Processes, []string{"api (pid 413)"}) {
 			t.Fatalf("pending after the restart = %+v, want the worker_restart end listing only api", ev)

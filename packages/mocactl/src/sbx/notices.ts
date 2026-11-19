@@ -21,7 +21,7 @@ import type { SbxCtx } from './commands.js';
  * from a worker whose clock is behind the one that stamped the stored value (a sandbox moved to
  * another host) stay hidden until its clock passes that value.
  */
-export const noticesFile = (stateDir: string): string => join(stateDir, 'sbx', 'notices.json');
+const noticesFile = (stateDir: string): string => join(stateDir, 'sbx', 'notices.json');
 
 type Store = Record<string, number>;
 
@@ -60,7 +60,7 @@ function save(file: string, store: Store): void {
  * seen, and counts as shown, so a start beside it stays hidden, but gets no line: the command
  * reports it itself (ruling P4-R17). Any other event, whatever its text, is shown as usual.
  */
-export function unseenNotices(
+function unseenNotices(
   stateDir: string,
   id: string,
   events: LeaseEvent[],

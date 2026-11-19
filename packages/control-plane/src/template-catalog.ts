@@ -33,7 +33,7 @@ export const TEMPLATE_DOC_SCHEMA = 'moca-template/1';
 export type OnboardingStatus =
   'queued' | 'building' | 'probing' | 'built' | 'registered' | 'rejected' | 'failed' | 'retired';
 
-export interface BuildSpec {
+interface BuildSpec {
   guest_mb?: number;
   vcpus?: number;
   workspace_mb?: number;

@@ -362,10 +362,7 @@ exit: 0 ok, 1 failed, 2 usage, 3 log in first, 4 control plane unreachable, 5 a 
  * apply to them. Undefined for a command with no entry, which then gets the whole usage. A usage
  * error (`forError`) leaves out the exit codes: the user just saw which one they got.
  */
-export function sbxCommandUsage(
-  words: string[],
-  opts: { forError?: boolean } = {},
-): string | undefined {
+function sbxCommandUsage(words: string[], opts: { forError?: boolean } = {}): string | undefined {
   const body = commandUsage(SBX_USAGE, '  mocactl sbx ', words);
   if (body === undefined) return undefined;
   const notes = [
@@ -420,7 +417,7 @@ export interface SbxDeps {
   loginHelpers?: LoginHelpers;
 }
 
-export function resolveSbxUrl(
+function resolveSbxUrl(
   flag: string | undefined,
   env: NodeJS.ProcessEnv,
   config: TuiConfig,
@@ -434,7 +431,7 @@ export function resolveSbxUrl(
  * the last fallback, for a login file present without `sbx login`'s config.json entry (one copied
  * from another machine, say), since `sbx login` also remembers its URL in config.json.
  */
-export function loginControlPlaneUrl(env: NodeJS.ProcessEnv, home: string): string | undefined {
+function loginControlPlaneUrl(env: NodeJS.ProcessEnv, home: string): string | undefined {
   const u = storedLoginUrl(sbxPaths(resolvePaths(env, home)).authFile);
   return u && /^https?:\/\//.test(u) ? u : undefined;
 }
@@ -463,7 +460,7 @@ function upFallbackUrl(
 }
 
 /** Where resolveSbxUrl's answer came from, by the same precedence (and the same `||`). */
-export function sbxUrlSource(
+function sbxUrlSource(
   flag: string | undefined,
   env: NodeJS.ProcessEnv,
   config: TuiConfig,
@@ -1396,10 +1393,6 @@ async function sbxMainWith(
   }
 
   if (command === 'credentials') {
-    if (arg !== undefined && !['add', 'delete', 'presets', 'list'].includes(arg)) {
-      io.err(`sbx: unknown credentials command '${sanitizeRemote(arg)}'\n${usage}`);
-      return SBX_EXIT.usage;
-    }
     // The catalog is local: no login, no request, no stdin.
     if (arg === 'presets') return listPresets({ io, json: values.json === true });
     if (arg === 'add' || arg === 'delete') {

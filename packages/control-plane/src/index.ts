@@ -171,11 +171,7 @@ export {
   type SandboxView as SandboxStoreView,
   type TerminationReason,
 } from './sandbox-store.js';
-export {
-  DEFAULT_SANDBOX_PREFIX,
-  RedisSandboxStore,
-  type SandboxRedisLike,
-} from './sandbox-redis.js';
+export { RedisSandboxStore, type SandboxRedisLike } from './sandbox-redis.js';
 export {
   isEnrolled,
   parseTemplates,
@@ -305,7 +301,6 @@ export {
   PROFILE_RULES,
   TEMPLATE_ID_RE,
   checkCreate,
-  ownedLimit,
   policyDigest,
   policyProblems,
   registryOf,

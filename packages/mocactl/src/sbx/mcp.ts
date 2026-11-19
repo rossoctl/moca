@@ -19,7 +19,7 @@ import { afterText } from './lifetime.js';
 import { recordCall } from './recorder.js';
 
 /** The lease keepalive's cadence (spec §8.3), while the current sandbox token is a lease mode's. */
-export const KEEPALIVE_MS = 30_000;
+const KEEPALIVE_MS = 30_000;
 
 /** The record's mode: absent, or one this client does not know, reads as per-exec. */
 const recordMode = (s: SbxSandbox): SandboxModeName =>
