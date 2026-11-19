@@ -238,9 +238,11 @@ not exceed the maximum.
 
 ## 4. Adding or removing a user
 
-Users are `SBX_ALLOWED_SUBJECTS`: comma-separated `github:<numeric id>`, no spaces. Look an id up
-with `gh api users/<login> --jq .id`. A user who is not enrolled is told their own `github:<id>` by
-`mocactl sbx login`.
+Users are `SBX_ALLOWED_SUBJECTS`: comma-separated `github:<numeric id>` or `oidc:<provider sub>`
+(a mixed list is accepted), no spaces. Look a GitHub id up with `gh api users/<login> --jq .id`. A
+user who is not enrolled is told their own subject by `mocactl sbx login`. The model behind this
+section (who is enrolled, who is an admin, the installer token, what a removed user leaves behind)
+is in [Users, enrollment and roles](../../reference/users-and-roles.md).
 
 Edit the list and re-run `setup.sh`. The control plane rolls with the new list:
 

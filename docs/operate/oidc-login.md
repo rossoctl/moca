@@ -45,8 +45,9 @@ attacker a fully verified login as the victim, one click and no code to type. Wi
 victim lands on the confirmation page and is asked for a code they have never seen.
 
 Subjects minted this way are `oidc:<provider sub>` (the provider's stable `sub` claim), so
-`SH_ADMIN_SUBJECTS` and — on the sandbox profile — `SH_ALLOWED_SUBJECTS` take entries in that
-form.
+`SH_ADMIN_SUBJECTS` and — on the sandbox and combined profiles — `SH_ALLOWED_SUBJECTS` take entries in that
+form. The subject grammar and what each profile admits are in
+[Users, enrollment and roles](../reference/users-and-roles.md).
 
 ## Registering the application
 

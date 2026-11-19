@@ -171,8 +171,9 @@ outlive a command too). The deployment decides which modes users may pick; see
 ## subject
 
 The identity a login maps to, written `github:<numeric GitHub user id>` or `oidc:<provider sub>`.
-`SH_ADMIN_SUBJECTS` and, on the sandbox profile, `SH_ALLOWED_SUBJECTS` take subjects; a user who
-is not enrolled is told their own subject by `mocactl sbx login`.
+`SH_ADMIN_SUBJECTS` and, on the sandbox and combined profiles, `SH_ALLOWED_SUBJECTS` take subjects; a user who
+is not enrolled is told their own subject by `mocactl sbx login`. See
+[Users, enrollment and roles](reference/users-and-roles.md).
 
 ## config bundle
 

@@ -337,7 +337,8 @@ unless `SBX_CONVERT_TO_COMBINED=1` says the conversion is meant. It needs, besid
 It turns the template store on, adds the harness's keys to `moca-mu1`, and writes its files to
 `deploy/sbx/.generated-<namespace>/`, so a sandbox-service namespace's generated files stay as they are.
 Egress credentials are not supported with it yet. On `combined` any GitHub account can log in and use
-sessions; the sandbox routes and template writes still need `SBX_ALLOWED_SUBJECTS` or an admin.
+sessions; the sandbox routes and template writes still need enrollment: `SBX_ALLOWED_SUBJECTS`, an admin, or a subject
+enrolled through `/v1/subjects` ([Users, enrollment and roles](../../reference/users-and-roles.md)).
 
 Clients log in once to the API host: `mocactl login --control-plane-url https://<api host>` for
 sessions and `mocactl sbx login --control-plane-url https://<api host>` for sandboxes; later commands
@@ -355,7 +356,8 @@ janitor's last run and one host sample (see [the runbook](runbook.md#8-status-an
 ## 4. Users
 
 Users log in with GitHub, then bring a repository up in a sandbox; [the user guide](../../sandbox/user-guide.md)
-covers it end to end:
+covers it end to end. Who may log in, and who can change that, is in
+[Users, enrollment and roles](../../reference/users-and-roles.md):
 
     mocactl sbx login --control-plane-url https://<api host>
     cd <repository> && mocactl sbx up
