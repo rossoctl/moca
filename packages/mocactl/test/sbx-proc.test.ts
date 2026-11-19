@@ -362,7 +362,7 @@ describe('mocactl sbx proc: refusals, failures, notices', () => {
       const w = world({ mode });
       expect(await w.run(['proc', 'ls', SBX])).toBe(1);
       expect(w.err()).toBe(
-        `sbx: processes not enabled for this sandbox; run: mocactl sbx mode ${SBX} lease+processes`,
+        `sbx: processes not enabled for this sandbox; run: mocactl sbx mode lease+processes ${SBX}`,
       );
       expect(w.calls).toEqual([]);
       expect(w.closed()).toBe(1);
@@ -400,7 +400,7 @@ describe('mocactl sbx proc: refusals, failures, notices', () => {
           'mode lease',
           'processes_not_enabled: mode lease',
         ),
-        `sbx: processes not enabled for this sandbox; run: mocactl sbx mode ${SBX} lease+processes`,
+        `sbx: processes not enabled for this sandbox; run: mocactl sbx mode lease+processes ${SBX}`,
       ],
       [
         new ExecMachineryError('sandbox failure: worker unavailable'),

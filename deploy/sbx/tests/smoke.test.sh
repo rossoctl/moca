@@ -246,7 +246,7 @@ proc)
   # lease when there is none.
   sub="${args[0]:-}" id="${args[1]:-}"
   live "$id"; readmode "$id"; idle_check "$id"; take_end "$id" || true
-  [[ "$m" == lease+processes ]] || { echo "sbx: processes not enabled for this sandbox; run: mocactl sbx mode $id lease+processes" >&2; exit 1; }
+  [[ "$m" == lease+processes ]] || { echo "sbx: processes not enabled for this sandbox; run: mocactl sbx mode lease+processes $id" >&2; exit 1; }
   P="$L/$id.procs"
   case "$sub" in
   start)
