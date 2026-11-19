@@ -153,7 +153,8 @@ A **template** is what a sandbox-service sandbox is made from (`mocactl sbx temp
 them). A **build** is one immutable snapshot of a template; a new build of a template does not
 change the sandboxes made from an earlier one. A **tag** names a registered build
 (`ID:TAG`, or `ID@BUILD` for a build itself); `default` is the tag used when none is given, and it
-cannot be removed; moving a tag leaves the sandboxes made earlier on their build.
+cannot be removed; moving a tag leaves the sandboxes made earlier on their build. See
+[Templates, builds and activation](sandbox/concepts/templates.md).
 
 ## activation lease
 
