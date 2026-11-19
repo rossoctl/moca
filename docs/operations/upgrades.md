@@ -1,6 +1,6 @@
 # Upgrades
 
-> **Preview.** For P6 on Kubernetes ([`deploy/k8s`](../../deploy/k8s/README.md)). The repository documents no
+> **Preview.** For P6 on Kubernetes ([`deploy/k8s`](../operate/harness/kubernetes.md)). The repository documents no
 > rollback procedure; what is below is what the scripts and manifests do.
 
 ## Upgrading means passing a new image

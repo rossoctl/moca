@@ -30,7 +30,7 @@
 - [ ] **Rotate tokens deliberately.** Access tokens last 15 minutes and are never revoked, so shorten
       `SH_API_TOKEN_TTL_SECONDS` if you need faster revocation.
 
-## Kubernetes ([`deploy/k8s`](../../deploy/k8s/README.md))
+## Kubernetes ([`deploy/k8s`](../operate/harness/kubernetes.md))
 
 - [ ] **Use a CNI that enforces NetworkPolicy** (kind 0.24 or later, or OVN-Kubernetes). On one that does not, every
       isolation rule is open _(documented)_. Run the smoke test's isolation claim to check.

@@ -2,7 +2,7 @@
 # NetworkPolicy of the base in ONE namespace, for a developer or CI tenant on a shared OpenShift
 # cluster where you have edit rights in a namespace and nothing else.
 #
-# What setup.sh does with it (deploy/k8s/README.md §12): no namespace creation (cluster scope),
+# What setup.sh does with it (docs/operate/harness/kubernetes.md §12): no namespace creation (cluster scope),
 # no SCC grants (restricted-v2 assigns UIDs), no Routes, no `oc`, no cluster-scoped reads. The
 # namespace is the one you point SH_SINGLE_NAMESPACE at; setup.sh patches it into the generated
 # overlay, because a checked-in kustomization cannot take one as input. Reach the supervisor and

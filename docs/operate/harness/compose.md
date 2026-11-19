@@ -7,7 +7,7 @@ sidebar_position: 1
 > **Preview.** The Docker Compose trial is implemented but not yet declared Stable; interfaces
 > and limits may change. Known limits: [What the trial does not claim](#what-the-trial-does-not-claim).
 > It is a trial by design and will not be promoted to Stable. For production see
-> [`deploy/vm/`](single-vm.md) or [`deploy/k8s/`](../../../deploy/k8s/README.md); labels are explained in [Maturity and lifecycle](../../reference/maturity-and-lifecycle.md).
+> [`deploy/vm/`](single-vm.md) or [`deploy/k8s/`](kubernetes.md); labels are explained in [Maturity and lifecycle](../../reference/maturity-and-lifecycle.md).
 
 A five-minute, no-root way to run the P6 (process-manager) runtime on a dev machine: the supervisor (with its worker
 pool), the sandbox relay, Redis and one remote-worker sandbox, under Docker Compose. Optionally, add

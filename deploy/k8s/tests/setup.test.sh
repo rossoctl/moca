@@ -766,7 +766,7 @@ ci_h="$(settings_hash)"
 [[ "$(replicas_of moca-control-plane)" == 0 ]] || fail 'kind ran the control plane on the kind-ci placeholder id (#429)'
 expect_out 'no SH_GITHUB_CLIENT_ID'
 # The other half: the filter must not cost kind-ci its convergence. It re-derives the same string,
-# so a second kind-ci run still hashes identically and rolls no pod (README §"re-run ... converges").
+# so a second kind-ci run still hashes identically and rolls no pod (docs/operate/harness/kubernetes.md, "re-run ... converges").
 expect_ok --target kind-ci --skip-build
 [[ "$(setting SH_GITHUB_CLIENT_ID)" == Iv1.k8s-smoke-unused ]] || fail 'the kind-ci placeholder was not re-derived after a kind run cleared it'
 [[ "$(settings_hash)" == "$ci_h" ]] || fail 'a kind-ci re-run changed the settings hash (it would roll the control plane for nothing)'
@@ -1162,7 +1162,7 @@ expect_out 'kubectl -n moca-single port-forward svc/moca-supervisor'
 ! grep -q 'https://' "$TMP/out" || fail 'ocp-single printed an https URL; it has no Routes'
 pass 'ocp-single: access is printed as port-forward commands, never a Route URL'
 
-echo "== ocp-single: optional Routes (SH_ROUTE_DOMAIN, README §12.5)"
+echo "== ocp-single: optional Routes (SH_ROUTE_DOMAIN, docs/operate/harness/kubernetes.md §12.5)"
 reset_state
 # A preinstalled kubernetes.io/tls Secret, as an operator's wildcard certificate would be.
 jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace: "moca-single"},

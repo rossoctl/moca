@@ -39,4 +39,4 @@ kind-moca`). On OpenShift omit the context. Rows marked _(inferred)_ come from r
 
 Run `mocactl doctor`; it runs seven ordered checks (control plane, login, credentials, harness) and stops at the first
 failure. Its last check is not read-only: it creates and then deletes a scratch session ([reference](../harness/reference/cli-mocactl.md#doctor)). The full operator troubleshooting section
-and the OpenShift Route and TLS notes are in [`deploy/k8s/README.md`](../../deploy/k8s/README.md).
+and the OpenShift Route and TLS notes are in [`deploy/k8s/README.md`](../operate/harness/kubernetes.md).

@@ -1,6 +1,6 @@
 # Operations
 
-> **Preview.** These pages are for operators of **P6 on Kubernetes** ([`deploy/k8s`](../../deploy/k8s/README.md)),
+> **Preview.** These pages are for operators of **P6 on Kubernetes** ([`deploy/k8s`](../operate/harness/kubernetes.md)),
 > the first path planned for Stable. Facts come from the manifests, `setup.sh` and the code as of 2026-10-13. Where
 > something is not documented anywhere in the repository, the page says so rather than guessing. Single-VM and
 > Compose notes appear only where they differ.

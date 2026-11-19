@@ -814,4 +814,4 @@ its own P6 is container-only from then on, and untiered (P6.3 spec §7). Remote 
 `/etc/serverless-harness/microvm-relay-ca.crt` (when the bundle carries a CA) and the drop-in
 `microvm-worker.service.d/50-moca-remote.conf` in place of `50-moca-p6.conf`.
 See
-[`deploy/k8s/README.md` §11](../k8s/README.md#11-p4-on-kubernetes-microvm-hosts-outside-the-cluster).
+[`deploy/k8s/README.md` §11](../../docs/operate/harness/kubernetes.md#11-p4-on-kubernetes-microvm-hosts-outside-the-cluster).

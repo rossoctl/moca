@@ -57,7 +57,7 @@ which looks like a real answer. Poll the turn route, not this one.
    prerequisite logs one line and leaves the drain off rather than failing the boot. Per deployment:
    `supervisor.env` on [`deploy/vm`](../../operate/harness/single-vm.md), `.env` on
    [`deploy/compose`](../../operate/harness/compose.md), the `moca-settings` ConfigMap on
-   [`deploy/k8s`](../../../deploy/k8s/README.md). Every worker that has it drains, so the drain needs no
+   [`deploy/k8s`](../../operate/harness/kubernetes.md). Every worker that has it drains, so the drain needs no
    concurrency knob of its own: a worker runs **one** queued leaf at a time and claims it only while
    its total in-flight count — async plus interactive — is below `SH_TURNS_PER_WORKER`. See the
    [configuration reference](../../reference/configuration.md).
@@ -114,7 +114,7 @@ which looks like a real answer. Poll the turn route, not this one.
   `multi` on: the SANDBOX grant has no redeemer yet, so an async turn gets inference isolation and
   not egress isolation.
 - **`deploy/k8s` is proven by its smoke test, and nothing autoscales it.** Two opt-in smoke claims
-  check that a real cluster drains queued leaves, and `deploy/k8s/README.md` §14 documents the
+  check that a real cluster drains queued leaves, and [Kubernetes and OpenShift](../../operate/harness/kubernetes.md#14-async-fan-out-opt-in-sh_async_drain) §14 documents the
   consumer and its capacity: `replicas` × `SH_WORKERS` wide, raised by hand
   ([#688](https://github.com/rossoctl/moca/issues/688), #765).
 - Per-turn caps: `turn_exp` is anchored at the dequeue and clamped to `caps.wallClock`; it bounds how
