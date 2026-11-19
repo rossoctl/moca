@@ -107,7 +107,7 @@ preceded by `POST /v1/sandboxes/{id}/token` when no fresh sandbox token is held.
 | `sbx run` / `sbx put`                      | `SandboxExec.Exec`, sent again as a new Exec after a refusal before start (see [Retries](#when-to-retry))                                                                                                                                                                                                          |
 | `sbx up`                                   | `GET /v1/sandboxes/{id}` for the bound sandbox, or `GET /v1/sandboxes` for one labelled with this repository; else `POST /v1/sandboxes` as `create`; then `Exec`s that send the tree and commit a baseline                                                                                                         |
 | `sbx push` / `sbx pull`                    | `Exec`s: the tree in; a `git diff` against the baseline out                                                                                                                                                                                                                                                        |
-| `sbx rm`                                   | without `--force`, an `Exec` that checks for unpulled changes; for a lease sandbox, `GET /v1/sandboxes/{id}` and `LeaseControl sandbox_deleted`, best effort, capped at 15 s, any error ignored; then `DELETE /v1/sandboxes/{id}`                                                                                  |
+| `sbx rm`                                   | without `--force`, an `Exec` that checks for unpulled changes; `GET /v1/sandboxes/{id}` (to read its mode); for a lease sandbox, a sandbox token and `LeaseControl sandbox_deleted`, best effort, capped at 15 s, any error ignored; then `DELETE /v1/sandboxes/{id}`                                              |
 | `sbx mcp` / `sbx claude` / `sbx codex`     | one `Exec` per tool call; in a lease mode, `LeaseKeepalive` every 30 s                                                                                                                                                                                                                                             |
 | `sbx credentials` / `add` / `delete`       | `GET /v1/credentials`; `PUT` / `DELETE /v1/credentials/{name}`, with `consumer: sandbox-egress`                                                                                                                                                                                                                    |
 | `sbx egress [--ndjson \| --verify]`        | `GET /v1/sandboxes/{id}/egress`, paged by `after` (`--ndjson`: `format=ndjson`; `--verify`: the NDJSON log, then the first page's `summary`)                                                                                                                                                                       |
@@ -144,7 +144,7 @@ and no `Retry-After`.
 | 404    | `sandbox_not_found`, `template_not_found`, `session_not_found`, `not_found` | both          | unknown, or another user's (never 403, so ids cannot be probed)                                                                                       | check the id                                                                                                        |
 | 404    | `credential_not_found`                                                      | both          | no credential with that name, or none the subject can resolve                                                                                         | add the credential, or name an existing one                                                                         |
 | 404    | `config_bundle_not_found`                                                   | control plane | a session names a digest nobody uploaded, or that expired                                                                                             | promote the bundle again                                                                                            |
-| 404    | `turn_not_found`                                                            | harness       | attach or cancel with no running or retained turn, or with detachable turns off                                                                       | do not retry; start a new turn                                                                                      |
+| 404    | `turn_not_found`                                                            | harness       | attach or cancel with no running or retained turn (an unknown async turn on the control plane is `404 not_found`)                                     | do not retry; start a new turn                                                                                      |
 | 409    | `sandbox_terminated` (`reason`)                                             | control plane | a token or mode call on a sandbox deleted or expired                                                                                                  | create a new sandbox                                                                                                |
 | 409    | `name_conflict`                                                             | control plane | you already have a live sandbox with that name                                                                                                        | pick another name                                                                                                   |
 | 409    | `template_exists`, `self_attested`                                          | control plane | another subject's template id; deployment visibility for a self-attested template                                                                     | pick another id; keep the template private                                                                          |
@@ -212,6 +212,19 @@ Per-command detail is in the generated references:
 | `124`             | `sbx run`: the command timed out, or was killed                                                                                  |                                                                                |
 | `125`             | `sbx run`, `sbx put`: the sandbox failed; there is no exit status                                                                |                                                                                |
 | `130`             | interrupted (Ctrl-C); a build already queued goes on                                                                             | cancelled (Ctrl-C)                                                             |
+
+## Quotas and limits
+
+The defaults a client runs into are documented with what they bound:
+
+- **Per sandbox:** two Execs in flight (one running, one waiting; a third is refused as busy),
+  16 MiB per gRPC message, 8 MiB of stdout per call, and a longest command of one token lifetime
+  minus 60 s (14 minutes by default) — [Calling the sandbox API, Limits](../sandbox/how-to/direct-api.md#limits).
+- **Per user:** 3 live sandboxes by default, a 7-day idle lifetime, and how delete and removal take
+  effect — [Limits](../sandbox/concepts/limits.md).
+- **Templates:** your template quotas (`templates`, `buildsQueued`, `active`, `owned`) and their
+  use: `GET /v1/quota` (`mocactl sbx quota`); a refusal is `429 quota_exceeded` naming the `quota`
+  (above).
 
 ## When to retry
 

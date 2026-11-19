@@ -20,8 +20,8 @@ sidebar_position: 2
 - **Delete and de-enrollment take effect within one token lifetime plus 30 s** (15 minutes by
   default, so 15.5 minutes). A sandbox token already issued keeps working until it expires. A
   command still running at that point is cancelled.
-- **The longest single command is one token lifetime** (15 minutes by default). `run`'s
-  `--timeout` defaults to, and is capped at, that lifetime minus 60 s. Split longer work into
+- **The longest single command is one token lifetime minus 60 s** (14 minutes by default).
+  `run`'s `--timeout` defaults to, and is capped at, that. Split longer work into
   several calls.
 - **Files over 12 MiB are not pushed** (`push` refuses and names them; `.gitignore` them), and a
   tree over 256 MiB is refused (`--max-push` sets another cap). A pull larger than 8 MiB as a
