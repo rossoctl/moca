@@ -1221,8 +1221,9 @@ async function sbxMainWith(
       const was = sanitizeRemote(boundUrl!);
       const what = upBound ? `the bound sandbox ${sanitizeRemote(upBound)}` : '.sbx/sandbox.json';
       io.err(
-        `sbx up: ${what} is on ${was}, which this machine is not logged in to; using ` +
-          `${sanitizeRemote(other)}, which it is (work not pulled from there stays on ${was})`,
+        `sbx up: ${what} is on ${was}, which this machine is not logged in to; this ` +
+          `repository's files go to ${sanitizeRemote(other)}, which it is (work not pulled ` +
+          `from there stays on ${was})`,
       );
       boundUrl = undefined;
       upBound = undefined;

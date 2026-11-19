@@ -948,7 +948,7 @@ describe('mocactl sbx up: a binding on a control plane with no login here', () =
     expect(binding(h.r)).toMatchObject({ id: NEW, controlPlaneUrl: URL_ });
     expect(h.err()).toContain(
       `the bound sandbox ${SBX} is on ${OLD_URL}, which this machine is not logged in to; ` +
-        `using ${URL_}, which it is`,
+        `this repository's files go to ${URL_}, which it is`,
     );
   });
 
