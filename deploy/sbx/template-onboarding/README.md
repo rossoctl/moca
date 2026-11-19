@@ -53,13 +53,13 @@ These are part of the same flow but live with the code they belong to.
 
 **Using a template:**
 
-| File                                                                                                 | Role in the flow                                                                               |
-| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| [`docs/sandbox/user-guide.md`](../../../docs/sandbox/user-guide.md)                                  | clients: `mocactl sbx templates`, `create --template`, `run`, agents through `mocactl sbx mcp` |
-| [`docs/concepts/sandboxes-and-tiers.md`](../../../docs/concepts/sandboxes-and-tiers.md)              | templates and tiers in Moca's own agent sessions (`--option sandboxTemplate=ID`)               |
-| `docs/specs/2026-10-30-session-sandbox-templates-design.md`                                          | the design of templates in agent sessions                                                      |
-| `docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md`                                  | the design of the template lifecycle: self-serve creates, activation, provenance               |
-| [The sandbox service design](../../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md) | the design of the sandbox service and its templates                                            |
+| File                                                                                                    | Role in the flow                                                                               |
+| ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| [`docs/sandbox/user-guide.md`](../../../docs/sandbox/user-guide.md)                                     | clients: `mocactl sbx templates`, `create --template`, `run`, agents through `mocactl sbx mcp` |
+| [`docs/harness/concepts/sandboxes-and-tiers.md`](../../../docs/harness/concepts/sandboxes-and-tiers.md) | templates and tiers in Moca's own agent sessions (`--option sandboxTemplate=ID`)               |
+| `docs/specs/2026-10-30-session-sandbox-templates-design.md`                                             | the design of templates in agent sessions                                                      |
+| `docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md`                                     | the design of the template lifecycle: self-serve creates, activation, provenance               |
+| [The sandbox service design](../../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md)    | the design of the sandbox service and its templates                                            |
 
 **Code that implements template selection:** `packages/control-plane/src/sandbox-config.ts`
 (`SH_SANDBOX_TEMPLATES`), `packages/control-plane/src/sandbox-handlers.ts` (`POST /v1/sandboxes

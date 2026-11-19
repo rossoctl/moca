@@ -114,7 +114,7 @@ mocactl login
 The control plane advertises the harness as `http://127.0.0.1:8080` by default, so the supervisor's
 forward must use local port 8080. If 8080 conflicts with another local service, override it with
 `SH_PUBLIC_HARNESS_URL` at setup time (see §2's sticky settings). `mocactl` runs from a checkout
-([`packages/mocactl/QUICKSTART.md`](../../packages/mocactl/QUICKSTART.md)). The GitHub OAuth app
+([`docs/harness/how-to/set-up-mocactl.md`](../../docs/harness/how-to/set-up-mocactl.md)). The GitHub OAuth app
 needs **Enable Device Flow** ticked ([`deploy/vm/README.md`](../vm/README.md), "The GitHub OAuth
 app").
 
@@ -582,7 +582,7 @@ kindnet:
 ### 9.3 The acts
 
 One user per laptop. On each, `mocactl` runs from a checkout
-([`packages/mocactl/QUICKSTART.md`](../../packages/mocactl/QUICKSTART.md)):
+([`docs/harness/how-to/set-up-mocactl.md`](../../docs/harness/how-to/set-up-mocactl.md)):
 
 ```bash
 alias mocactl="node $PWD/packages/mocactl/bin/mocactl.mjs"
@@ -1285,7 +1285,7 @@ credential names in the audit stream.
 
 An orchestrator that wants to dispatch many leaves and collect them later submits them to the
 **control plane** and polls; it does not hold a connection per leaf. This is archetype A
-([dispatch archetypes](../../docs/concepts/dispatch-archetypes.md)), the KEDA `ScaledObject`'s
+([dispatch archetypes](../../docs/harness/concepts/dispatch-archetypes.md)), the KEDA `ScaledObject`'s
 replacement, decided in [ADR-0047](../../docs/adrs/0047-p6-async-fan-out-in-worker-drain.md).
 
 > **Status: single-tenant in v0.10.0.** Async fan-out under `MOCA_TENANCY=multi` (grants minted at

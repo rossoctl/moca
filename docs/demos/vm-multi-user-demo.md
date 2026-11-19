@@ -245,7 +245,7 @@ Do all of Act 1 as user 1, then as user 2. Each laptop needs:
 - `jq` and a browser;
 - an inference credential of its user's own: a gateway token or an Anthropic API key;
 - `mocactl`, which runs from a checkout. There's no installed `mocactl` command. Follow
-  `packages/mocactl/QUICKSTART.md`: Node 22 and pnpm 9, `pnpm install` in the checkout, and in each
+  `docs/harness/how-to/set-up-mocactl.md`: Node 22 and pnpm 9, `pnpm install` in the checkout, and in each
   terminal, from the checkout:
 
   ```bash
@@ -327,7 +327,7 @@ Start `mocactl`, open **Credentials** with `ctrl+x k`, and add one with consumer
 - **An Anthropic API key** (`sk-ant-api…`): kind `api-key`, destination host `api.anthropic.com`,
   gateway endpoint `https://api.anthropic.com` (no `/v1`), and the key pasted as is into the
   **API key** field.
-- **A gateway token:** kind `bearer`, with the fields in `packages/mocactl/QUICKSTART.md`, step 4.
+- **A gateway token:** kind `bearer`, with the fields in `docs/harness/how-to/set-up-mocactl.md`, step 4.
 
 Give the two users' credentials different names (the run used `anthropic` and `anthropic-dev`), so
 2c's audit tells them apart at a glance.

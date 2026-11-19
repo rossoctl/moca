@@ -10,7 +10,7 @@ One supervisor pod runs `SH_WORKERS` workers, each allowing `SH_TURNS_PER_WORKER
 manifest pins **2 workers and 4 turns per worker**, so a pod serves up to **8 concurrent turns**; beyond that it
 answers `429 {"error":"overloaded"}` with `Retry-After: 1` before reading the request. Only `POST /turn` and
 `POST /v1/turn` count toward the cap, but the supervisor checks saturation once per connection, before reading any
-bytes, so while a pod is saturated **every** connection on the data port gets the 429, `/v1/runs` included. See [Session multiplexing](../concepts/session-multiplexing.md).
+bytes, so while a pod is saturated **every** connection on the data port gets the 429, `/v1/runs` included. See [Session multiplexing](../harness/concepts/session-multiplexing.md).
 
 Change the worker count, the CPU limit and the memory request together: the manifest pins W with a CPU limit of 2
 (about one CPU per worker) and a memory request of at least W x 256Mi (a manifest test enforces that), plus about 256Mi of headroom, which is

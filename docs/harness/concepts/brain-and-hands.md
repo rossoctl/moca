@@ -36,7 +36,7 @@ implemented over gRPC and a relay:
 Because the sandbox dials out, it can live behind NAT, on another network, or on a laptop. The relay is a
 single replica: a restart drops attached streams and fails in-flight execs, and recovery is a retry.
 The older `kubectl exec` transport was removed with the Knative/KEDA deployment path
-([ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md)).
+([ADR-0041](../../adrs/0041-deprecate-knative-keda-deployment.md)).
 
 ## Limits on what the hands return
 
@@ -50,7 +50,7 @@ A command's default timeout is 30 minutes.
 Each session gets its own directory under the sandbox's workspace root
 (`<root>/<sessionId>`), selected by the `workspace_key`. The root the harness expects
 (`KAGENTI_SANDBOX_CWD`) must equal the sandbox worker's `SH_WORKSPACE_ROOT`
-([Configuration](../reference/configuration.md)). The per-session directory is **not a security
+([Configuration](../../reference/configuration.md)). The per-session directory is **not a security
 boundary**: sessions on one sandbox share a Unix user and container. An idle workspace is deleted after
 `SH_WORKSPACE_IDLE` (30 minutes by default; the microVM installer and `deploy/k8s/setup.sh` set 8
 hours). The next turn is told, from a marker file (below). On a container worker, a per-session

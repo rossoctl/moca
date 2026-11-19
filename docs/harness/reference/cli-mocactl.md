@@ -1,19 +1,83 @@
 # `mocactl` command reference
 
-> **Preview.** Reflects `packages/mocactl` on `main` as of 2026-10-12. Install it with the
-> [one-line installer](../get-started/index.md#install-the-client); the narrative guide, key bindings and
-> troubleshooting are in [`packages/mocactl/README.md`](../../packages/mocactl/README.md). `mocactl`
-> talks to the multi-user control plane, which tells it where the harness is.
+> **Preview.** Install `mocactl` with the
+> [one-line installer](../../get-started/index.md#install-the-client); how to use it, with its key
+> bindings and troubleshooting, is [Use mocactl](../how-to/use-mocactl.md). `mocactl` talks to the
+> multi-user control plane, which tells it where the harness is. The sandbox service's commands are
+> [`mocactl sbx`](../../sandbox/reference/cli-sbx.md).
 
 ## Usage
 
-```text
-mocactl                      the interactive UI (needs a terminal)
-mocactl <command> [flags]    a headless command
+The block below is `mocactl --help`, generated from `USAGE` in `packages/mocactl/src/cli.ts`; a
+test fails when the two disagree. `mocactl COMMAND --help` prints only that command's syntax. To
+update the block after changing the help text:
+
+```bash
+UPDATE_MOCACTL_REFERENCE=1 pnpm -C packages/mocactl exec vitest run test/mocactl-reference.test.ts
 ```
 
-Run `mocactl --help` for the usage text. `--help` is not per command: `mocactl run --help` prints the
-same global usage. `mocactl --version` prints a release tag or `edge-<sha>`; run from a source checkout it prints
+<!-- BEGIN GENERATED: mocactl --help -->
+
+```text
+usage:
+  mocactl [--setup] [--no-animation]             interactive terminal UI
+  mocactl --version                              print this build's version (a release tag, edge-<sha>,
+                                                 or dev-<sha> from a source checkout)
+  mocactl login [--no-browser]                   log in with the GitHub device flow (in a local
+                                                 terminal: copies the code, opens the browser)
+  mocactl login --test-user N                    log in as test user N (needs the control plane's
+                                                 SH_TEST_USERS; secret in MOCA_TEST_USER_SECRET)
+  mocactl logout [--all]                         end this login (--all: every login of yours)
+  mocactl auth token [--json]                    print a valid API token, refreshing if needed
+                                                 (exit 3: log in first; 4: control plane unreachable)
+  mocactl doctor [--json]                        check the setup; one fix per failure
+  mocactl run "prompt" [--session ID | --new] [--option key=value ...] [--json]
+  mocactl run "prompt" --config DIGEST            start the new session with a promoted config bundle
+  mocactl run "prompt" --show-tools              print each tool call the turn makes, between its
+                                                 text (not with --json, which streams the frames)
+  mocactl run "prompt" --record F                append one NDJSON line per HTTP attempt to F (0600):
+                                                 path, status, times, ids; a stream's bytes, sha256
+                                                 and frame count; never a token, host, prompt,
+                                                 reply or patch (kept as sha256 or length)
+  mocactl promote DIR [--dry-run] [--json]       upload DIR's .claude/skills and .claude/commands
+                                                 (--dry-run: build and report, upload nothing)
+  mocactl bundles list [--json]                  your own stored bundles, newest first
+  mocactl bundles delete DIGEST [--json]         delete a bundle you promoted and free its budget
+  mocactl sbx …                                  the sandbox service, workspaces in isolated VMs for your agent: login, up, pull, rm (mocactl sbx --help)
+  mocactl sessions [--json]                      list your sessions
+  mocactl sessions delete ID [--json]
+  mocactl credentials [--json]                   list your credentials (never their secrets)
+  mocactl credentials add NAME --host HOST [--host HOST ...] [--kind KIND] [--consumer CONSUMER]
+      [--endpoint URL] [--json]                  the secret is read from stdin
+  mocactl credentials delete NAME [--json]
+  mocactl spawn "prompt" [--config DIGEST] --kind prompt|solve
+      [--repo URL --ref REF] [--tag T] [--label L] [--json]
+                                                 fork a detached subagent (solve needs --repo/--ref;
+                                                 --label names one dispatch within a --tag group,
+                                                 surfaced on 'mocactl subagents --json' as label)
+  mocactl spawn --prompt-file FILE [...]         read the prompt from FILE (UTF-8, trimmed); use when
+                                                 the prompt would otherwise be awkward on argv
+  mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]
+                                                 run the subagent on a workload's context
+                                                 (--writable: its own copy, discarded after)
+  mocactl subagents [--tag T] [--json]            list spawned subagents + current state
+  mocactl get SESSIONID [--out DIR] [--json]      write result files + bounded summary
+  mocactl workloads create --context FILE [--name NAME] [--json]
+      [--sandboxes N [--mount read-only|writable]]
+                                                 upload a context file (contextctl ctx pack) to a
+                                                 new workload; prints its id (--sandboxes: N
+                                                 sandboxes of its own; --mount: its context on
+                                                 their own volume, no per-run copy)
+  mocactl workloads list [--json]                your own live workloads, newest first
+  mocactl workloads get ID [--json]
+  mocactl workloads delete ID [--json]           delete a workload and its context
+flags for every command: --control-plane-url URL
+  (the control plane says where the harness is; --harness-url URL overrides that)
+```
+
+<!-- END GENERATED: mocactl --help -->
+
+`mocactl --version` prints a release tag or `edge-<sha>`; run from a source checkout it prints
 `dev-<sha>` (the checkout's commit, `-dirty` if tracked files differ from it), or `dev` where git can't say.
 
 All flags are accepted by one parser. An unknown flag, or a missing flag value, prints the usage and
@@ -72,7 +136,7 @@ reachable?` instead; `auth token` exits 3 (login required) or 4; `logout` while 
 | `mocactl auth token [--json]`                                                                                                     | Prints a valid API token for scripts, refreshing if needed. `--json`: `{"token","expiresAt","subject"}`                                                                                                                                                                                                                                                                                                                  |
 | `mocactl doctor [--json]`                                                                                                         | Seven ordered checks that stop at the first failure (below). Exit 1 if any fails                                                                                                                                                                                                                                                                                                                                         |
 | `mocactl run "prompt" [--session ID \| --new] [--option k=v ...] [--config DIGEST] [--json] [--record F]`                         | Runs a turn. Continues `--session`, or starts a new session (`--new`, the default)                                                                                                                                                                                                                                                                                                                                       |
-| `mocactl promote DIR [--dry-run] [--json]`                                                                                        | Builds a config bundle from `DIR/.claude` and uploads it (`POST /v1/config-bundles`). See [Promoting](../guides/promote-claude-workflow.md)                                                                                                                                                                                                                                                                              |
+| `mocactl promote DIR [--dry-run] [--json]`                                                                                        | Builds a config bundle from `DIR/.claude` and uploads it (`POST /v1/config-bundles`). See [Promoting](../how-to/promote-claude-workflow.md)                                                                                                                                                                                                                                                                              |
 | `mocactl bundles list [--json]`                                                                                                   | Lists the bundles you own, newest first (`GET /v1/config-bundles`). See below                                                                                                                                                                                                                                                                                                                                            |
 | `mocactl bundles delete DIGEST [--json]`                                                                                          | Deletes a bundle you promoted (`DELETE /v1/config-bundles/{digest}`). `DIGEST` must be `sha256:` plus 64 hex characters                                                                                                                                                                                                                                                                                                  |
 | `mocactl sessions [--json]`                                                                                                       | Lists every session you own (all pages of `GET /v1/sessions`)                                                                                                                                                                                                                                                                                                                                                            |
@@ -145,7 +209,7 @@ already holding its id is the point, so `workloads list ID` exits 2.
 - A table of `WORKLOAD STATUS TYPE SIZE SANDBOXES CREATED REVISION`. `CREATED` is relative
   (`4m ago`), `REVISION` is the first 12 characters, and `-` means unset — `CREATED` is `-` for a
   workload created before the harness recorded the field, which is also absent from the listing
-  (see "Upgrading" in [`../context-service.md`](../context-service.md)).
+  (see "Upgrading" in [Context Service and workloads](../how-to/workloads.md)).
 - `--json` prints one document, `{"workloads": [...]}`, with `null` for what a workload lacks and
   `createdAt` in ISO 8601.
 - With no workloads it says `no workloads` on stderr and prints no table, so
@@ -184,8 +248,8 @@ caller.
 
 ### `spawn`, `subagents`, `get`
 
-See [`packages/mocactl/README.md`](../../packages/mocactl/README.md) and
-[`docs/specs/2026-10-12-mocactl-subagent-commands-design.md`](../specs/2026-10-12-mocactl-subagent-commands-design.md)
+See [Use mocactl](../how-to/use-mocactl.md) and
+[`docs/specs/2026-10-12-mocactl-subagent-commands-design.md`](../../specs/2026-10-12-mocactl-subagent-commands-design.md)
 for behavior; this section covers only CLI-reference details.
 
 - `spawn` exit 2: empty prompt, prompt over 64 KiB, bundle digest not matching `sha256:<64 lowercase
@@ -207,8 +271,8 @@ hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo
 
 ### `workloads`
 
-See "Delegate with context" in [`packages/mocactl/README.md`](../../packages/mocactl/README.md) and
-[`docs/context-service.md`](../context-service.md). The routes are on the harness and take the API
+See [Delegate with context](../how-to/use-mocactl.md#delegate-with-context) and
+[`docs/harness/how-to/workloads.md`](../how-to/workloads.md). The routes are on the harness and take the API
 token. There is no list command: the harness has no list route.
 
 - `create` exit 2: no `--context`, a missing, empty or non-regular file, an invalid `--name`, a
@@ -333,5 +397,5 @@ left behind. `/promote DIR` uploads the bundle and attaches it to the next sessi
 ## Known gaps
 
 - The keys inside the Sessions, Credentials and Palette overlays are not listed here.
-- `packages/mocactl/README.md` states exit codes as `0, 1, 2, 130` for every command and documents
+- [Use mocactl](../how-to/use-mocactl.md) states exit codes as `0, 1, 2, 130` for every command and documents
   `promote`'s exit 3, but not `auth token`'s exits 3 and 4 (only `auth token` uses 4).

@@ -61,7 +61,7 @@ leaves). B is served by the P6 runtime. A runs on P6 again, opt-in behind `SH_AS
 single-tenant only in v0.10.0 (multi-tenant is targeted for v0.12.0), submitted to the control
 plane's `POST /v1/sessions/{id}/turns`; the data plane's `async: true` stays removed. C was removed
 with the Knative/KEDA path and has no P6 design yet
-([#536](https://github.com/rossoctl/moca/issues/536)). See [dispatch archetypes](concepts/dispatch-archetypes.md).
+([#536](https://github.com/rossoctl/moca/issues/536)). See [dispatch archetypes](harness/concepts/dispatch-archetypes.md).
 
 ## brain and hands
 
@@ -116,7 +116,7 @@ exchanges a user's session token for the credentials a turn needs. `mocactl` is 
 A content-addressed tar built by `@moca/config-bundle` from a user's `.claude` skills and commands,
 the `CLAUDE.md` chain and the memory index and files (under `context/`), that a session or leaf runs
 with, referenced by digest (`configRef: sha256:…`). Built and credential-scanned client-side;
-see [Promoting a local Claude Code workflow](guides/promote-claude-workflow.md).
+see [Promoting a local Claude Code workflow](harness/how-to/promote-claude-workflow.md).
 
 ## human gate
 

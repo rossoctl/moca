@@ -168,7 +168,7 @@ export function orphanSweeper(
         if (r.kept > 0) {
           console.error(
             `provisioner: ${r.kept} PVC(s) kept on missing records; they count against the ` +
-              'moca-sandbox ResourceQuota until deleted by hand (docs/context-service.md)',
+              'moca-sandbox ResourceQuota until deleted by hand (docs/harness/how-to/workloads.md)',
           );
         }
       })

@@ -193,7 +193,7 @@ onboarding flow; a plain `mocactl` with a control-plane URL and a login goes str
 Add one credential with consumer `inference`:
 
 - **A gateway token** (LiteLLM and the like): kind `bearer`, with the fields in
-  `packages/mocactl/QUICKSTART.md`, step 4.
+  `docs/harness/how-to/set-up-mocactl.md`, step 4.
 - **An Anthropic API key** (`sk-ant-api…`): kind `api-key`, destination host `api.anthropic.com`,
   gateway endpoint `https://api.anthropic.com` (no `/v1`), and the key itself, pasted as is into
   the **API key** field. The form stores that field verbatim, so a `key=` prefix would become part

@@ -196,7 +196,7 @@ Two limits keep it short of a full clear: the path is `MOCA_TENANCY=single` only
 needs the grant and token-endpoint slice, ADR-0047 §9's M2 — and `deploy/k8s` is wired but not yet
 proven end to end, which is [#688](https://github.com/rossoctl/moca/issues/688). Both are a dated
 conditional refusal in the shape this record used for its own deprecation window, and
-[dispatch archetypes](../concepts/dispatch-archetypes.md) carries them with the operator detail, so
+[dispatch archetypes](../harness/concepts/dispatch-archetypes.md) carries them with the operator detail, so
 they are stated once rather than three times.
 
 Nothing here changes this record's accepted costs. Scale-to-zero and queue-depth-driven capacity stay

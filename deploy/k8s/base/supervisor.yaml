@@ -96,7 +96,7 @@ spec:
                   configMapKeyRef:
                     { name: moca-settings, key: LEAF_RESULT_TTL_SECONDS, optional: true },
                 }
-            # Optional /workloads on Context Service (docs/context-service.md). Off unless the
+            # Optional /workloads on Context Service (docs/harness/how-to/workloads.md). Off unless the
             # operator creates the moca-context-service ConfigMap and Secret.
             - name: MOCA_CONTEXT_WORKLOADS_ENABLED
               valueFrom:

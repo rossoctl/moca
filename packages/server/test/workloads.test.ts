@@ -386,7 +386,7 @@ describe('workload lifecycle', () => {
       });
     });
 
-    // The privacy property of docs/context-service.md ("Names are per user") is the reason the new
+    // The privacy property of docs/harness/how-to/workloads.md ("Names are per user") is the reason the new
     // code cannot be reported for someone else's record: only the owner's keyspace is ever read, so
     // bob learns nothing about alice's workload -- not even that the name is taken.
     it("says nothing about another user's deleted workload", async () => {
@@ -416,7 +416,7 @@ describe('workload lifecycle', () => {
     });
 
     // A `deleting` record is an unfinished delete, not a finished one: it must still be retried
-    // (docs/context-service.md), so it must not take the new code.
+    // (docs/harness/how-to/workloads.md), so it must not take the new code.
     it('still retries a delete left `deleting` by a Context Service failure', async () => {
       await create(alice, 'stuck');
       cs.failures.set('delete', 500);

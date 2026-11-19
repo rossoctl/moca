@@ -13,7 +13,7 @@ A user with nothing but a cluster URL should type one line, then `mocactl`.
 Today (`rossoctl/main` @ `4482def`):
 
 - The only way to run `mocactl` is from a checkout: `pnpm install`, then
-  `alias mocactl="node $PWD/packages/mocactl/bin/mocactl.mjs"` (`packages/mocactl/QUICKSTART.md` §4).
+  `alias mocactl="node $PWD/packages/mocactl/bin/mocactl.mjs"` (`docs/harness/how-to/set-up-mocactl.md` §4).
 - `bin/mocactl.mjs` registers the `tsx` loader and runs `src/main.ts`, so it needs the whole
   workspace's `node_modules` and the package's `tsconfig.json` beside it.
 - `v*` releases are cut by hand and carry no assets; `build.yaml` publishes container images only.

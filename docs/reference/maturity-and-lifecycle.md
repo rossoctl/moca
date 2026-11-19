@@ -56,5 +56,5 @@ release that carries it keeps working code but gets no fixes. Archetypes A (asyn
 turn worker, opt-in behind `SH_ASYNC_DRAIN` and `MOCA_TENANCY=single`
 ([ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md),
 [#686](https://github.com/rossoctl/moca/issues/686), operator steps in
-[dispatch archetypes](../concepts/dispatch-archetypes.md)); C has no design
+[dispatch archetypes](../harness/concepts/dispatch-archetypes.md)); C has no design
 ([#536](https://github.com/rossoctl/moca/issues/536)) and no P6 equivalent.
