@@ -32,7 +32,7 @@
 # on its own and re-registers every live VM within seconds; open tunnels are severed.
 #
 # SH_VMM=cloud-hypervisor: the worker refuses egress on CHV by name, so such a host must drop
-# MOCA_EGRESS_CONTROL_SOCK from microvm-worker.service with a drop-in (see P4-ON-P6.md).
+# MOCA_EGRESS_CONTROL_SOCK from microvm-worker.service with a drop-in (see docs/operate/harness/microvm-tier.md).
 
 [Unit]
 Description=moca-egress: allowlisted egress proxy for the microVM tier (moca P4.1)
