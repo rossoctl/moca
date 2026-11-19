@@ -1,18 +1,22 @@
+---
+sidebar_position: 6
+---
+
 # Attach a remote sandbox
 
 > **Preview.** A sandbox is a `remote-worker` that **dials out** to the relay, so it can live on another host with no
-> inbound route ([Brain and hands](../harness/concepts/brain-and-hands.md)). Only two remote arrangements are documented for
+> inbound route ([Brain and hands](../../harness/concepts/brain-and-hands.md)). Only two remote arrangements are documented for
 > P6: extra container sandboxes on the same host or cluster, and a microVM host attached to an OpenShift relay. Running
 > a container sandbox on an unrelated host against a P6 relay is not documented anywhere; the recipe in step 2 is
-> assembled from the pieces and **has not been run**. Read [Sandboxes and tiers](../harness/concepts/sandboxes-and-tiers.md) and
-> the [security model](../reference/security-model.md#isolation-by-tier) and the
-> [multi-user isolation notes](../harness/concepts/multi-user.md#isolation-between-users-today) first: a sandbox you attach joins the
+> assembled from the pieces and **has not been run**. Read [Sandboxes and tiers](../../harness/concepts/sandboxes-and-tiers.md) and
+> the [security model](../../reference/security-model.md#isolation-by-tier) and the
+> [multi-user isolation notes](../../harness/concepts/multi-user.md#isolation-between-users-today) first: a sandbox you attach joins the
 > shared pool and is not bound to any user.
 
 ## What the worker needs
 
 The image is `ghcr.io/rossoctl/moca-remote-worker:latest`. Its settings, with the full list in the
-[configuration reference](../reference/configuration.md#sandbox-workers-go):
+[configuration reference](../../reference/configuration.md#sandbox-workers-go):
 
 | Variable                     | Notes                                                                                            |
 | ---------------------------- | ------------------------------------------------------------------------------------------------ |
@@ -70,9 +74,9 @@ sudo podman exec sh-redis redis-cli HGET sh:sandbox:records byo_1
 
 A tiered record carries the label `moca.dev/tier`. The label only narrows placement when the tier is declared in
 `SH_SANDBOX_TIERS` on both the supervisor and the control plane and the session picks it (`--option sandboxTier=...`);
-with no tiers declared, labels are ignored. See [choosing a tier](manage-multi-user-sessions.md#4-choose-a-sandbox-tier). Stopping the worker clears the record without any manual deletion.
+with no tiers declared, labels are ignored. See [choosing a tier](multi-user.md#4-choose-a-sandbox-tier). Stopping the worker clears the record without any manual deletion.
 Relay-side, the relay logs presence-write retries and token problems (`relay token for <id> unreadable`); see
-[Observability](../operations/observability.md#logs).
+[Observability](../day-2/observability.md#logs).
 
 ## 4. Network and TLS
 
@@ -117,7 +121,7 @@ sudo deploy/microvm/setup-microvm.sh --remote ~/moca-p4-<id>
 
 The host needs outbound TCP 443 to the relay Route. `setup.sh` refuses this on Kind and on the single-namespace OpenShift
 target. To revoke a host, remove its id from `SH_P4_SANDBOX_IDS`; restarting the relay drops attached hosts. See
-[`deploy/k8s/README.md`](../operate/harness/kubernetes.md) and [P4 on P6](../operate/harness/microvm-tier.md).
+[`deploy/k8s/README.md`](kubernetes.md) and [P4 on P6](microvm-tier.md).
 
 ## Not supported
 

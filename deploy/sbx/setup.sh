@@ -18,7 +18,7 @@
 #                           SBX_OIDC_REDIRECT_URI are (SBX_OIDC_SCOPE optional), all written to
 #                           moca-settings, which the base's env wiring reads; and the client secret
 #                           must already sit in a Secret named moca-oidc, key SH_OIDC_CLIENT_SECRET
-#                           -- setup.sh never touches it (docs/guides/oidc-login.md). Subjects
+#                           -- setup.sh never touches it (docs/operate/oidc-login.md). Subjects
 #                           in SBX_ALLOWED_SUBJECTS and SBX_ADMIN_SUBJECTS are then oidc:<provider
 #                           sub> entries, per the control plane's subject grammar; a mixed list is
 #                           accepted, so a GitHub enrollment survives the switch

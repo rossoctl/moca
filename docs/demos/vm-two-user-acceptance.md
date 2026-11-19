@@ -2,7 +2,7 @@
 
 > **Preview.** Run by one person with two GitHub accounts on one laptop. It predates the `mocactl` installer (use the
 > one-line installer in [Get started](../get-started/index.md)) and says the container worker ignores the workspace key,
-> which is out of date. The task version is [Manage multi-user sessions](../guides/manage-multi-user-sessions.md).
+> which is out of date. The task version is [Manage multi-user sessions](../operate/harness/multi-user.md).
 > Labels: [Maturity and lifecycle](../reference/maturity-and-lifecycle.md).
 
 > **The claim:** two people, each on their own laptop with their own GitHub account, log in to the
