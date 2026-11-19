@@ -169,9 +169,9 @@ export async function cmdSpawn(rt: Runtime, io: Io, opts: SpawnOptions): Promise
   // Liveness-gated, not a bare non-terminal count: a stale `running` or `unknown` row — exactly
   // what an unreconciled crash leaves behind — would otherwise hold a slot for good and wedge
   // `spawn` permanently. A child that is gone holds nothing.
-  // shortcut: an async row has no child to probe, so it holds its slot until `subagents` reads the
-  // turn and writes a terminal state. Revisit if the turn state is worth reading here — it costs a
-  // round trip per row, which is what this preflight exists to avoid.
+  // shortcut: an async row has no child to probe, so it holds its slot until `subagents` or `get`
+  // reads the turn and writes a terminal state — both do. Revisit if the turn state is worth
+  // reading here too: it costs a round trip per row, which is what this preflight exists to avoid.
   const running = ledger
     .readAll()
     .filter((r) => !isTerminalState(r.lastKnownState))
@@ -735,7 +735,8 @@ async function readLeafResult(
   // shortcut: the sessionId may well not be ours (another machine spawned it), in which case there
   // is no row and this reads the sync path — an async turn spawned elsewhere is invisible to `get`.
   // Revisit with `get --turn ID`, or by asking the control plane for the session's turns.
-  const record = (opts.ledger ?? openLedger(rt.paths.subagentsFile)).find(opts.sessionId);
+  const ledger = opts.ledger ?? openLedger(rt.paths.subagentsFile);
+  const record = ledger.find(opts.sessionId);
   const turnId = record?.turnId;
   let token: SessionToken | undefined;
   const read = async (): Promise<LeafResultBody | 'queued'> => {
@@ -769,7 +770,21 @@ async function readLeafResult(
       io.err(describeError(err));
       return 1;
     }
-    if (raw !== 'queued' || !opts.wait) return raw;
+    if (raw !== 'queued') {
+      // Record what we just read, for an async row. `cmdSubagents`'s persist loop is otherwise the
+      // only writer of a turn's state, so a subagent collected with `get` would go on holding its
+      // `--max-concurrent` slot — the `spawn --async` ×N, `get` each, spawn more workflow would
+      // refuse at the cap with every one of those subagents already done (#922 review). The sync
+      // path needs none of this: the detached worker records its own outcome.
+      if (record?.turnId !== undefined) {
+        const view = terminalFromBody(raw);
+        if (view.state !== record.lastKnownState || view.detail !== record.stateDetail) {
+          ledger.updateState(opts.sessionId, view.state, { detail: view.detail, now: rt.now() });
+        }
+      }
+      return raw;
+    }
+    if (!opts.wait) return raw;
     const hopeless = record && noResultComing(record, rt.now());
     if (hopeless) {
       const detail = sanitizeRemote(hopeless);

@@ -209,13 +209,17 @@ function sequenceTransport(resps: unknown[]): LeafTransport {
   } as unknown as LeafTransport;
 }
 
-/** A ledger holding at most the one row `--wait` looks up. */
-function ledgerWith(record?: LedgerRecord): Ledger {
+/** A ledger holding at most the one row `get` looks up, recording what is written back. */
+function ledgerWith(record?: LedgerRecord): Ledger & { updates: unknown[] } {
+  const updates: unknown[] = [];
   return {
+    updates,
     find: () => record,
     readAll: () => (record ? [record] : []),
     append: () => {},
-    updateState: () => {},
+    updateState: (sessionId, lastKnownState, opts) => {
+      updates.push({ sessionId, lastKnownState, detail: opts?.detail });
+    },
     compact: () => {},
   };
 }
@@ -518,5 +522,37 @@ describe('cmdGet on an async row', () => {
     expect(r).toBe(1);
     expect(err.join('\n')).toContain('has not finished yet');
     expect(turns.readTurnState).toHaveBeenCalledTimes(3);
+  });
+
+  it('records the terminal state it read, so the row stops holding a --max-concurrent slot', async () => {
+    const { rt } = makeRt(scratch);
+    const { io } = makeIo();
+    const turns = {
+      readTurnState: vi.fn(async () => ({ status: 'failed' as const, reason: 'caps_exceeded' })),
+      collect: vi.fn(async (_s: string, _t: string, body: any) => body),
+    };
+    const ledger = ledgerWith(asyncRow());
+    const r = await cmdGet(rt, io, baseOpts({ turns, outDir: scratch, ledger }));
+    expect(r).toBe(1);
+    expect(ledger.updates).toEqual([
+      { sessionId: 'sess-abc', lastKnownState: 'failed', detail: 'caps_exceeded' },
+    ]);
+  });
+
+  it('leaves a sync row to its own worker to record', async () => {
+    const { rt } = makeRt(scratch);
+    const { io } = makeIo();
+    const ledger = ledgerWith(runningRow({ childPid: process.pid }));
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({
+        transport: fakeTransport({ status: 'responded', text: 'sync' }),
+        outDir: scratch,
+        ledger,
+      }),
+    );
+    expect(r).toBe(0);
+    expect(ledger.updates).toEqual([]);
   });
 });
