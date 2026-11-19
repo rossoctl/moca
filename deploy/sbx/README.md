@@ -319,4 +319,4 @@ covers it end to end:
     mocactl sbx login --control-plane-url https://<api host>
     cd <repository> && mocactl sbx up
 
-To call the gRPC API directly, see [the direct-client guide](../../docs/api/sandbox-v1-direct-client.md).
+To call the gRPC API directly, see [the direct-client guide](../../docs/sandbox/how-to/direct-api.md).

@@ -1,0 +1,65 @@
+# Docs site build: does this change still publish and build as rossoctl.dev's Moca section?
+#
+# rossoctl.dev (rossoctl/.github) syncs this repository's docs/ at build time and publishes it at
+# /moca/*. scripts/check-docs-site.sh runs that sync and build against this checkout -- the same
+# script, the same publish guard, the site's own main -- and fails when the Moca section would be
+# held back, would not build, or would carry a broken link or anchor. The `docs` job in ci.yml
+# covers strings and relative links offline; this covers the site itself.
+name: Docs site
+
+on:
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'scripts/check-docs-site.sh'
+      - '.github/workflows/docs-site.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-site-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build the rossoctl.dev Moca section
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The site's main, as its deploy builds it. Public repository: no token needed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: rossoctl/.github
+          ref: main
+          path: .site
+          persist-credentials: false
+
+      # Node 20 and npm ci, as rossoctl/.github's deploy.yaml does.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v6
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: .site/package-lock.json
+
+      - name: Install the site's dependencies
+        working-directory: .site
+        run: npm ci --no-audit --no-fund
+
+      - name: Sync this docs/ into the site and build it
+        env:
+          LOG_DIR: ${{ runner.temp }}/docs-site
+        run: scripts/check-docs-site.sh .site
+
+      - name: Keep the logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docs-site-logs
+          path: ${{ runner.temp }}/docs-site
+          retention-days: 7

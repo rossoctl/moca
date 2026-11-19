@@ -56,6 +56,6 @@ Docker Compose, as a trial.
 ## Next
 
 - New to the ideas? Read [Brain and hands](../concepts/brain-and-hands.md) and
-  [What the sandbox service gives you](../sandbox/user-guide.md#1-what-you-get).
+  [What the sandbox service gives you](../sandbox/user-guide.md#what-you-get).
 - Checking maturity before you commit? Read
   [Maturity and lifecycle](../reference/maturity-and-lifecycle.md).
