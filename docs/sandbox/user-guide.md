@@ -49,5 +49,9 @@ handling](concepts/isolation.md).
 ## Concepts and reference
 
 - [Isolation and data handling](concepts/isolation.md) and [Limits](concepts/limits.md).
+- [Templates, builds and activation](concepts/templates.md): what a build, a tag and an activation
+  lease are, and the states a build goes through.
 - [`mocactl sbx` reference](reference/cli-sbx.md): every command, environment variable and exit
   code, generated from the CLI.
+- [Template API](reference/templates-api.md): the template routes, error codes, policy rule ids and
+  quotas.

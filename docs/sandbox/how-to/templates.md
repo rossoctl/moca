@@ -71,7 +71,9 @@ has changes not yet pulled, so a plain `rm` refuses it. Pull what you want to ke
 another build; `templates edit ID` changes its description and visibility. `mocactl sbx templates
 retire my-python --wait` returns once no host holds it; `--build B` retires one build. A retire is
 refused while a live sandbox runs on the build, or an active Moca Pi session is pinned to it
-(`409 build_in_use`): delete those first. A create after a retire answers `410 template_retired`.
+(`409 build_in_use`): delete those first. A sandbox create naming a retired build answers
+`410 template_retired`. A `templates create` of your own retired id is not refused: it queues a
+new build of it.
 
 **Waits and their exit.** `follow` waits up to 3600 s, `retire --wait` 900 s (past the 600 s a
 host keeps shipping an ended sandbox's egress before it removes the build, plus a few host polls);
@@ -98,3 +100,40 @@ first and prints `old -> new` and the record written; if the value changed betwe
 the write (another admin at the same time), it says so and exits 1: check it and write again.
 `mocactl sbx templates quota TARGET …` sets a subject's template quotas, and `templates transfer ID
 SUBJECT` hands a template to another owner.
+
+## Pin a session to a build
+
+A Moca Pi session (`mocactl run`, not a `mocactl sbx` sandbox) can name a template too, on a
+deployment whose control plane serves sessions and keeps a template store, such as one on the
+`combined` route profile. Name it once, when the session is created, in the same forms a sandbox
+takes (`ID`, `ID:TAG` or `ID@BUILD`):
+
+```bash
+mocactl sbx templates activate my-python --wait
+mocactl run "fix the failing test" --option sandboxTemplate=my-python@sha256:<64 hex>
+```
+
+- The reference resolves to one registered build at creation, kept for the session's life: the
+  session shows `sandboxTemplate`, `sandboxBuildId` and `templateManifestHash`. `mocactl` sends a
+  value its list does not show as given, and the control plane judges it (`400 unknown_template`).
+  `--option` is ignored when resuming a session.
+- Its turns run only on workers of that build. With none attached, a turn is refused
+  `503 sandbox_unavailable`, which a retry can clear. On an inactive build, the session create answers
+  `409 template_not_active`, and on the `combined` profile it starts the activation only for a
+  subject enrolled for sandboxes (`403 not_enrolled` otherwise), so activate it first, as above.
+- The harness runs the build's own seed once in the session's workspace, before the first tool
+  call; the turn's `sandbox.seed` says `{source: build, buildId}`. After every turn, the
+  result's `workspace` holds the whole diff from the seed's baseline commit; a diff over
+  `SH_TURN_PATCH_MAX_BYTES` (4 MiB by default) is left out, `patchRefused: too_large`, never cut
+  ([Sandboxes and tiers](../../harness/concepts/sandboxes-and-tiers.md#templates)).
+- An active session pinned to a build blocks its retire (`409 build_in_use`): delete it when you
+  are done (`mocactl sessions delete ID`).
+
+## From your own code
+
+A client that calls the REST API directly sees the same templates, builds and leases. Every route,
+error code, policy rule id and quota is in the [Template API](../reference/templates-api.md), and
+what each build status and readiness means is in
+[Templates, builds and activation](../concepts/templates.md).
+
+All the flags: [`mocactl sbx` reference](../reference/cli-sbx.md).
