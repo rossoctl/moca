@@ -12,7 +12,7 @@
 
 ## Context
 
-Async fan-out — Archetype A of [`../concepts/dispatch-archetypes.md`](../concepts/dispatch-archetypes.md)
+Async fan-out — Archetype A of [`../concepts/dispatch-archetypes.md`](../harness/concepts/dispatch-archetypes.md)
 — is submitting N leaf turns that run later, draining them at a concurrency cap below N, and
 collecting per-leaf results. Its only implementation was `leaf-job.ts`, a Redis Streams drainer run
 as a KEDA `ScaledJob`, and it existed on the Knative/KEDA deployment path alone.

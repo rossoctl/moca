@@ -2,9 +2,9 @@
 
 > **Preview.** Describes the P6 runtime as of `main` on 2026-10-12. Variable names keep their
 > historical prefixes (`SH_*`, `KAGENTI_*`, `MOCA_*`); they are listed as they exist in the code.
-> Each row is taken from the code that reads it. The deployment READMEs ([`deploy/vm`](../../deploy/vm/README.md),
-> [`deploy/k8s`](../../deploy/k8s/README.md), [`deploy/compose`](../../deploy/compose/README.md),
-> [`deploy/microvm`](../../deploy/microvm/P4-ON-P6.md)) say how each path sets these; the env
+> Each row is taken from the code that reads it. The deployment READMEs ([`deploy/vm`](../operate/harness/single-vm.md),
+> [`deploy/k8s`](../operate/harness/kubernetes.md), [`deploy/compose`](../operate/harness/compose.md),
+> [`deploy/microvm`](../operate/harness/microvm-tier.md)) say how each path sets these; the env
 > templates are in `deploy/vm/env/*.env.example`.
 
 ## Conventions
@@ -151,7 +151,7 @@ caching off raises the billed input tokens of a long session.
 ## Worker: Context Service workloads (optional)
 
 Enabled only when `MOCA_CONTEXT_WORKLOADS_ENABLED=1` and `CONTEXT_SERVICE_URL` is set; otherwise
-`/workloads` returns 501. See [`docs/context-service.md`](../context-service.md).
+`/workloads` returns 501. See [`docs/harness/how-to/workloads.md`](../harness/how-to/workloads.md).
 
 | Variable                                                    | Default                    | Notes                                                                                                           |
 | ----------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------- |
@@ -171,7 +171,7 @@ Enabled only when `MOCA_CONTEXT_WORKLOADS_ENABLED=1` and `CONTEXT_SERVICE_URL` i
 These settings are checked per request, not at boot: a missing `CONTEXT_SERVICE_TOKEN` or URL returns
 500 `workloads_misconfigured`.
 
-Workloads with sandboxes of their own (phase 2, [`docs/context-service.md`](../context-service.md),
+Workloads with sandboxes of their own (phase 2, [`docs/harness/how-to/workloads.md`](../harness/how-to/workloads.md),
 "Own sandboxes"), off unless `MOCA_PROVISIONER_URL` is set:
 
 | Variable                          | Default     | Notes                                                                        |
@@ -436,7 +436,7 @@ header is authoritative.
   most, in seconds: with a control plane that sends no `starting`, the agent's own starts; with one,
   a listed worker not attached after it is stuck and holds no slot; default 300), `SBX_IDLE_GRACE_S` (how long a
   released build's running worker is kept, in seconds; default 0, off; at most 86400),
-  `SBX_REGISTRY` (`deploy/sbx/RUNBOOK.md`, the template host agent). `deploy/sbx/setup.sh`'s
+  `SBX_REGISTRY` ([the runbook](../operate/sandbox-service/runbook.md), the template host agent). `deploy/sbx/setup.sh`'s
   `SBX_TEMPLATE_HOSTS` lists the hosts and writes each one's bundle.
 
 ## Known inconsistencies

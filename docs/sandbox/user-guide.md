@@ -10,8 +10,8 @@ sidebar_label: Overview
 
 This guide takes you from nothing installed to an agent's work applied in your own repository. You
 need no moca background. New here? The [quickstart](quickstart.md) is the five-step version.
-Operators should read [the runbook](../../deploy/sbx/RUNBOOK.md) instead; to look into a member's
-problem, its [Reproducing a member's issue](../../deploy/sbx/RUNBOOK.md#reproducing-a-members-issue).
+Operators should read [the runbook](../operate/sandbox-service/runbook.md) instead; to look into a member's
+problem, its [Reproducing a member's issue](../operate/sandbox-service/runbook.md#reproducing-a-members-issue).
 
 ## What you get
 

@@ -17,7 +17,7 @@ and the code that enforces it (`packages/control-plane/src/template-policy.ts`, 
 changes in the same pull request. A deployment's own choices (which profiles it offers, which
 registries and repositories it admits, whose gate records it trusts, its quotas) are not rule
 changes: an admin sets them in the stored policy (`PUT /v1/policy`, sent with `?expect=` the digest
-read, as in the [RUNBOOK](../../RUNBOOK.md) §5), and each change is a `policy`
+read, as in the [the runbook](../../../../docs/operate/sandbox-service/runbook.md) §5), and each change is a `policy`
 provenance record naming who made it ([`PROCESS.md`](PROCESS.md), step 0). A change that widens
 the policy (a trusted gate record, a registry or repository, a profile added or loosened) needs an
 admin named in the settings (`SBX_ADMIN_SUBJECTS`); an admin granted through the API may only narrow

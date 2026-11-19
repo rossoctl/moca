@@ -18,8 +18,8 @@ plane and one build (§8).
 - **Everything for templates is in [this folder](README.md):** the tools, the two sample specs,
   their tests, and pointers to the related files elsewhere.
 - The short reference for the same steps is [`deploy/sbx/template-onboarding/ONBOARDING.md`](ONBOARDING.md).
-  Deploying the sandbox service itself is [`deploy/sbx/README.md`](../README.md) and
-  [`RUNBOOK.md`](../RUNBOOK.md); using a sandbox is the
+  Deploying the sandbox service itself is [Install the sandbox service](../../../docs/operate/sandbox-service/install.md) and
+  [the runbook](../../../docs/operate/sandbox-service/runbook.md); using a sandbox is the
   [user guide](../../../docs/sandbox/user-guide.md); templates in Moca's own agent sessions are designed in
   [`docs/specs/2026-10-30-session-sandbox-templates-design.md`](../../../docs/specs/2026-10-30-session-sandbox-templates-design.md).
 - **Every host and registry below is a placeholder:** `sbx-api.example.com`, `registry.example.com`.
@@ -204,7 +204,7 @@ This spec is `examples/default.json` in this folder:
 ```
 
 `egress: true` gives the guest the host's allowlisted egress (GitHub by default,
-[RUNBOOK](../RUNBOOK.md#guest-egress)). Use `false` for a template that must stay offline.
+[the runbook](../../../docs/operate/sandbox-service/runbook.md#guest-egress)). Use `false` for a template that must stay offline.
 
 ### 4.2 Build and probe on the KVM host
 
@@ -267,7 +267,7 @@ take goes through the API (`POST /v1/templates`) and `mocactl sbx`. Moca builds 
 template on a KVM host and registers it by policy; nobody approves it. One step is still an
 operator's: the host agent installs no worker, so an operator installs each registered build's
 worker (its id in `SBX_WORKERS`, `setup.sh` for its relay token, then `install-host.sh` on the host
-that built it; [RUNBOOK](../RUNBOOK.md#the-template-host-agent)). Until then an activation's host
+that built it; [the runbook](../../../docs/operate/sandbox-service/runbook.md#the-template-host-agent)). Until then an activation's host
 reports it `refused` (`worker not installed`). Sections 4 and 5 are the operator's path for the same
 result.
 
@@ -616,7 +616,7 @@ names the builds it narrowed.
   events that arrive in the 600 s after the end produce a later `sandbox` record with
   `state: egress`. Check a saved copy only once the log is `sealed` (600 s after the end):
   `mocactl sbx egress ID --verify`, and `--ndjson` for the log to give `verify-provenance.py
---egress` ([RUNBOOK](../RUNBOOK.md#egress-records)). Paths are logged without query, fragment or
+--egress` ([the runbook](../../../docs/operate/sandbox-service/runbook.md#egress-records)). Paths are logged without query, fragment or
   userinfo, and an injected credential appears by name only, but a secret a guest puts in a URL path
   segment is logged as sent. With egress off (both recorded paths), the log is empty, complete, and
   its digest is the sha256 of no bytes (seen on both paths); a log with events is _(unverified)_ on
@@ -861,7 +861,7 @@ Moca's own agent sessions (Moca Pi, P6) can name a template too: `mocactl run --
 sandboxTemplate=ID`. A worker serves a template when `SANDBOX_TEMPLATE` is set; a session with no
 template never lands on one; the harness runs the seed once, before the agent's first tool call.
 A templated P4 worker is installed beside the main one with `setup-microvm.sh --template ID
---snapshot DIR`; set-up is in [`P4-ON-P6.md`](../../microvm/P4-ON-P6.md), "A templated P4 worker".
+--snapshot DIR`; set-up is in [MicroVM tier (P4)](../../../docs/operate/harness/microvm-tier.md), "A templated P4 worker".
 Only one worker per host may use guest egress (moca-egress keys VMs by id, which workers share), so
 the installer refuses `--egress` beside another worker that uses it.
 Checked live on a Moca-VM (P6+P4), with a scripted mock model: a session naming
@@ -936,7 +936,7 @@ budget allows far fewer commands at once than memory holds: raise `--budget-mb` 
 4 GiB guest). With snapshots on a general-purpose cloud block volume of about 125 MB/s, cold 4 GiB
 starts one at a time took 78 s on average (at most 120 s; the runbook's cold-start pacing has the
 measurement). Two settings shorten it: the verify cache,
-which spares the re-hash of files already checked on the host (`P4-ON-P6.md`), and
+which spares the re-hash of files already checked on the host ([MicroVM tier (P4)](../../../docs/operate/harness/microvm-tier.md)), and
 `install-host.sh`'s snapshot read-ahead (`SBX_READ_AHEAD_KB`, the runbook's "Snapshot read-ahead").
 A host starts at most `SBX_START_CONCURRENCY` workers at once; a client's activation waits its turn
 (`activating`, `queued`, §4b.4).

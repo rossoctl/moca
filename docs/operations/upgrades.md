@@ -1,6 +1,6 @@
 # Upgrades
 
-> **Preview.** For P6 on Kubernetes ([`deploy/k8s`](../../deploy/k8s/README.md)). The repository documents no
+> **Preview.** For P6 on Kubernetes ([`deploy/k8s`](../operate/harness/kubernetes.md)). The repository documents no
 > rollback procedure; what is below is what the scripts and manifests do.
 
 ## Upgrading means passing a new image
@@ -70,7 +70,7 @@ period is only an outer bound. Practically:
   bundle format ([#510](https://github.com/rossoctl/moca/issues/510)). Nothing enforces this order, and the
   supervisor, control plane and relay use the same image, so one `--image` bump moves all three and they roll in
   parallel (the rule is in [ADR-0038](../adrs/0038-mocactl-config-bundle-promotion.md) and the
-  [promote guide](../guides/promote-claude-workflow.md)). For a release whose notes say it changes config-bundle handling, roll the supervisor
+  [promote guide](../harness/how-to/promote-claude-workflow.md)). For a release whose notes say it changes config-bundle handling, roll the supervisor
   first (see below). Do not split the image to get this ordering.
 - **Tier lists must match.** `SH_SANDBOX_TIERS` and `SH_SANDBOX_DEFAULT_TIER` are read by both from the same
   ConfigMap.

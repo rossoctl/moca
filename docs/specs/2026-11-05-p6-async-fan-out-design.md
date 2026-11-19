@@ -26,7 +26,7 @@ measured, and what proves it. Covers all three P6 deployments (`deploy/k8s`, `de
 ## 1. Problem
 
 Async fan-out — Archetype A of
-[`docs/concepts/dispatch-archetypes.md`](../concepts/dispatch-archetypes.md) — means submitting N
+[`docs/harness/concepts/dispatch-archetypes.md`](../harness/concepts/dispatch-archetypes.md) — means submitting N
 leaves that run later, draining them at a concurrency cap below N, and collecting per-leaf results.
 It is how an orchestrator dispatches work that runs for minutes without holding N long-lived HTTP
 connections.
@@ -1263,7 +1263,7 @@ it adds is the schedule. Its design should cite this document for both.
   limits; the one gap it names, collecting N results without N polls, belongs to #392's event
   stream.
 - Documentation: ADR-0041's "Still owed" note, the Archetype A row and section of
-  `dispatch-archetypes.md`, and the `async_removed` entry in `docs/reference/http-api.md` (#690).
+  `dispatch-archetypes.md`, and the `async_removed` entry in `docs/harness/reference/http-api.md` (#690).
   `MOCA_ASYNC_QUEUED_PER_OWNER` (§4.3) joins `docs/reference/configuration.md`'s table with the code
   that reads it, as that file's own rule requires — it lists variables as they exist in the code.
 - Retiring #380's interim sync-disconnect contract (§5.5), which belongs to #389's scope item 5. The

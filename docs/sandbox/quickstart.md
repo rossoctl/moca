@@ -30,7 +30,7 @@ You need:
 
 - **Node.js 22 or later** and `git`.
 - A **sandbox service deployment** and its URL, `https://<api host>`. Moca is self-hosted:
-  [deploy one](../../deploy/sbx/README.md), or ask whoever runs yours.
+  [deploy one](../operate/sandbox-service/install.md), or ask whoever runs yours.
 - A GitHub account **enrolled** in that deployment (its allowed subjects).
 - Claude Code or OpenCode. (Codex and IBM Bob work too. See
   [the user guide](how-to/connect-agents.md#codex-cli).)

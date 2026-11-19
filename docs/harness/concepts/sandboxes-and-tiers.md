@@ -1,7 +1,7 @@
 # Sandboxes and tiers
 
 > **Preview.** Describes the P6 runtime on `main` as of 2026-10-12. The microVM tier is implemented with
-> documented limits; see [`deploy/microvm/P4-ON-P6.md`](../../deploy/microvm/P4-ON-P6.md).
+> documented limits; see [MicroVM tier (P4)](../../operate/harness/microvm-tier.md).
 
 A **sandbox** is where a session's tools run ([Brain and hands](brain-and-hands.md)). A **tier** is an
 operator-defined class of sandbox. A deployment can offer one tier or several, and each session picks one
@@ -39,7 +39,7 @@ From the verified install notes: the guest has no network device, and reaches on
 call starts a fresh VM, by design (ADR-0035), and destroying it dominates latency (#307); an idle
 workspace is silently reset after its idle time, which the turn is not told about (#338, open); and nothing binds a `workspace_key` to a user, so any holder
 of the relay exec token can target any workspace. Warm standby VMs, the design that keeps VM creation off the
-request path, are in [ADR-0035](../adrs/0035-per-exec-microvm-warm-standby.md); the install notes do not
+request path, are in [ADR-0035](../../adrs/0035-per-exec-microvm-warm-standby.md); the install notes do not
 verify them, and no published density or latency figures exist in this repository.
 
 ## How a sandbox joins
@@ -93,9 +93,9 @@ saturated the turn gets 503 `sandbox_unavailable` with `Retry-After`.
   the workspace's `.moca-seed.log`. A seed must be safe to re-run: a failed one leaves no marker.
 - An affine sandbox that now serves another template (or none) moves the session at once, with reason
   `retiered`. The design is
-  [`docs/specs/2026-10-30-session-sandbox-templates-design.md`](../specs/2026-10-30-session-sandbox-templates-design.md);
+  [`docs/specs/2026-10-30-session-sandbox-templates-design.md`](../../specs/2026-10-30-session-sandbox-templates-design.md);
   installing a templated P4 worker is in
-  [`deploy/microvm/P4-ON-P6.md`](../../deploy/microvm/P4-ON-P6.md#a-templated-p4-worker-session-templates).
+  [MicroVM tier (P4)](../../operate/harness/microvm-tier.md#a-templated-p4-worker-session-templates).
 
 An affinity move never loses a workspace silently: the session either waits or is told it was reset. Idle
 reclaim (`SH_WORKSPACE_IDLE`) is still silent on both tiers (#338).

@@ -1,7 +1,7 @@
 # Delegate tasks to moca
 
 > **Preview.** The `moca-delegate-task` skill is implemented but not yet declared Stable;
-> interfaces and limits may change. Known limits: [Runs](../../docs/context-service.md#runs).
+> interfaces and limits may change. Known limits: [Runs](../../docs/harness/how-to/workloads.md#runs).
 
 `moca-delegate-task` teaches a local agent harness, such as Claude Code or Codex, to hand bounded
 tasks to moca. The agent packs a local directory with `contextctl`, uploads it once as a moca
@@ -12,7 +12,7 @@ read-only or as a writable copy for that task.
 ## Requirements
 
 - [`mocactl`](../../packages/mocactl/README.md), logged in to a moca deployment that has workloads
-  turned on ([Context Service and workloads](../../docs/context-service.md))
+  turned on ([Context Service and workloads](../../docs/harness/how-to/workloads.md))
 - [`contextctl`](https://github.com/rossoctl/context-service#install) with `ctx pack`
   ([rossoctl/context-service#56](https://github.com/rossoctl/context-service/pull/56), workspace
   bundles)
@@ -56,4 +56,4 @@ errors, one task per package, and summarize the findings with file references.
 
 - [`SKILL.md`](SKILL.md): the instructions the agent follows
 - [How delegation works inside moca](references/internal-flow.md)
-- [Context workflows](../../docs/concepts/context-workflows.md): this skill covers workflows 1 and 2
+- [Context workflows](../../docs/harness/concepts/context-workflows.md): this skill covers workflows 1 and 2

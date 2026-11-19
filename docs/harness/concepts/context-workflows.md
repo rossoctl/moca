@@ -1,14 +1,14 @@
 # Context workflows
 
 > **Preview.** This is a planning list, not a description of shipped behavior: the Status column
-> says which workflows work today. Known limits of what has shipped: [Runs](../context-service.md#runs).
+> says which workflows work today. Known limits of what has shipped: [Runs](../how-to/workloads.md#runs).
 
 Moca runs agent tasks remotely. Many of those tasks need context: files, repositories, memory or
 data that the task works from. This page lists the ways we expect people to move context into and
 out of moca, and what each one needs. It is a living list; propose changes in a PR.
 
 A **workload** is an environment for delegated tasks: where they run and the context they work from
-([Context Service and workloads](../context-service.md)). Today a workload belongs to the user who created
+([Context Service and workloads](../how-to/workloads.md)). Today a workload belongs to the user who created
 it. Context is stored by [Context Service](https://github.com/rossoctl/context-service).
 
 ## Workflows
@@ -74,7 +74,7 @@ Storage:
   command-line client and delegate skill are designed in
   [#495](https://github.com/rossoctl/moca/issues/495) (one CLI for delegating subagent tasks).
   Today's limits: workload runs are synchronous only, they need a logged-in user, and the routes are
-  off unless the operator enables them (see [Runs](../context-service.md#runs)).
+  off unless the operator enables them (see [Runs](../how-to/workloads.md#runs)).
 - **Planned (#476):** [#476](https://github.com/rossoctl/moca/issues/476) (phase 2: per-workload
   sandboxes and storage).
 - **Planned (#358):** [#358](https://github.com/rossoctl/moca/issues/358) (per-user PVC

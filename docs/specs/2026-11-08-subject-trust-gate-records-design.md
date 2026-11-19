@@ -47,7 +47,7 @@ The default policy keeps `benchmark` as curated, and adds two profiles with `sel
   reason: an agent must not be able to fetch the upstream fix.
 - **`general-self`** is for general users whose sandboxes need the network. The egress it allows is the
   KVM host's allowlisted egress: the allowlist is the host operator's (`MOCA_EGRESS_ALLOW`, the
-  [RUNBOOK's guest egress section](../../deploy/sbx/RUNBOOK.md#guest-egress)), never the template's. No template gets unrestricted network.
+  [RUNBOOK's guest egress section](../operate/sandbox-service/runbook.md#guest-egress)), never the template's. No template gets unrestricted network.
 - Both have the benchmark envelope (4096 MiB, 2 vCPUs).
 
 ## 4. The rules on a self-attested record

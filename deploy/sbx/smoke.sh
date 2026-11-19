@@ -135,7 +135,7 @@ PROMPT='The test suite fails (python3 -m unittest). Fix it with a minimal change
 [[ -n "${SBX_API_URL:-}" ]] || die "set SBX_API_URL=https://<api host> (the sandbox control plane)"
 [[ "$SBX_API_URL" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?/?$ ]] || die "SBX_API_URL must be https://<api host> (got '$SBX_API_URL')"
 homecheck() { # homecheck VAR: a set variable naming a directory
-  [[ -n "${!1:-}" ]] || die "set $1 to a HOME already logged in with \`mocactl sbx login\` (see deploy/sbx/RUNBOOK.md, Live smoke)"
+  [[ -n "${!1:-}" ]] || die "set $1 to a HOME already logged in with \`mocactl sbx login\` (see docs/operate/sandbox-service/runbook.md, Live smoke)"
   [[ -d "${!1}" ]] || die "$1='${!1}' is not a directory"
 }
 homecheck SBX_SMOKE_HOME_A
@@ -505,7 +505,7 @@ in_repo() { local r="$1" old="$PWD"; shift; cd "$r" || { RC=1; return 0; }; "$@"
 # --- Preflight: both logins work, and are two users -----------------------------------------
 
 x ls-a as a ls
-[[ "$RC" == 0 ]] || die "user A (SBX_SMOKE_HOME_A) cannot list sandboxes: $(lastline "$LOGS/ls-a.err") (see deploy/sbx/RUNBOOK.md, Live smoke)"
+[[ "$RC" == 0 ]] || die "user A (SBX_SMOKE_HOME_A) cannot list sandboxes: $(lastline "$LOGS/ls-a.err") (see docs/operate/sandbox-service/runbook.md, Live smoke)"
 if want 2 || ((CRED_B)); then
   x ls-b as b ls
   [[ "$RC" == 0 ]] || die "user B (SBX_SMOKE_HOME_B) cannot list sandboxes: $(lastline "$LOGS/ls-b.err")"

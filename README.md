@@ -35,7 +35,7 @@ curl -s -H 'Content-Type: application/json' -d '{"prompt":"Run uname -a and tell
 
 Next step: the [harness quickstart](docs/harness/quickstart.md).
 
-**Sandbox service.** You need a [sandbox service deployment](deploy/sbx/README.md),
+**Sandbox service.** You need a [sandbox service deployment](docs/operate/sandbox-service/install.md),
 its URL, and a GitHub account enrolled in it:
 
 ```bash
@@ -61,13 +61,13 @@ Next step: the [sandbox quickstart](docs/sandbox/quickstart.md).
 Every deployment path is **Preview**: this is explorative work, and interfaces may change. See
 [Maturity and lifecycle](docs/reference/maturity-and-lifecycle.md).
 
-| Path                                            | Delivers                        | Label                            |
-| ----------------------------------------------- | ------------------------------- | -------------------------------- |
-| [Docker Compose](deploy/compose/README.md)      | Harness (trial)                 | Preview, trial only              |
-| [Single VM](deploy/vm/README.md)                | Harness                         | Preview                          |
-| [Kubernetes / OpenShift](deploy/k8s/README.md)  | Harness                         | Preview, first target for Stable |
-| [MicroVM tier (P4)](deploy/microvm/P4-ON-P6.md) | The harness's microVM sandboxes | Preview                          |
-| [Sandbox service](deploy/sbx/README.md)         | Sandbox service                 | Preview                          |
+| Path                                                         | Delivers                        | Label                            |
+| ------------------------------------------------------------ | ------------------------------- | -------------------------------- |
+| [Docker Compose](docs/operate/harness/compose.md)            | Harness (trial)                 | Preview, trial only              |
+| [Single VM](docs/operate/harness/single-vm.md)               | Harness                         | Preview                          |
+| [Kubernetes / OpenShift](docs/operate/harness/kubernetes.md) | Harness                         | Preview, first target for Stable |
+| [MicroVM tier (P4)](docs/operate/harness/microvm-tier.md)    | The harness's microVM sandboxes | Preview                          |
+| [Sandbox service](docs/operate/sandbox-service/install.md)   | Sandbox service                 | Preview                          |
 
 Roadmap and the evidence behind moca's design: [Project](docs/project/index.md) (a draft).
 

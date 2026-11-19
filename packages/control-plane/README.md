@@ -10,7 +10,7 @@ node --import tsx src/main.ts        # from this directory; tsx resolves from th
 
 Deployments: `deploy/vm/systemd/`, `deploy/k8s/base/control-plane.yaml`
 (Kubernetes) and the `control-plane` profile in
-[`deploy/compose`](../../deploy/compose/README.md#using-mocactl-the-control-plane).
+[`deploy/compose`](../../docs/operate/harness/compose.md#using-mocactl-the-control-plane).
 
 ## Required settings
 

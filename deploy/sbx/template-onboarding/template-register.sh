@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # deploy/sbx/template-onboarding/template-register.sh -- on the operator's machine, add a built template to SBX0's inputs,
-# or retire a worker from them (RUNBOOK §5, steps 2-4, for deployments without a host agent).
+# or retire a worker from them (docs/operate/sandbox-service/runbook.md §5, steps 2-4, for deployments without a host agent).
 #
 #   deploy/sbx/template-onboarding/template-register.sh --env-file FILE RECORD [--apply]
 #   deploy/sbx/template-onboarding/template-register.sh --env-file FILE --retire WORKER_ID [--apply]
@@ -13,11 +13,11 @@
 #
 #   RECORD          adds the record's worker to SBX_WORKERS and its {id, worker, description, tools}
 #                   to the templates file. A template id already listed is an update, versioned
-#                   (RUNBOOK §5): its entry moves to the new worker, and the old worker STAYS in
+#                   (docs/operate/sandbox-service/runbook.md §5): its entry moves to the new worker, and the old worker STAYS in
 #                   SBX_WORKERS so its live sandboxes keep working until it is retired.
 #   --retire W      drops worker W from SBX_WORKERS once no template names it (its token is revoked by
 #                   the next setup.sh; its sandboxes stop working at once: retire it only when it
-#                   serves no live sandbox, RUNBOOK §5).
+#                   serves no live sandbox, docs/operate/sandbox-service/runbook.md §5).
 #   --remove T      drops template T's entry and its worker (the reverse of adding it).
 #
 # A re-run with nothing to change changes nothing and says so. Without --apply it prints the
@@ -79,7 +79,7 @@ WORKERS="$(env_value SBX_WORKERS)"
 [[ -n "$TEMPLATES" && -f "$TEMPLATES" ]] || die "SBX_TEMPLATES_FILE in $ENV_FILE does not name a file"
 jq -e 'type == "array"' "$TEMPLATES" >/dev/null 2>&1 || die "$TEMPLATES is not a JSON list"
 [[ -z "$(env_value SBX_EGRESS_HOSTS)" ]] ||
-  die "$ENV_FILE sets SBX_EGRESS_HOSTS, which names template workers by host: change templates there by hand (RUNBOOK §5)"
+  die "$ENV_FILE sets SBX_EGRESS_HOSTS, which names template workers by host: change templates there by hand (docs/operate/sandbox-service/runbook.md §5)"
 
 has_worker() { [[ " $WORKERS " == *" $1 "* ]]; }
 # Unquoted on purpose: SBX_WORKERS is a space-separated list of ids (WORKER_RE: no glob characters).
@@ -108,7 +108,7 @@ if [[ -n "$RECORD" ]]; then
   elif [[ "$(jq -c --arg id "$ID" '.[] | select(.id == $id)' <<<"$NEW_TEMPLATES")" != "$ENTRY" ]]; then
     NEW_TEMPLATES="$(jq -c --argjson e "$ENTRY" --arg id "$ID" 'map(if .id == $id then $e else . end)' <<<"$NEW_TEMPLATES")"
     if [[ "$old" != "$W" ]]; then
-      CHANGES+=("template $ID moves from $old to $W: $old stays in SBX_WORKERS so its sandboxes keep working; retire it with --retire $old once it serves none (RUNBOOK §5)")
+      CHANGES+=("template $ID moves from $old to $W: $old stays in SBX_WORKERS so its sandboxes keep working; retire it with --retire $old once it serves none (docs/operate/sandbox-service/runbook.md §5)")
     else
       CHANGES+=("template $ID's description or tools updated")
     fi
@@ -181,7 +181,7 @@ fi
 if [[ -n "$RECORD" ]]; then
   egress=''
   [[ "$(jq -r .egress "$RECORD")" == true ]] || egress=' --no-egress'
-  log "then on the KVM host: sudo deploy/sbx/install-host.sh <bundle of $W> --snapshot $(jq -r .snapshot "$RECORD") --budget-mb <at least $(jq -r '.min_budget_mb // "see RUNBOOK §1"' "$RECORD")>$egress"
+  log "then on the KVM host: sudo deploy/sbx/install-host.sh <bundle of $W> --snapshot $(jq -r .snapshot "$RECORD") --budget-mb <at least $(jq -r '.min_budget_mb // "see docs/operate/sandbox-service/runbook.md §1"' "$RECORD")>$egress"
 elif [[ -n "$RETIRE$REMOVE" && -n "${W:-$RETIRE}" ]]; then
   log "then on its KVM host: sudo deploy/sbx/install-host.sh --uninstall ${W:-$RETIRE}"
 fi

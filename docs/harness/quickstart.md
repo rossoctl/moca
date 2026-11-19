@@ -50,6 +50,11 @@ The installer does four things:
 The data plane listens on `http://127.0.0.1:8080`. Redis and the relay aren't published to your
 host.
 
+By default it accepts unauthenticated calls (`SH_REQUIRE_AUTH=false`), so a plain `curl` works.
+Adding the control plane for `mocactl` does not close that: the operator's model credential still
+serves an unauthenticated `curl /turn` unless you set `SH_REQUIRE_AUTH=true` in `.env`. What changes
+is that a present but invalid token is refused.
+
 ## 2. Send a turn
 
 ```bash
@@ -60,7 +65,7 @@ curl -s -H 'Content-Type: application/json' \
 
 The reply is JSON with `response`, `stopReason`, `usage` and `sessionId`. The `uname` command ran
 in the **sandbox container**, not in the worker that runs the agent. This split is moca's
-"[brain and hands](../concepts/brain-and-hands.md)". Copy the `sessionId`.
+"[brain and hands](concepts/brain-and-hands.md)". Copy the `sessionId`.
 
 ## 3. Resume the session
 
@@ -137,9 +142,8 @@ isolation differ.
 
 ## Next
 
-- **Do more:** [First run: resume and stream](../get-started/first-run.md),
-  [the mocactl README](../../packages/mocactl/README.md),
-  [dispatch over the HTTP API](../reference/http-api.md).
-- **Understand:** [Sessions and turns](../concepts/sessions-and-turns.md),
-  [Session multiplexing](../concepts/session-multiplexing.md).
-- **Look up:** [HTTP API](../reference/http-api.md), [mocactl](../reference/cli-mocactl.md).
+- **Do more:** [Set up mocactl against the Compose trial](how-to/set-up-mocactl.md),
+  [Use mocactl](how-to/use-mocactl.md), [dispatch over the HTTP API](reference/http-api.md).
+- **Understand:** [Sessions and turns](concepts/sessions-and-turns.md),
+  [Session multiplexing](concepts/session-multiplexing.md).
+- **Look up:** [HTTP API](reference/http-api.md), [mocactl](reference/cli-mocactl.md).

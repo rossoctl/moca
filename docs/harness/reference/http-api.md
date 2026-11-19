@@ -1,10 +1,10 @@
 # HTTP API guide
 
 > **Preview.** Describes the P6 runtime on `main` as of 2026-11-12. The machine-readable contracts are
-> [`docs/api/openapi.yaml`](../api/openapi.yaml) (control plane) and
-> [`docs/api/harness-openapi.yaml`](../api/harness-openapi.yaml) (data plane); this page explains how
+> [`docs/api/openapi.yaml`](../../api/openapi.yaml) (control plane) and
+> [`docs/api/harness-openapi.yaml`](../../api/harness-openapi.yaml) (data plane); this page explains how
 > they fit together and records behaviour the specs do not. Workload routes are covered in
-> [`docs/context-service.md`](../context-service.md).
+> [`docs/harness/how-to/workloads.md`](../how-to/workloads.md).
 
 ## Two APIs
 
@@ -55,7 +55,7 @@ Send `Authorization: Bearer <session token>`. The token is an Ed25519 JWT checke
 | `POST /run-leaf`, `GET /run-leaf/status` | session token | **Deprecated** aliases of `/runs` and `/runs/status`; log a warning once per process |
 
 The unprefixed `POST /turn` and `POST /runs` are supported, frozen aliases of the `/v1` routes: the same handler, so
-the same auth, body and responses, with no removal date ([change policy](change-policy.md), decision 3). New
+the same auth, body and responses, with no removal date ([change policy](../../reference/change-policy.md), decision 3). New
 features appear under `/v1` only, so the detachable-turn routes have no unprefixed form; a new client should use
 `/v1`. `docs/api/harness-openapi.yaml` describes both aliases.
 
@@ -171,8 +171,8 @@ is the leaf result; both are specified in [Leaf envelope and result](leaf-and-en
   — it is unauthenticated when `SH_REQUIRE_AUTH` is off, which would be a second trust model for one
   queue. Its replacement is the authenticated, owner-scoped `POST /v1/sessions/{id}/turns` with
   `async: true` → `202 {sessionId, turnId}`, designed in
-  [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md) and documented in
-  [`docs/api/openapi.yaml`](../api/openapi.yaml). **That path works**, on one condition: each
+  [ADR-0047](../../adrs/0047-p6-async-fan-out-in-worker-drain.md) and documented in
+  [`docs/api/openapi.yaml`](../../api/openapi.yaml). **That path works**, on one condition: each
   worker needs `SH_ASYNC_DRAIN=1` (off by default) to drain the queue. Under `MOCA_TENANCY=multi` the
   dequeue hands the worker grants instead of a key, so the control plane needs the grant ring and the
   inference listener configured — it refuses to boot without them. Poll
@@ -188,7 +188,7 @@ is the leaf result; both are specified in [Leaf envelope and result](leaf-and-en
 
 ## Control plane
 
-The control-plane routes are listed in [`docs/api/openapi.yaml`](../api/openapi.yaml). In outline:
+The control-plane routes are listed in [`docs/api/openapi.yaml`](../../api/openapi.yaml). In outline:
 
 | Area           | Routes                                                                                                                                                                                                                                             |
 | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -218,7 +218,7 @@ submitted with, however long it waits, because the turn record pins `model` and 
 switch applies to turns submitted after it.
 The id is checked against the credential's catalog (400 `model_unavailable` when it is not listed); when the endpoint
 cannot list its models, the id is accepted unverified and the answer has `modelVerified: false`. Only the two list routes
-answer 503 `model_catalog_unavailable`. These routes came with API 1.1.0; see the [changelog](../api/CHANGELOG.md).
+answer 503 `model_catalog_unavailable`. These routes came with API 1.1.0; see the [changelog](../../api/CHANGELOG.md).
 
 The template read routes came with API 1.4.0 and mount on both route profiles, so a session's brain and a sandbox client
 read the same templates. With `SH_PROVENANCE_DIR` set, templates live in the control plane's template store
@@ -227,12 +227,12 @@ name over its builds, with tags naming builds (`default` is what a bare id names
 readiness from the relay's presence: `active`, `inactive`, or `unknown` when presence cannot be read. A sandbox create
 names `id`, `id:tag` or `id@<build id>`, resolved to one build at creation and kept for the sandbox's life (the Sandbox
 shows `buildId`). A `private` template, like an unknown id or build, answers 404 `template_not_found` to anyone but its
-owner and admins. See the [template lifecycle spec](../specs/2026-11-03-template-lifecycle-and-provenance-design.md).
+owner and admins. See the [template lifecycle spec](../../specs/2026-11-03-template-lifecycle-and-provenance-design.md).
 
 The self-serve routes came with API 1.5.0 and need `SH_PROVENANCE_DIR`. An enrolled client creates a template from an
 image pinned by digest; the deployment's policy (`GET /v1/policy`, set by an admin with `PUT`) checks it before anything
 is queued, and a refusal is 422 `policy_refused` naming the gating rule
-([GATING-RULES.md](../../deploy/sbx/template-onboarding/governance/GATING-RULES.md)). Ids are unique per deployment
+([GATING-RULES.md](../../../deploy/sbx/template-onboarding/governance/GATING-RULES.md)). Ids are unique per deployment
 (409 `template_exists`); quotas are per subject (429 `quota_exceeded` naming which; `GET /v1/quota` shows them). A create
 with the same inputs as a build of the caller's own template answers that build, `reused: true`.
 
@@ -258,7 +258,7 @@ imported from `SH_SANDBOX_TEMPLATES` is never gated (the deployment runs its wor
 Egress records came with API 1.14.0. A sandbox's egress log (`GET /v1/sandboxes/{id}/egress`) holds the KVM host's
 egress proxy events for it, shipped by the host agent; the sandbox's end record names the log's sha256. Paths are logged
 without query, fragment or userinfo, and an injected credential appears by name only, but a secret a guest puts in a URL
-path segment is logged as sent. See the [egress records spec](../specs/2026-11-08-sandbox-egress-records-design.md).
+path segment is logged as sent. See the [egress records spec](../../specs/2026-11-08-sandbox-egress-records-design.md).
 
 Retire came with API 1.18.0. The template's owner, or an admin, retires a whole template (`POST
 /v1/templates/{id}/retire`, with an optional `reason`) or one build (`DELETE /v1/templates/{id}/builds/{build}`). A
@@ -279,7 +279,7 @@ Who is enrolled and who is an admin (API 1.20.0, with a template store): the dep
 reads the list, only an admin named in `SH_ADMIN_SUBJECTS` changes it. Roles and enrollment are evaluated per request, so
 a grant, a revoke or a lapsed `until` takes effect at the subject's next request; a token's `roles` claim reports what
 held when it was minted. A subject is `github:<numeric id>` or `oidc:<provider sub>`, never `test:<n>`. See the
-[enrollment and roles spec](../specs/2026-11-08-enrollment-and-roles-api-design.md).
+[enrollment and roles spec](../../specs/2026-11-08-enrollment-and-roles-api-design.md).
 
 The admin routes came with API 1.21.0. An admin sets the deployment default quota (`PUT /v1/quota/default`) or one
 subject's override (`PUT /v1/quota/{subject}`, `github:<numeric id>` or `oidc:<provider sub>`; a body of `null` removes

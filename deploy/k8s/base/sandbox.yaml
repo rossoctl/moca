@@ -50,7 +50,7 @@ spec:
             # (default 8h) to moca-sandbox-settings, this namespace's copy of the moca-settings key.
             # `optional`: without the ConfigMap the worker's own default, 30m, applies. Disk is not
             # admission-controlled: /workspace is this pod's writable layer, on node disk, and the
-            # idle sweep is what frees it (README §2).
+            # idle sweep is what frees it (docs/operate/harness/kubernetes.md §2).
             - name: SH_WORKSPACE_IDLE
               valueFrom:
                 configMapKeyRef:

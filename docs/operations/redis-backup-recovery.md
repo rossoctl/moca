@@ -22,7 +22,7 @@ with workload sandboxes on, one ACL user for `moca-provisioner` that may only `G
 
 The single-VM and Compose deployments differ: Redis has no named volume there. Whether the image's anonymous
 `/data` volume survives a container recreate is not established by the repository, so assume that removing or
-replacing the container (including re-running `setup-vm.sh`) loses everything. See [Sessions and turns](../concepts/sessions-and-turns.md).
+replacing the container (including re-running `setup-vm.sh`) loses everything. See [Sessions and turns](../harness/concepts/sessions-and-turns.md).
 
 ## What lives in Redis
 

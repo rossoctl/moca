@@ -32,15 +32,15 @@ These are part of the same flow but live with the code they belong to.
 
 **The sandbox service the templates run on** (`deploy/sbx/`):
 
-| File                                             | Role in the flow                                                                                                        |
-| ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| [`../setup.sh`](../setup.sh)                     | the cluster side: mints each worker's token and bundle; a template change restarts the control plane only               |
-| [`../install-host.sh`](../install-host.sh)       | the KVM host: installs (or `--uninstall`s) a template's worker                                                          |
-| [`../host-agent.sh`](../host-agent.sh)           | the KVM host's template agent: builds queued templates, starts and stops their workers, removes retired builds          |
-| [`../templates-check.sh`](../templates-check.sh) | the live check that a client gets the template it asked for, and that templates are isolated                            |
-| [`../README.md`](../README.md)                   | installing the sandbox service                                                                                          |
-| [`../RUNBOOK.md`](../RUNBOOK.md)                 | operating it: §5 templates, [guest egress](../RUNBOOK.md#guest-egress), the template host agent, checking the templates |
-| [`../tests/`](../tests/)                         | the deploy scripts' tests (`install-host.test.sh`, `setup.test.sh`, …)                                                  |
+| File                                                                            | Role in the flow                                                                                                                                           |
+| ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`../setup.sh`](../setup.sh)                                                    | the cluster side: mints each worker's token and bundle; a template change restarts the control plane only                                                  |
+| [`../install-host.sh`](../install-host.sh)                                      | the KVM host: installs (or `--uninstall`s) a template's worker                                                                                             |
+| [`../host-agent.sh`](../host-agent.sh)                                          | the KVM host's template agent: builds queued templates, starts and stops their workers, removes retired builds                                             |
+| [`../templates-check.sh`](../templates-check.sh)                                | the live check that a client gets the template it asked for, and that templates are isolated                                                               |
+| [Install the sandbox service](../../../docs/operate/sandbox-service/install.md) | installing the sandbox service                                                                                                                             |
+| [the runbook](../../../docs/operate/sandbox-service/runbook.md)                 | operating it: §5 templates, [guest egress](../../../docs/operate/sandbox-service/runbook.md#guest-egress), the template host agent, checking the templates |
+| [`../tests/`](../tests/)                                                        | the deploy scripts' tests (`install-host.test.sh`, `setup.test.sh`, …)                                                                                     |
 
 **Snapshots** (`deploy/microvm/`):
 
@@ -48,18 +48,18 @@ These are part of the same flow but live with the code they belong to.
 | -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | [`../../microvm/build-rootfs.sh`](../../microvm/build-rootfs.sh)     | image → rootfs tree (called by `template-build.sh`)                                                                                    |
 | [`../../microvm/build-snapshot.sh`](../../microvm/build-snapshot.sh) | rootfs → golden snapshot; `--verify-command` runs the probe (called by `template-build.sh`)                                            |
-| [`../../microvm/P4-ON-P6.md`](../../microvm/P4-ON-P6.md)             | building snapshots by hand, and a templated P4 worker for Moca sessions                                                                |
+| [MicroVM tier (P4)](../../../docs/operate/harness/microvm-tier.md)   | building snapshots by hand, and a templated P4 worker for Moca sessions                                                                |
 | [`../../microvm/setup-microvm.sh`](../../microvm/setup-microvm.sh)   | Moca-VM (P6+P4): `--template ID --snapshot DIR` installs a templated P4 worker for Moca sessions; `--uninstall-template ID` removes it |
 
 **Using a template:**
 
-| File                                                                                                 | Role in the flow                                                                               |
-| ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| [`docs/sandbox/user-guide.md`](../../../docs/sandbox/user-guide.md)                                  | clients: `mocactl sbx templates`, `create --template`, `run`, agents through `mocactl sbx mcp` |
-| [`docs/concepts/sandboxes-and-tiers.md`](../../../docs/concepts/sandboxes-and-tiers.md)              | templates and tiers in Moca's own agent sessions (`--option sandboxTemplate=ID`)               |
-| `docs/specs/2026-10-30-session-sandbox-templates-design.md`                                          | the design of templates in agent sessions                                                      |
-| `docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md`                                  | the design of the template lifecycle: self-serve creates, activation, provenance               |
-| [The sandbox service design](../../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md) | the design of the sandbox service and its templates                                            |
+| File                                                                                                    | Role in the flow                                                                               |
+| ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| [`docs/sandbox/user-guide.md`](../../../docs/sandbox/user-guide.md)                                     | clients: `mocactl sbx templates`, `create --template`, `run`, agents through `mocactl sbx mcp` |
+| [`docs/harness/concepts/sandboxes-and-tiers.md`](../../../docs/harness/concepts/sandboxes-and-tiers.md) | templates and tiers in Moca's own agent sessions (`--option sandboxTemplate=ID`)               |
+| `docs/specs/2026-10-30-session-sandbox-templates-design.md`                                             | the design of templates in agent sessions                                                      |
+| `docs/specs/2026-11-03-template-lifecycle-and-provenance-design.md`                                     | the design of the template lifecycle: self-serve creates, activation, provenance               |
+| [The sandbox service design](../../../docs/specs/2026-10-15-sbx0-internal-sandbox-service-design.md)    | the design of the sandbox service and its templates                                            |
 
 **Code that implements template selection:** `packages/control-plane/src/sandbox-config.ts`
 (`SH_SANDBOX_TEMPLATES`), `packages/control-plane/src/sandbox-handlers.ts` (`POST /v1/sandboxes

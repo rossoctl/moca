@@ -1,4 +1,4 @@
-# ocp-single's optional Routes (README §12.5). A Component, not files in the parent overlay:
+# ocp-single's optional Routes (docs/operate/harness/kubernetes.md §12.5). A Component, not files in the parent overlay:
 # setup.sh's generated overlay lists it only when SH_ROUTE_DOMAIN is set, so a stack without Routes
 # renders exactly as §12 does. The domain cannot be read at cluster scope with namespace rights,
 # so the hosts stay placeholders here -- the generated overlay patches them to moca.<domain> and

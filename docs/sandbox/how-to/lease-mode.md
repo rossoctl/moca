@@ -19,7 +19,7 @@ over. A **lease mode** keeps the guest between commands instead, so the page cac
 
 **The deployment decides which modes you may pick.** `per-exec` is always allowed; a deployment
 allows only `per-exec` unless its operator lists more (`SBX_MODES_ALLOWED`, in
-[the install reference](../../../deploy/sbx/README.md)). Picking a mode it does not allow is refused (`mode_not_allowed`).
+[the install reference](../../operate/sandbox-service/install.md)). Picking a mode it does not allow is refused (`mode_not_allowed`).
 
 ## Create a sandbox in a lease mode
 

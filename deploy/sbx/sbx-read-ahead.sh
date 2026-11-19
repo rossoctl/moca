@@ -2,7 +2,7 @@
 # deploy/sbx/sbx-read-ahead.sh -- the kernel read-ahead of the block device holding a path (SBX0's
 # $SBX_SRV, where the snapshots live), so a worker's cold start reads its memory file in larger
 # requests. Installed by deploy/sbx/install-host.sh as $SBX_LIBEXEC_DIR/sbx-read-ahead.sh and run at
-# boot by sbx-read-ahead.service (a sysfs write does not survive a reboot); see deploy/sbx/RUNBOOK.md
+# boot by sbx-read-ahead.service (a sysfs write does not survive a reboot); see docs/operate/sandbox-service/runbook.md
 # (Snapshot read-ahead).
 #
 #   sbx-read-ahead.sh resolve PATH     print the read_ahead_kb file of the device holding PATH
