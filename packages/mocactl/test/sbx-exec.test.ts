@@ -1598,7 +1598,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
   });
 
   it('an upgrade since the held token: the process call re-mints once and goes through (P5-R29)', async () => {
-    // The user ran `mocactl sbx mode <id> lease+processes` after the held token was minted.
+    // The user ran `mocactl sbx mode lease+processes <id>` after the held token was minted.
     const m = leaseSession(['lease', 'lease+processes'], { record: () => 'lease+processes' });
     let changed = 0;
     m.client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
@@ -1669,7 +1669,7 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
   });
 
   it('a record still below lease+processes: the §7 refusal naming the sandbox, after one re-mint, sending nothing', async () => {
-    const REFUSAL = `processes not enabled for this sandbox; ask the user to run: mocactl sbx mode ${SBX} lease+processes`;
+    const REFUSAL = `processes not enabled for this sandbox; ask the user to run: mocactl sbx mode lease+processes ${SBX}`;
     const m = leaseSession(['lease'], { record: () => 'lease' });
     await m.connect();
     await m.bash('echo'); // the held token

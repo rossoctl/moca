@@ -1180,7 +1180,7 @@ describe('level 2: tracked processes (plan 5, spec §7)', () => {
   const NINE = ['bash', 'read', 'write', 'edit', 'grep', 'find', 'ls', 'sandbox_info', 'reset'];
   const FOUR = ['process_start', 'process_list', 'process_logs', 'process_stop'];
   const REFUSAL =
-    'processes not enabled for this sandbox; ask the user to run: mocactl sbx mode sbx_0123abcd lease+processes';
+    'processes not enabled for this sandbox; ask the user to run: mocactl sbx mode lease+processes sbx_0123abcd';
   const L2_SENTENCE =
     '`&`, `nohup` and `setsid` do not survive the call, and `process_start` does, when the sandbox allows it.';
   const view = (over: Record<string, unknown> = {}) => ({
@@ -1610,7 +1610,7 @@ describe('level 2: tracked processes (plan 5, spec §7)', () => {
 
 describe('the §7 refusal clears once the user upgrades (fix round 1, P5-R29)', () => {
   const REFUSAL =
-    'processes not enabled for this sandbox; ask the user to run: mocactl sbx mode sbx_0123abcd lease+processes';
+    'processes not enabled for this sandbox; ask the user to run: mocactl sbx mode lease+processes sbx_0123abcd';
   const neverExec: Exec = async () => {
     throw new Error('no command Exec expected');
   };
@@ -1713,13 +1713,13 @@ describe('execFailureText for a process refusal', () => {
   it('names the command without "ask the user" for the CLI (Minor 3)', () => {
     const e = new ProcessError('processes_not_enabled', "this sandbox's mode is lease", '');
     expect(execFailureText(e, { audience: 'cli', sandboxId: 'sbx_0123abcd' })).toBe(
-      'processes not enabled for this sandbox; run: mocactl sbx mode sbx_0123abcd lease+processes',
+      'processes not enabled for this sandbox; run: mocactl sbx mode lease+processes sbx_0123abcd',
     );
     expect(execFailureText(e, { sandboxId: 'sbx_0123abcd' })).toBe(
-      'processes not enabled for this sandbox; ask the user to run: mocactl sbx mode sbx_0123abcd lease+processes',
+      'processes not enabled for this sandbox; ask the user to run: mocactl sbx mode lease+processes sbx_0123abcd',
     );
     expect(execFailureText(e, { audience: 'cli' })).toBe(
-      'processes not enabled for this sandbox; run: mocactl sbx mode <id> lease+processes',
+      'processes not enabled for this sandbox; run: mocactl sbx mode lease+processes <id>',
     );
   });
 

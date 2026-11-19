@@ -515,7 +515,7 @@ port in the static client (`remote-worker/cmd/sbx/notice.go`):
 ## 7. Level 2: tracked processes
 
 New MCP tools, offered only when the mode is `lease+processes` (at other modes a call fails with
-`processes not enabled for this sandbox; ask the user to run: mocactl sbx mode <id> lease+processes`):
+`processes not enabled for this sandbox; ask the user to run: mocactl sbx mode lease+processes <id>`):
 
 | Tool            | Arguments                                                                            | Result                                                                          |
 | --------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
@@ -842,7 +842,7 @@ terminal. The sandbox ID is optional: without it, the sandbox the repository is 
   with `--raw`, the output is passed through as written.
 - **`proc stop (NAME|ID) [--signal S] [ID]`** prints the process's final row.
 - **Below `lease+processes`** the call is refused before sending, from the fresh token's `mode`
-  claim: `sbx: processes not enabled for this sandbox; run: mocactl sbx mode <id> lease+processes`
+  claim: `sbx: processes not enabled for this sandbox; run: mocactl sbx mode lease+processes <id>`
   (P5-R32). The relay and the worker refuse it as well.
 - **`mocactl sbx get`** adds a `processes` row at `lease+processes`, or whenever the worker
   reports processes: the full tracked table, one process per line, then `(as of the last call)`:

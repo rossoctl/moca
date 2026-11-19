@@ -161,7 +161,7 @@ export const TOKEN_EXPIRED_TEXT =
   'if it is long.';
 /** The §7 refusal of a process tool below lease+processes, as the model is told it. */
 export const processesNotEnabledText = (sandboxId: string): string =>
-  `processes not enabled for this sandbox; ask the user to run: mocactl sbx mode ${sandboxId} lease+processes`;
+  `processes not enabled for this sandbox; ask the user to run: mocactl sbx mode lease+processes ${sandboxId}`;
 const CANCELLED = 'cancelled by the client';
 const UP = 'run `mocactl sbx up` for a new one';
 
@@ -240,7 +240,7 @@ function processFailureText(
     case 'processes_not_enabled': {
       const id = o.sandboxId ?? '<id>';
       return o.audience === 'cli'
-        ? `processes not enabled for this sandbox; run: mocactl sbx mode ${id} lease+processes`
+        ? `processes not enabled for this sandbox; run: mocactl sbx mode lease+processes ${id}`
         : processesNotEnabledText(id);
     }
     // A person at a terminal has the sbx proc commands, not the model's tools.
