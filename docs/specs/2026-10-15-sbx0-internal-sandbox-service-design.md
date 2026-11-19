@@ -630,7 +630,7 @@ nothing here changes, and moca does not need Cortex.
 **Published:**
 
 - `proto/sandbox/v1/sandbox.proto`, unchanged;
-- the direct-client guide (`docs/api/sandbox-v1-direct-client.md`) and a Python example client
+- the direct-client guide (`docs/sandbox/how-to/direct-api.md`) and a Python example client
   (`docs/api/examples/sandbox_v1_client.py`). Both are **new on `main` in 1b**, adapted for sandbox
   tokens from the prototype branch's versions.
 

@@ -48,7 +48,7 @@ deploy/k8s/.generated/
 deploy/sbx/.generated/
 deploy/sbx/.generated-*/
 
-# Generated Python stubs for the sandbox/v1 examples (docs/api/sandbox-v1-direct-client.md)
+# Generated Python stubs for the sandbox/v1 examples (docs/sandbox/how-to/direct-api.md)
 docs/api/examples/sandbox/
 
 # Per-developer agent wiring written by `mocactl sbx up`: it points at one developer's

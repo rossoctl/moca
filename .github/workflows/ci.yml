@@ -356,7 +356,7 @@ jobs:
       - name: Check the published docs against the denylist
         run: scripts/check-docs-publish.sh
 
-      # The sandbox/v1 direct-client examples' offline tests (docs/api/sandbox-v1-direct-client.md):
+      # The sandbox/v1 direct-client examples' offline tests (docs/sandbox/how-to/direct-api.md):
       # no network beyond pip, no relay. The runner's own python3, so no unpinned setup action;
       # grpcio pinned to the versions the tests were written against.
       - name: Test the sandbox/v1 Python examples

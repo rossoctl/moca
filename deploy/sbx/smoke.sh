@@ -363,7 +363,7 @@ if want 2 || want 4; then
   elif [[ -f "$SRC/docs/api/examples/sandbox/v1/sandbox_pb2_grpc.py" ]]; then
     PYPATH="$SRC/docs/api/examples"
   else
-    die "cannot generate the sandbox/v1 stubs: $PY needs grpcio-tools (see docs/api/sandbox-v1-direct-client.md)"
+    die "cannot generate the sandbox/v1 stubs: $PY needs grpcio-tools (see docs/sandbox/how-to/direct-api.md)"
   fi
 fi
 # key=value lines, never the token. `exec` calls the example client's own _exec with the caller's

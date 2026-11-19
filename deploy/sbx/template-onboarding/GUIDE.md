@@ -699,7 +699,7 @@ needs (4096 + 32) × 3 + 1024 MiB for one session at standby depth 2.
 A new sandbox's `/workspace` is empty, and the client seeds it. On a deployment with the template
 store, `mocactl sbx create --template django-django-11133 --seed` runs the served build's seed,
 checks that `/workspace` is a clean tree, and makes the seeded HEAD the sandbox's baseline, so
-`sbx pull` and `sbx rm` measure changes from it ([user guide](../../../docs/sandbox/user-guide.md), §8).
+`sbx pull` and `sbx rm` measure changes from it ([Make your own templates](../../../docs/sandbox/how-to/templates.md)).
 Without the store, the client runs the seed as its first command, as below. Either way use
 `sbx create`, not `sbx up`: `up` pushes the client's own repository into `/workspace` before the
 seed runs.

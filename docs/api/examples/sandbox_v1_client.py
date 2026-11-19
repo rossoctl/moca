@@ -1,6 +1,6 @@
 """A minimal direct client for MOCA's sandbox/v1 SandboxExec API, for the moca sandbox service.
 
-See docs/api/sandbox-v1-direct-client.md. Needs Python 3.10+ and grpcio. Generate the stubs first,
+See docs/sandbox/how-to/direct-api.md. Needs Python 3.10+ and grpcio. Generate the stubs first,
 from this directory:
 
     python -m grpc_tools.protoc -I ../../../proto --python_out=. --grpc_python_out=. sandbox/v1/sandbox.proto
