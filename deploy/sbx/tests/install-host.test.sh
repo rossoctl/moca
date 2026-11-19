@@ -88,7 +88,7 @@ grep -q 'no snapshot' "$TMP/out" || fail 'missing-snapshot refusal does not say 
 b="$(bundle sbx_bad)"; sed -i.bak 's/^SANDBOX_TOKEN=.*/SANDBOX_TOKEN=short/' "$b/worker.env"
 ! bash "$INSTALL" "$b" --snapshot default >"$TMP/out" 2>&1 || fail 'accepted a malformed token'
 ! grep -q 'short' "$TMP/out" || fail 'the refusal printed the token value'
-for extra in 'SH_WORKSPACE_IDLE=9d' 'SH_WORKSPACE_IDLE=0h' 'SH_WORKSPACE_IMAGE_MB=2g' 'SH_WORKSPACE_IMAGE_MB=0' \
+for extra in 'SH_WORKSPACE_IDLE=9d' 'SH_WORKSPACE_IDLE=0h' 'SH_WORKSPACE_IMAGE_MB=2g' 'SH_WORKSPACE_IMAGE_MB=0' 'SH_WORKSPACE_IMAGE_MB=2049' \
   'SH_LEASE_IDLE_CEILING_S=30m' 'SH_LEASE_IDLE_CEILING_S=1.5' 'SH_LEASE_IDLE_CEILING_S=0' 'SH_LEASE_IDLE_CEILING_S=299' 'SH_LEASE_IDLE_CEILING_S=86401' 'SH_LEASE_IDLE_CEILING_S= '; do
   : >"$MOCK_LOG"
   # The bad line last: env_value takes the last one, so it overrides the valid idle before it.
@@ -107,12 +107,12 @@ grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" && grep -q 'deploy/sbx/setup.sh' "$TMP/ou
   fail 'accepted a ceiling above 86400 s'
 grep -q 'SH_LEASE_IDLE_CEILING_S in .* must be a whole number of seconds, 300-86400' "$TMP/out" ||
   fail "the ceiling refusal does not name 300-86400: $(cat "$TMP/out")"
-pass 'refuses a missing snapshot, a missing --snapshot, a malformed token (without printing it), a missing or bad idle, a bad image size or idle ceiling'
+pass 'refuses a missing snapshot, a missing --snapshot, a malformed token (without printing it), a missing or bad idle, a bad or too large (#907) image size or idle ceiling'
 
 # py312 has a template record (template-build.sh's); default has none.
 mkdir -p "$SBX_SRV/templates" && printf '{\n  "schema": "moca-sbx-template/1",\n  "id": "py312",\n  "worker": "sbx_py312"\n}\n' >"$SBX_SRV/templates/py312.json"
 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_default'
-bash "$INSTALL" "$(bundle sbx_py312 $'SH_WORKSPACE_IDLE=240h\nSH_WORKSPACE_IMAGE_MB=4096\nSH_LEASE_IDLE_CEILING_S=3600\n')" --snapshot py312 --budget-mb 8192 \
+bash "$INSTALL" "$(bundle sbx_py312 $'SH_WORKSPACE_IDLE=240h\nSH_WORKSPACE_IMAGE_MB=1536\nSH_LEASE_IDLE_CEILING_S=3600\n')" --snapshot py312 --budget-mb 8192 \
   >"$TMP/out" 2>&1 || fail 'install sbx_py312'
 
 A="$SBX_ENV_DIR/workers/sbx_default.env" B="$SBX_ENV_DIR/workers/sbx_py312.env"
@@ -123,7 +123,7 @@ done
 grep -qx 'SH_WORKSPACE_IDLE=216h' "$A" || fail "$A: SH_WORKSPACE_IDLE is not the bundle's 216h"
 grep -qx 'SH_WORKSPACE_IMAGE_MB=2048' "$A" || fail "$A: SH_WORKSPACE_IMAGE_MB is not the bundle's 2048"
 grep -qx 'SH_WORKSPACE_IDLE=240h' "$B" || fail "$B: SH_WORKSPACE_IDLE is not the bundle's 240h"
-grep -qx 'SH_WORKSPACE_IMAGE_MB=4096' "$B" || fail "$B: SH_WORKSPACE_IMAGE_MB is not the bundle's 4096"
+grep -qx 'SH_WORKSPACE_IMAGE_MB=1536' "$B" || fail "$B: SH_WORKSPACE_IMAGE_MB is not the bundle's 1536"
 grep -qx 'SH_LEASE_IDLE_CEILING_S=1800' "$A" || fail "$A: SH_LEASE_IDLE_CEILING_S is not the bundle's 1800"
 grep -qx 'SH_LEASE_IDLE_CEILING_S=3600' "$B" || fail "$B: SH_LEASE_IDLE_CEILING_S is not the bundle's 3600"
 [[ "$(grep -c '^SH_LEASE_IDLE_CEILING_S=' "$B")" == 1 ]] || fail "$B: SH_LEASE_IDLE_CEILING_S written twice"
