@@ -1317,6 +1317,20 @@ describe('pull --apply never writes local agent configuration or hooks (final re
     });
   }
 
+  it('refuses a patch writing hooks/pre-commit when the git directory is the tree', async () => {
+    const r = tmp('sbx-gitdir-root-');
+    git(r, 'init', '-q', '--bare', '.');
+    git(r, 'config', 'core.bare', 'false');
+    git(r, 'config', 'core.worktree', r);
+    const tree = snapshot(r);
+    const err = await applyPatch(r, Buffer.from(creating('hooks/pre-commit'))).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(PushError);
+    expect((err as Error).message).toContain('hooks/pre-commit (the git directory)');
+    expect(snapshot(r)).toEqual(tree);
+  });
+
   // A nested repository's own hooks and config are not the tree's: nothing inside one is written.
   for (const [what, set, p] of [
     [

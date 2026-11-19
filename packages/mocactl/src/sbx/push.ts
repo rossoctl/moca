@@ -250,7 +250,12 @@ function inTree(root: string, abs: string): string[][] {
   return out;
 }
 
-type GitRead = { segs: string[]; what: string };
+type GitRead = {
+  segs: string[];
+  what: string;
+  /** At the tree's root, everything below is read too (a git directory), not only its entries. */
+  subtree?: boolean;
+};
 
 /**
  * What git reads from the working tree that can make it run commands: the hooks directory
@@ -277,8 +282,8 @@ async function gitReads(root: string): Promise<GitRead[]> {
     );
   };
   const out: GitRead[] = [];
-  const add = (abs: string, what: string) => {
-    for (const segs of inTree(root, abs)) out.push({ segs, what });
+  const add = (abs: string, what: string, subtree = false) => {
+    for (const segs of inTree(root, abs)) out.push({ segs, what, subtree });
   };
   const hooks = (await text(['config', '--type=path', '--get', 'core.hooksPath'], true)).replace(
     /\n$/,
@@ -286,7 +291,9 @@ async function gitReads(root: string): Promise<GitRead[]> {
   );
   if (hooks !== '') add(resolve(root, hooks), 'the hooks directory core.hooksPath names');
   const dirs = await text(['rev-parse', '--absolute-git-dir', '--git-common-dir']);
-  for (const d of dirs.split('\n').filter(Boolean)) add(resolve(root, d), 'the git directory');
+  for (const d of dirs.split('\n').filter(Boolean)) {
+    add(resolve(root, d), 'the git directory', true);
+  }
   for (const { file } of entries(await text(['config', '--list', '--show-origin', '-z']))) {
     add(file, 'a git config file');
   }
@@ -331,14 +338,15 @@ async function gitReads(root: string): Promise<GitRead[]> {
 
 /**
  * Why a path is something git reads (`reads`, from `gitReads`), or where one of its parents goes
- * (a link there would move it); undefined when neither. For the tree's root, only its own entries.
+ * (a link there would move it); undefined when neither. For the tree's root, only its own entries
+ * unless the read is `subtree`.
  */
 function gitReadWhy(p: string, reads: GitRead[]): string | undefined {
   const segs = segments(p);
   const same = (a: string, b: string) => folds(a).some((f) => folds(b).includes(f));
-  for (const { segs: d, what } of reads) {
+  for (const { segs: d, what, subtree } of reads) {
     if (d.length === 0) {
-      if (segs.length === 1) return what;
+      if (subtree || segs.length === 1) return what;
       continue;
     }
     const n = Math.min(segs.length, d.length);
@@ -1100,9 +1108,9 @@ async function dryRun3way(root: string, dir: string, patch: string): Promise<str
 
 /**
  * Applies a pulled patch in the local repository (R6c). First, a patch that writes `.git`, a
- * submodule or nested repository, the `.sbx/` binding, local agent configuration or hooks (`isAgentConfigPath`), or what git
- * reads to run commands (`gitReads`: hooks, git directory, config) is refused whole, before git is
- * asked to apply anything. Then:
+ * submodule or nested repository, the `.sbx/` binding, local agent configuration or hooks
+ * (`isAgentConfigPath`), or what git reads to run commands (`gitReads`: hooks, git directory,
+ * config files) is refused whole, before git is asked to apply anything. Then:
  * 1. a plain `git apply`, which changes only the working tree and is all or nothing;
  * 2. if that fails because a file it touches has uncommitted local changes, it is refused with
  *    those files named, and nothing is changed;

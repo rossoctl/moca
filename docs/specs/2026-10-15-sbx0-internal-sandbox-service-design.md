@@ -489,15 +489,17 @@ persistence follows the existing `base/redis.yaml`.
 - **`pull --apply` refuses a patch that writes `.git`, `.sbx/` or the agent-configuration and
   local-hook files** (`.mcp.json`, `.claude/`, `opencode.json(c)`, `.opencode/`, `.codex/`,
   `.agents/` (Codex CLI's repo skills), `.pi/` (Pi loads project-local `extensions/`, `skills/` and
-  `prompts/`), `.bob/` (IBM Bob's settings, which can start MCP servers),
-  `.vscode/tasks.json`, `.vscode/settings.json`, `.husky/`, `.envrc`, or `.vscode`
-  itself), on either side of a rename or copy, at any depth and under case and Unicode folding;
-  also the in-tree `core.hooksPath` directory, git directory and git config files
-  (`include.path` ones too), as git reports them, through symlinks, and anything inside a
-  submodule or nested repository (a parent directory holding `.git`). A
-  change to a steering file — `CLAUDE.md`, `AGENTS.md`, `AGENTS.override.md` (Codex reads it in
-  preference to `AGENTS.md`) or `.bobrules` (IBM Bob's, which `sbx up` does not write, so a change
-  to it is all change) — outside the `sbx up` block is applied with a warning.
+  `prompts/`), `.bob/` (IBM Bob's settings, which can start MCP servers), `.vscode/tasks.json`,
+  `.vscode/settings.json`, `.husky/`, `.envrc`, or `.vscode` itself), on either side of a rename or
+  copy, at any depth and under case and Unicode folding; also the in-tree `core.hooksPath`
+  directory, git directory and git config files (`include.path` ones too), as git reports them,
+  through symlinks, and anything inside a submodule or nested repository (a parent directory holding
+  `.git`). When the git directory is the tree's root, every path in it is refused. Not refused, and
+  a non-goal: an in-tree file that a git config value runs (`core.fsmonitor`, `filter.*.clean` and
+  `smudge`, `diff.*.textconv`, `core.sshCommand`, a `!` alias); review it in the patch like any
+  other script. A change to a steering file — `CLAUDE.md`, `AGENTS.md`, `AGENTS.override.md` (Codex
+  reads it in preference to `AGENTS.md`) or `.bobrules` (IBM Bob's, which `sbx up` does not write,
+  so a change to it is all change) — outside the `sbx up` block is applied with a warning.
 - **"Changes not yet pulled"** means the tree differs from `refs/sbx/baseline` (a superset of a
   non-empty porcelain status that also counts the agent's own commits), or the workspace holds files
   with no baseline.
