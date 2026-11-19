@@ -302,6 +302,52 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       await done();
     });
 
+    it('reserves a CLUSTER-WIDE running slot, owner-scoped and separate from the open set (#391)', async () => {
+      const { store, now, done } = await make();
+      // Separate from the open set on purpose: that one counts `queued` too, and the two caps mean
+      // different things (wait vs execute). A shared set would have an owner's own backlog deny
+      // their running leaves.
+      await store.create(rec({ turnId: 't-q' }));
+      expect(await store.countOpen('github:1234')).toBe(1);
+
+      expect(await store.reserveRunningSlot('github:1234', 't-1', now)).toBe(1);
+      expect(await store.reserveRunningSlot('github:1234', 't-2', now)).toBe(2);
+      // Idempotent per turn: a redelivery re-admitted by another worker must not take a second slot.
+      expect(await store.reserveRunningSlot('github:1234', 't-2', now + 1)).toBe(2);
+      expect(await store.reserveRunningSlot('github:9999', 't-3', now)).toBe(1);
+      // ...and it did not touch the open count either way.
+      expect(await store.countOpen('github:1234')).toBe(1);
+
+      await store.releaseRunningSlot('github:1234', 't-2');
+      expect(await store.reserveRunningSlot('github:1234', 't-2', now)).toBe(2);
+      // Releasing a slot nobody holds is a no-op, not an underflow: the worker's `finally` runs on
+      // paths where the slot was already given back by the terminal transition.
+      await store.releaseRunningSlot('github:1234', 't-never');
+      expect(await store.reserveRunningSlot('github:1234', 't-4', now)).toBe(3);
+      await done();
+    });
+
+    it('frees a running slot at the terminal transition and with the session (#391)', async () => {
+      const { store, now, sessionId, done } = await make();
+      // The worker that admitted the delivery releases its own slot, so these two are the cases it
+      // cannot reach: it was SIGKILLed mid-leaf and the redelivery dead-lettered, or the session
+      // was deleted under it (which deletes the record outright, never going through `toTerminal`).
+      await store.create(rec({ turnId: 't-dead', sessionId }));
+      await store.create(rec({ turnId: 't-gone', sessionId, idempotencyKey: 'k-gone' }));
+      expect(await store.reserveRunningSlot('github:1234', 't-dead', now)).toBe(1);
+      expect(await store.reserveRunningSlot('github:1234', 't-gone', now)).toBe(2);
+
+      expect(await store.finalize('t-dead', 'lost', now)).toBe('ok');
+      // Only the finalized turn's slot: the count is back to 1, which `reserveRunningSlot`'s own
+      // return value reports by re-adding the member it just removed.
+      expect(await store.reserveRunningSlot('github:1234', 't-dead', now)).toBe(2);
+      await store.releaseRunningSlot('github:1234', 't-dead');
+
+      await store.deleteSessionTurns(sessionId, 'github:1234');
+      expect(await store.reserveRunningSlot('github:1234', 't-probe', now)).toBe(1);
+      await done();
+    });
+
     it('carries no TTL while non-terminal, in `queued` or `running` (§5.1)', async () => {
       const { store, ttlOf, done } = await make();
       await store.create(rec());

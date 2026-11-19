@@ -1218,7 +1218,7 @@ it adds is the schedule. Its design should cite this document for both.
   holding it — new control-plane-to-worker machinery.~~ **Done in #391**: the two sides already
   share a Redis keyspace, so the `DELETE` writes a `cancelRequested` flag the worker's 2 s watchdog
   reads and the leaf aborts — no transport. §4.5's amendment has the shape and the M2 caveat.
-- **Per-subject fairness on the async drain.** **Partly addressed in #391, and still owed.** What
+- **Per-subject fairness on the async drain.** **Done in #391, except for the queue's shape.** What
   ships is claim-time filtering against the SYNC cap: the queue is still one FIFO stream, so the
   worker reads the claimed entry's `owner` (one `HGET`) and, when that owner already holds
   `SH_TURNS_PER_SUBJECT` of this worker's slots, hands the entry back **unrun and unpenalised** —
@@ -1237,15 +1237,25 @@ it adds is the schedule. Its design should cite this document for both.
   did, because an owner who never frees a slot would otherwise have their turn deferred forever —
   never run, never dead-lettered, and with `turnExp` never starting, since it is anchored at a
   dequeue that never comes. The worker-wide `SH_TURNS_PER_WORKER` cap still holds.
-  **What it is NOT, and what #391 therefore leaves open.** It does not bound an owner's share of an
-  **async-only** drain. A worker runs one queued leaf at a time (§5.3), so an owner's async turns
-  reach a cap of `max(1, ⌊S/2⌋)` only when their sync turns are in flight too; with async alone the
-  count never reaches it, nothing is ever deferred, and the single FIFO stream then serves owner A's
-  thousand-entry backlog ahead of owner B's one turn. Binding that needs a count no worker holds —
-  per-owner streams, or a cluster-wide per-owner running count checked at the dequeue exchange
-  (where the control plane already owns the records and a per-owner open-turn set). That is the
-  queue-shape question this section's per-class-caps item below also waits on, and it is why #391's
-  fourth criterion ("one subject can't take every slot") stays open.
+  **What the sync cap alone is NOT.** It does not bound an owner's share of an **async-only** drain.
+  A worker runs one queued leaf at a time (§5.3), so an owner's async turns reach a cap of
+  `max(1, ⌊S/2⌋)` only when their sync turns are in flight too; with async alone the count never
+  reaches it, nothing is ever deferred, and the single FIFO stream then serves owner A's
+  thousand-entry backlog ahead of owner B's one turn. Binding that needs a count no worker holds, so
+  **#391 also ships the cluster-wide half**: `MOCA_ASYNC_RUNNING_PER_OWNER` (unset = off, no derived
+  default — the value is deployment-wide, so S cannot imply it, and a cap appearing on upgrade would
+  pace a single-owner deployment's own fan-out) is checked against a per-owner **running** zset
+  (`sh:cp:owner:<subjectHash>:running`), ZADD-then-ZCARD so N simultaneous readers of an under-limit
+  count cannot all pass. It answers through the same `admitOwner` hook and takes the same unrun,
+  unpenalised hand-back, so the defer latency and the ten-minute `DEFER_CEILING_MS` yield above apply
+  unchanged. A member is **one delivery's** claim, taken before the claim handshake and released in
+  the runner's `finally` on every path — `redelivered` and `lost` included — so the count is
+  self-healing and needs no staleness horizon; `toTerminal` ZREMs as well, which covers a SIGKILLed
+  worker whose entry is later dead-lettered. The check is enforced in the worker rather than behind a
+  new control-plane route for the same reason `cancelRequested` is: in M1 the records and the queue
+  share one Redis. A deployment that split the keyspaces would need the route. What stays open is the
+  **queue shape**: per-owner streams would remove the hand-back altogether, which is the question
+  this section's per-class-caps item below also waits on.
 - **Per-turn cost attribution (#859).** #391's other half, split out: it wants the per-model price table
   §4.3's amendment says does not exist (#359), which is the same reason `caps.costUsd` is refused
   at submission rather than enforced.

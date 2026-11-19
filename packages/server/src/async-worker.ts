@@ -16,7 +16,7 @@ import { createLeafDrainLoop, asyncLeafCap, shouldArmAsync } from './leaf-drain-
 import { getResultStore, RESULT_TTL_SECONDS } from './server.js';
 import { claimTurn, deadLetterTurn } from './turn-claim.js';
 import type { SlotCounter } from './leaf-drain-loop.js';
-import { turnsPerSubjectCap, type SubjectCounter } from './subject-quota.js';
+import { runningPerOwnerCap, turnsPerSubjectCap, type SubjectCounter } from './subject-quota.js';
 
 /** §6.2's fixed constants. Injectable for tests; none of them is an operator knob. */
 const MIN_IDLE_MS = 90_000;
@@ -273,6 +273,67 @@ export function reconnecting<T extends object>(target: T, client: RedisClientTyp
   }) as T;
 }
 
+/** Stands in for a per-worker slot when only the cluster-wide cap is configured. */
+const noop = (): void => {};
+
+/**
+ * `LeafJobDeps.admitOwner` for this deployment's caps, or undefined when it configured none (#391).
+ *
+ * TWO caps, ONE hook. `SH_TURNS_PER_SUBJECT` bounds this worker and is shared with sync `/turn`;
+ * `MOCA_ASYNC_RUNNING_PER_OWNER` bounds the whole deployment through a zset beside the turn records.
+ * The hand-back is the same either way and nothing downstream can act differently on which of them
+ * refused, so there is one hook and one `async_deferred_subject`.
+ *
+ * Cluster-wide enforcement sits in the WORKER rather than behind a control-plane route for the
+ * reason `cancelRequested` does: records and queue share one Redis in M1, so a worker can count an
+ * owner's running leaves without any worker-addressed transport. A deployment that split those
+ * keyspaces would need that route.
+ *
+ * Exported so the drain's integration test drives the real thing: the fairness property under test
+ * is "two workers, one owner", and a test that re-implements this closure would pass against its
+ * own copy of the logic.
+ */
+export function ownerAdmission(opts: {
+  turns: Pick<TurnStore, 'owner' | 'reserveRunningSlot' | 'releaseRunningSlot'>;
+  subjects: SubjectCounter;
+  /** Per worker, shared with the sync route. Undefined ⇒ only the cluster-wide cap applies. */
+  subjectCap?: number;
+  /** Per deployment. Undefined ⇒ only the per-worker cap applies. */
+  runningCap?: number;
+  now?: () => number;
+}): LeafJobDeps['admitOwner'] {
+  const { subjectCap, runningCap, subjects, turns } = opts;
+  if (subjectCap === undefined && runningCap === undefined) return undefined;
+  const now = opts.now ?? Date.now;
+  return async (turnId: string) => {
+    // A record with no owner is a turn the claim will refuse anyway, and deferring it forever would
+    // leave an entry nothing ever retires. Admitted, so `claimTurn` gets to give the real answer;
+    // the slot it borrows is returned either way.
+    const owner = await turns.owner(turnId);
+    if (!owner) return noop;
+    // The local cap first: it is a Map lookup, and an owner already at it must not cost a Redis
+    // write per claim to find that out.
+    const local = subjectCap === undefined ? noop : subjects.acquire(owner, subjectCap);
+    if (!local) return null;
+    if (runningCap === undefined) return local;
+    const running = await turns.reserveRunningSlot(owner, turnId, now());
+    if (running > runningCap) {
+      // Give back what this claim took, in both counters, and let the entry go down the ordinary
+      // defer path -- unrun, unpenalised, and with no credential minted.
+      await turns.releaseRunningSlot(owner, turnId);
+      local();
+      return null;
+    }
+    return async () => {
+      local();
+      // Swallowed: `processOne` awaits this in a `finally`, so a throw here would replace the
+      // outcome of a run that already finished and acked. A slot lost to a Redis blip is reclaimed
+      // by `toTerminal`'s own ZREM, which ran on the finalize just before this.
+      await turns.releaseRunningSlot(owner, turnId).catch(() => undefined);
+    };
+  };
+}
+
 /**
  * Arm the async leaf drain on this worker, or return null when the deployment has not asked for it
  * (`shouldArmAsync`). Everything it builds is per-process and torn down by `stop`.
@@ -330,7 +391,12 @@ export function armAsyncLeafWorker(opts: {
   const controlPlaneUrl = String(env.SH_CONTROL_PLANE_URL);
   const exchangeToken = String(credentialValue(env, 'SH_EXCHANGE_TOKEN'));
   const resultStore = getResultStore();
-  const subjectCap = turnsPerSubjectCap(env);
+  const admitOwner = ownerAdmission({
+    turns,
+    subjects: opts.subjects,
+    subjectCap: turnsPerSubjectCap(env),
+    runningCap: runningPerOwnerCap(env),
+  });
 
   const job: LeafJobDeps = {
     queue,
@@ -349,21 +415,11 @@ export function armAsyncLeafWorker(opts: {
     // with no control-plane-to-worker transport at all. A deployment that split the two keyspaces
     // would need the second variable that note already calls for.
     cancelRequested: (turnId) => turns.cancelRequested(turnId),
-    // Per-owner fairness (#391), and only when a cap is configured: `turnsPerSubjectCap` answers
-    // undefined for a deployment that sets neither SH_TURNS_PER_SUBJECT nor SH_TURNS_PER_WORKER,
-    // and leaving the dep off is cheaper than a dep that admits everything -- it is the owner read
-    // below, one HGET per claim, that we are declining to pay for.
-    ...(subjectCap === undefined
-      ? {}
-      : {
-          admitOwner: async (turnId: string) => {
-            // A record with no owner is a turn the claim will refuse anyway, and deferring it
-            // forever would leave an entry nothing ever retires. Admitted, so `claimTurn` gets to
-            // give the real answer; the slot it borrows is returned either way.
-            const owner = await turns.owner(turnId);
-            return owner ? opts.subjects.acquire(owner, subjectCap) : () => {};
-          },
-        }),
+    // Per-owner fairness (#391), and only when a cap is configured: `ownerAdmission` answers
+    // undefined for a deployment that set neither knob, and leaving the dep off is cheaper than a
+    // dep that admits everything -- it is the owner read inside it, one HGET per claim, that we are
+    // declining to pay for.
+    ...(admitOwner ? { admitOwner } : {}),
     finalize: async (turnId, status) => {
       await turns.finalize(turnId, asyncFinalizeState(status), Date.now());
     },

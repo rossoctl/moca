@@ -4,6 +4,7 @@ import { sanitizeLimits } from './models.js';
 import {
   idempotencyKeyKey,
   isTerminalState,
+  ownerRunningTurnsKey,
   ownerTurnsKey,
   sessionTurnsKey,
   turnKey,
@@ -100,6 +101,10 @@ export class TurnStore {
 
   private ownerKey(owner: string): string {
     return ownerTurnsKey(this.tag(owner));
+  }
+
+  private runningKey(owner: string): string {
+    return ownerRunningTurnsKey(this.tag(owner));
   }
 
   private sessionKey(sessionId: string): string {
@@ -278,6 +283,28 @@ export class TurnStore {
   }
 
   /**
+   * Take a CLUSTER-WIDE running slot for `turnId` and answer the owner's running count INCLUDING it
+   * (#391, `ownerRunningTurnsKey`). Called by the async worker when it admits a claimed entry, which
+   * is why it lives here rather than behind a control-plane route: records and queue share one Redis
+   * in M1, the same thing `cancelRequested` relies on.
+   *
+   * Write first, count second, for `reserveOpenSlot`'s measured reason -- N workers that each read an
+   * under-limit ZCARD before any of them writes all pass, and here N is "every worker in the
+   * deployment" rather than "every concurrent submission".
+   *
+   * The caller MUST `releaseRunningSlot` on every way out, including the ones that leave the record
+   * `running` for another worker to reclaim: the member describes a delivery in flight, not a turn.
+   */
+  async reserveRunningSlot(owner: string, turnId: string, now: number): Promise<number> {
+    await this.guard(() => this.redis.zAdd(this.runningKey(owner), { score: now, value: turnId }));
+    return this.guard(() => this.redis.zCard(this.runningKey(owner)));
+  }
+
+  async releaseRunningSlot(owner: string, turnId: string): Promise<void> {
+    await this.guard(() => this.redis.zRem(this.runningKey(owner), turnId));
+  }
+
+  /**
    * Delete every one of `sessionId`'s turns -- record, stored result and quota slot -- for
    * `OwnershipIndex.cascadeDelete` (F2).
    *
@@ -332,6 +359,9 @@ export class TurnStore {
       // nothing about who the turn belonged to, and its hash is not this delete's to remove.
       if (rec ? rec.sessionId !== sessionId : !indexed.has(turnId)) continue;
       await this.guard(() => this.redis.zRem(this.ownerKey(owner), turnId));
+      // And its running slot (#391), for the reason the open-set removal above exists: this walk
+      // deletes the record outright instead of going through `toTerminal`, so nothing else will.
+      await this.guard(() => this.redis.zRem(this.runningKey(owner), turnId));
       // The record AND this turn's result key, which `cascadeDelete`'s `dataKeys` cannot name: the
       // key carries a turn id, so only an enumeration of the session's turns reaches it.
       await this.guard(() => this.redis.del([this.key(turnId), leafResultKey(sessionId, turnId)]));
@@ -486,6 +516,11 @@ export class TurnStore {
     }
     await this.releaseIdempotencyKeyIf(rec.owner, rec.idempotencyKey, rec.turnId);
     await this.guard(() => this.redis.zRem(this.ownerKey(rec.owner), rec.turnId));
+    // The cluster-wide running slot too (#391). The worker that admitted the delivery releases it
+    // itself on every path out, so this is the one case that worker cannot cover: it was SIGKILLed
+    // mid-leaf, and the entry's redelivery dead-lettered rather than ran. Idempotent -- a ZREM of a
+    // member that is not there is the normal case here.
+    await this.guard(() => this.redis.zRem(this.runningKey(rec.owner), rec.turnId));
     await this.guard(() => this.redis.expire(this.key(rec.turnId), this.ttlSeconds()));
     // The session index LAST, and off the same sum: it must never expire while a record it points at
     // is still there, or `deleteSessionTurns` loses its only route to that record and its result.

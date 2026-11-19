@@ -129,6 +129,10 @@ services:
       # The explicit :- default (unlike the bare SH_EXCHANGE_TOKEN: above) keeps the key PRESENT as
       # '' rather than null when .env is silent, which the compose test's svc_env probe needs to see.
       SH_ASYNC_DRAIN: ${SH_ASYNC_DRAIN:-}
+      # #391: async leaves one owner may RUN deployment-wide, counted in Redis so it holds across
+      # workers (SH_TURNS_PER_SUBJECT above counts in one process). Empty is off, which is what a
+      # single-user trial wants. Same :- default as SH_ASYNC_DRAIN, and for the same probe.
+      MOCA_ASYNC_RUNNING_PER_OWNER: ${MOCA_ASYNC_RUNNING_PER_OWNER:-}
       # The result TTL the turn record's own TTL is derived from (+1 h margin). Set on both the
       # supervisor and the control plane or neither: this worker writes its own async leaf results.
       LEAF_RESULT_TTL_SECONDS:

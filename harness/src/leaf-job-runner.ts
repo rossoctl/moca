@@ -61,15 +61,20 @@ export interface LeafJobDeps {
   cancelRequested?: (turnId: string) => Promise<boolean>;
   /**
    * Take one of this turn's OWNER's concurrency slots (§5.3, #391), or answer `null` when that
-   * owner already holds every slot their cap allows on this worker. The release is held for the
-   * whole run and is idempotent.
+   * owner already holds every slot their cap allows. The release is held for the whole run and is
+   * idempotent.
    *
    * Injected, and taking a turn id rather than a subject, because the owner is on the turn record:
    * resolving it is a Redis read `@moca/server` already does, and the counter it checks against is
    * the same `SubjectCounter` instance the sync `/turn` path uses -- the two must share one count
    * or neither cap means anything. Absent ⇒ no per-owner fairness, the pre-#391 behaviour.
+   *
+   * The release may be ASYNC and is awaited: the cluster-wide half of the cap is a zset in Redis
+   * (`TurnStore.releaseRunningSlot`), and a fire-and-forget ZREM could still be in flight when this
+   * loop's next claim counts the same owner -- which would defer an entry against a slot nobody
+   * holds. It must not throw; a failed release is the caller's to swallow.
    */
-  admitOwner?: (turnId: string) => Promise<(() => void) | null>;
+  admitOwner?: (turnId: string) => Promise<(() => void | Promise<void>) | null>;
   /** Stamp the terminal state on the record. 'aborted' has no TurnState; the caller maps it. */
   finalize: (turnId: string, status: LeafResult['status']) => Promise<void>;
   /**
@@ -201,15 +206,20 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
   // claimed -- which is why this is a check-and-hand-back rather than a filter on the read. One
   // owner's fan-out holds at most `SH_TURNS_PER_SUBJECT` of this worker's slots, the same cap an
   // interactive `/turn` is held to and counted against the same `SubjectCounter`, so an owner whose
-  // leaves are running cannot also fill the worker with interactive turns. Before `claimTurn`
-  // deliberately: a turn that may not run yet must not have a credential minted for it, must not
-  // flip to `running`, and must not appear in the audit log as an issuance.
+  // leaves are running cannot also fill the worker with interactive turns; and, when the operator
+  // sets `MOCA_ASYNC_RUNNING_PER_OWNER`, at most that many leaves across the whole DEPLOYMENT.
+  // Before `claimTurn` deliberately: a turn that may not run yet must not have a credential minted
+  // for it, must not flip to `running`, and must not appear in the audit log as an issuance.
   //
-  // shortcut: this bounds an owner's MIXED load, not an async-only drain -- a worker runs one queued
-  // leaf at a time, so async alone never reaches a cap of max(1, S/2) and A's deep backlog is still
-  // served ahead of B's single turn. Upgrade when async-only fan-out from several owners is real:
-  // the count has to be cluster-wide (per-owner streams, or a per-owner running count checked at the
-  // dequeue exchange), which no in-process counter can provide. Open on #391; spec §12 has the shape.
+  // Both caps answer through this one hook, because the hand-back is the same either way and
+  // nothing downstream can act differently on which of them refused. Why it must be a hook and not
+  // a number: the cluster-wide count is a Redis write (`TurnStore.reserveRunningSlot`), and this
+  // package does not reach Redis for records.
+  //
+  // shortcut: the per-worker cap alone bounds an owner's MIXED load only -- a worker runs one queued
+  // leaf at a time, so async traffic alone never reaches max(1, S/2), and a deployment that sets no
+  // cluster-wide cap still serves A's deep backlog ahead of B's single turn. Per-owner streams are
+  // the upgrade that removes the hand-back entirely (spec §12).
   let releaseOwner = deps.admitOwner ? await deps.admitOwner(claimed.turnId) : noRelease;
   if (!releaseOwner) {
     if (entryAgeMs(claimed.entryId) < (deps.deferCeilingMs ?? DEFER_CEILING_MS)) {
@@ -245,8 +255,14 @@ export async function processOne(deps: LeafJobDeps): Promise<ProcessOutcome> {
   } finally {
     // Idempotent (`SubjectCounter.acquire`), and in a `finally` around the whole of the run rather
     // than beside each of its returns: every path out gives the owner their slot back, including a
-    // throw, which would otherwise leak one of their slots for the life of the process.
-    releaseOwner();
+    // throw, which would otherwise leak one of their slots for the life of the process -- and, for
+    // the cluster-wide half, for the life of the DEPLOYMENT.
+    //
+    // `redelivered` and `lost` release too, deliberately: the record stays `running` there, but no
+    // worker is running it, and the slot describes a delivery in flight. That is what lets the
+    // cluster-wide count self-heal without a staleness horizon -- the reclaiming worker's own
+    // `admitOwner` takes the slot again.
+    await releaseOwner();
   }
 }
 
