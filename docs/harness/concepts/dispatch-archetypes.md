@@ -56,7 +56,7 @@ which looks like a real answer. Poll the turn route, not this one.
    `SH_CONTROL_PLANE_URL` and `SH_EXCHANGE_TOKEN`, which the deployment already sets. A missing
    prerequisite logs one line and leaves the drain off rather than failing the boot. Per deployment:
    `supervisor.env` on [`deploy/vm`](../../../deploy/vm/README.md), `.env` on
-   [`deploy/compose`](../../../deploy/compose/README.md), the `moca-settings` ConfigMap on
+   [`deploy/compose`](../../operate/harness/compose.md), the `moca-settings` ConfigMap on
    [`deploy/k8s`](../../../deploy/k8s/README.md). Every worker that has it drains, so the drain needs no
    concurrency knob of its own: a worker runs **one** queued leaf at a time and claims it only while
    its total in-flight count — async plus interactive — is below `SH_TURNS_PER_WORKER`. See the

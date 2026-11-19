@@ -64,7 +64,7 @@
 - [ ] **If you add the microVM tier,** run its worker under a hardened unit; the shipped one runs as root with no
       systemd sandboxing. Keep its relay token separate (the installer does this).
 
-## Docker Compose ([`deploy/compose`](../../deploy/compose/README.md))
+## Docker Compose ([`deploy/compose`](../operate/harness/compose.md))
 
 - [ ] **Treat it as a trial.** Redis has no password, sandboxes have internet access, and there are no resource limits.
 - [ ] **Set `SH_REQUIRE_AUTH=true` as soon as you add the control plane**, and remove `ANTHROPIC_*` from `.env` if you
