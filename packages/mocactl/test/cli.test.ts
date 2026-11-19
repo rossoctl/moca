@@ -527,7 +527,7 @@ describe('spawn / subagents / get', () => {
     expect(o.errs.join('\n')).toContain('--kind must be prompt or solve');
   });
 
-  it('rejects --repo / --ref outside spawn, and --tag outside spawn/subagents', async () => {
+  it('rejects --repo / --ref outside spawn, and --tag outside spawn/subagents/watch', async () => {
     for (const extra of [
       ['--repo', 'u'],
       ['--ref', 'r'],
@@ -574,6 +574,19 @@ describe('spawn / subagents / get', () => {
     expect(stub.mock.calls[0][2]).toMatchObject({ json: true });
   });
 
+  it('watch refuses extra positionals and routes --tag/--json through', async () => {
+    const mod = await import('../src/subagent.js');
+    const stub = vi.fn(async (..._a: unknown[]) => 0);
+    const spy = vi.spyOn(mod, 'cmdWatch').mockImplementation(stub);
+    onTestFinished(() => spy.mockRestore());
+    expect(await main(['watch', 'extra'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(stub).not.toHaveBeenCalled();
+    expect(
+      await main(['watch', '--tag', 'batch-1', '--json'], {}, io(), { buildRuntime: fakeBuild }),
+    ).toBe(0);
+    expect(stub.mock.calls[0][2]).toMatchObject({ tag: 'batch-1', json: true });
+  });
+
   it('get needs exactly one sessionId and threads --out through', async () => {
     const mod = await import('../src/subagent.js');
     const stub = vi.fn(async (..._a: unknown[]) => 0);
@@ -591,9 +604,10 @@ describe('spawn / subagents / get', () => {
     expect(stub.mock.calls[0][2]).toMatchObject({ sessionId: 'sess1', outDir: '/tmp/x' });
   });
 
-  it('USAGE documents all three new commands so --help remains the one source of truth', () => {
+  it('USAGE documents every subagent command so --help remains the one source of truth', () => {
     expect(USAGE).toContain('mocactl spawn');
     expect(USAGE).toContain('mocactl subagents');
+    expect(USAGE).toContain('mocactl watch');
     expect(USAGE).toContain('mocactl get');
   });
 

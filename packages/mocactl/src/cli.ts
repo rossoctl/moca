@@ -24,7 +24,14 @@ import { DiscoveringHarness } from './api/discovery.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
 import { openCallRecord, RUN_LENGTH_FIELDS, type CallRecorder } from './sbx/call-record.js';
 import { sbxMain } from './sbx/cli.js';
-import { cmdGet, cmdSpawn, cmdSubagents, MAX_PROMPT_BYTES, runSpawnWorker } from './subagent.js';
+import {
+  cmdGet,
+  cmdSpawn,
+  cmdSubagents,
+  cmdWatch,
+  MAX_PROMPT_BYTES,
+  runSpawnWorker,
+} from './subagent.js';
 import { WORKLOAD_MOUNTS, type WorkloadMount } from './api/workloads.js';
 import {
   cmdWorkloadCreate,
@@ -83,6 +90,9 @@ export const USAGE = `usage:
                                                  refuse the dispatch when N of your subagents are
                                                  already running (default 4)
   mocactl subagents [--tag T] [--json]            list spawned subagents + current state
+  mocactl watch [--tag T] [--json]                one line per state change, until every watched
+                                                 subagent is finished (--json: one JSON object per
+                                                 line, for an agent's background monitor)
   mocactl get SESSIONID [--out DIR] [--json]      write result files + bounded summary
   mocactl get SESSIONID --wait [--timeout S]     block until the result is there, then write it
                                                  (default 300 s; exit 1 and status 'queued' if the
@@ -315,8 +325,10 @@ async function mainWith(
     io.err(`--repo and --ref only apply to \`mocactl spawn\`\n${help}`);
     return 2;
   }
-  if (values.tag !== undefined && command !== 'spawn' && command !== 'subagents') {
-    io.err(`--tag only applies to \`mocactl spawn\` and \`mocactl subagents\`\n${help}`);
+  if (values.tag !== undefined && !['spawn', 'subagents', 'watch'].includes(command ?? '')) {
+    io.err(
+      `--tag only applies to \`mocactl spawn\`, \`mocactl subagents\` and \`mocactl watch\`\n${help}`,
+    );
     return 2;
   }
   if (values.label !== undefined && command !== 'spawn') {
@@ -588,6 +600,10 @@ async function mainWith(
     case 'subagents': {
       if (rest.length > 0) return usage(io, help);
       return cmdSubagents(rt, io, { tag: values.tag, json, signal });
+    }
+    case 'watch': {
+      if (rest.length > 0) return usage(io, help);
+      return cmdWatch(rt, io, { tag: values.tag, json, signal });
     }
     case 'get': {
       const [sid, ...extra] = rest;
