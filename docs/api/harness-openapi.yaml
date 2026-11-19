@@ -6,7 +6,7 @@
 #
 # Scope, mirroring the control-plane document's own boundary note: only the client-facing
 # surface. The handler also serves the workload lifecycle (/workloads — off unless the operator
-# enables it, see docs/context-service.md) and the deprecated pre-rename paths (/run-leaf,
+# enables it, see docs/harness/how-to/workloads.md) and the deprecated pre-rename paths (/run-leaf,
 # /run-leaf/status) — listed in src/routes.ts as surface: 'internal' and not described here.
 # The unprefixed /turn and /runs ARE described: supported, frozen aliases of /v1/turn and /v1/runs
 # (docs/reference/change-policy.md, decision 3; #507), whose request body and responses are $refs
@@ -490,7 +490,7 @@ paths:
         `sandboxPoolSelector` is internal routing state and is deleted at the request boundary —
         never settable by an external caller. A synchronous prompt run naming a `workloadId` runs
         with that workload's frozen context, which Moca copies read-only into the sandbox; the
-        session token's user must own the workload (docs/context-service.md). With workloads off
+        session token's user must own the workload (docs/harness/how-to/workloads.md). With workloads off
         it is refused with 501 workload_runs_unavailable rather than run on the default pool; a
         synchronous one without a token is 401 token_required.
         `contextWritable: true` gives that run its own writable copy of the context instead,
@@ -576,7 +576,7 @@ paths:
           description: |
             internal_error — not retryable as-is. workloads_misconfigured — the run named a
             workloadId, but the operator's Context Service settings are missing or unsafe
-            (docs/context-service.md).
+            (docs/harness/how-to/workloads.md).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

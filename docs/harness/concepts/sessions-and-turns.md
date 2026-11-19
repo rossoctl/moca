@@ -3,7 +3,7 @@
 > **Preview.** Describes the P6 runtime on `main` as of 2026-10-12.
 
 A **session** is the durable, owned, resumable unit of work; a **turn** is one exchange within it
-([glossary](../glossary.md)). The point of the design is that the agent process holds nothing a
+([glossary](../../glossary.md)). The point of the design is that the agent process holds nothing a
 restart can lose: the conversation lives in Redis, and any worker can pick a session up.
 
 ## Where a session lives
@@ -39,7 +39,7 @@ Pi kept, so a resume reads the tail of the log instead of replaying all of it. A
 the cap; it is a per-turn spend limit, not a speed-up.
 
 Measured in an early experiment (E2, in-process, with a counting backend; see
-[`docs/archive/experiment-results.md`](../archive/experiment-results.md)): resuming read a constant 6 entries and about
+[`docs/archive/experiment-results.md`](../../archive/experiment-results.md)): resuming read a constant 6 entries and about
 900 bytes whatever the session length (50 to 5,000 entries), against 53 to 5,003 entries for a full
 replay. Two caveats: it was not an LLM-latency result, and in the production Redis backend finding the
 checkpoint marker still scans the whole stream, so total Redis work is not constant.

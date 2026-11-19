@@ -45,7 +45,7 @@ flowchart LR
 - **Shared parts.** Both use moca's sandbox relay and its sandbox workers, which dial _out_ to the
   relay, so a sandbox needs no inbound route. Both can run each command in its own Firecracker
   microVM.
-  ([Sandboxes and tiers](concepts/sandboxes-and-tiers.md),
+  ([Sandboxes and tiers](harness/concepts/sandboxes-and-tiers.md),
   [Install the sandbox service](../deploy/sbx/README.md))
 - **One control plane, three profiles.** The same control-plane component serves the harness, the
   sandbox service, or both (`SH_ROUTE_PROFILE` = `harness`, `sandbox` or `combined`). With

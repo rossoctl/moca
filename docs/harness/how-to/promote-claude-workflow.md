@@ -1,9 +1,13 @@
+---
+sidebar_position: 3
+---
+
 # Promoting a local Claude Code workflow
 
 > **Preview.** Workflow promotion is implemented but not yet declared Stable; interfaces and limits
-> may change. Design: [ADR-0038](../adrs/0038-mocactl-config-bundle-promotion.md) and the
-> [promotion spec](../specs/2026-10-06-mocactl-config-bundle-promotion-design.md); the bundle format is
-> [ADR-0030](../adrs/0030-claude-code-workflow-promotion.md).
+> may change. Design: [ADR-0038](../../adrs/0038-mocactl-config-bundle-promotion.md) and the
+> [promotion spec](../../specs/2026-10-06-mocactl-config-bundle-promotion-design.md); the bundle format is
+> [ADR-0030](../../adrs/0030-claude-code-workflow-promotion.md).
 
 Promotion packages the skills and commands you iterated on locally in Claude Code into a
 content-addressed **config bundle**, uploads it through the multi-user control plane, and starts a
@@ -13,9 +17,9 @@ control plane's `/v1` API.
 ## Before you start
 
 - `mocactl` installed and logged in to a control plane (`mocactl login`; install steps in
-  [Get started](../get-started/index.md)).
+  [Get started](../../get-started/index.md)).
 - A directory with a `.claude/skills` and/or `.claude/commands` tree. `mocactl promote DIR` uploads
-  those two trees; this guide covers only what [`mocactl`'s README](../../packages/mocactl/README.md)
+  those two trees; this guide covers only what [`mocactl`'s README](../../../packages/mocactl/README.md)
   documents.
 - Upgrade the harness before the control plane. An older harness ignores the bundle reference, so
   turns would run without the skills and report no error.
@@ -71,15 +75,15 @@ A batch leaf can use the same bundle by adding one field to a prompt leaf:
 ```
 
 Memory in a promoted run is read-only
-([ADR-0031](../adrs/0031-promoted-memory-read-only.md)). MCP servers and subagents are not promoted;
-see the [original design](../specs/2026-09-02-claude-code-workflow-promotion-design.md) §2, §9.
+([ADR-0031](../../adrs/0031-promoted-memory-read-only.md)). MCP servers and subagents are not promoted;
+see the [original design](../../specs/2026-09-02-claude-code-workflow-promotion-design.md) §2, §9.
 
 ## The older harness-side path
 
 Before ADR-0038 the only uploader was a Claude Code slash command
-([`deploy/claude/commands/promote.md`](../../deploy/claude/commands/promote.md)) that runs
+([`deploy/claude/commands/promote.md`](../../../deploy/claude/commands/promote.md)) that runs
 `pnpm --dir <harness> promote` and writes straight to Redis over a tunnel you hold open. It needs
 cluster access, so it does not fit a multi-user control plane, and this guide does not cover it. The
 command and CLI remain in the repository. How they work is documented in
-[`deploy/claude/commands/promote.md`](../../deploy/claude/commands/promote.md);
+[`deploy/claude/commands/promote.md`](../../../deploy/claude/commands/promote.md);
 ADR-0030 only mentions the slash command.

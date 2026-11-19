@@ -151,7 +151,7 @@ caching off raises the billed input tokens of a long session.
 ## Worker: Context Service workloads (optional)
 
 Enabled only when `MOCA_CONTEXT_WORKLOADS_ENABLED=1` and `CONTEXT_SERVICE_URL` is set; otherwise
-`/workloads` returns 501. See [`docs/context-service.md`](../context-service.md).
+`/workloads` returns 501. See [`docs/harness/how-to/workloads.md`](../harness/how-to/workloads.md).
 
 | Variable                                                    | Default                    | Notes                                                                                                           |
 | ----------------------------------------------------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------- |
@@ -171,7 +171,7 @@ Enabled only when `MOCA_CONTEXT_WORKLOADS_ENABLED=1` and `CONTEXT_SERVICE_URL` i
 These settings are checked per request, not at boot: a missing `CONTEXT_SERVICE_TOKEN` or URL returns
 500 `workloads_misconfigured`.
 
-Workloads with sandboxes of their own (phase 2, [`docs/context-service.md`](../context-service.md),
+Workloads with sandboxes of their own (phase 2, [`docs/harness/how-to/workloads.md`](../harness/how-to/workloads.md),
 "Own sandboxes"), off unless `MOCA_PROVISIONER_URL` is set:
 
 | Variable                          | Default     | Notes                                                                        |

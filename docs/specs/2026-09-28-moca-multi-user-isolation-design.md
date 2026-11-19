@@ -959,7 +959,7 @@ prediction sealed before E8's next rung, since it sits on the hot path.
   creates. Two subjects creating one new name concurrently can both succeed, and the later write's
   owner wins. Closing it needs a set-if-absent owner reservation before Context Service is called.
 - **Per-subject PVC authorization and subject-scoped workload names** for `/workloads` (rossoctl/moca#358). Under `multi`
-  and from any authenticated caller, a caller-named `workspace.claimName` is refused instead (§4.3). `docs/context-service.md` states the
+  and from any authenticated caller, a caller-named `workspace.claimName` is refused instead (§4.3). `docs/harness/how-to/workloads.md` states the
   boundary.
 - **Any `pi-fork` change.**
 

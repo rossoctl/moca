@@ -1,4 +1,8 @@
-# mocactl quickstart
+---
+sidebar_position: 1
+---
+
+# Set up mocactl against the Compose trial
 
 From nothing to a streamed reply in `mocactl`, on the Docker Compose trial of the P6 runtime.
 Most of the time goes into the first image pull. `mocactl` itself needs one URL; the compose
@@ -24,7 +28,7 @@ with its worker pool, the sandbox relay, Redis, one remote-worker sandbox — co
 the trial. The control plane is published on `http://localhost:8090` (`SH_CP_PORT`).
 
 Details, configuration and the trial's limits:
-[`deploy/compose/README.md`](../../deploy/compose/README.md).
+[`deploy/compose/README.md`](../../../deploy/compose/README.md).
 
 ## 2. Register a GitHub OAuth app (once)
 
@@ -84,7 +88,7 @@ a message. The first one creates a session and streams the reply.
 | see every key                       | `?` on an empty input |
 | quit                                | `ctrl+c`              |
 
-Headless, for scripts: `mocactl run "hello" --json`. More in the [README](README.md).
+Headless, for scripts: `mocactl run "hello" --json`. More in [Use mocactl](use-mocactl.md).
 
 ## 4. When something fails: `mocactl doctor`
 

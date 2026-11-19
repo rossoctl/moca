@@ -1,12 +1,12 @@
 # Attach a remote sandbox
 
 > **Preview.** A sandbox is a `remote-worker` that **dials out** to the relay, so it can live on another host with no
-> inbound route ([Brain and hands](../concepts/brain-and-hands.md)). Only two remote arrangements are documented for
+> inbound route ([Brain and hands](../harness/concepts/brain-and-hands.md)). Only two remote arrangements are documented for
 > P6: extra container sandboxes on the same host or cluster, and a microVM host attached to an OpenShift relay. Running
 > a container sandbox on an unrelated host against a P6 relay is not documented anywhere; the recipe in step 2 is
-> assembled from the pieces and **has not been run**. Read [Sandboxes and tiers](../concepts/sandboxes-and-tiers.md) and
+> assembled from the pieces and **has not been run**. Read [Sandboxes and tiers](../harness/concepts/sandboxes-and-tiers.md) and
 > the [security model](../reference/security-model.md#isolation-by-tier) and the
-> [multi-user isolation notes](../concepts/multi-user.md#isolation-between-users-today) first: a sandbox you attach joins the
+> [multi-user isolation notes](../harness/concepts/multi-user.md#isolation-between-users-today) first: a sandbox you attach joins the
 > shared pool and is not bound to any user.
 
 ## What the worker needs

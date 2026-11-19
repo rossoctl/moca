@@ -2,7 +2,7 @@
 
 > **Preview.** These pages explain how the P6 runtime works and why it is shaped that way. Each states
 > what the code does today and marks what only a spec or ADR proposes. For terms see the
-> [glossary](../glossary.md); for commands and settings see the [reference](../reference/configuration.md).
+> [glossary](../../glossary.md); for commands and settings see the [reference](../../reference/configuration.md).
 
 | Page                                            | Question it answers                                                              |
 | ----------------------------------------------- | -------------------------------------------------------------------------------- |

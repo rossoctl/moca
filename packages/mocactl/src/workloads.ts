@@ -61,7 +61,7 @@ export function describeWorkloadError(err: unknown, id?: string): string {
   if (err instanceof ApiError && err.status !== 0 && !TOKEN_CODES.has(err.code)) {
     switch (err.code) {
       case 'workloads_unavailable':
-        return 'workloads are not enabled on this harness — its operator turns them on (docs/context-service.md)';
+        return 'workloads are not enabled on this harness — its operator turns them on (docs/harness/how-to/workloads.md)';
       case 'workloads_misconfigured':
         return "the harness's workload settings are incomplete — ask its operator";
       case 'workload_not_found':

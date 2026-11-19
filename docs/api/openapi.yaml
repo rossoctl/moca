@@ -1968,7 +1968,7 @@ paths:
         `202` with the EXISTING turn id.
 
         Interactive turns do not come through here: they stream over the harness's own
-        `POST /turns` with a session token (docs/reference/http-api.md).
+        `POST /turns` with a session token (docs/harness/reference/http-api.md).
       security: [{ sessionToken: [] }]
       parameters: [{ $ref: '#/components/parameters/sessionId' }]
       requestBody:

@@ -1,14 +1,14 @@
 # Leaf envelope and result
 
 > **Preview.** Describes `POST /v1/runs` on `main` as of 2026-11-12 (`harness/src/run-leaf.ts`). A
-> **leaf** is one unit of agent work an orchestrator dispatches ([glossary](../glossary.md#leaf)). This
+> **leaf** is one unit of agent work an orchestrator dispatches ([glossary](../../glossary.md#leaf)). This
 > page replaces the file-based "volume envelope" of the early specs, which no longer exists in the code.
 
 ## What changed from the volume envelope
 
 The first leaf contract passed inputs and results as files on a shared volume (`inputsRef`,
 `resultRef`, `doneMarkerRef`, `gateRef`, `decisionRef`, a `/work` PVC). The FS-free redesign
-([P1 spec](../specs/2026-07-02-p1-fs-free-harness-design.md), ADR-0020) replaced it: inputs and the
+([P1 spec](../../specs/2026-07-02-p1-fs-free-harness-design.md), ADR-0020) replaced it: inputs and the
 gate decision are **inline** in the request, the result is the **response body**, and a copy is stored
 in Redis for polling. The harness does no filesystem I/O of its own.
 
@@ -32,7 +32,7 @@ still run in a sandbox with its own filesystem, and `workspaceRef` is a path ins
 Optional fields on any envelope: `decision`, `model`, `provider`, `workspaceRef`, `repoUrl`, `ref`,
 `maxTurns` (verdict leaf only), `tenant`, `configRef`, `problemStatement`, `prompt`, `env_key`.
 
-**`configRef`** names a [config bundle](../guides/promote-claude-workflow.md) (`sha256:` plus 64 lowercase hex
+**`configRef`** names a [config bundle](../how-to/promote-claude-workflow.md) (`sha256:` plus 64 lowercase hex
 characters). It applies to **prompt and solve leaves only**; a verdict leaf never reads it and runs without the
 bundle's skills, with no warning. It must be in the envelope: `/runs` does not use the session's bound
 bundle (unlike `/turn`). At request time only a non-blank string is required (`null` counts as absent; a
@@ -43,7 +43,7 @@ resolved, and a bad digest comes back as a 200 `failed` result with reason `erro
 400 `tenant_not_allowed`.
 
 `workloadId` runs a synchronous prompt on that workload's frozen context (see
-[Context Service and workloads](../context-service.md#runs)). An async run that names one, and any
+[Context Service and workloads](../how-to/workloads.md#runs)). An async run that names one, and any
 run while workloads are off, returns 501 `workload_runs_unavailable`, unless the deployment requires
 a token and none was sent (401 `token_required` first). `contextWritable: true` gives that run its
 own writable copy of the context, discarded when the run ends. It must be a boolean (400
@@ -131,7 +131,7 @@ the session's last synchronous result as if it were the answer. Cron still has n
 
 ## Spec drift
 
-- The [human-gate design](../specs/2026-06-28-human-gate-design.md) still describes the file-based
+- The [human-gate design](../../specs/2026-06-28-human-gate-design.md) still describes the file-based
   design (`decisionRef`, `gateRef`, an `awaiting_approval` marker). This page follows the code.
 - The P1 spec lists failure reasons without `saturated`, and statuses without `solved` and `responded`.
 - **Prompt-leaf session ids are inconsistent.** The turn is opened under the **raw** `sessionId` (no tenant

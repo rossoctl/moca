@@ -37,9 +37,9 @@ session log in Redis, and there is no harness-side timeout. There is no gate on 
 ## Archetype A, async fan-out
 
 Archetype A's drainer — a Redis-Streams consumer run as a KEDA `ScaledJob` — was removed with the
-Knative/KEDA deployment path ([ADR-0041](../adrs/0041-deprecate-knative-keda-deployment.md)). Its P6
-replacement is [ADR-0047](../adrs/0047-p6-async-fan-out-in-worker-drain.md) with its
-[design spec](../specs/2026-11-05-p6-async-fan-out-design.md), and it **runs on P6 today**: the
+Knative/KEDA deployment path ([ADR-0041](../../adrs/0041-deprecate-knative-keda-deployment.md)). Its P6
+replacement is [ADR-0047](../../adrs/0047-p6-async-fan-out-in-worker-drain.md) with its
+[design spec](../../specs/2026-11-05-p6-async-fan-out-design.md), and it **runs on P6 today**: the
 consumer is a drain loop inside the ordinary `--role=turn` worker, sharing one admission budget with
 interactive turns, rather than a separate process or a `--role=leaf` worker (that role stays reserved
 and unimplemented). A worker claims one queued turn at a time, runs it through the same `runLeaf` the
@@ -55,12 +55,12 @@ which looks like a real answer. Poll the turn route, not this one.
 1. **Turn the drain on.** `SH_ASYNC_DRAIN=1` on each worker process; it is off by default and needs
    `SH_CONTROL_PLANE_URL` and `SH_EXCHANGE_TOKEN`, which the deployment already sets. A missing
    prerequisite logs one line and leaves the drain off rather than failing the boot. Per deployment:
-   `supervisor.env` on [`deploy/vm`](../../deploy/vm/README.md), `.env` on
-   [`deploy/compose`](../../deploy/compose/README.md), the `moca-settings` ConfigMap on
-   [`deploy/k8s`](../../deploy/k8s/README.md). Every worker that has it drains, so the drain needs no
+   `supervisor.env` on [`deploy/vm`](../../../deploy/vm/README.md), `.env` on
+   [`deploy/compose`](../../../deploy/compose/README.md), the `moca-settings` ConfigMap on
+   [`deploy/k8s`](../../../deploy/k8s/README.md). Every worker that has it drains, so the drain needs no
    concurrency knob of its own: a worker runs **one** queued leaf at a time and claims it only while
    its total in-flight count — async plus interactive — is below `SH_TURNS_PER_WORKER`. See the
-   [configuration reference](../reference/configuration.md).
+   [configuration reference](../../reference/configuration.md).
 2. **Submit through the authenticated route**, in a loop: `POST /v1/sessions/{id}/turns` with
    `async: true` answers `202 {sessionId, turnId}`. Over the fan-out quota it answers 429
    `async_quota_exhausted`. **N leaves are N sessions**, one async turn each — `idempotencyKey`
@@ -69,7 +69,7 @@ which looks like a real answer. Poll the turn route, not this one.
    which does queue several turns on one session and makes their ordering yours to manage, a
    responsibility the queue does not take (spec §4.3). There is no batch resource and none is coming
    ([#537](https://github.com/rossoctl/moca/issues/537) decided that; the reasoning and the loop's
-   limits are in the [design spec](../specs/2026-11-05-p6-async-fan-out-design.md) §4.4).
+   limits are in the [design spec](../../specs/2026-11-05-p6-async-fan-out-design.md) §4.4).
 3. **Collect.** Poll `GET /v1/sessions/{id}/turns/{turnId}` for `state` and `attempts`, plus the
    result once the turn is terminal — the record's state is the source of truth, so a result written
    by a worker that then died is withheld until the reaper has ruled on it, rather than returned as

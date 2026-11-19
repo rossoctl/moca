@@ -5,7 +5,7 @@
 
 On the removed Knative path one request meant one scaled-to-zero process. P6 turns that around: a
 **supervisor** keeps a fixed pool of warm **workers**, each serving many sessions. Scale-to-zero and high
-density trade against each other ([ADR-0034](../adrs/0034-vm-process-manager-socket-handoff.md)), so
+density trade against each other ([ADR-0034](../../adrs/0034-vm-process-manager-socket-handoff.md)), so
 idle capacity costs memory, in exchange for no cold start and no autoscaler to operate.
 
 ## How a request travels
@@ -60,6 +60,6 @@ enforces this per request: an authenticated turn takes its identity from the ver
 conflicting `X-SH-Subject` is rejected), the process holds no ambient provider credential under
 `MOCA_TENANCY=multi` (it is scrubbed and replaced by a sentinel), and the worker's Pi loader is locked
 down. Some process-wide state in Pi cannot be isolated and is pinned by tests rather than refactored; the
-[P5 design](../specs/2026-09-06-p5-session-isolation-design.md) lists the residual hazards (for example, a write error in the output guard can exit the whole process,
+[P5 design](../../specs/2026-09-06-p5-session-isolation-design.md) lists the residual hazards (for example, a write error in the output guard can exit the whole process,
 which the spec calls a fleet-wide outage triggered by one session). The P5 spec's `X-SH-Subject` flow for
 unauthenticated callers does not appear in the current server code.

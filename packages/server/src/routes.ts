@@ -136,7 +136,7 @@ export const ROUTES: RouteSpec[] = [
   // Workload lifecycle: served, but an operator/stack surface rather than a client contract —
   // deliberately outside docs/api/harness-openapi.yaml. Off unless MOCA_CONTEXT_WORKLOADS_ENABLED=1
   // and CONTEXT_SERVICE_URL are set (501 workloads_unavailable otherwise); see
-  // docs/context-service.md.
+  // docs/harness/how-to/workloads.md.
   {
     method: 'POST',
     path: '/workloads',

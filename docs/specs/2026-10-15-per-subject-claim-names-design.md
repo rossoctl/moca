@@ -6,7 +6,7 @@
 **Builds on (reuse, no redesign):** [MI1](2026-09-28-moca-multi-user-isolation-design.md)
 (§4.3 records the stop-gap, §13 the deferral); the `/workloads` lifecycle
 (`packages/knative-server/src/workloads.ts`: `WORKSPACE_FIELDS`, `publicView`);
-[context-service](../context-service.md) (Moca's client for Context Service's trusted, storage-only
+[context-service](../harness/how-to/workloads.md) (Moca's client for Context Service's trusted, storage-only
 API, which already names the user in `X-Context-Subject`);
 [rossoctl/context-service](https://github.com/rossoctl/context-service) (the service itself — this
 design needs a companion change there, §2.2);

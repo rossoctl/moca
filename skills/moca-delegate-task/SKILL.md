@@ -201,7 +201,7 @@ The full set:
 
 ## References
 
-- [`mocactl` command reference](../../docs/reference/cli-mocactl.md)
-- [Context Service and workloads](../../docs/context-service.md), including [Runs](../../docs/context-service.md#runs)
-- [Context workflows](../../docs/concepts/context-workflows.md)
+- [`mocactl` command reference](../../docs/harness/reference/cli-mocactl.md)
+- [Context Service and workloads](../../docs/harness/how-to/workloads.md), including [Runs](../../docs/harness/how-to/workloads.md#runs)
+- [Context workflows](../../docs/harness/concepts/context-workflows.md)
 - [How delegation works inside moca](references/internal-flow.md)

@@ -1,3 +1,7 @@
+---
+sidebar_position: 4
+---
+
 # Context Service and workloads
 
 A Moca workload is a user's private environment for delegated tasks: where those tasks run and the
@@ -36,7 +40,7 @@ It does not build the context file:
 `contextctl ctx pack <dir> -o FILE` does, which packs the directory's files under the bundle's
 `workspace/` directory. `pack` needs a Context Service with [rossoctl/context-service#56](https://github.com/rossoctl/context-service/pull/56) (workspace bundles), on the server as well as
 the client. See "Delegate with context" in
-[`packages/mocactl/README.md`](../packages/mocactl/README.md).
+[`packages/mocactl/README.md`](../../../packages/mocactl/README.md).
 
 The routes are off by default. With them off, every `/workloads` route answers
 `501 workloads_unavailable`.
@@ -194,8 +198,8 @@ period.
 
 A workload can get sandboxes of its own instead of the shared pool
 ([#476](https://github.com/rossoctl/moca/issues/476), per-workload sandboxes; design in
-[`specs/2026-10-16-workload-sandboxes-design.md`](specs/2026-10-16-workload-sandboxes-design.md),
-decision in [ADR-0043](adrs/0043-workload-sandboxes-provisioner.md)). It is off by default: it needs
+[`specs/2026-10-16-workload-sandboxes-design.md`](../../specs/2026-10-16-workload-sandboxes-design.md),
+decision in [ADR-0043](../../adrs/0043-workload-sandboxes-provisioner.md)). It is off by default: it needs
 `moca-provisioner` and `MOCA_PROVISIONER_URL` on the workers (on Kubernetes,
 `SH_WORKLOAD_SANDBOXES=1 deploy/k8s/setup.sh ...`). Without it, `sandboxes` is refused as any
 unknown field is (`400 workload_field_not_allowed`), and everything above is unchanged.

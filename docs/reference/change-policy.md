@@ -9,7 +9,7 @@
 | Surface                   | Where it is defined                                                                                                                         |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | The HTTP API              | [`docs/api/openapi.yaml`](../api/openapi.yaml) (control plane), [`docs/api/harness-openapi.yaml`](../api/harness-openapi.yaml) (data plane) |
-| The `mocactl` CLI         | [Command reference](cli-mocactl.md)                                                                                                         |
+| The `mocactl` CLI         | [Command reference](../harness/reference/cli-mocactl.md)                                                                                    |
 | Configuration             | [Configuration reference](configuration.md): environment variables, ConfigMaps, `setup.sh` flags                                            |
 | The sandbox wire contract | `proto/sandbox/v1` (the `Attach` and `Exec` services)                                                                                       |
 | Stored data               | Redis keys, the credential envelope, token claims, config bundles                                                                           |

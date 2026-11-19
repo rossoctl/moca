@@ -28,7 +28,7 @@ export function workloadKeyFor(owner: string, name: string, generation: string):
 
 /**
  * The workload record's Redis key. `sh:wl:`, not `sh:workload:`: the upgrade note's cleanup of
- * legacy records (`sh:workload:*`, docs/context-service.md) must never match a live workload.
+ * legacy records (`sh:workload:*`, docs/harness/how-to/workloads.md) must never match a live workload.
  */
 export function workloadRecordKey(owner: string, name: string): string {
   return `sh:wl:${ownerScopeFor(owner)}:${name}`;
