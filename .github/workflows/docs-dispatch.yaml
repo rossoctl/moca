@@ -9,6 +9,10 @@
 # rossoctl/.github's "Deploy site to Pages" workflow listens for (type:
 # docs-updated), so the site rebuilds within minutes of the merge.
 #
+# A published release sends it too: the site serves the latest release's docs
+# at /moca/* and main's at /moca/next/*, and looks the release up when it
+# builds, so the new release's pages go live within minutes of publishing it.
+#
 # ONE-TIME SETUP: the secret SITE_DISPATCH_TOKEN.
 #   GITHUB_TOKEN is scoped to this repository, so it cannot dispatch to another
 #   one. Create a fine-grained personal access token, or a GitHub App token,
@@ -26,6 +30,8 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+  release:
+    types: [published]
   workflow_dispatch: {}
 
 permissions:
@@ -89,7 +95,7 @@ jobs:
             echo ""
             if [ "${NOTIFIED}" = "true" ]; then
               echo "Sent \`docs-updated\` to rossoctl/.github. The site rebuilds"
-              echo "\`/moca/*\` from this commit, if it passes the publish guard."
+              echo "its Moca section from moca's docs, if they pass the publish guard."
             else
               echo "\`SITE_DISPATCH_TOKEN\` is not set, so the site was not notified."
               echo "It resyncs on its daily 06:17 UTC schedule."
