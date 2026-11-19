@@ -34,6 +34,11 @@ export interface LeafResultBody {
   gateId?: number;
   gate?: { summary: string; proposed_action: string };
   usage?: Record<string, number>;
+  /**
+   * Async path only (`transport/async-turn.ts`): which of `text`/`patch` this result has bytes for,
+   * to be fetched one artifact route at a time. The sync path inlines both, so it never sets this.
+   */
+  artifacts?: string[];
 }
 
 /** User-facing state, resolved from `queued`'s three meanings via child liveness + grace. */

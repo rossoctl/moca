@@ -257,3 +257,49 @@ describe('cmdSubagents — label', () => {
     expect(unlabelled).not.toHaveProperty('label');
   });
 });
+
+/* --- async rows --- */
+
+describe('cmdSubagents — async rows', () => {
+  it('reads the turn, never mints a session token, and counts the turn as liveness', async () => {
+    const rt = makeRt(scratch);
+    const ledger = openLedger(rt.paths.subagentsFile);
+    // A long-stale row with no pid: on the sync path this is `unknown` past the 60 s grace.
+    ledger.append(seedRecord({ turnId: 't1', stateObservedAt: 1 }));
+    const { io, out } = makeIo();
+    const turns = { readTurnState: vi.fn(async () => 'queued' as const) };
+    const r = await cmdSubagents(rt, io, base({ json: true, turns, transport: fakeTransport({}) }));
+    expect(r).toBe(0);
+    expect(rt.cp.mintSessionToken).not.toHaveBeenCalled();
+    expect(turns.readTurnState).toHaveBeenCalledWith('s1', 't1', undefined);
+    expect(JSON.parse(out[0]!.trim()).subagents[0]).toMatchObject({ state: 'running' });
+  });
+
+  it('reconciles a finished turn into the ledger', async () => {
+    const rt = makeRt(scratch);
+    const ledger = openLedger(rt.paths.subagentsFile);
+    ledger.append(seedRecord({ turnId: 't1' }));
+    const { io } = makeIo();
+    const turns = {
+      readTurnState: vi.fn(async () => ({ status: 'responded' as const, artifacts: ['text'] })),
+    };
+    const r = await cmdSubagents(rt, io, base({ turns, transport: fakeTransport({}) }));
+    expect(r).toBe(0);
+    expect(openLedger(rt.paths.subagentsFile).find('s1')!.lastKnownState).toBe('done');
+  });
+
+  it("one async row's failure does not fail the list", async () => {
+    const rt = makeRt(scratch);
+    const ledger = openLedger(rt.paths.subagentsFile);
+    ledger.append(seedRecord({ turnId: 't1' }));
+    const { io, out } = makeIo();
+    const turns = {
+      readTurnState: vi.fn(async () => {
+        throw new Error('turn store is down');
+      }),
+    };
+    const r = await cmdSubagents(rt, io, base({ json: true, turns, transport: fakeTransport({}) }));
+    expect(r).toBe(0);
+    expect(JSON.parse(out[0]!.trim()).subagents[0]).toMatchObject({ state: 'unknown' });
+  });
+});

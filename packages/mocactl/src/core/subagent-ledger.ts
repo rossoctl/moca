@@ -42,7 +42,14 @@ export interface LedgerRecord {
   writable?: boolean;
   envelope: LedgerEnvelope;
   submittedAt: number;
-  /** The detached worker's pid. Absent until the child is forked. */
+  /**
+   * The async turn this row was dispatched as (`spawn --async`). Its presence is what says which
+   * backend holds the leaf: a row with one is read and cancelled through the turn routes and has no
+   * local process at all, a row without one is the sync `/runs` path with a detached worker. Written
+   * once, at `append`.
+   */
+  turnId?: string;
+  /** The detached worker's pid. Absent until the child is forked, and never on an async row. */
   childPid?: number;
   /** Latest observed state. Starts as 'running'. */
   lastKnownState: HonestState;

@@ -85,6 +85,7 @@ export function fakeControlPlane(
     deleteConfigBundle: async () => undefined,
     submitTurn: async (sessionId) => ({ sessionId, turnId: 't-fake' }),
     getTurn: async (_sessionId, turnId) => ({ turnId, state: 'done', attempts: 1 }),
+    getTurnArtifact: async (_sessionId: string, _turnId: string, kind: string) => `fake ${kind}`,
     cancelTurn: async (_sessionId: string, turnId: string) => ({
       turnId,
       state: 'cancelled' as const,
