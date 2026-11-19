@@ -18,7 +18,7 @@ import {
   type LeaseEvent,
 } from '@moca/sandbox-client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { saveAuth } from '../src/config.js';
+import { DEFAULT_CONFIG, saveAuth, saveConfig } from '../src/config.js';
 import { SBX_USAGE, sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import { checkAgentConfig } from '../src/sbx/agent-config.js';
 import { hasUnpulled, MAX_FILE, repoId } from '../src/sbx/push.js';
@@ -922,5 +922,55 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     expect(await h.run(['rm'])).toBe(0);
     expect(existsSync(join(h.r, '.sbx'))).toBe(false);
     expect(existsSync(join(h.r, '.mcp.json'))).toBe(false);
+  });
+});
+
+describe('mocactl sbx up: a binding on a control plane with no login here', () => {
+  const OLD_URL = 'https://sbx-old.example.invalid';
+  // Logged in to URL_ (sbx login remembers it); the repository is bound to a sandbox on OLD_URL.
+  const boundElsewhere = (loginUrl = URL_) => {
+    const h = harness({ boxes: [sandbox({ id: SBX })] });
+    saveConfig(h.paths, { ...DEFAULT_CONFIG, sbxControlPlaneUrl: URL_ });
+    saveAuth(sbxPaths(h.paths), { ...LOGIN, controlPlaneUrl: loginUrl });
+    mkdirSync(join(h.r, '.sbx'));
+    writeFileSync(
+      join(h.r, '.sbx/sandbox.json'),
+      JSON.stringify({ id: SBX, controlPlaneUrl: OLD_URL, template: 'default' }),
+    );
+    return h;
+  };
+
+  it('uses the logged-in control plane, never asks it for the bound id, and rebinds', async () => {
+    const h = boundElsewhere();
+    expect(await h.run(['up'], { env: { HOME: h.home } })).toBe(0);
+    expect(h.cp.calls.some((c) => c.path === `/v1/sandboxes/${SBX}`)).toBe(false);
+    expect(h.cp.posts()).toHaveLength(1);
+    expect(binding(h.r)).toMatchObject({ id: NEW, controlPlaneUrl: URL_ });
+    expect(h.err()).toContain(
+      `the bound sandbox ${SBX} is on ${OLD_URL}, which this machine is not logged in to; ` +
+        `this repository's files go to ${URL_}, which it is`,
+    );
+  });
+
+  it("keeps the binding's control plane when the login is for it", async () => {
+    const h = boundElsewhere(OLD_URL);
+    expect(await h.run(['up'], { env: { HOME: h.home } })).toBe(0);
+    expect(h.cp.posts()).toHaveLength(0);
+    expect(binding(h.r)).toMatchObject({ id: SBX, controlPlaneUrl: OLD_URL });
+  });
+
+  it('with --control-plane-url naming another, never asks it for the bound id', async () => {
+    const h = boundElsewhere();
+    expect(await h.run(['up', '--control-plane-url', URL_], { env: { HOME: h.home } })).toBe(0);
+    expect(h.cp.calls.some((c) => c.path === `/v1/sandboxes/${SBX}`)).toBe(false);
+    expect(binding(h.r)).toMatchObject({ id: NEW, controlPlaneUrl: URL_ });
+  });
+
+  it('with no login for either, refuses and offers no up', async () => {
+    const h = boundElsewhere('https://sbx-third.example.invalid');
+    expect(await h.run(['up'], { env: { HOME: h.home } })).toBe(3);
+    expect(h.cp.calls).toHaveLength(0);
+    expect(h.err()).toContain(`at ${OLD_URL} (from .sbx/sandbox.json)`);
+    expect(h.err()).not.toContain('mocactl sbx up');
   });
 });

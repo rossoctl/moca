@@ -70,6 +70,12 @@ Without `--template`, `up` uses the `default` template; `mocactl sbx templates` 
 and `mocactl sbx up --template <id>` picks one. Run `up` again at any time: it reuses this
 repository's sandbox while it is live.
 
+**Moving to another control plane.** The other commands use the bound sandbox's control plane. So
+after `mocactl sbx login --control-plane-url <new URL>`, a repository bound on the old one is
+refused until you run `up` in it. `up` sees the binding's control plane has no login on this
+machine, uses the new URL and rebinds. Work not pulled from the old sandbox stays on the old
+control plane. `MOCACTL_SBX_URL` sets the control plane for one shell.
+
 A new sandbox ends after 7 days without use by default; `--lifetime DURATION` (`36h`, `14d`,
 `90m`, or whole seconds) picks another: at least 1 h, at most the deployment's maximum (30 days
 by default). It applies only to a new sandbox: `up` on an existing one warns that the sandbox

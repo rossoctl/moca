@@ -4,9 +4,11 @@ import { parseArgs, type ParseArgsConfig } from 'node:util';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { MAX_STDIN_BYTES, q, WORKSPACE, type SandboxModeName } from '@moca/sandbox-client';
 import {
+  loadAuth,
   loadConfig,
   normalizeUrl,
   resolvePaths,
+  sameControlPlane,
   storedLoginUrl,
   type Paths,
   type TuiConfig,
@@ -349,7 +351,9 @@ admins only:
 NDJSON line per HTTP attempt appended to F (0600), with no token, host or free text in it.
 ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, the one remembered at
-login, or the login's own (a login minted by an operator). The login is kept apart from \`mocactl login\`'s, so both can be active at once.
+login, or the login's own (a login minted by an operator). \`up\` skips the bound sandbox's, and
+rebinds, when this machine has a login for the remembered (or login's) one and none for it. The
+login is kept apart from \`mocactl login\`'s, so both can be active at once.
 exit: 0 ok, 1 failed, 2 usage, 3 log in first, 4 control plane unreachable, 5 a wait timed out,
 130 interrupted (Ctrl-C)`;
 
@@ -433,6 +437,29 @@ export function resolveSbxUrl(
 export function loginControlPlaneUrl(env: NodeJS.ProcessEnv, home: string): string | undefined {
   const u = storedLoginUrl(sbxPaths(resolvePaths(env, home)).authFile);
   return u && /^https?:\/\//.test(u) ? u : undefined;
+}
+
+/**
+ * The control plane `up` uses instead of the binding's `boundUrl`: the one it would use without a
+ * binding, when this machine has a login for it and none for `boundUrl`. Undefined otherwise, and
+ * when the flag or MOCACTL_SBX_URL decides.
+ */
+function upFallbackUrl(
+  boundUrl: string | undefined,
+  flag: string | undefined,
+  env: NodeJS.ProcessEnv,
+  home: string,
+): string | undefined {
+  if (!boundUrl || flag || env.MOCACTL_SBX_URL) return undefined;
+  const paths = resolvePaths(env, home);
+  const url = resolveSbxUrl(
+    undefined,
+    env,
+    loadConfig(paths).config,
+    loginControlPlaneUrl(env, home),
+  );
+  const auth = sbxPaths(paths);
+  return url && !loadAuth(auth, boundUrl) && loadAuth(auth, url) ? url : undefined;
 }
 
 /** Where resolveSbxUrl's answer came from, by the same precedence (and the same `||`). */
@@ -531,7 +558,10 @@ export async function openSbx(
       opts.urlFrom &&
       remembered.sbxControlPlaneUrl &&
       normalizeUrl(remembered.sbxControlPlaneUrl) !== normalizeUrl(url)
-        ? `; that is not the control plane you logged in to (${sanitizeRemote(remembered.sbxControlPlaneUrl)}): log in there only if you trust it, as it would receive this repository's files`
+        ? `; that is not the control plane you logged in to (${sanitizeRemote(remembered.sbxControlPlaneUrl)}): log in there only if you trust it, as it would receive this repository's files` +
+          (!loadAuth(rt.paths, url) && loadAuth(rt.paths, remembered.sbxControlPlaneUrl)
+            ? ', or run `mocactl sbx up` to bind this repository to a sandbox there'
+            : '')
         : '';
     io.err(`sbx: not logged in to the sandbox service${where}: run \`${login}\`${other}`);
     return SBX_EXIT.loginRequired;
@@ -1183,6 +1213,24 @@ async function sbxMainWith(
     if (bound && !SANDBOX_ID_RE.test(bound.id)) {
       io.err(`sbx: ignoring .sbx/sandbox.json: '${sanitizeRemote(bound.id)}' is not a sandbox id`);
     } else upBound = bound?.id;
+    // A binding to a control plane this machine has no login for, while it has one for the
+    // control plane it would otherwise use: `up` cannot reach the bound sandbox, so it uses
+    // the logged-in control plane and rebinds, as `create` would.
+    const other = upFallbackUrl(boundUrl, values['control-plane-url'], env, deps.home ?? homedir());
+    if (other) {
+      const was = sanitizeRemote(boundUrl!);
+      const what = upBound ? `the bound sandbox ${sanitizeRemote(upBound)}` : '.sbx/sandbox.json';
+      io.err(
+        `sbx up: ${what} is on ${was}, which this machine is not logged in to; this ` +
+          `repository's files go to ${sanitizeRemote(other)}, which it is (work not pulled ` +
+          `from there stays on ${was})`,
+      );
+      boundUrl = undefined;
+      upBound = undefined;
+    }
+    // The flag or MOCACTL_SBX_URL naming another control plane: the bound id is not on it.
+    const chosen = values['control-plane-url'] || env.MOCACTL_SBX_URL;
+    if (chosen && boundUrl && !sameControlPlane(chosen, boundUrl)) upBound = undefined;
   }
   let upLifetime: number | undefined;
   if (command === 'up') {
@@ -1391,6 +1439,7 @@ async function sbxMainWith(
       flagUrl,
       env,
       loadConfig(resolvePaths(env, deps.home ?? homedir())).config,
+      loginControlPlaneUrl(env, deps.home ?? homedir()),
     );
     deps = { ...deps, fetchImpl: r.wrap(deps.fetchImpl ?? fetch, base ?? 'http://invalid') };
   }

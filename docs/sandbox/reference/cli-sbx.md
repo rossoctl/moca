@@ -272,7 +272,9 @@ admins only:
 NDJSON line per HTTP attempt appended to F (0600), with no token, host or free text in it.
 ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, the one remembered at
-login, or the login's own (a login minted by an operator). The login is kept apart from `mocactl login`'s, so both can be active at once.
+login, or the login's own (a login minted by an operator). `up` skips the bound sandbox's, and
+rebinds, when this machine has a login for the remembered (or login's) one and none for it. The
+login is kept apart from `mocactl login`'s, so both can be active at once.
 exit: 0 ok, 1 failed, 2 usage, 3 log in first, 4 control plane unreachable, 5 a wait timed out,
 130 interrupted (Ctrl-C)
 ```
