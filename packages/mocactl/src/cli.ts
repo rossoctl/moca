@@ -76,6 +76,9 @@ export const USAGE = `usage:
   mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]
                                                  run the subagent on a workload's context
                                                  (--writable: its own copy, discarded after)
+  mocactl spawn "prompt" --async [...]            dispatch as a cancellable async turn instead of a
+                                                 local worker process (needs SH_ASYNC_DRAIN on the
+                                                 deployment; not available with --workload)
   mocactl spawn "prompt" --max-concurrent N [...]
                                                  refuse the dispatch when N of your subagents are
                                                  already running (default 4)
@@ -192,6 +195,7 @@ const OPTIONS = {
   'max-concurrent': { type: 'string' },
   workload: { type: 'string' },
   writable: { type: 'boolean' },
+  async: { type: 'boolean' },
   context: { type: 'string' },
   name: { type: 'string' },
   sandboxes: { type: 'string' },
@@ -340,6 +344,10 @@ async function mainWith(
   }
   if (values.workload !== undefined && command !== 'spawn') {
     io.err(`--workload only applies to \`mocactl spawn\`\n${help}`);
+    return 2;
+  }
+  if (values.async !== undefined && command !== 'spawn') {
+    io.err(`--async only applies to \`mocactl spawn\`\n${help}`);
     return 2;
   }
   if (values.writable !== undefined && command !== 'spawn') {
@@ -572,6 +580,7 @@ async function mainWith(
         label: values.label,
         workloadId: values.workload,
         writable: values.writable === true,
+        async: values.async === true,
         ...(maxConcurrent !== undefined ? { maxConcurrent } : {}),
         json,
       });

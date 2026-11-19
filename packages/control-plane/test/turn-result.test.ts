@@ -83,8 +83,11 @@ describe('projectLeafResult (#390)', () => {
   it('omits the summary entirely at a cap of 0, which is what "no summary" means', () => {
     // Not `summary: '…[truncated]'`: a key holding nothing but the marker is not "no summary", and
     // `configuration.md` promises the key is gone.
+    // The ARTIFACT survives the cap of 0, as the patch's does: naming what can be fetched is a
+    // descriptor, not model prose, and it is the only thing left pointing at the reply.
     expect(projectLeafResult({ status: 'responded', text: 'x'.repeat(5000) }, 0)).toEqual({
       status: 'responded',
+      artifacts: [{ kind: 'text', bytes: 5000 }],
     });
   });
 
@@ -143,7 +146,7 @@ describe('projectLeafResult (#390)', () => {
     });
   });
 
-  it('offers no artifact for a capture refused for size, and keeps the refusal visible', () => {
+  it('offers no PATCH artifact for a capture refused for size, and keeps the refusal visible', () => {
     const out = projectLeafResult(
       {
         status: 'responded',
@@ -157,8 +160,9 @@ describe('projectLeafResult (#390)', () => {
       2048,
     );
     // The bytes never left the sandbox, so there is nothing to fetch -- and the descriptor is the
-    // whole answer about that patch.
-    expect(out.artifacts).toBeUndefined();
+    // whole answer about that patch. The reply itself is still fetchable, which on this record is
+    // the only thing that is.
+    expect(out.artifacts).toEqual([{ kind: 'text', bytes: 4 }]);
     expect(out.workspace).toEqual({
       patchRefused: 'too_large',
       patchBytes: 9_000_000,
@@ -176,7 +180,11 @@ describe('projectLeafResult (#390)', () => {
       },
       2048,
     );
-    expect(out.artifacts).toEqual([{ kind: 'patch', bytes: patch.byteLength }]);
+    // Patch first, then the reply: a prompt leaf that edited files has both to fetch.
+    expect(out.artifacts).toEqual([
+      { kind: 'patch', bytes: patch.byteLength },
+      { kind: 'text', bytes: 16 },
+    ]);
     expect(out.workspace).toEqual({ patchBytes: patch.byteLength });
   });
 
@@ -217,10 +225,22 @@ describe('pickArtifact (#390)', () => {
     expect(pickArtifact({ patch: 'diff a\n' }, 'patch')?.sha256).toBeUndefined();
   });
 
-  it('has nothing for an unknown kind, an empty patch, or a refused capture', () => {
+  it('serves the assistant s reply whole, which the status body only summarises', () => {
+    const reply = 'x'.repeat(5000);
+    expect(pickArtifact({ status: 'responded', text: reply }, 'text')).toEqual({
+      bytes: Buffer.from(reply, 'utf8'),
+      contentType: 'text/plain; charset=utf-8',
+    });
+    // No stored digest for a reply: the route hashes these bytes for the ETag instead.
+    expect(pickArtifact({ text: 'hi' }, 'text')?.sha256).toBeUndefined();
+  });
+
+  it('has nothing for an unknown kind, an empty patch, an empty text, or a refused capture', () => {
     expect(pickArtifact({ patch: 'diff a\n' }, 'transcript')).toBeNull();
     expect(pickArtifact({ patch: null, text: 'hello' }, 'patch')).toBeNull();
     expect(pickArtifact({ workspace: { patchRefused: 'too_large' } }, 'patch')).toBeNull();
+    expect(pickArtifact({ patch: 'diff a\n', text: null }, 'text')).toBeNull();
+    expect(pickArtifact({ text: '' }, 'text')).toBeNull();
   });
 });
 

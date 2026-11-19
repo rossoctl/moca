@@ -247,7 +247,19 @@ export interface ControlPlaneApi {
    */
   submitTurn(sessionId: string, req: SubmitTurnRequest): Promise<SubmittedTurn>;
   /** An async turn's state, and its result once written. */
-  getTurn(sessionId: string, turnId: string): Promise<TurnStatus>;
+  getTurn(sessionId: string, turnId: string, opts?: { signal?: AbortSignal }): Promise<TurnStatus>;
+  /**
+   * One artifact of a TERMINAL turn, whole — the output `getTurn`'s body deliberately leaves out.
+   * `kind` is as `result.artifacts[].kind` names it (`patch`, `text`). Throws ApiError `not_found`
+   * for a turn that is not terminal yet and for a kind this turn has nothing for, so read
+   * `artifacts` first rather than guessing.
+   */
+  getTurnArtifact(
+    sessionId: string,
+    turnId: string,
+    kind: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<string>;
   /**
    * Cancel a QUEUED or RUNNING async turn (#391). A queued turn answers `state: 'cancelled'` and
    * never starts; a running one answers `state: 'running'` with `cancelRequested`, and the worker

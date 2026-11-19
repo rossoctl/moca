@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.31.0
+  version: 1.32.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -352,13 +352,15 @@ components:
               type: array
               description: |
                 what `GET …/turns/{turnId}/artifacts/{kind}` can serve for this turn, absent when
-                nothing can. A capture refused for size (`workspace.patchRefused`) has no artifact
-                by design: the bytes never left the sandbox.
+                nothing can; `patch` first, then `text`. A capture refused for size
+                (`workspace.patchRefused`) has no `patch` artifact by design: the bytes never left
+                the sandbox. A `text` artifact carries no `sha256` -- nothing hashes the assistant's
+                reply on the way in, and the fetch route hashes the bytes it serves for the `ETag`.
               items:
                 type: object
                 required: [kind, bytes]
                 properties:
-                  kind: { type: string, enum: [patch] }
+                  kind: { type: string, enum: [patch, text] }
                   bytes: { type: integer }
                   sha256:
                     type: string
@@ -2131,21 +2133,24 @@ paths:
       summary: An async turn's output, whole
       description: |
         The output `GET …/turns/{turnId}` leaves out of its bounded body (#390), served as bytes with
-        its own content type. `TurnStatus.result.artifacts` says which kinds this turn has; `patch`
-        is the only kind in M1.
+        its own content type. `TurnStatus.result.artifacts` says which kinds this turn has: `patch`
+        for the diff, `text` for the assistant's reply.
 
-        The body is the diff exactly as the leaf produced it -- never truncated, and byte-exact for a
+        `patch` is the diff exactly as the leaf produced it -- never truncated, and byte-exact for a
         diff that is not valid UTF-8 (the worker stores such a capture base64 and this route decodes
-        it). `ETag` is a `sha256:<hex>` digest of the bytes served, in the one format
+        it). `text` is the reply whole, which `TurnStatus.result.summary` only describes in one
+        clipped line -- so for a prompt turn this route is the only way to read a long answer back.
+        `ETag` is a `sha256:<hex>` digest of the bytes served, in the one format
         `TurnStatus.result.artifacts[].sha256` uses: the capture's own digest when the record carries
         one, and otherwise a digest of these bytes. It is for comparing what you hold against what
         the route would serve; this route does not honour `If-None-Match`, so every fetch is a `200`
         with the whole body.
 
-        Everything absent is `404`, with a message naming which: an unknown kind, a turn that is
-        still queued or running, a terminal turn whose leaf stored no result, and a capture refused
-        for size (`workspace.patchRefused`) -- in that last case the bytes never left the sandbox,
-        so the descriptor in the status body is the whole answer.
+        Everything absent is `404`, with a message naming which: an unknown kind, a kind this turn
+        has nothing for (a solve has no `text`), a turn that is still queued or running, a terminal
+        turn whose leaf stored no result, and a capture refused for size
+        (`workspace.patchRefused`) -- in that last case the bytes never left the sandbox, so the
+        descriptor in the status body is the whole answer.
       security: [{ sessionToken: [] }]
       parameters:
         - { $ref: '#/components/parameters/sessionId' }
@@ -2153,7 +2158,7 @@ paths:
         - name: kind
           in: path
           required: true
-          schema: { type: string, enum: [patch] }
+          schema: { type: string, enum: [patch, text] }
           description: the artifact kind, as named in `TurnStatus.result.artifacts[].kind`
       responses:
         '200':
@@ -2167,6 +2172,8 @@ paths:
           content:
             text/x-diff:
               schema: { type: string, format: binary }
+            text/plain:
+              schema: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
   /v1/credentials:

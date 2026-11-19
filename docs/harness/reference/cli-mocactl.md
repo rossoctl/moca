@@ -60,6 +60,9 @@ usage:
   mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]
                                                  run the subagent on a workload's context
                                                  (--writable: its own copy, discarded after)
+  mocactl spawn "prompt" --async [...]            dispatch as a cancellable async turn instead of a
+                                                 local worker process (needs SH_ASYNC_DRAIN on the
+                                                 deployment; not available with --workload)
   mocactl spawn "prompt" --max-concurrent N [...]
                                                  refuse the dispatch when N of your subagents are
                                                  already running (default 4)
@@ -92,7 +95,7 @@ exits 2. Some flags are always rejected (exit 2) outside their command: `--consu
 `--endpoint` outside `credentials add`; `--kind` outside `credentials add` and `spawn`; `--config`
 outside `run` and `spawn`; `--repo` and `--ref` outside `spawn`; `--tag` outside `spawn` and
 `subagents`; `--label` outside `spawn`; `--out`, `--wait` and `--timeout` outside `get`;
-`--max-concurrent` outside `spawn`; `--workload` outside `spawn`;
+`--max-concurrent` outside `spawn`; `--workload` outside `spawn`; `--async` outside `spawn`;
 `--prompt-file` outside `spawn`; `--record` outside `run`;
 `--context`, `--name`, `--sandboxes` and `--mount` outside `workloads create`; and `--all` outside `logout`. Other flags a
 command does not use are not rejected and may be ignored.
@@ -274,8 +277,19 @@ hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo
   already running — before the session is created and before the worker is forked, so a refused
   dispatch costs nothing. The count is of this machine's ledger rows that are both non-terminal and
   have a live child pid; a row whose child is gone holds no slot, so an unreconciled crash cannot
-  wedge `spawn`. The server's own pool is the real bound (a sync 503 `saturated`, retried as above).
-  Exit 2 for an `N` that is not a whole number of at least 1.
+  wedge `spawn`. An `--async` row has no child, so it holds its slot until a `subagents` or `get`
+  call reads the turn and records a terminal state. The server's own pool is the real bound (a sync
+  503 `saturated`, retried as above). Exit 2 for an `N` that is not a whole number of at least 1.
+- `spawn --async` dispatches the leaf as an async turn (`POST /v1/sessions/{id}/turns`) instead of
+  forking a local worker that holds a synchronous `/v1/runs`. What it buys: a turn record, which is
+  what makes a subagent cancellable, and no local process — nothing on this machine has to survive
+  the command, so a laptop can close on a running subagent. The turn id is recorded in the ledger
+  row and is what `subagents` and `get` read the leaf through from then on. Exit 2 with `--workload`:
+  the control plane refuses a workload on the async path (501), so it is refused before the session
+  is created. It needs `SH_ASYNC_DRAIN=1` on at least one worker of the deployment — that is off by
+  default, and without a drain the turn sits `queued` until the server's reaper calls it `lost`.
+  A row spawned with `--async` on another machine is invisible to this one's `get`: there is no
+  ledger row to carry the turn id.
 - `get` exit 2: sessionId outside `[A-Za-z0-9][A-Za-z0-9._-]*[A-Za-z0-9]`, or `--timeout` without
   `--wait`, or a `--timeout` that is not a whole number of seconds of at least 1. Exit 0 only on
   `responded`/`done`/`solved`; `queued`/`paused`/`failed` exit 1.
@@ -283,7 +297,9 @@ hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo
   writes and summarizes it exactly as a plain `get` does — one call, result inline, for a caller
   that spawns and collects in the same turn. It polls `GET /runs/status` every 2 s within an `S`
   budget (default 300, never overrun) and re-mints the session token as it nears expiry, since
-  `SH_SESSION_TOKEN_TTL_SECONDS` also defaults to 300. It stops early, exit 1 and
+  `SH_SESSION_TOKEN_TTL_SECONDS` also defaults to 300. On an `--async` row it polls
+  `GET /v1/sessions/{id}/turns/{turnId}` instead, with the API token the command already holds, and
+  fetches the reply and the patch from the turn's artifact routes once it has a result. It stops early, exit 1 and
   `status: "unknown"`, when the ledger says no result is coming: the row already went terminal
   client-side (a fork failure), or its child exited without writing one, past the 60 s
   result-write grace. On the budget running out the output is what a not-finished `get` has
@@ -291,7 +307,8 @@ hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo
   from "never". Ctrl-C ends the wait with exit 130 and no error line, whether it lands during a
   poll or between two; the subagent itself keeps running, so a later `get` still collects it.
 - `--json`:
-  - `spawn` → `{"type":"session","sessionId","pid"}`.
+  - `spawn` → `{"type":"session","sessionId","pid"}`, or `{"type":"session","sessionId","turnId"}`
+    with `--async`, which has no local process to name.
   - `subagents` → `{"subagents":[{"sessionId","tag","label"?,"kind","state","detail","bundle","workload","writable"?,"submittedAt"}]}` (`label` and `writable` are present only on rows dispatched with them). The non-`--json` table columns are `SESSION TAG LABEL KIND STATE BUNDLE` (`-` on unlabeled rows).
   - `get` → `{"sessionId","status","files":[…],"reason"?,"message"?}`, or
     `{"sessionId","status":"queued"}` with nothing to collect, or

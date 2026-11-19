@@ -65,7 +65,7 @@ export function clip(text: string, maxBytes: number): string {
 
 /** What `GET …/turns/{turnId}/artifacts/{kind}` can serve for this result. */
 export interface TurnArtifact {
-  kind: 'patch';
+  kind: 'patch' | 'text';
   bytes: number;
   sha256?: string;
 }
@@ -82,8 +82,10 @@ export interface ArtifactBody {
   sha256?: string;
 }
 
-/** Unified diffs, the only artifact kind in M1. `text/x-diff` is what git's own tooling serves. */
+/** Unified diffs. `text/x-diff` is what git's own tooling serves. */
 const PATCH_CONTENT_TYPE = 'text/x-diff';
+/** The assistant's reply, whole. Charset stated because the stored value is a JSON string. */
+const TEXT_CONTENT_TYPE = 'text/plain; charset=utf-8';
 
 /**
  * The status read's body (§4.4, B5): everything the stored record says ABOUT the turn, and nothing
@@ -174,18 +176,28 @@ function summarize(
 }
 
 /**
- * `patch` when there are bytes to serve, nothing otherwise. A record whose capture was refused for
- * size (`patchRefused`) deliberately has no artifact: the worker never carried the bytes out of the
- * sandbox, so there is nothing to fetch and the descriptor is the whole answer.
+ * Each kind this result has bytes for, patch first. A record whose capture was refused for size
+ * (`patchRefused`) deliberately has no patch artifact: the worker never carried the bytes out of the
+ * sandbox, so there is nothing to fetch and the descriptor is the whole answer — its `text` is still
+ * there to fetch, which is the only thing that record can serve.
+ *
+ * `text` carries no `sha256`: nothing hashes the assistant's reply on the way in, and hashing it
+ * here would cost a poll what this projection exists to save. The fetch route hashes the bytes it
+ * serves for the ETag (`turn-handlers.ts`), so a caller still gets one.
  */
 function describeArtifacts(
   raw: Record<string, unknown>,
   ws: Record<string, unknown> | null,
 ): TurnArtifact[] {
+  const out: TurnArtifact[] = [];
   const bytes = patchSize(raw, ws);
-  if (bytes === null) return [];
-  const sha = ws ? str(ws.patchSha256) : null;
-  return [{ kind: 'patch', bytes, ...(sha ? { sha256: sha } : {}) }];
+  if (bytes !== null) {
+    const sha = ws ? str(ws.patchSha256) : null;
+    out.push({ kind: 'patch', bytes, ...(sha ? { sha256: sha } : {}) });
+  }
+  const text = str(raw.text);
+  if (text) out.push({ kind: 'text', bytes: Buffer.byteLength(text, 'utf8') });
+  return out;
 }
 
 /**
@@ -212,8 +224,14 @@ function patchSize(
  * there is one place that decides it.
  */
 export function pickArtifact(raw: Record<string, unknown>, kind: string): ArtifactBody | null {
-  if (kind !== 'patch') return null;
-  return patchBody(raw, obj(raw.workspace));
+  if (kind === 'patch') return patchBody(raw, obj(raw.workspace));
+  if (kind === 'text') {
+    // The full reply, which `summary` only describes: clipped to `turnSummaryBytes` there, so this
+    // route is the only way to read a long one back.
+    const text = str(raw.text);
+    return text ? { bytes: Buffer.from(text, 'utf8'), contentType: TEXT_CONTENT_TYPE } : null;
+  }
+  return null;
 }
 
 /**

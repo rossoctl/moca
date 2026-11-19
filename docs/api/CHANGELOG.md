@@ -17,6 +17,23 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
+## 1.32.0
+
+An async turn's assistant reply is fetchable
+([#381](https://github.com/rossoctl/moca/issues/381)). Additive: a second artifact kind on an
+existing route, no new route or field, and the data plane is untouched.
+
+- `GET …/turns/{turnId}/artifacts/{kind}` now serves `text` as well as `patch` — the reply whole,
+  as `text/plain; charset=utf-8`. Until now `TurnStatus.result.summary` was the only way to read a
+  prompt turn's answer, clipped to `MOCA_TURN_SUMMARY_BYTES` (2048), so a longer answer could not be
+  read back at all; #390 moved the text out of the polled body without giving it a route.
+- `TurnStatus.result.artifacts[].kind` gains `text`, listed after `patch`. A `text` entry carries no
+  `sha256`: nothing hashes the reply on the way in, and the fetch route hashes the bytes it serves
+  for the `ETag`. A client that reads `artifacts[0]` and assumes `patch` must check `kind` — a
+  prompt turn that edited no files now has one entry, and it is `text`.
+- A capture refused for size (`workspace.patchRefused`) previously had no artifacts at all; it now
+  has its `text`. The patch is still absent, for the same reason as before.
+
 ## 1.31.0
 
 A workspace reset on the session's own sandbox is reported

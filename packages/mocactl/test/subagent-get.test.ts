@@ -209,13 +209,17 @@ function sequenceTransport(resps: unknown[]): LeafTransport {
   } as unknown as LeafTransport;
 }
 
-/** A ledger holding at most the one row `--wait` looks up. */
-function ledgerWith(record?: LedgerRecord): Ledger {
+/** A ledger holding at most the one row `get` looks up, recording what is written back. */
+function ledgerWith(record?: LedgerRecord): Ledger & { updates: unknown[] } {
+  const updates: unknown[] = [];
   return {
+    updates,
     find: () => record,
     readAll: () => (record ? [record] : []),
     append: () => {},
-    updateState: () => {},
+    updateState: (sessionId, lastKnownState, opts) => {
+      updates.push({ sessionId, lastKnownState, detail: opts?.detail });
+    },
     compact: () => {},
   };
 }
@@ -421,5 +425,134 @@ describe('cmdGet — paused is not success', () => {
     expect(parsed.status).toBe('paused');
     expect(parsed.files).toHaveLength(1);
     expect(parsed.files[0]).toMatch(/sess-abc\.text$/);
+  });
+});
+
+/* --- async rows: the turn routes, not /runs/status --- */
+
+describe('cmdGet on an async row', () => {
+  const asyncRow = (over: Partial<LedgerRecord> = {}): LedgerRecord => ({
+    ...runningRow(),
+    turnId: 'turn-1',
+    ...over,
+  });
+
+  it('reads the turn, fetches the artifacts once and writes them', async () => {
+    const { rt, cp, sleep } = makeRt(scratch);
+    const { io, out } = makeIo();
+    let reads = 0;
+    const turns = {
+      readTurnState: vi.fn(async () =>
+        ++reads < 3 ? ('queued' as const) : { status: 'responded' as const, artifacts: ['text'] },
+      ),
+      collect: vi.fn(async (_s: string, _t: string, body: any) => ({
+        ...body,
+        text: 'the answer',
+      })),
+    };
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({ wait: true, turns, outDir: scratch, ledger: ledgerWith(asyncRow()) }),
+    );
+    expect(r).toBe(0);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    // Never minted: the turn routes take the API token the command already holds.
+    expect(cp.mintSessionToken).not.toHaveBeenCalled();
+    expect(turns.collect).toHaveBeenCalledTimes(1);
+    expect(readFileSync(join(scratch, 'sess-abc.text'), 'utf8')).toBe('the answer');
+    expect(out.join('')).toContain('the answer');
+  });
+
+  it('routes a row without a turnId to the sync path', async () => {
+    const { rt, cp } = makeRt(scratch);
+    const { io } = makeIo();
+    const turns = { readTurnState: vi.fn(), collect: vi.fn() };
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({
+        transport: fakeTransport({ status: 'responded', text: 'sync' }),
+        turns,
+        outDir: scratch,
+        ledger: ledgerWith(runningRow()),
+      }),
+    );
+    expect(r).toBe(0);
+    expect(turns.readTurnState).not.toHaveBeenCalled();
+    expect(cp.mintSessionToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a cancelled turn as aborted, exit 1', async () => {
+    const { rt } = makeRt(scratch);
+    const { io, err } = makeIo();
+    const turns = {
+      readTurnState: vi.fn(async () => ({ status: 'aborted' as const, reason: 'cancelled' })),
+      collect: vi.fn(async (_s: string, _t: string, body: any) => body),
+    };
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({ turns, outDir: scratch, ledger: ledgerWith(asyncRow()) }),
+    );
+    expect(r).toBe(1);
+    expect(err.join('\n')).toContain('status  aborted');
+    expect(err.join('\n')).toContain('reason  cancelled');
+  });
+
+  it("waits out the budget rather than reading a dead pid's grace: there is no child", async () => {
+    const { rt } = makeRt(scratch);
+    const { io, err } = makeIo();
+    const turns = {
+      readTurnState: vi.fn(async () => 'queued' as const),
+      collect: vi.fn(),
+    };
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({
+        wait: true,
+        timeoutS: 4,
+        turns,
+        outDir: scratch,
+        // A pid that is long gone would stop the sync path on `noResultComing`.
+        ledger: ledgerWith(asyncRow({ childPid: 0x7fffffff, stateObservedAt: -600_000 })),
+      }),
+    );
+    expect(r).toBe(1);
+    expect(err.join('\n')).toContain('has not finished yet');
+    expect(turns.readTurnState).toHaveBeenCalledTimes(3);
+  });
+
+  it('records the terminal state it read, so the row stops holding a --max-concurrent slot', async () => {
+    const { rt } = makeRt(scratch);
+    const { io } = makeIo();
+    const turns = {
+      readTurnState: vi.fn(async () => ({ status: 'failed' as const, reason: 'caps_exceeded' })),
+      collect: vi.fn(async (_s: string, _t: string, body: any) => body),
+    };
+    const ledger = ledgerWith(asyncRow());
+    const r = await cmdGet(rt, io, baseOpts({ turns, outDir: scratch, ledger }));
+    expect(r).toBe(1);
+    expect(ledger.updates).toEqual([
+      { sessionId: 'sess-abc', lastKnownState: 'failed', detail: 'caps_exceeded' },
+    ]);
+  });
+
+  it('leaves a sync row to its own worker to record', async () => {
+    const { rt } = makeRt(scratch);
+    const { io } = makeIo();
+    const ledger = ledgerWith(runningRow({ childPid: process.pid }));
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({
+        transport: fakeTransport({ status: 'responded', text: 'sync' }),
+        outDir: scratch,
+        ledger,
+      }),
+    );
+    expect(r).toBe(0);
+    expect(ledger.updates).toEqual([]);
   });
 });

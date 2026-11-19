@@ -239,7 +239,7 @@ export const TURN_HANDLERS: Record<string, Handler> = {
 
   /**
    * GET /v1/sessions/{id}/turns/{turnId}/artifacts/{kind} (§4.4, B5): the output the status read
-   * leaves out, served whole and with its own content type. One kind in M1, `patch`.
+   * leaves out, served whole and with its own content type: `patch` and `text`.
    *
    * Every absence is 404 -- unknown kind, a turn still running, a terminal turn with no result,
    * a capture refused for size -- with a message naming which. `turn_not_found` is NOT reused: that

@@ -225,11 +225,34 @@ export class ControlPlaneClient implements ControlPlaneApi {
     return this.json('POST', `/v1/sessions/${encodeURIComponent(sessionId)}/turns`, { body: req });
   }
 
-  getTurn(sessionId: string, turnId: string): Promise<TurnStatus> {
+  getTurn(
+    sessionId: string,
+    turnId: string,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<TurnStatus> {
     return this.json(
       'GET',
       `/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`,
+      opts,
     );
+  }
+
+  async getTurnArtifact(
+    sessionId: string,
+    turnId: string,
+    kind: string,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<string> {
+    // `text()`, not `json()`: the body is the artifact's own bytes with its own content type. A
+    // patch that was stored base64 because it is not valid UTF-8 comes back with replacement
+    // characters here — `get` writes a text file either way, as the sync path always has.
+    const res = await this.request(
+      'GET',
+      `/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}` +
+        `/artifacts/${encodeURIComponent(kind)}`,
+      opts,
+    );
+    return await res.text();
   }
 
   cancelTurn(sessionId: string, turnId: string): Promise<CancelledTurn> {
