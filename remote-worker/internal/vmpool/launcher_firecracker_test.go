@@ -65,6 +65,18 @@ func fcLauncherWith(t *testing.T, mod func(*FirecrackerOptions)) Launcher {
 	return lc
 }
 
+// gateJailPrefix names the per-test directory sameDeviceSiblingDir makes. It is short on
+// purpose: on the Firecracker arm that directory is the launcher's ChrootBase, and every VM's
+// API socket lives at <ChrootBase>/firecracker/vm-<20 digits>/root/run/firecracker.socket,
+// which must fit sun_path (108 bytes with its terminator; firecrackerOptions.validate refuses
+// otherwise). A 21-byte prefix (".gates-hardlink-jail-") left a parent of only ~7 bytes once
+// os.MkdirTemp's up-to-10-digit suffix was added; this one leaves gateJailParentBudget.
+const gateJailPrefix = ".gj-"
+
+// gateJailParentBudget is the longest SH_CHROOT_BASE (or snapshot-dir parent) the gates'
+// Firecracker arm accepts, pinned by TestTheGatesJailPrefixFitsSunPath.
+const gateJailParentBudget = 28
+
 // sameDeviceSiblingDir returns a fresh directory guaranteed by construction to share a
 // device with snapshotDir's parent, for use as a hardlink target next to the golden
 // snapshot -- mirroring new_verify_dir() in deploy/microvm/build-snapshot.sh, which
@@ -85,7 +97,7 @@ func fcLauncherWith(t *testing.T, mod func(*FirecrackerOptions)) Launcher {
 func sameDeviceSiblingDir(t *testing.T, snapshotDir string) string {
 	t.Helper()
 	parent := envOr("SH_CHROOT_BASE", filepath.Dir(snapshotDir))
-	dir, err := os.MkdirTemp(parent, ".gates-hardlink-jail-")
+	dir, err := os.MkdirTemp(parent, gateJailPrefix)
 	if err != nil {
 		t.Fatalf("same-device sibling dir: MkdirTemp under %s (a sibling of snapshot dir "+
 			"%s, so hardlinks into it land on the same device -- see new_verify_dir in "+
@@ -674,5 +686,27 @@ func TestLeaseCgroupAndLeaseBytesWithoutACgroupError(t *testing.T) {
 	}
 	if _, err := vm.LeaseBytes(); err == nil {
 		t.Fatal("LeaseBytes with no pooled cgroup: want error")
+	}
+}
+
+// TestTheGatesJailPrefixFitsSunPath pins the gates' chroot-base budget without KVM: a
+// parent of gateJailParentBudget bytes plus gateJailPrefix and os.MkdirTemp's longest suffix
+// (10 digits) still fits the worst-case API socket path under sun_path, and one byte more does
+// not, so a longer default prefix, or a lowered budget, fails here rather than as a
+// NewFirecrackerLauncher refusal of every gate on the rig.
+func TestTheGatesJailPrefixFitsSunPath(t *testing.T) {
+	const limit = 108 // Linux's sun_path, where Firecracker runs (macOS's is 104)
+	apiPath := func(parentLen int) string {
+		parent := "/" + strings.Repeat("p", parentLen-1)
+		o := FirecrackerOptions{ChrootBase: parent + "/" + gateJailPrefix + "4294967295", FirecrackerBin: "/usr/bin/firecracker"}
+		return o.maxAPISocketPath()
+	}
+	if p := apiPath(gateJailParentBudget); len(p) >= limit {
+		t.Fatalf("a %d-byte gate chroot parent gives a %d-byte API socket path, over sun_path (%d): %s",
+			gateJailParentBudget, len(p), limit, p)
+	}
+	if p := apiPath(gateJailParentBudget + 1); len(p) < limit {
+		t.Fatalf("gateJailParentBudget (%d) understates the room: %d bytes still fit under %d; raise it",
+			gateJailParentBudget, len(p), limit)
 	}
 }
