@@ -165,7 +165,8 @@ a sandbox by hand: create one, its lease and processes, a direct client:
                                                  --ndjson prints the log whose sha256 its end record names;
                                                  --verify checks the log served against the control
                                                  plane's summary of it (sha256 and count; once the log
-                                                 is sealed, 10 minutes after the end, it is final)
+                                                 is sealed, at the host janitor's first sweep at least
+                                                 10 minutes after the end, it is final)
 
 the credentials the host swaps in:
   mocactl sbx credentials [list] [--json]       the credentials the host swaps into your sandboxes' HTTPS requests
