@@ -41,12 +41,18 @@ async function session(d: Deps): Promise<string> {
 }
 
 /** A session with one prompt turn parked at gate 0, as a gated leaf would leave it. */
-async function paused(d: Deps, sid: string, gateId = 0): Promise<string> {
+async function paused(d: Deps, sid: string, gateId = 0, gateDeadlineS?: number): Promise<string> {
   const res = await HANDLERS.submitTurn!(
     ctx({
       principal: alice,
       params: { id: sid },
-      body: { async: true, kind: 'prompt', prompt: 'hi', requireApproval: true },
+      body: {
+        async: true,
+        kind: 'prompt',
+        prompt: 'hi',
+        requireApproval: true,
+        ...(gateDeadlineS ? { gateDeadlineS } : {}),
+      },
     }),
     d,
   );
@@ -90,6 +96,16 @@ describe('decideGate (#393, design §2)', () => {
       requireApproval: true,
       decision: { gateId: 0, action: 'approve', feedback: 'go' },
     });
+  });
+
+  it('takes the answered gate out of the deadline index', async () => {
+    // Otherwise the sweep would expire a gate a human already answered, and `onTimeout: 'abort'`
+    // would abort the work the decision just approved.
+    const d = turnDeps();
+    const sid = await session(d);
+    await paused(d, sid, 0, 60);
+    await decide(d, sid, { gateId: 0, action: 'approve' });
+    expect(await d.turns.dueGates(Number.MAX_SAFE_INTEGER)).toEqual([]);
   });
 
   it('is idempotent: a second identical decision returns the same turn', async () => {

@@ -57,14 +57,17 @@ export function fakeRedis() {
     },
     async zRem(key, member) {
       ops.push(`zRem ${key}`);
-      zsets.set(
-        key,
-        (zsets.get(key) ?? []).filter((m) => m.value !== member),
-      );
-      return 1;
+      const gone = new Set(Array.isArray(member) ? member : [member]);
+      const before = zsets.get(key) ?? [];
+      const after = before.filter((m) => !gone.has(m.value));
+      zsets.set(key, after);
+      // The COUNT actually removed, not 1: `claimGate` is a CAS on this number, so a fake that
+      // always claimed success would let two sweepers resume the same gate.
+      return before.length - after.length;
     },
-    async zRange(key, max, min, opts) {
-      if (!opts?.REV || opts.BY !== 'SCORE') throw new Error('this fake only serves REV BY SCORE');
+    async zRange(key, from, to, opts) {
+      if (opts?.BY !== 'SCORE') throw new Error('this fake only serves BY SCORE');
+      const [max, min] = opts.REV ? [from, to] : [to, from];
       const parse = (v: number | string) => {
         const s = String(v);
         if (s === '+inf') return { bound: Infinity, exclusive: false };
@@ -78,7 +81,8 @@ export function fakeRedis() {
       let rows = [...(zsets.get(key) ?? [])]
         .filter((m) => (hi.exclusive ? m.score < hi.bound : m.score <= hi.bound))
         .filter((m) => (lo.exclusive ? m.score > lo.bound : m.score >= lo.bound))
-        .sort((a, b) => b.score - a.score);
+        // LIMIT applies AFTER the sort, so the direction decides which page a bounded read gets.
+        .sort((a, b) => (opts.REV ? b.score - a.score : a.score - b.score));
       if (opts.LIMIT) rows = rows.slice(opts.LIMIT.offset, opts.LIMIT.offset + opts.LIMIT.count);
       return rows.map((m) => m.value);
     },

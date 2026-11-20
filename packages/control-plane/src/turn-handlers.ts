@@ -180,6 +180,9 @@ export async function submitResume(
     await turns.releaseIdempotencyKeyIf(paused.owner, idempotencyKey, turn.turnId);
     throw err;
   }
+  // The gate is answered: out of the index, so the sweep cannot also expire it. After the enqueue,
+  // because a claim that is not followed by a submission is the one failure that strands a gate.
+  await turns.claimGate(paused.turnId);
   await auditBestEffort(deps, 'turn_submitted', turn.turnId, {
     subject: paused.owner,
     sessionId: paused.sessionId,

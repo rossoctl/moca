@@ -5,6 +5,7 @@ import {
   decodeTurnEvent,
   encodeTurnEvent,
   EVENTS_MAXLEN,
+  gateIndexKey,
   idempotencyKeyKey,
   isTerminalState,
   ownerEventsKey,
@@ -145,6 +146,11 @@ export class TurnStore {
 
   private sessionKey(sessionId: string): string {
     return sessionTurnsKey(this.tag(sessionId));
+  }
+
+  /** The one global gate index (#393 §3); tagged, because it has no id of its own to tag. */
+  private gateKey(): string {
+    return gateIndexKey(this.opts.keyTag);
   }
 
   /** A terminal record's lifetime, and the session index's: one sum, one place (§5.1). */
@@ -343,6 +349,35 @@ export class TurnStore {
     return null;
   }
 
+  /** Turn ids whose gate deadline has passed, oldest first (#393 §3). */
+  async dueGates(now: number, limit = 100): Promise<string[]> {
+    // Forward, so a backlog longer than `limit` pages from the gates that have waited longest. The
+    // reverse read would take the newest `limit` and starve the rest for as long as the backlog
+    // lasted, which is the opposite of what a deadline is for.
+    return this.guard(() =>
+      this.redis.zRange(this.gateKey(), '-inf', now, {
+        BY: 'SCORE',
+        LIMIT: { offset: 0, count: limit },
+      }),
+    );
+  }
+
+  /**
+   * Take a turn out of the gate index, true only for the caller that removed it (#393 §3).
+   *
+   * The ZREM *is* the lock: N control-plane replicas sweep the same index, and the one whose ZREM
+   * returned 1 is the one that resumes. Cheaper than a lock key and self-releasing -- there is
+   * nothing to expire if the winner dies mid-resume. What that costs: a winner that dies between the
+   * ZREM and the submission loses the gate, which stays paused forever. Acceptable because the
+   * submission is the very next step and the gate is still answerable by hand; `submitResume`'s
+   * idempotency key is what makes a retry safe if we ever add one.
+   */
+  async claimGate(turnId: string): Promise<boolean> {
+    // An UNTAGGED member, as the session index holds: the key carries the tag, and `dueGates` hands
+    // these ids straight to `get`, which tags itself.
+    return Number(await this.guard(() => this.redis.zRem(this.gateKey(), turnId))) === 1;
+  }
+
   /**
    * The owner's NON-TERMINAL turns, as one ZCARD (§4.3). The open set holds exactly those, because
    * every terminal transition removes from it -- so this cannot drift from the records it describes,
@@ -486,6 +521,14 @@ export class TurnStore {
     }
     for (let i = 0; i < keys.length; i += DELETE_CHUNK) {
       await this.guard(() => this.redis.del(keys.slice(i, i + DELETE_CHUNK)));
+    }
+    // The gate index too (#393). A paused turn is terminal, so it is always in the session index and
+    // never in the owner set -- the indexed set is the whole of it. One ZREM per chunk rather than
+    // one per turn: the command takes every member at once and ignores the ones that were never
+    // there, which is almost all of them.
+    const gated = [...indexed];
+    for (let i = 0; i < gated.length; i += DELETE_CHUNK) {
+      await this.guard(() => this.redis.zRem(this.gateKey(), gated.slice(i, i + DELETE_CHUNK)));
     }
     await this.guard(() => this.redis.del([this.sessionKey(sessionId)]));
   }
@@ -735,6 +778,22 @@ export class TurnStore {
         this.redis.zAdd(this.sessionKey(rec.sessionId), { score: now, value: rec.turnId }),
       );
       await this.guard(() => this.redis.expire(this.sessionKey(rec.sessionId), this.ttlSeconds()));
+    }
+    // #393 §3. Scored by the DEADLINE, so the sweep is one ZRANGEBYSCORE and never scans; added only
+    // on `paused`, which is the one terminal state that is waiting for something. Before the `emit`,
+    // because the index is state a reader may act on and the event is what tells anyone to look.
+    //
+    // No TTL on this key. Its members are bounded by the paused records that put them there, every
+    // removal path clears them (`submitResume`, `deleteSessionTurns`, `claimGate`), and a member
+    // whose record expired anyway is dropped on its first due pass -- an `expire` here would instead
+    // drop live gates whenever the deployment went a TTL without pausing anything.
+    if (state === 'paused' && rec.gateDeadlineS) {
+      await this.guard(() =>
+        this.redis.zAdd(this.gateKey(), {
+          score: now + rec.gateDeadlineS! * 1000,
+          value: rec.turnId,
+        }),
+      );
     }
     await this.emit(rec.owner, {
       ts: now,
