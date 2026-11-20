@@ -22,3 +22,5 @@ Your code sits on one shared KVM host that other users' sandboxes also run on. *
 secrets.** `sbx up` and `push` leave out common secret files by default (`.env*`,
 `*.pem`, `*.key`, `id_*`), but they cannot know about every secret: keep credentials, tokens and
 customer data out of the repositories you push.
+
+**See also.** [Sandbox authentication and exec flow](../../project/explainers/index.md): a step-through diagram of how a token is issued and one command reaches a fresh microVM.

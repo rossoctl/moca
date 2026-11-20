@@ -1,0 +1,1031 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandbox authentication and exec flow · moca</title>
+<meta name="description" content="Interactive walkthrough of how a client obtains a sandbox token and how one Exec reaches a microVM and returns.">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<style>
+  :root {
+    --bg: #f5f6fb;
+    --panel: #ffffff;
+    --panel-2: #f0f2f9;
+    --card: #ffffff;
+    --line: #d7dcea;
+    --grid: rgba(30, 41, 80, 0.075);
+    --text: #131729;
+    --muted: #5a6178;
+    --accent: #3d5afe;
+    --accent-soft: rgba(61, 90, 254, 0.11);
+    --exec: #0f766e;
+    --exec-soft: rgba(15, 118, 110, 0.12);
+    --bad: #c62828;
+    --bad-soft: rgba(198, 40, 40, 0.1);
+    --ok: #15803d;
+    --warn: #b45309;
+    --shadow: 0 1px 2px rgba(20, 24, 43, .05), 0 10px 30px rgba(20, 24, 43, .07);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0a0c15;
+      --panel: #111420;
+      --panel-2: #171b2b;
+      --card: #151928;
+      --line: #2a3048;
+      --grid: rgba(160, 175, 220, 0.07);
+      --text: #e7eaf6;
+      --muted: #9aa3c0;
+      --accent: #8397ff;
+      --accent-soft: rgba(131, 151, 255, 0.15);
+      --exec: #2dd4bf;
+      --exec-soft: rgba(45, 212, 191, 0.14);
+      --bad: #f87171;
+      --bad-soft: rgba(248, 113, 113, 0.12);
+      --ok: #4ade80;
+      --warn: #fbbf24;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .45), 0 14px 34px rgba(0, 0, 0, .4);
+    }
+  }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+  }
+  .stage-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 1120 / 620;
+    overflow: hidden;
+    border-radius: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+  }
+  #scene { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--text);
+    border-radius: .6rem;
+    padding: .4rem .7rem;
+    font-size: .78rem;
+    font-weight: 600;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: border-color .15s, color .15s, background .15s;
+    white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn-primary:hover { color: #fff; filter: brightness(1.08); }
+  .btn:focus-visible, .step:focus-visible, select:focus-visible, input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    font-size: .7rem;
+    font-weight: 600;
+    padding: .18rem .55rem;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .dot { width: .5rem; height: .5rem; border-radius: 999px; display: inline-block; }
+  select {
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--text);
+    border-radius: .6rem;
+    padding: .38rem .5rem;
+    font-size: .78rem;
+    font-weight: 600;
+  }
+  input[type="checkbox"] { accent-color: var(--accent); width: 1rem; height: 1rem; }
+  .step {
+    display: flex;
+    gap: .55rem;
+    align-items: flex-start;
+    width: 100%;
+    text-align: left;
+    padding: .42rem .5rem;
+    border-radius: .55rem;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text);
+    font-size: .78rem;
+    line-height: 1.3;
+    cursor: pointer;
+  }
+  .step:hover { background: var(--panel-2); }
+  .step.is-current { background: var(--accent-soft); border-color: var(--accent); }
+  .step.is-done { color: var(--muted); }
+  .step-num {
+    flex: none;
+    width: 1.3rem;
+    height: 1.3rem;
+    border-radius: 999px;
+    display: grid;
+    place-items: center;
+    font-size: .63rem;
+    font-weight: 700;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    margin-top: .05rem;
+  }
+  .step.is-current .step-num { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .step-group {
+    font-size: .66rem;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: .5rem .5rem .25rem;
+  }
+  .check { display: inline-block; width: 1rem; font-weight: 700; }
+  .check-ok { color: var(--ok); }
+  .check-bad { color: var(--bad); }
+  @media (prefers-reduced-motion: reduce) {
+    .btn, #progress { transition: none; }
+  }
+</style>
+</head>
+<body class="min-h-screen">
+<div class="mx-auto w-full max-w-[1440px] px-4 py-6 sm:px-6 lg:px-8">
+
+  <header class="mb-5 flex flex-wrap items-end justify-between gap-4">
+    <div class="max-w-2xl">
+      <p class="text-[11px] font-bold uppercase tracking-[0.14em]" style="color: var(--accent)">moca · sandbox service</p>
+      <h1 class="mt-1 text-2xl font-bold tracking-tight sm:text-3xl">Sandbox authentication and exec flow</h1>
+      <p class="mt-1.5 text-sm leading-relaxed" style="color: var(--muted)">
+        How a client obtains a sandbox token, and how one Exec reaches a fresh microVM and comes back.
+        Press <span class="mono text-[12px]">Next</span> to advance one step at a time, or click any step.
+        Each step animates once and then waits.
+      </p>
+    </div>
+    <div class="flex flex-wrap items-center gap-2">
+      <span class="chip"><span class="dot" style="background: var(--accent)"></span>caller sandbox token</span>
+      <span class="chip"><span class="dot" style="background: var(--warn)"></span>worker credential</span>
+      <span class="chip"><span class="dot" style="background: var(--bad)"></span>refusal</span>
+    </div>
+  <p class="muted" style="margin-top:10px;font-size:13px"><a href="https://www.rossoctl.dev/moca/" target="_blank" rel="noopener">&lsaquo; moca docs</a> · written page: <a href="https://www.rossoctl.dev/moca/sandbox/concepts/isolation" target="_blank" rel="noopener">Isolation and data handling</a></p>
+  </header>
+
+  <div class="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
+    <section class="panel p-3 sm:p-4">
+      <div class="stage-wrap">
+        <canvas id="scene" role="img" aria-label="Diagram of the client, control plane, Redis, relay, worker and VM pool, with an animated message travelling between them for the current step."></canvas>
+      </div>
+
+      <div class="mt-3 rounded-xl p-3" style="border: 1px solid var(--line); background: var(--panel-2)">
+        <div class="mb-1 flex items-center gap-2">
+          <span id="capChip" class="chip">Auth flow</span>
+          <span id="capCount" class="text-[11px]" style="color: var(--muted)">Step 1</span>
+        </div>
+        <h2 id="capTitle" class="text-sm font-semibold leading-snug">&nbsp;</h2>
+        <p id="capDetail" class="mt-1 text-[12.5px] leading-relaxed" style="color: var(--muted)" aria-live="polite">&nbsp;</p>
+        <div id="capWire" class="mt-2 flex flex-wrap items-center gap-1.5"></div>
+      </div>
+
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <button id="play" type="button" class="btn btn-primary" aria-label="Replay the animation of the current step">Replay step</button>
+        <button id="prev" type="button" class="btn" aria-label="Previous step">Prev</button>
+        <button id="next" type="button" class="btn" aria-label="Next step">Next</button>
+        <button id="restart" type="button" class="btn" aria-label="Restart from the first step">Restart</button>
+        <span class="mx-1" style="display: inline-block; width: 1px; height: 20px; background: var(--line)"></span>
+        <label class="flex items-center gap-1.5 text-[12px]" style="color: var(--muted)">
+          Speed
+          <select id="speed" aria-label="Animation speed">
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="1.5">1.5×</option>
+            <option value="2">2×</option>
+          </select>
+        </label>
+        <label class="flex items-center gap-1.5 text-[12px]" style="color: var(--muted)">
+          Show
+          <select id="phase" aria-label="Which flow to show">
+            <option value="all" selected>Both flows</option>
+            <option value="auth">Auth only</option>
+            <option value="exec">Exec only</option>
+          </select>
+        </label>
+        <label class="ml-auto flex cursor-pointer items-center gap-2 text-[12px]" style="color: var(--muted)">
+          <input id="tamper" type="checkbox">
+          Show a refused Exec (tampered <span class="mono text-[11px]">workspace_key</span>)
+        </label>
+      </div>
+
+      <div class="mt-3 h-1.5 w-full overflow-hidden rounded-full" style="background: var(--panel-2)" aria-hidden="true">
+        <div id="progress" class="h-full rounded-full" style="width: 0%; background: var(--accent)"></div>
+      </div>
+    </section>
+
+    <aside class="flex min-w-0 flex-col gap-4">
+      <div class="panel p-4">
+        <div class="mb-3 flex items-center justify-between gap-2">
+          <h2 class="text-sm font-semibold">Sandbox token</h2>
+          <span id="tokenStatus" class="chip">not minted</span>
+        </div>
+        <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[12px]">
+          <dt style="color: var(--muted)">typ</dt><dd class="mono truncate">moca-sandbox+jwt</dd>
+          <dt style="color: var(--muted)">alg</dt><dd class="mono">EdDSA</dd>
+          <dt style="color: var(--muted)">aud</dt><dd class="mono">moca-sandbox</dd>
+          <dt style="color: var(--muted)">sbx</dt><dd class="mono truncate">sbx-0f3a…c9</dd>
+          <dt style="color: var(--muted)">wrk</dt><dd class="mono truncate">sbx_py312</dd>
+          <dt style="color: var(--muted)">wsk</dt><dd class="mono truncate">sbx-0f3a…c9</dd>
+          <dt style="color: var(--muted)">exp</dt><dd class="mono truncate">min(now + 15 min, sandbox expiry)</dd>
+        </dl>
+        <ul id="tokenChecks" class="mt-3 space-y-1 text-[12px] hidden"></ul>
+        <p class="mt-3 text-[11px] leading-relaxed" style="color: var(--muted)">
+          The relay holds public keys only. It cannot mint a token, and it does no Redis read to authorize.
+        </p>
+      </div>
+
+      <div class="panel flex min-h-0 flex-col p-2">
+        <div class="flex items-center justify-between px-2 pt-1.5 pb-1">
+          <h2 class="text-sm font-semibold">Steps</h2>
+          <span id="stepTotal" class="text-[11px]" style="color: var(--muted)">18 steps</span>
+        </div>
+        <div id="stepList" class="max-h-[440px] overflow-auto pr-1"></div>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="mt-6 text-[11.5px] leading-relaxed" style="color: var(--muted)">
+    Sources: ADR-0024 (transport), ADR-0035 (per-Exec microVM).
+    The animation is illustrative: step numbers are not wire message ids. Tailwind CSS loads from
+    <span class="mono">cdn.tailwindcss.com</span>; everything else is in this file.
+  </footer>
+
+  <noscript>
+    <p class="mt-4 text-sm" style="color: var(--bad)">This page needs JavaScript for the animation.</p>
+  </noscript>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ---------- scene geometry ---------- */
+
+  var V = { w: 1120, h: 620 };
+  var FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+  var MONO = 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
+  var NODES = {
+    client: { x: 50,  y: 285, w: 215, h: 115, title: 'Client',         sub: 'mocactl sbx · MCP · gRPC' },
+    cp:     { x: 380, y: 55,  w: 230, h: 115, title: 'Control plane',  sub: 'sandbox route profile' },
+    redis:  { x: 700, y: 60,  w: 125, h: 78,  title: 'Redis',          sub: 'records · presence' },
+    relay:  { x: 620, y: 265, w: 195, h: 115, title: 'Relay',          sub: 'gRPC exec + attach' },
+    worker: { x: 890, y: 215, w: 180, h: 100, title: 'Worker',         sub: 'microvm-worker' },
+    vmpool: { x: 890, y: 370, w: 180, h: 80,  title: 'vmpool',         sub: 'warm standby VMs' },
+    disk:   { x: 890, y: 475, w: 180, h: 70,  title: 'Workspace',      sub: 'disk image · persists' }
+  };
+
+  var CLUSTER = { x: 352, y: 32,  w: 498, h: 382, label: 'shared cluster · namespace moca-sbx' };
+  var HOST    = { x: 858, y: 172, w: 242, h: 404, label: 'KVM host · outside the cluster', note: 'workers dial out · no inbound route' };
+
+  var EDGES = {
+    'client>cp':     [[215, 285], [240, 205], [300, 172], [400, 170]],
+    'cp>client':     [[445, 170], [380, 228], [310, 255], [225, 285]],
+    'cp>redis':      [[610, 100], [640, 95],  [670, 95],  [700, 99]],
+    'client>relay':  [[265, 355], [380, 500], [560, 485], [632, 378]],
+    'relay>client':  [[658, 378], [560, 468], [380, 480], [268, 362]],
+    'relay>worker':  [[815, 300], [840, 285], [862, 272], [890, 268]],
+    'worker>relay':  [[890, 288], [858, 302], [840, 312], [815, 318]],
+    'worker>vmpool': [[980, 315], [980, 336], [980, 352], [980, 370]]
+  };
+
+  /* ---------- colours from CSS ---------- */
+
+  var C = {};
+  function refreshColors() {
+    var cs = getComputedStyle(document.documentElement);
+    var v = function (n) { return cs.getPropertyValue(n).trim(); };
+    C = {
+      panel2: v('--panel-2'), card: v('--card'), line: v('--line'), grid: v('--grid'),
+      text: v('--text'), muted: v('--muted'), accent: v('--accent'), exec: v('--exec'),
+      bad: v('--bad'), ok: v('--ok'), worker: v('--warn')
+    };
+  }
+
+  function toneFor(step) {
+    var stroke;
+    if (step.tone === 'bad') stroke = C.bad;
+    else if (step.tone === 'worker') stroke = C.worker;
+    else if (step.phase === 'exec') stroke = C.exec;
+    else stroke = C.accent;
+    return { stroke: stroke, glow: stroke + '66' };
+  }
+
+  function packetColor(p, step) {
+    if (p.tone === 'bad') return C.bad;
+    if (p.tone === 'worker') return C.worker;
+    return step.phase === 'exec' ? C.exec : C.accent;
+  }
+
+  /* ---------- steps ---------- */
+
+  var AUTH = 'auth', EXEC = 'exec';
+
+  var ALL_STEPS = [
+    {
+      phase: AUTH,
+      title: 'Ask for a device code',
+      detail: 'The client starts the GitHub device flow against the control plane. The deployment uses its own OAuth app.',
+      packets: [{ from: 'client', to: 'cp', edge: 'client>cp', label: 'POST /v1/auth/device', start: 0, span: 0.8 }]
+    },
+    {
+      phase: AUTH,
+      title: 'Receive the user token',
+      detail: 'The control plane returns an API token. The subject must be in SH_ALLOWED_SUBJECTS, or the call fails with 403 not_enrolled.',
+      packets: [{ from: 'cp', to: 'client', edge: 'cp>client', label: 'API token', start: 0, span: 0.8 }]
+    },
+    {
+      phase: AUTH,
+      title: 'Create the sandbox',
+      detail: 'The client sends POST /v1/sandboxes with a template name. The control plane returns 201 and a sandbox record.',
+      packets: [{ from: 'client', to: 'cp', edge: 'client>cp', label: 'POST /v1/sandboxes', start: 0, span: 0.8 }]
+    },
+    {
+      phase: AUTH,
+      title: 'Store the record',
+      detail: 'The control plane writes the record and its absolute expiry to Redis. The quota check and the insert run in one Lua script.',
+      packets: [{ from: 'cp', to: 'redis', edge: 'cp>redis', label: 'record + expiresAt', start: 0, span: 0.7 }]
+    },
+    {
+      phase: AUTH,
+      title: 'Ask for a sandbox token',
+      detail: "Only the owner can mint. An admin gets the same 404 as anyone else, so no one can exec into another user's code.",
+      packets: [{ from: 'client', to: 'cp', edge: 'client>cp', label: 'POST /v1/sandboxes/{id}/token', start: 0, span: 0.8 }],
+      token: 'mint'
+    },
+    {
+      phase: AUTH,
+      title: 'Sign the token',
+      detail: 'The control plane signs an EdDSA JWT. typ is moca-sandbox+jwt and aud is moca-sandbox. The token names one worker (wrk) and one workspace (wsk). exp is the shorter of 15 minutes and the sandbox expiry.',
+      event: true,
+      arrive: ['cp'],
+      token: 'mint'
+    },
+    {
+      phase: AUTH,
+      title: 'Return the token',
+      detail: 'The control plane returns the token, the exec endpoint and the exec CA. The harness audience cannot use this token, and this token cannot use the harness.',
+      packets: [{ from: 'cp', to: 'client', edge: 'cp>client', label: 'JWT + execEndpoint', start: 0, span: 0.8 }],
+      token: 'mint'
+    },
+    {
+      phase: AUTH,
+      title: 'Worker attaches',
+      detail: 'The worker dials the relay with its own credential, SANDBOX_TOKEN, and sends Hello. Attach is fail-closed. The live stream is the registration, and the relay writes presence to Redis. The relay holds public keys only.',
+      packets: [{ from: 'worker', to: 'relay', edge: 'worker>relay', label: 'Attach + Hello', start: 0.05, span: 0.8, tone: 'worker' }]
+    },
+    {
+      phase: EXEC,
+      title: 'Send the Exec',
+      detail: 'The Exec carries sandbox_id, workspace_key, req_id and the command. The token rides in the authorization metadata.',
+      packets: [{ from: 'client', to: 'relay', edge: 'client>relay', label: 'Exec + Bearer token', start: 0, span: 0.8 }],
+      token: 'present'
+    },
+    {
+      phase: EXEC,
+      title: 'Verify before routing',
+      detail: 'The relay checks the signature with a public key, then typ, aud, iss and exp. sandbox_id must equal wrk and workspace_key must equal wsk, exactly. The relay does no Redis read. A refused call never reaches the worker.',
+      event: true,
+      arrive: ['relay'],
+      token: 'verify'
+    },
+    {
+      phase: EXEC,
+      title: 'Refuse the call',
+      detail: 'One claim does not match. The relay stops the call with PERMISSION_DENIED and writes an audit line with outcome refused.',
+      optional: true,
+      tone: 'bad',
+      packets: [{ from: 'relay', to: 'client', edge: 'relay>client', label: 'PERMISSION_DENIED', start: 0, span: 0.8, tone: 'bad' }],
+      token: 'reject'
+    },
+    {
+      phase: EXEC,
+      title: 'Admit the Exec',
+      detail: 'The relay renames req_id with HMAC(sbx ‖ req_id) so two sandboxes never share a result. It admits at most SH_SANDBOX_MAX_INFLIGHT in-flight Execs per sandbox (default 2) and arms a timer at the token expiry plus a 30 s clock leeway.',
+      event: true,
+      arrive: ['relay']
+    },
+    {
+      phase: EXEC,
+      title: 'Forward to the worker',
+      detail: 'The frame travels down the Attach stream the worker opened. The relay never dials the worker and the KVM host needs no inbound route.',
+      packets: [{ from: 'relay', to: 'worker', edge: 'relay>worker', label: 'ServerFrame{Exec}', start: 0, span: 0.8 }]
+    },
+    {
+      phase: EXEC,
+      title: 'Check for duplicates',
+      detail: 'The worker checks in-flight ids first, then a bounded cache. The same req_id with the same fingerprint gets the cached terminal frame and does not run again.',
+      event: true,
+      arrive: ['worker']
+    },
+    {
+      phase: EXEC,
+      title: 'Pop a warm VM',
+      detail: 'The worker takes a paused standby VM, mounts the workspace image and runs the command over vsock. VM creation stays off the request path.',
+      packets: [{ from: 'worker', to: 'vmpool', edge: 'worker>vmpool', label: 'pop standby VM', start: 0, span: 0.75 }]
+    },
+    {
+      phase: EXEC,
+      title: 'Stream the output',
+      detail: "stdout and stderr arrive as separate 32 KiB frames. The relay restores the caller's own req_id on every frame.",
+      packets: [
+        { from: 'worker', to: 'relay', edge: 'worker>relay', label: 'Chunk · 32 KiB', start: 0, span: 0.5 },
+        { from: 'relay', to: 'client', edge: 'relay>client', label: 'Chunk · 32 KiB', start: 0.35, span: 0.55 }
+      ]
+    },
+    {
+      phase: EXEC,
+      title: 'Finish',
+      detail: "A failed spawn or a timeout sends ExecError instead. The exit code is the child's real code.",
+      packets: [
+        { from: 'worker', to: 'relay', edge: 'worker>relay', label: 'End{exit_code}', start: 0, span: 0.5 },
+        { from: 'relay', to: 'client', edge: 'relay>client', label: 'End{exit_code}', start: 0.35, span: 0.55 }
+      ]
+    },
+    {
+      phase: EXEC,
+      title: 'Audit and teardown',
+      detail: 'The relay writes one sandbox_exec audit line: outcome, milliseconds and bytes. Command text is excluded unless SH_SANDBOX_AUDIT_COMMANDS=1. The worker kills the VM, and a fresh standby replaces it in the background. The workspace image stays on disk.',
+      event: true,
+      arrive: ['relay', 'vmpool']
+    }
+  ];
+
+  var LEAD = 150, DUR = 1500, HOLD = 1600;
+
+  /* ---------- state ---------- */
+
+  var state = {
+    steps: [],
+    index: 0,
+    elapsed: 0,
+    playing: false,
+    speed: 1,
+    phase: 'all',
+    tamper: false,
+    pulses: {},
+    pulsed: new Set(),
+    lastTs: 0
+  };
+
+  var canvas = document.getElementById('scene');
+  var ctx = canvas.getContext('2d');
+  var els = {
+    play: document.getElementById('play'),
+    prev: document.getElementById('prev'),
+    next: document.getElementById('next'),
+    restart: document.getElementById('restart'),
+    speed: document.getElementById('speed'),
+    phase: document.getElementById('phase'),
+    tamper: document.getElementById('tamper'),
+    capChip: document.getElementById('capChip'),
+    capCount: document.getElementById('capCount'),
+    capTitle: document.getElementById('capTitle'),
+    capDetail: document.getElementById('capDetail'),
+    capWire: document.getElementById('capWire'),
+    progress: document.getElementById('progress'),
+    stepList: document.getElementById('stepList'),
+    stepTotal: document.getElementById('stepTotal'),
+    tokenStatus: document.getElementById('tokenStatus'),
+    tokenChecks: document.getElementById('tokenChecks')
+  };
+
+  /* ---------- step helpers ---------- */
+
+  function stepTotal(s) {
+    return (s.lead == null ? LEAD : s.lead) + (s.dur == null ? (s.event ? 1100 : DUR) : s.dur) + (s.hold == null ? (s.event ? 1400 : HOLD) : s.hold);
+  }
+
+  function current() { return state.steps[state.index] || null; }
+
+  function buildSteps() {
+    var list = ALL_STEPS.filter(function (s) { return !s.optional || state.tamper; });
+    if (state.phase !== 'all') list = list.filter(function (s) { return s.phase === state.phase; });
+    state.steps = list;
+  }
+
+  function pulse(node) {
+    if (NODES[node]) state.pulses[node] = performance.now();
+  }
+
+  function entry(i, opts) {
+    if (!state.steps.length) return;
+    state.index = Math.max(0, Math.min(i, state.steps.length - 1));
+    state.elapsed = 0;
+    state.pulsed = new Set();
+    state.pulses = {};
+    state.playing = !!(opts && opts.animate);
+    state.lastTs = 0;
+    var s = current();
+    if (s && s.event) (s.arrive || []).forEach(pulse);
+    updateUI();
+  }
+
+  function setPlaying(on) {
+    state.playing = !!on;
+    state.lastTs = 0;
+  }
+
+  /* ---------- UI ---------- */
+
+  function updateUI() {
+    var s = current();
+    if (!s) return;
+    var isAuth = s.phase === AUTH;
+    els.capChip.textContent = isAuth ? 'Auth flow' : 'Exec flow';
+    els.capChip.style.color = isAuth ? C.accent : C.exec;
+    els.capChip.style.borderColor = isAuth ? C.accent : C.exec;
+    els.capCount.textContent = 'Step ' + (state.index + 1) + ' of ' + state.steps.length;
+    els.capTitle.textContent = s.title;
+    els.capDetail.textContent = s.detail;
+    els.stepTotal.textContent = state.steps.length + ' steps';
+    renderSteps();
+    updateTokenCard(s);
+    renderWire(s);
+    updateProgress();
+  }
+
+  function renderWire(s) {
+    els.capWire.innerHTML = '';
+    var labels = [];
+    (s.packets || []).forEach(function (p) {
+      if (labels.indexOf(p.label) < 0) labels.push(p.label);
+    });
+    if (!labels.length) return;
+    var pre = document.createElement('span');
+    pre.className = 'text-[11px]';
+    pre.style.color = 'var(--muted)';
+    pre.textContent = 'On the wire:';
+    els.capWire.appendChild(pre);
+    labels.forEach(function (l) {
+      var c = document.createElement('span');
+      c.className = 'chip mono';
+      c.style.fontSize = '11px';
+      c.textContent = l;
+      els.capWire.appendChild(c);
+    });
+  }
+
+  function renderSteps() {
+    els.stepList.innerHTML = '';
+    var lastPhase = null;
+    state.steps.forEach(function (s, i) {
+      if (s.phase !== lastPhase) {
+        var h = document.createElement('div');
+        h.className = 'step-group';
+        h.textContent = s.phase === AUTH ? 'Auth flow' : 'Exec flow';
+        els.stepList.appendChild(h);
+        lastPhase = s.phase;
+      }
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'step' + (i === state.index ? ' is-current' : '') + (i < state.index ? ' is-done' : '');
+      b.setAttribute('aria-current', i === state.index ? 'step' : 'false');
+      var n = document.createElement('span');
+      n.className = 'step-num';
+      n.textContent = String(i + 1);
+      var t = document.createElement('span');
+      t.textContent = s.title;
+      b.appendChild(n);
+      b.appendChild(t);
+      b.addEventListener('click', function () {
+        entry(i, { animate: true });
+      });
+      els.stepList.appendChild(b);
+    });
+  }
+
+  var TOKEN_STATUS = {
+    mint: ['minted · exp ≤ 15 min', 'var(--accent)'],
+    present: ['presented as Bearer metadata', 'var(--muted)'],
+    verify: ['verified locally · no Redis read', 'var(--ok)'],
+    reject: ['rejected · PERMISSION_DENIED', 'var(--bad)']
+  };
+
+  var TOKEN_CHECKS = [
+    'Signature verifies with a public key',
+    'typ and aud are pinned',
+    'exp is in the future',
+    'sandbox_id === wrk',
+    'workspace_key === wsk'
+  ];
+
+  function updateTokenCard(s) {
+    var st = TOKEN_STATUS[s.token];
+    els.tokenStatus.textContent = st ? st[0] : 'not minted yet';
+    els.tokenStatus.style.color = st ? st[1] : 'var(--muted)';
+    els.tokenStatus.style.borderColor = st ? st[1] : 'var(--line)';
+
+    var showChecks = s.token === 'verify' || s.token === 'reject';
+    els.tokenChecks.classList.toggle('hidden', !showChecks);
+    if (!showChecks) { els.tokenChecks.innerHTML = ''; return; }
+
+    els.tokenChecks.innerHTML = '';
+    TOKEN_CHECKS.forEach(function (label, i) {
+      var ok = !(s.token === 'reject' && i === TOKEN_CHECKS.length - 1);
+      var li = document.createElement('li');
+      li.className = 'flex items-start gap-1.5';
+      var mark = document.createElement('span');
+      mark.className = 'check ' + (ok ? 'check-ok' : 'check-bad');
+      mark.textContent = ok ? '✓' : '✗';
+      var txt = document.createElement('span');
+      txt.textContent = label;
+      if (!ok) txt.style.color = 'var(--bad)';
+      li.appendChild(mark);
+      li.appendChild(txt);
+      els.tokenChecks.appendChild(li);
+    });
+  }
+
+  function updateProgress() {
+    var s = current();
+    if (!s) return;
+    var frac = Math.max(0, Math.min(1, state.elapsed / stepTotal(s)));
+    var pct = ((state.index + frac) / state.steps.length) * 100;
+    els.progress.style.width = pct.toFixed(2) + '%';
+  }
+
+  /* ---------- interaction ---------- */
+
+  function replayStep() {
+    entry(state.index, { animate: true });
+  }
+
+  els.play.addEventListener('click', replayStep);
+  els.prev.addEventListener('click', function () {
+    entry(state.index - 1, { animate: true });
+  });
+  els.next.addEventListener('click', function () {
+    entry(state.index + 1, { animate: true });
+  });
+  els.restart.addEventListener('click', function () {
+    entry(0, { animate: true });
+  });
+  els.speed.addEventListener('change', function () {
+    state.speed = parseFloat(els.speed.value) || 1;
+  });
+  els.phase.addEventListener('change', function () {
+    state.phase = els.phase.value;
+    buildSteps();
+    entry(0, { animate: true });
+  });
+  els.tamper.addEventListener('change', function () {
+    state.tamper = els.tamper.checked;
+    buildSteps();
+    entry(0, { animate: true });
+  });
+
+  window.addEventListener('keydown', function (e) {
+    var tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    if (e.code === 'Space') { e.preventDefault(); replayStep(); }
+    else if (e.code === 'ArrowRight') { e.preventDefault(); entry(state.index + 1, { animate: true }); }
+    else if (e.code === 'ArrowLeft') { e.preventDefault(); entry(state.index - 1, { animate: true }); }
+  });
+
+  /* ---------- drawing ---------- */
+
+  var dpr = 1;
+
+  function fit() {
+    var rect = canvas.getBoundingClientRect();
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.max(1, Math.round(rect.width * dpr));
+    canvas.height = Math.max(1, Math.round(rect.height * dpr));
+  }
+
+  function rr(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function pathFor(pts) {
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    ctx.bezierCurveTo(pts[1][0], pts[1][1], pts[2][0], pts[2][1], pts[3][0], pts[3][1]);
+  }
+
+  function bezier(pts, t) {
+    var mt = 1 - t;
+    var a = mt * mt * mt, b = 3 * mt * mt * t, c = 3 * mt * t * t, d = t * t * t;
+    return [
+      a * pts[0][0] + b * pts[1][0] + c * pts[2][0] + d * pts[3][0],
+      a * pts[0][1] + b * pts[1][1] + c * pts[2][1] + d * pts[3][1]
+    ];
+  }
+
+  function easeInOut(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  function drawBackground() {
+    ctx.save();
+    ctx.fillStyle = C.grid;
+    for (var x = 18; x < V.w; x += 28) {
+      for (var y = 18; y < V.h; y += 28) {
+        ctx.fillRect(x, y, 1.4, 1.4);
+      }
+    }
+    ctx.restore();
+  }
+
+  function drawFrame(f, dashed) {
+    ctx.save();
+    rr(f.x, f.y, f.w, f.h, 18);
+    ctx.fillStyle = 'rgba(127, 140, 180, 0.035)';
+    ctx.fill();
+    ctx.strokeStyle = C.line;
+    ctx.lineWidth = 1.2;
+    if (dashed) ctx.setLineDash([6, 6]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = C.muted;
+    ctx.font = '600 11px ' + FONT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(f.label, f.x + 14, f.y + f.h - 12);
+    ctx.restore();
+  }
+
+  function drawHostNote() {
+    ctx.save();
+    ctx.fillStyle = C.muted;
+    ctx.globalAlpha = 0.8;
+    ctx.font = '10px ' + MONO;
+    ctx.textAlign = 'left';
+    ctx.fillText(HOST.note, HOST.x + 14, HOST.y + 22);
+    ctx.restore();
+  }
+
+  function drawEdges() {
+    ctx.save();
+    ctx.strokeStyle = C.line;
+    ctx.lineWidth = 1.4;
+    Object.keys(EDGES).forEach(function (k) {
+      pathFor(EDGES[k]);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  function drawNode(key, n, active, tone) {
+    ctx.save();
+    rr(n.x, n.y, n.w, n.h, 15);
+    ctx.fillStyle = C.card;
+    ctx.fill();
+    if (active) {
+      ctx.shadowColor = tone.glow;
+      ctx.shadowBlur = 22;
+    }
+    ctx.lineWidth = active ? 2 : 1;
+    ctx.strokeStyle = active ? tone.stroke : C.line;
+    ctx.stroke();
+    ctx.restore();
+
+    ctx.save();
+    var small = n.h <= 82;
+    var tx = small ? n.x + n.w / 2 : n.x + 16;
+    var ty = small ? n.y + n.h / 2 - 9 : n.y + 33;
+    ctx.textAlign = small ? 'center' : 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = C.text;
+    ctx.font = '600 15px ' + FONT;
+    ctx.fillText(n.title, tx, ty);
+    ctx.fillStyle = C.muted;
+    ctx.font = '11px ' + FONT;
+    ctx.fillText(n.sub, tx, ty + 20);
+    ctx.restore();
+  }
+
+  function drawPulses(ts, tone) {
+    var keys = Object.keys(state.pulses);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var n = NODES[k];
+      if (!n) { delete state.pulses[k]; continue; }
+      var age = (ts - state.pulses[k]) / 900;
+      if (age >= 1) { delete state.pulses[k]; continue; }
+      var e = 1 - Math.pow(1 - age, 3);
+      var cx = n.x + n.w / 2;
+      var cy = n.y + n.h / 2;
+      var r = Math.max(n.w, n.h) / 2 + 6 + e * 30;
+      ctx.save();
+      ctx.globalAlpha = 0.45 * (1 - age);
+      ctx.strokeStyle = tone.stroke;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  function drawPill(x, y, label, color, alpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.font = '600 11px ' + MONO;
+    var w = ctx.measureText(label).width + 22;
+    var h = 26;
+    ctx.shadowColor = 'rgba(0,0,0,0.22)';
+    ctx.shadowBlur = 8;
+    ctx.shadowOffsetY = 2;
+    rr(x - w / 2, y - h / 2, w, h, 13);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, x, y + 0.5);
+    ctx.restore();
+  }
+
+  function drawPackets(s, tone) {
+    if (!s.packets || !s.packets.length) return;
+    var lead = s.lead == null ? LEAD : s.lead;
+    var dur = s.dur == null ? DUR : s.dur;
+    var local = (state.elapsed - lead) / dur;
+    if (local < 0) return;
+
+    for (var i = 0; i < s.packets.length; i++) {
+      var p = s.packets[i];
+      var pp = (local - p.start) / p.span;
+      if (pp <= 0) continue;
+      var edge = EDGES[p.edge];
+      if (!edge) continue;
+      var col = packetColor(p, s);
+      var t = Math.min(Math.max(pp, 0), 1);
+      var arrived = pp >= 1;
+      var alpha = arrived ? 1 : (t < 0.08 ? t / 0.08 : 1);
+      var x, y;
+
+      if (arrived) {
+        /* Park the label at the end of the step, just outside the destination. */
+        ctx.font = '600 11px ' + MONO;
+        var w = ctx.measureText(p.label).width + 22;
+        var a = bezier(edge, 0.86);
+        var b = bezier(edge, 1);
+        var dx = b[0] - a[0], dy = b[1] - a[1];
+        var len = Math.sqrt(dx * dx + dy * dy) || 1;
+        var off = w / 2 + 6;
+        x = b[0] - (dx / len) * off;
+        y = b[1] - (dy / len) * off;
+      } else {
+        var pt = bezier(edge, easeInOut(t));
+        x = pt[0];
+        y = pt[1];
+        ctx.save();
+        ctx.globalAlpha = 0.35 * alpha;
+        ctx.strokeStyle = col;
+        ctx.lineWidth = 2.6;
+        pathFor(edge);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      drawPill(x, y, p.label, col, alpha);
+    }
+  }
+
+  function drawPhaseLabel(s) {
+    if (!s) return;
+    var isAuth = s.phase === AUTH;
+    ctx.save();
+    ctx.fillStyle = isAuth ? C.accent : C.exec;
+    ctx.font = '700 12px ' + FONT;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+    var label = isAuth ? 'AUTH FLOW · TOKEN ISSUANCE' : 'EXEC FLOW · ONE COMMAND';
+    ctx.globalAlpha = 0.9;
+    ctx.fillText(label, 26, 34);
+    ctx.restore();
+  }
+
+  function activeNodes(s) {
+    var set = new Set();
+    if (s.packets) s.packets.forEach(function (p) { set.add(p.from); set.add(p.to); });
+    if (s.event) (s.arrive || []).forEach(function (n) { set.add(n); });
+    return set;
+  }
+
+  function maybeTriggerArrivals() {
+    var s = current();
+    if (!s) return;
+    var lead = s.lead == null ? LEAD : s.lead;
+    var dur = s.dur == null ? (s.event ? 700 : DUR) : s.dur;
+    var local = (state.elapsed - lead) / dur;
+    if (s.packets) {
+      s.packets.forEach(function (p, i) {
+        var pp = (local - p.start) / p.span;
+        if (pp >= 0.9 && !state.pulsed.has('p' + i)) {
+          state.pulsed.add('p' + i);
+          pulse(p.to);
+        }
+      });
+    }
+  }
+
+  function draw(ts) {
+    var sx = canvas.width / V.w;
+    var sy = canvas.height / V.h;
+    ctx.setTransform(sx, 0, 0, sy, 0, 0);
+    ctx.clearRect(0, 0, V.w, V.h);
+
+    var s = current();
+    var tone = s ? toneFor(s) : { stroke: C.accent, glow: C.accent + '66' };
+
+    drawBackground();
+    drawFrame(CLUSTER, false);
+    drawFrame(HOST, true);
+    drawHostNote();
+    drawEdges();
+
+    var active = s ? activeNodes(s) : new Set();
+    Object.keys(NODES).forEach(function (k) {
+      drawNode(k, NODES[k], active.has(k), tone);
+    });
+
+    drawPulses(ts, tone);
+    if (s) drawPackets(s, tone);
+    drawPhaseLabel(s);
+  }
+
+  /* ---------- loop ---------- */
+
+  function frame(ts) {
+    var dt = state.lastTs ? Math.min(64, ts - state.lastTs) : 0;
+    state.lastTs = ts;
+
+    if (state.playing) {
+      state.elapsed += dt * state.speed;
+      var s = current();
+      if (s) {
+        maybeTriggerArrivals();
+        if (state.elapsed >= stepTotal(s)) {
+          state.elapsed = stepTotal(s);
+          setPlaying(false);
+        }
+      }
+    }
+
+    draw(ts);
+    updateProgress();
+    requestAnimationFrame(frame);
+  }
+
+  /* ---------- boot ---------- */
+
+  refreshColors();
+  if (window.matchMedia) {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    if (mq.addEventListener) mq.addEventListener('change', refreshColors);
+  }
+
+  buildSteps();
+  entry(0);
+
+  fit();
+  if (window.ResizeObserver) {
+    new ResizeObserver(function () { fit(); }).observe(canvas.parentElement);
+  } else {
+    window.addEventListener('resize', fit);
+  }
+  window.addEventListener('resize', fit);
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

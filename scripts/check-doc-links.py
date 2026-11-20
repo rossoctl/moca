@@ -52,6 +52,10 @@ def main(argv):
     for f in files:
         text = INLINE.sub("", FENCE.sub("", open(f, encoding="utf-8").read()))
         for link in [m.group(1) for m in LINK.finditer(text)] + REFDEF.findall(text):
+            if link.startswith("pathname://"):
+                # Docusaurus escape for a file the docs plugin does not route (the .html explainers):
+                # the target is still checked, relative to this page.
+                link = link[len("pathname://") :]
             if re.match(r"(https?:|mailto:|tel:)", link) or "<" in link or (f, link) in ALLOW:
                 continue
             target, _, frag = link.partition("#")

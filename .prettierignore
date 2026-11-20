@@ -16,3 +16,6 @@ gen/
 # Gate records copied from their image builder: their sha256 is the evidence a template record cites
 # (deploy/sbx/template-onboarding/governance/GATING-RULES.md X10), so they stay byte-identical.
 *.gate-record.json
+
+# Self-contained explainer pages: hand-written, one file each; prettier would rewrite them wholesale.
+docs/project/explainers/*.html

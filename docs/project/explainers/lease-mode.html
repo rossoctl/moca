@@ -1,0 +1,1055 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lease mode · moca</title>
+<meta name="description" content="Interactive walkthrough of the sandbox service's lease mode: what a lease keeps between commands, and what it costs.">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Layout: one step-through stage up top, quiet reference cards below.
+     Blue = Exec data, teal = control / mode, amber = lease lifecycle, red = ends. */
+  :root{
+    --bg:#f4f6f8; --fg:#1b2530; --muted:#5b6a79; --line:#dbe2e9; --panel:#ffffff;
+    --accent:#0f766e; --accent-soft:rgba(15,118,110,.08);
+    --c-bg:#f4f6f8; --c-panel:#ffffff; --c-fg:#1b2530; --c-muted:#5b6a79; --c-line:#c9d3dd;
+    --c-async:#b45309; --c-sync:#1d4ed8; --c-danger:#b91c1c; --c-ok:#15803d; --c-accent:#0f766e;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0c1219; --fg:#e6edf3; --muted:#8fa0af; --line:#20303f; --panel:#121b26;
+      --accent:#3fc1b0; --accent-soft:rgba(63,193,176,.10);
+      --c-bg:#0c1219; --c-panel:#121b26; --c-fg:#e6edf3; --c-muted:#8fa0af; --c-line:#2a3b4d;
+      --c-async:#f59e0b; --c-sync:#6ea8ff; --c-danger:#f87171; --c-ok:#4ade80; --c-accent:#3fc1b0;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1219; --fg:#e6edf3; --muted:#8fa0af; --line:#20303f; --panel:#121b26;
+    --accent:#3fc1b0; --accent-soft:rgba(63,193,176,.10);
+    --c-bg:#0c1219; --c-panel:#121b26; --c-fg:#e6edf3; --c-muted:#8fa0af; --c-line:#2a3b4d;
+    --c-async:#f59e0b; --c-sync:#6ea8ff; --c-danger:#f87171; --c-ok:#4ade80; --c-accent:#3fc1b0;
+    color-scheme: dark;
+  }
+  html{background:var(--bg)}
+  body{
+    background:var(--bg); color:var(--fg);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",sans-serif;
+    margin:0; padding-left:max(16px,env(safe-area-inset-left,0px)); padding-right:max(16px,env(safe-area-inset-right,0px));
+  }
+  .mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace}
+  .muted{color:var(--muted)}
+  .accent{color:var(--accent)}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px}
+  .chip{border:1px solid var(--line); border-radius:6px; padding:2px 8px; font-size:11px; color:var(--muted)}
+  .eyebrow{font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); font-weight:600}
+  .btn{
+    border:1px solid var(--line); background:var(--panel); color:var(--fg);
+    border-radius:8px; padding:8px 16px; font-size:14px; font-weight:500; cursor:pointer;
+  }
+  .btn:hover:not(:disabled){border-color:var(--accent); color:var(--accent)}
+  .btn:disabled{opacity:.4; cursor:default}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  .btn.primary:hover{opacity:.9; color:#fff}
+  .btn:focus-visible,.dot:focus-visible,.tabbtn:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  .dot{width:10px; height:10px; border-radius:50%; border:1.5px solid var(--muted); background:transparent; cursor:pointer; padding:0}
+  .dot.on{background:var(--accent); border-color:var(--accent)}
+  .tabbtn{padding:8px 14px; font-size:13px; font-weight:500; background:var(--panel); color:var(--muted); border:0; cursor:pointer}
+  .tabbtn.on{background:var(--accent); color:#fff}
+  .legend-sw{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:-1px}
+  canvas{display:block; width:100%}
+  a{color:var(--accent)}
+  .stepnum{font-variant-numeric:tabular-nums}
+  #stepWire{border-left:3px solid var(--accent)}
+  #stepWire > div{padding:1px 0}
+</style>
+</head>
+<body>
+<noscript><p style="margin:16px;color:#b42318">This page needs JavaScript: the steps are built by script.</p></noscript>
+<div class="max-w-5xl mx-auto px-0 pb-16">
+
+  <header class="pt-10 pb-6">
+    <p class="eyebrow">moca · sandbox service · ADR-0048</p>
+    <h1 class="text-3xl sm:text-4xl font-bold mt-2 tracking-tight">Lease mode</h1>
+    <p class="muted mt-3 max-w-2xl leading-relaxed">Per-<span class="mono text-sm">Exec</span> mode gives each Exec a fresh microVM.
+      Files persist. Nothing else persists. Repeated CPU-heavy work pays a cold start every time.
+      Lease mode keeps one guest warm between Execs. Level 1 kills every process at the end of each
+      Exec. Level 2 lets <span class="mono text-sm">process_start</span> processes survive. Step through each flow.
+      Press Next for one step. Press Prev to go back one step. The wire box below the stage shows the
+      messages of the current step. The messages stay until you move on.</p>
+  <p class="muted" style="margin-top:10px;font-size:13px"><a href="https://www.rossoctl.dev/moca/" target="_blank" rel="noopener">&lsaquo; moca docs</a> · written page: <a href="https://www.rossoctl.dev/moca/sandbox/how-to/lease-mode" target="_blank" rel="noopener">Keep a guest between commands (lease mode)</a></p>
+  </header>
+
+  <section class="card overflow-hidden">
+    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 px-4 pt-3 pb-2 border-b" style="border-color:var(--line)">
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-sync)"></span>Exec data</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-accent)"></span>control / mode</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-async)"></span>lease lifecycle</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-danger)"></span>lease end</span>
+    </div>
+    <div class="px-2 pt-2"><canvas id="stage" aria-label="Step-through diagram of the SBX lease mode design"></canvas></div>
+    <div class="px-5 pb-5">
+      <div class="flex flex-wrap items-center gap-3 pt-2">
+        <div class="flex rounded-lg overflow-hidden border" style="border-color:var(--line)">
+          <button id="tabL1" class="tabbtn on">Level 1 · lease</button>
+          <button id="tabL2" class="tabbtn">Level 2 · lease+processes</button>
+        </div>
+        <button id="prev" class="btn" aria-label="Previous step">&#8249; Prev</button>
+        <button id="next" class="btn primary">Next &#8250;</button>
+        <button id="play" class="btn" aria-label="Play all steps">&#9654; Play</button>
+        <div id="dots" class="flex items-center gap-2 ml-1" role="tablist" aria-label="Steps"></div>
+        <span id="stepNum" class="ml-auto mono text-sm muted stepnum"></span>
+      </div>
+      <div class="mt-4 pt-4 border-t" style="border-color:var(--line)">
+        <h2 id="stepTitle" class="text-lg font-semibold"></h2>
+        <div id="stepWire" class="mono text-[12.5px] leading-relaxed mt-3 pl-3 py-1 card"></div>
+        <p id="stepBody" class="muted mt-3 text-[15px] leading-relaxed max-w-3xl"></p>
+        <div id="stepChips" class="flex flex-wrap gap-2 mt-3"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mt-12">
+    <p class="eyebrow">The decision</p>
+    <blockquote class="mt-3 text-xl sm:text-2xl font-medium leading-snug max-w-3xl border-l-4 pl-5" style="border-color:var(--accent)">
+      Per-<span class="mono text-base sm:text-lg">Exec</span> stays the default. A lease keeps one guest warm between
+      Execs. At level 1, every process dies at the end of each Exec. At level 2, only
+      <span class="mono text-base sm:text-lg">process_start</span> processes survive. Survival is asked for.
+      It is never a side effect.
+    </blockquote>
+  </section>
+
+  <section class="mt-10">
+    <p class="eyebrow">The rules behind the flow</p>
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+      <div class="card p-5"><h3 class="font-semibold">Three modes</h3>
+        <p class="muted text-sm mt-2 leading-relaxed"><span class="mono text-xs">per-exec</span>: a fresh guest for each
+        Exec. No process survives. <span class="mono text-xs">lease</span>: the same guest until the lease
+        ends. No process survives an Exec. <span class="mono text-xs">lease+processes</span>: the same guest.
+        Only <span class="mono text-xs">process_start</span> processes survive.</p></div>
+      <div class="card p-5"><h3 class="font-semibold">The lease clock</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">Idle is measured from the last Exec end. The default timeout is
+        300&nbsp;s. A keepalive never resets idle. The maximum duration marks the lease
+        <em>expiring</em>. The lease then ends at the next idle, or at the grace limit. Defaults:
+        8&nbsp;h at level 1, 4&nbsp;h at level 2, grace 30&nbsp;min. Keepalive loss ends the lease
+        after 120&nbsp;s.</p></div>
+      <div class="card p-5"><h3 class="font-semibold">Admission and reclaim</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">A lease VM is a third accounting class. The charge starts at
+        192&nbsp;MiB, then follows the measured <span class="mono text-xs">memory.current × 1.25</span>.
+        An idle lease VM holds no concurrency slot. Under pressure the worker ends the lease idle
+        longest. A lease with an Exec in flight is never reclaimed.</p></div>
+      <div class="card p-5"><h3 class="font-semibold">The guest stays clean</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">In a lease, an Exec runs as an unprivileged uid with no
+        capabilities and <span class="mono text-xs">no_new_privs</span>. The cgroup tree is root-owned and not
+        delegated. The agent stays root as PID 1, non-dumpable. Each tracked process gets its own
+        uid. <span class="mono text-xs">cgroup.kill</span> ends every Exec process. <span class="mono text-xs">setsid</span>
+        cannot escape.</p></div>
+      <div class="card p-5"><h3 class="font-semibold">The mode switch</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">The owner changes the mode through mocactl, with the user API
+        token. The agent gets no tool for it. The control plane signs the mode and the epoch into a set-mode token, and into
+        every sandbox token. The relay sets <span class="mono text-xs">mode</span> and
+        <span class="mono text-xs">mode_epoch</span> from the verified claims on every frame. The worker refuses a
+        stale epoch. An unknown epoch fails closed to <span class="mono text-xs">per-exec</span>.</p></div>
+      <div class="card p-5"><h3 class="font-semibold">No silent end</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">Every end reason sends one notice on the next tool result and in
+        <span class="mono text-xs">sandbox_info</span>. Every end writes an audit record. At level 2 the notice
+        lists the stopped processes. The end reasons are idle, max_duration, grace_limit,
+        keepalive_lost, reset, mode_change, memory_reclaim, worker_restart, teardown_failed,
+        agent_dead, sandbox_deleted.</p></div>
+    </div>
+  </section>
+
+  <section class="mt-10">
+    <p class="eyebrow">Why a lease at all</p>
+    <div class="grid sm:grid-cols-3 gap-4 mt-4">
+      <div class="card p-5"><p class="mono text-xs accent">E15 · metal</p>
+        <h3 class="font-semibold mt-1">Density</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">On AWS m7i.metal-24xl at 9.5% duty, per-Exec held 80 sessions.
+        Resident with a 300&nbsp;s idle timeout held 128. The idle timeout kept all of the benefit
+        and gave memory back.</p></div>
+      <div class="card p-5"><p class="mono text-xs accent">the target</p>
+        <h3 class="font-semibold mt-1">Cache-heavy Python</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">The workload that hurts is repeated cache-heavy or CPU-heavy
+        work in one project: a dataset re-read, a heavy import, a test suite rerun. Each run starts
+        in a cold guest. Level 1 serves on-disk caches through a warm page cache. Level 2 serves
+        in-memory process state.</p></div>
+      <div class="card p-5"><p class="mono text-xs accent">the bound</p>
+        <h3 class="font-semibold mt-1">Self-operated service</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">A build-vs-adopt assessment (2026-11-05) required
+        self-operation, your own identity provider, and no vendor control plane. A hosted
+        resident provider does not meet that bound. So the warm guest comes to the sandbox service,
+        as an opt-in mode.</p></div>
+    </div>
+  </section>
+
+  <footer class="mt-12 pt-6 border-t text-sm muted flex flex-wrap gap-x-6 gap-y-2" style="border-color:var(--line)">
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/adrs/0048-sbx-lease-mode.md" target="_blank" rel="noopener">ADR-0048</a>
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/specs/2026-11-08-sbx-lease-mode-design.md" target="_blank" rel="noopener">Spec (2026-11-08)</a>
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/adrs/0035-per-exec-microvm-warm-standby.md" target="_blank" rel="noopener">ADR-0035</a>
+    <a href="https://github.com/rossoctl/moca-experiments/issues/21" target="_blank" rel="noopener">E17</a>
+    <span>status: built (v0.11.0), off by default (<span class="mono">SH_SANDBOX_MODES_ALLOWED=per-exec</span>)</span>
+  </footer>
+</div>
+
+<script>
+(function(){
+"use strict";
+var $ = function(s){ return document.querySelector(s); };
+var canvas = $('#stage');
+var ctx = canvas.getContext('2d');
+
+var LW = 1000, LH = 640;
+var viewScale = 1;
+
+/* ---------- geometry ---------- */
+var G = {
+  agent:   {x:24,  y:40,  w:190, h:104},
+  mocactl: {x:24,  y:196, w:190, h:118},
+  mcp:     {x:272, y:40,  w:200, h:104},
+  control: {x:272, y:196, w:200, h:118},
+  relay:   {x:530, y:78,  w:150, h:120},
+  worker:  {x:724, y:36,  w:252, h:150},
+  vm:      {x:724, y:216, w:252, h:280},
+  ws:      {x:724, y:528, w:252, h:78}
+};
+/* cgroup boxes and the memory meter live inside the VM box */
+var X = {
+  guest:   {x:740, y:250, w:220, h:28},
+  exec:    {x:740, y:294, w:126, h:66},
+  tracked: {x:740, y:380, w:126, h:84},
+  meter:   {x:884, y:294, w:76,  h:164}
+};
+
+/* ---------- theme colors (canvas reads the CSS tokens) ---------- */
+var C = {};
+function readColors(){
+  var cs = getComputedStyle(document.documentElement);
+  ['bg','panel','fg','muted','line','async','sync','danger','ok','accent'].forEach(function(k){
+    C[k] = cs.getPropertyValue('--c-' + k).trim();
+  });
+}
+readColors();
+var themeMq = matchMedia('(prefers-color-scheme: dark)');
+if (themeMq.addEventListener) themeMq.addEventListener('change', readColors);
+else if (themeMq.addListener) themeMq.addListener(readColors);
+var rmMq = matchMedia('(prefers-reduced-motion: reduce)');
+function reduced(){ return rmMq.matches; }
+
+/* ---------- sizing ---------- */
+function resize(){
+  var w = canvas.parentElement.clientWidth - 16 || canvas.clientWidth;
+  var dpr = window.devicePixelRatio || 1;
+  var cssH = w * LH / LW;
+  canvas.style.height = cssH + 'px';
+  canvas.width  = Math.max(1, Math.round(w * dpr));
+  canvas.height = Math.max(1, Math.round(cssH * dpr));
+  viewScale = canvas.width / LW;
+}
+window.addEventListener('resize', resize);
+
+/* ---------- small helpers ---------- */
+function clamp01(v){ return v < 0 ? 0 : v > 1 ? 1 : v; }
+function ease(t){ return t < .5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2; }
+function seg(t, a, b){ return clamp01((t - a) / (b - a)); }
+function rr(x, y, w, h, r){
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function pathLen(p){
+  var L = 0;
+  for (var i = 1; i < p.length; i++) L += Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
+  return L;
+}
+function pointAt(p, d){
+  var acc = 0;
+  for (var i = 1; i < p.length; i++){
+    var sl = Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
+    if (d <= acc + sl){
+      var u = (d - acc) / sl;
+      return [ p[i-1][0] + (p[i][0]-p[i-1][0])*u, p[i-1][1] + (p[i][1]-p[i-1][1])*u ];
+    }
+    acc += sl;
+  }
+  return p[p.length-1];
+}
+function rev(p){ return p.slice().reverse(); }
+function strokePath(p){
+  ctx.beginPath();
+  ctx.moveTo(p[0][0], p[0][1]);
+  for (var i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+  ctx.stroke();
+}
+function strokePathDashed(p){
+  ctx.beginPath();
+  ctx.moveTo(p[0][0], p[0][1]);
+  for (var i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+  ctx.setLineDash([4,4]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+/* ---------- wire paths ---------- */
+var P_STDIO  = [[214,92],[272,92]];                                  /* agent -> MCP server */
+var P_MCPREL = [[472,100],[501,100],[501,138],[530,138]];            /* MCP server -> relay */
+var P_MOCCP  = [[214,244],[272,244]];                                /* mocactl -> control plane */
+var P_CPMOC  = [[272,268],[214,268]];                                /* control plane -> mocactl */
+var P_MOCREL = [[214,296],[243,296],[243,352],[605,352],[605,198]];  /* mocactl -> relay (under the control plane) */
+var P_RELWRK = [[680,124],[724,124]];                                /* relay -> worker */
+var P_WRKVM  = [[850,186],[850,216]];                                /* worker -> lease VM */
+
+/* ---------- moving packet ---------- */
+function packet(p, t, label, color){
+  var u = ease(clamp01(t));
+  if (u <= 0) return;
+  var pos = pointAt(p, u * pathLen(p));
+  ctx.font = '500 11px "IBM Plex Mono", monospace';
+  var w = ctx.measureText(label).width + 16, h = 20;
+  rr(pos[0] - w/2, pos[1] - h/2, w, h, 5);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.fillText(label, pos[0] - w/2 + 8, pos[1] + 3.5);
+}
+function packetSeg(p, t, a, b, label, color){
+  var u = seg(t, a, b);
+  if (u > 0) packet(p, u, label, color);
+}
+function tiny(text, x, y, align){
+  ctx.font = '400 10px "IBM Plex Mono", monospace';
+  ctx.fillStyle = C.muted;
+  ctx.textAlign = align || 'left';
+  ctx.fillText(text, x, y);
+  ctx.textAlign = 'left';
+}
+
+/* ---------- scene state ---------- */
+var scene;
+function freshScene(){
+  return {
+    mode: 'per-exec',        /* sandbox record mode */
+    epoch: 2,                /* modeEpoch */
+    vm: 'none',              /* none | lease | gone */
+    lease: 'none',           /* none | active | ended */
+    standbys: 5,
+    execId: 0, execPhase: null,   /* null | 'run' | 'done' */
+    tracked: [],             /* {name, uid, state} */
+    memPct: 0, chargeText: '—',
+    hostMem: 0.22,
+    vmWarm: false,
+    keepalive: false,
+    notice: null             /* {l1, l2, shown} */
+  };
+}
+
+/* ---------- static drawing ---------- */
+function drawBox(g, title, sub){
+  rr(g.x, g.y, g.w, g.h, 10);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.4; ctx.stroke();
+  ctx.fillStyle = C.fg; ctx.font = '600 13px "IBM Plex Sans", sans-serif';
+  ctx.fillText(title, g.x + 16, g.y + 24);
+  if (sub){
+    ctx.fillStyle = C.muted; ctx.font = '400 10px "IBM Plex Mono", monospace';
+    ctx.fillText(sub, g.x + 16, g.y + 42);
+  }
+}
+function modeColor(){
+  return scene.mode === 'per-exec' ? C.muted : C.accent;
+}
+function drawConnections(){
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.2;
+  strokePath(P_STDIO); strokePath(P_MCPREL); strokePath(P_MOCCP); strokePath(P_CPMOC);
+  strokePath(P_MOCREL); strokePath(P_RELWRK); strokePath(P_WRKVM);
+  strokePath([[850,496],[850,528]]);   /* VM -> workspace */
+  tiny('stdio', 243, 84, 'center');
+  tiny('HTTP API', 243, 236, 'center');
+  tiny('LeaseControl', 424, 346);
+  tiny('gRPC + token', 702, 112, 'center');
+  tiny('run / End', 858, 206);
+}
+function drawAgent(){
+  drawBox(G.agent, 'Coding agent', null);
+  tiny('harness · MCP client', G.agent.x + 16, G.agent.y + 46);
+  tiny('runs tools, one at a time', G.agent.x + 16, G.agent.y + 64);
+}
+function drawMcp(){
+  drawBox(G.mcp, 'MCP server', null);
+  tiny('stdio · on the laptop', G.mcp.x + 16, G.mcp.y + 46);
+  tiny('tools: bash · read · write …', G.mcp.x + 16, G.mcp.y + 64);
+  if (scene.mode === 'lease+processes'){
+    ctx.font = '400 10px "IBM Plex Mono", monospace';
+    ctx.fillStyle = C.accent;
+    ctx.fillText('process_start · list · logs · stop', G.mcp.x + 16, G.mcp.y + 82);
+  }
+}
+function drawMocactl(){
+  drawBox(G.mocactl, 'mocactl', null);
+  tiny('owner CLI', G.mocactl.x + 16, G.mocactl.y + 46);
+  tiny('user API token', G.mocactl.x + 16, G.mocactl.y + 64);
+  tiny('mints the sandbox token', G.mocactl.x + 16, G.mocactl.y + 82);
+}
+function drawControl(){
+  drawBox(G.control, 'Control plane', null);
+  tiny('sandbox record · audit', G.control.x + 16, G.control.y + 46);
+  /* mode chip */
+  var col = modeColor();
+  rr(G.control.x + 16, G.control.y + 58, 168, 24, 6);
+  ctx.strokeStyle = col; ctx.lineWidth = 1.3; ctx.stroke();
+  ctx.font = '500 10.5px "IBM Plex Mono", monospace'; ctx.fillStyle = col;
+  ctx.fillText('mode: ' + scene.mode, G.control.x + 26, G.control.y + 74);
+  tiny('modeEpoch: ' + scene.epoch, G.control.x + 16, G.control.y + 106);
+}
+function drawRelay(){
+  drawBox(G.relay, 'Relay', null);
+  tiny('gRPC · sandbox-relay', G.relay.x + 16, G.relay.y + 46);
+  tiny('checks the token', G.relay.x + 16, G.relay.y + 64);
+  ctx.font = '400 10px "IBM Plex Mono", monospace';
+  ctx.fillStyle = C.accent;
+  ctx.fillText('sets mode + epoch', G.relay.x + 16, G.relay.y + 82);
+  if (scene.keepalive){
+    rr(G.relay.x + 16, G.relay.y + 92, 118, 20, 5);
+    ctx.strokeStyle = C.async; ctx.lineWidth = 1.2; ctx.stroke();
+    ctx.fillStyle = C.async; ctx.font = '500 9.5px "IBM Plex Mono", monospace';
+    ctx.fillText('keepalive ✓ every 30 s', G.relay.x + 22, G.relay.y + 106);
+  }
+}
+function leaseColor(){
+  if (scene.lease === 'active') return C.ok;
+  if (scene.lease === 'ended') return C.danger;
+  return C.muted;
+}
+function drawHostBar(p){
+  /* bar frame */
+  rr(740, 134, 220, 14, 4);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.2; ctx.stroke();
+  /* fill */
+  var w = Math.max(0, Math.min(1, p)) * 216;
+  if (w > 0){
+    rr(742, 136, w, 10, 3);
+    ctx.fillStyle = p > .72 ? C.danger : C.ok;
+    ctx.globalAlpha = .55; ctx.fill(); ctx.globalAlpha = 1;
+  }
+  /* headroom target tick */
+  var tx = 740 + 220 * .72;
+  ctx.strokeStyle = C.muted; ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(tx, 131); ctx.lineTo(tx, 151); ctx.stroke();
+}
+function drawWorker(){
+  drawBox(G.worker, 'Worker', null);
+  tiny('KVM host · vmpool · lease state', G.worker.x + 16, G.worker.y + 46);
+  /* standby chip */
+  rr(740, 94, 106, 24, 6);
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.fillStyle = C.muted; ctx.font = '500 10px "IBM Plex Mono", monospace';
+  ctx.fillText('standby · ' + scene.standbys, 750, 110);
+  /* lease chip */
+  var lc = leaseColor();
+  rr(856, 94, 104, 24, 6);
+  ctx.strokeStyle = lc; ctx.lineWidth = 1.3; ctx.stroke();
+  ctx.fillStyle = lc; ctx.font = '500 10px "IBM Plex Mono", monospace';
+  ctx.fillText('lease: ' + scene.lease, 866, 110);
+  tiny('host memory used', 740, 130);
+  tiny('target', 898, 130, 'center');
+  drawHostBar(scene.hostMem);
+}
+function fillMeter(p){
+  var h = Math.max(0, Math.min(1, p)) * 158;
+  if (h <= 0) return;
+  rr(886, 456 - h, 72, h, 3);
+  ctx.fillStyle = C.async;
+  ctx.globalAlpha = .5; ctx.fill(); ctx.globalAlpha = 1;
+}
+function drawVm(){
+  var g = G.vm;
+  if (scene.vm === 'none'){
+    ctx.globalAlpha = .55;
+    rr(g.x, g.y, g.w, g.h, 10);
+    ctx.fillStyle = C.panel; ctx.fill();
+    ctx.setLineDash([5,5]);
+    ctx.strokeStyle = C.line; ctx.lineWidth = 1.4; ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = C.muted; ctx.font = '500 12px "IBM Plex Mono", monospace';
+    ctx.fillText('no lease VM', g.x + 16, g.y + 26);
+    ctx.font = '400 10px "IBM Plex Mono", monospace';
+    ctx.fillText('the next Exec takes a standby', g.x + 16, g.y + 46);
+    ctx.globalAlpha = 1;
+    return;
+  }
+  if (scene.vm === 'gone'){
+    ctx.globalAlpha = .8;
+    rr(g.x, g.y, g.w, g.h, 10);
+    ctx.fillStyle = C.panel; ctx.fill();
+    ctx.setLineDash([5,5]);
+    ctx.strokeStyle = C.danger; ctx.lineWidth = 1.4; ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = C.danger; ctx.font = '500 12px "IBM Plex Mono", monospace';
+    ctx.fillText('VM destroyed', g.x + 16, g.y + 26);
+    ctx.font = '400 10px "IBM Plex Mono", monospace';
+    ctx.fillStyle = C.muted;
+    ctx.fillText('never returns to the standby pool', g.x + 16, g.y + 46);
+    ctx.fillText('the workspace is kept', g.x + 16, g.y + 62);
+    ctx.globalAlpha = 1;
+    return;
+  }
+  /* a live lease VM */
+  rr(g.x, g.y, g.w, g.h, 10);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.4; ctx.stroke();
+  ctx.fillStyle = C.fg; ctx.font = '600 13px "IBM Plex Sans", sans-serif';
+  ctx.fillText('Lease VM · Firecracker', g.x + 16, g.y + 26);
+  if (scene.vmWarm){
+    rr(912, 226, 48, 20, 5);
+    ctx.strokeStyle = C.async; ctx.lineWidth = 1.2; ctx.stroke();
+    ctx.fillStyle = C.async; ctx.font = '500 10px "IBM Plex Mono", monospace';
+    ctx.fillText('warm', 921, 240);
+  }
+  /* guest agent bar */
+  rr(X.guest.x, X.guest.y, X.guest.w, X.guest.h, 6);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.fillStyle = C.fg; ctx.font = '500 10.5px "IBM Plex Mono", monospace';
+  ctx.fillText('guest agent · root · PID 1', X.guest.x + 10, X.guest.y + 18);
+  /* exec cgroup */
+  var runCol = scene.execPhase === 'run' ? C.sync : C.line;
+  rr(X.exec.x, X.exec.y, X.exec.w, X.exec.h, 6);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = runCol; ctx.lineWidth = 1.3; ctx.stroke();
+  ctx.fillStyle = scene.execPhase === 'run' ? C.sync : C.fg;
+  ctx.font = '500 10.5px "IBM Plex Mono", monospace';
+  ctx.fillText(scene.execId ? ('exec/' + scene.execId) : 'exec/—', X.exec.x + 10, X.exec.y + 18);
+  ctx.fillStyle = C.muted; ctx.font = '400 9.5px "IBM Plex Mono", monospace';
+  ctx.fillText('uid sbx · fresh shell', X.exec.x + 10, X.exec.y + 34);
+  ctx.fillText('cgroup.kill at end', X.exec.x + 10, X.exec.y + 50);
+  /* tracked cgroup, level 2 */
+  ctx.setLineDash([4,3]);
+  rr(X.tracked.x, X.tracked.y, X.tracked.w, X.tracked.h, 6);
+  ctx.setLineDash([]);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.3; ctx.stroke();
+  ctx.fillStyle = C.fg; ctx.font = '500 10.5px "IBM Plex Mono", monospace';
+  ctx.fillText('tracked/', X.tracked.x + 10, X.tracked.y + 18);
+  if (scene.tracked.length === 0){
+    ctx.fillStyle = C.muted; ctx.font = '400 9.5px "IBM Plex Mono", monospace';
+    ctx.fillText('level 2 only', X.tracked.x + 10, X.tracked.y + 36);
+  }
+  scene.tracked.forEach(function(p, i){
+    var y = X.tracked.y + 36 + i * 17;
+    var col = p.state === 'running' ? C.ok : C.danger;
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(X.tracked.x + 14, y - 3, 3, 0, Math.PI * 2); ctx.fill();
+    ctx.font = '400 9.5px "IBM Plex Mono", monospace';
+    ctx.fillText(p.name + ' · ' + p.uid, X.tracked.x + 22, y);
+  });
+  /* memory meter */
+  tiny('charge', X.meter.x, X.meter.y - 6);
+  rr(X.meter.x, X.meter.y, X.meter.w, X.meter.h, 6);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.2; ctx.stroke();
+  fillMeter(scene.memPct);
+  ctx.font = '400 9.5px "IBM Plex Mono", monospace';
+  ctx.fillStyle = C.muted;
+  ctx.fillText(scene.chargeText, X.meter.x, X.meter.y + X.meter.h + 14);
+}
+function drawWs(){
+  drawBox(G.ws, 'Workspace', 'persists on the host disk');
+  tiny('survives every lease end', G.ws.x + 16, G.ws.y + 60);
+}
+function drawNotice(){
+  var n = scene.notice;
+  if (!n) return;
+  var col = n.shown ? C.ok : C.async;
+  rr(24, 154, 196, 42, 8);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = col; ctx.lineWidth = 1.3; ctx.stroke();
+  ctx.font = '400 9px "IBM Plex Mono", monospace';
+  ctx.fillStyle = col;
+  ctx.fillText(n.l1, 32, 170);
+  ctx.fillText(n.l2, 32, 184);
+  if (!n.shown){
+    ctx.textAlign = 'right';
+    ctx.fillText('pending', 212, 170);
+    ctx.textAlign = 'left';
+  }
+}
+
+/* ---------- overlay effects ---------- */
+function boxFlash(b, t, color){
+  var a = Math.sin(clamp01(t) * Math.PI) * .3;
+  if (a <= 0) return;
+  rr(b.x, b.y, b.w, b.h, 6);
+  ctx.fillStyle = color; ctx.globalAlpha = a; ctx.fill(); ctx.globalAlpha = 1;
+}
+function vmFlash(t){
+  var a = Math.sin(clamp01(t) * Math.PI) * .18;
+  if (a <= 0) return;
+  rr(G.vm.x, G.vm.y, G.vm.w, G.vm.h, 10);
+  ctx.fillStyle = C.danger; ctx.globalAlpha = a; ctx.fill(); ctx.globalAlpha = 1;
+}
+function dangerText(text, x, y, align){
+  ctx.font = '500 10px "IBM Plex Mono", monospace';
+  ctx.fillStyle = C.danger;
+  ctx.textAlign = align || 'left';
+  ctx.fillText(text, x, y);
+  ctx.textAlign = 'left';
+}
+
+/* ---------- the steps ---------- */
+
+/* LEVEL 1 — lease */
+var L1 = [
+{
+  title: 'The parts',
+  body: 'The coding agent runs on the laptop. The MCP server runs beside it, over stdio. mocactl is the owner CLI. The control plane stores the sandbox record. The relay checks the sandbox token. The worker runs microVMs on the KVM host. The guest agent runs in the VM as PID 1. The workspace sits on the host disk. The workspace persists. In per-exec mode, each Exec takes a standby VM and destroys it after one command.',
+  wire: ['stdio: agent ↔ MCP server',
+         'gRPC: MCP server / mocactl ↔ relay ↔ worker'],
+  chips: ['mode: per-exec (default)', 'one Exec = one fresh VM'],
+  dur: 3600,
+  commit: function(){},
+  overlay: function(t){}
+},
+{
+  title: 'The owner sets the mode',
+  body: 'The owner runs mocactl. mocactl sends the new mode to the control plane. The request carries the user API token. The control plane writes mode = lease. It raises modeEpoch. It writes an audit record. It returns the sandbox record and a set-mode token. A sandbox token cannot change the mode.',
+  wire: ['mocactl → control plane: PUT /v1/sandboxes/{id}/mode {mode:"lease"}',
+         'control plane → mocactl: 200 {sandbox:{mode:"lease", modeEpoch:3, …}, setModeToken}'],
+  chips: ['user API token', 'owner only', 'audit record', 'returns setModeToken'],
+  dur: 4200,
+  commit: function(){ scene.mode = 'lease'; scene.epoch = 3; },
+  overlay: function(t){
+    packetSeg(P_MOCCP, t, 0, .45, 'PUT mode: lease', C.accent);
+    packetSeg(P_CPMOC, t, .5, .9, '200 · epoch 3', C.accent);
+  }
+},
+{
+  title: 'mocactl pushes the mode to the worker',
+  body: 'mocactl sends the set-mode token from the last step in a LeaseControl set_mode call through the relay. The control plane minted that token. It carries the mode and the epoch. The relay verifies it and sets the mode and the epoch on the frame it forwards. A set_mode without a verified set-mode token gets PERMISSION_DENIED. The worker stores the epoch next to the workspace. The epoch survives a worker restart. The worker refuses an Exec with a stale epoch.',
+  wire: ['mocactl → relay: LeaseControlRequest {sandbox_id, op:"set_mode", set_mode_token}',
+         'relay → worker: LeaseControlFrame {op:"set_mode", mode:"lease", mode_epoch:3}',
+         'worker: epoch 3 stored on the host disk'],
+  chips: ['set-mode token claims: mode, mode_epoch', 'stale epoch = refused', 'fails closed to per-exec'],
+  dur: 4600,
+  commit: function(){},
+  overlay: function(t){
+    packetSeg(P_MOCREL, t, 0, .4, 'LeaseControl set_mode', C.accent);
+    packetSeg(P_RELWRK, t, .45, .75, 'set_mode', C.accent);
+    packetSeg(rev(P_RELWRK), t, .8, .95, 'ok', C.accent);
+  }
+},
+{
+  title: 'The agent runs a command',
+  body: 'The agent calls the bash tool. The MCP server sends an Exec to the relay. The Exec carries the sandbox token. The Exec kind is command. The Exec sets keepalive = true. This lease starts in keepalive state.',
+  wire: ['agent → MCP server: bash {command:"python train.py"}',
+         'MCP server → relay: Exec {kind:"command", keepalive:true} + sandbox token'],
+  chips: ['Exec.kind = command', 'keepalive = true'],
+  dur: 4200,
+  commit: function(){ scene.keepalive = true; },
+  overlay: function(t){
+    packetSeg(P_STDIO, t, 0, .35, 'bash', C.sync);
+    packetSeg(P_MCPREL, t, .4, .85, 'Exec · token', C.sync);
+  }
+},
+{
+  title: 'The relay sets the mode claims',
+  body: 'The relay checks the sandbox token. It reads mode and mode_epoch from the token claims. It overwrites the fields the client sent. It forwards the Exec to the worker. The worker trusts only relay-set values.',
+  wire: ['relay → worker: Exec {mode:"lease", mode_epoch:3, kind:"command", …}'],
+  chips: ['relay overwrites client values', 'worker trusts the relay only'],
+  dur: 3600,
+  commit: function(){},
+  overlay: function(t){
+    packetSeg(P_RELWRK, t, .1, .8, 'Exec · mode=lease', C.sync);
+  }
+},
+{
+  title: 'The worker admits a lease VM',
+  body: 'The sandbox has no lease VM. The worker takes a standby VM from the pool. The worker charges the budget the start estimate. The estimate is 192 MiB. The VM serves this sandbox only. The VM never returns to the standby pool.',
+  wire: ['worker: standby → lease VM · charge 192 MiB (SH_LEASE_START_MB)',
+         'an idle lease VM holds no concurrency slot'],
+  chips: ['third accounting class', 'no concurrency slot when idle', 'one lease VM per sandbox'],
+  dur: 4400,
+  commit: function(){
+    scene.vm = 'lease'; scene.lease = 'active'; scene.standbys = 4;
+    scene.memPct = .22; scene.chargeText = '192 MiB est';
+  },
+  overlay: function(t){
+    packetSeg(P_WRKVM, t, .1, .5, 'standby → lease', C.async);
+    fillMeter(.22 * ease(seg(t, .35, .8)));
+  }
+},
+{
+  title: 'The guest agent starts the Exec',
+  body: 'The guest agent stays root. It starts the Exec as uid sbx. The Exec gets no capabilities. no_new_privs is set. The Exec gets a fresh shell. The Exec runs in its own cgroup. The clock is corrected on every Exec in a lease.',
+  wire: ['guest agent: fork shell · uid sbx · cgroup exec/12'],
+  chips: ['fresh shell each Exec', 'rootfs stays read-only', 'clock correction'],
+  dur: 3800,
+  commit: function(){ scene.execId = 12; scene.execPhase = 'run'; },
+  overlay: function(t){
+    packetSeg(P_WRKVM, t, 0, .3, 'run exec/12', C.sync);
+    boxFlash(X.exec, seg(t, .3, .8), C.sync);
+  }
+},
+{
+  title: 'The Exec ends',
+  body: 'The command finishes. The guest agent writes cgroup.kill for the Exec cgroup. Every process in the cgroup dies. setsid cannot escape the cgroup. The agent waits until the cgroup is empty. Then it sends End. The guest stays.',
+  wire: ['guest agent: echo 1 > exec/12/cgroup.kill',
+         'guest agent → worker: End'],
+  chips: ['no process survives an Exec', 'empty bound 5 s → teardown_failed'],
+  dur: 4200,
+  commit: function(){ scene.execPhase = 'done'; },
+  overlay: function(t){
+    boxFlash(X.exec, seg(t, .1, .4), C.danger);
+    packetSeg(rev(P_WRKVM), t, .55, .9, 'End', C.async);
+  }
+},
+{
+  title: 'The worker keeps the VM',
+  body: 'The worker does not destroy the VM. The lease is active. The charge changes to the measured memory. The measured value is memory.current × 1.25. The idle timer starts at the Exec end. The page cache stays warm. The files in /tmp and /var stay.',
+  wire: ['worker: charge memory.current × 1.25 (SH_LEASE_HEADROOM)',
+         'idle timer starts — 300 s'],
+  chips: ['warm page cache', '/tmp and /var stay', 'idle from the last Exec end'],
+  dur: 4000,
+  commit: function(){
+    scene.memPct = .30; scene.chargeText = 'mem × 1.25'; scene.vmWarm = true;
+  },
+  overlay: function(t){
+    fillMeter(.30 * ease(seg(t, .2, .7)));
+    boxFlash(X.guest, seg(t, .3, .8), C.async);
+  }
+},
+{
+  title: 'The MCP server sends keepalives',
+  body: 'The MCP server sends a LeaseKeepalive every 30 s. The keepalive proves that the harness runs. It does not prove that anyone works. The keepalive never resets idle. If no keepalive arrives for 120 s, the lease ends right away.',
+  wire: ['MCP server → relay → worker: LeaseKeepalive {sandbox_id} — every 30 s'],
+  chips: ['keepalive ≠ activity', 'loss for 120 s → lease end'],
+  dur: 4200,
+  commit: function(){},
+  overlay: function(t){
+    [[.02,.26],[.34,.58],[.66,.9]].forEach(function(w, i){
+      packetSeg(P_MCPREL, t, w[0], w[1], 'keepalive', C.async);
+      packetSeg(P_RELWRK, t, w[0] + .04, w[1] + .04, 'ka ' + (i + 1), C.async);
+    });
+  }
+},
+{
+  title: 'The next Exec runs warm',
+  body: 'The next Exec runs in the same guest. The page cache is warm. The CPU caches are warm. The command runs faster. The Exec still gets a fresh shell. The Exec still ends with cgroup.kill.',
+  wire: ['MCP server → relay → worker: Exec {kind:"command"} — same VM, warm'],
+  chips: ['no cold start', 'fresh shell again', 'E15: resident-300 ≈ resident ∞'],
+  dur: 4200,
+  commit: function(){ scene.execId = 13; scene.execPhase = 'done'; scene.memPct = .42; },
+  overlay: function(t){
+    packetSeg(P_MCPREL, t, 0, .3, 'Exec', C.sync);
+    packetSeg(P_RELWRK, t, .32, .55, 'Exec · warm', C.sync);
+    packetSeg(P_WRKVM, t, .56, .7, 'run exec/13', C.sync);
+    boxFlash(X.exec, seg(t, .6, .9), C.sync);
+    boxFlash(X.exec, seg(t, .9, 1), C.danger);
+  }
+},
+{
+  title: 'The lease ends',
+  body: 'No Exec ends for 300 s. The idle timeout fires. The worker destroys the VM. The VM never returns to the standby pool. The workspace stays on the host. The worker writes an audit record. The reason is idle.',
+  wire: ['worker: lease end — reason: idle · VM destroyed · audit record'],
+  chips: ['idle timeout 300 s (default)', 'other reasons: keepalive_lost · max_duration · grace_limit · reset · mode_change · memory_reclaim · worker_restart · teardown_failed · agent_dead', 'workspace kept'],
+  dur: 5200,
+  commit: function(){
+    scene.vm = 'gone'; scene.lease = 'ended'; scene.execPhase = null; scene.vmWarm = false;
+    scene.notice = { l1: '[sandbox] guest restarted', l2: '(idle, 14:02) · /tmp gone', shown: false };
+  },
+  overlay: function(t){
+    var idle = seg(t, 0, .45);
+    if (idle > 0 && idle < 1){
+      dangerText('idle ' + Math.round(300 * (1 - ease(idle))) + ' s', 960, 60, 'right');
+    }
+    vmFlash(seg(t, .5, .75));
+  }
+},
+{
+  title: 'The next tool result shows the notice',
+  body: 'The MCP server cannot push a message into the harness. The notice rides on the next tool result. The notice gives the reason. sandbox_info shows the same reason. The next Exec starts a cold guest. It pays one cold start.',
+  wire: ['tool result: [sandbox] guest restarted (idle, 14:02):',
+         '  /tmp, installs outside /workspace and background processes are gone'],
+  chips: ['no silent end', 'one notice per end', 'sandbox_info shows mode, lease state, last reason'],
+  dur: 4600,
+  commit: function(){ scene.notice.shown = true; },
+  overlay: function(t){
+    packetSeg(rev(P_RELWRK), t, 0, .28, 'result', C.ok);
+    packetSeg(rev(P_MCPREL), t, .32, .6, 'result + notice', C.ok);
+    packetSeg(rev(P_STDIO), t, .64, .88, 'notice', C.ok);
+  }
+}
+];
+
+/* LEVEL 2 — lease+processes */
+var L2 = [
+{
+  title: 'The parts, level 2',
+  body: 'The sandbox already runs a lease at level 1. Level 2 adds the tracked/ cgroup. It sits under the root cgroup. The end-of-Exec kill does not touch it. The process tools work only at this level. The strict rule holds: only process_start processes survive an Exec.',
+  wire: ['level 2 = lease + process_start processes'],
+  chips: ['off until the security review', 'SH_SANDBOX_MODES_ALLOWED', 'SH_LEASE_MAX_PROCESSES = 4'],
+  dur: 3800,
+  setup: function(){
+    scene.mode = 'lease'; scene.epoch = 3;
+    scene.vm = 'lease'; scene.lease = 'active'; scene.standbys = 4;
+    scene.execId = 13; scene.execPhase = 'done';
+    scene.memPct = .34; scene.chargeText = 'mem × 1.25';
+    scene.vmWarm = true; scene.keepalive = true; scene.hostMem = .38;
+  },
+  commit: function(){},
+  overlay: function(t){ boxFlash(X.tracked, seg(t, .15, .85), C.accent); }
+},
+{
+  title: 'The owner sets level 2',
+  body: 'The owner runs mocactl. The mode changes to lease+processes. An upgrade needs a TTY. Operator policy must allow the mode. The control plane raises the epoch. mocactl sends a set_mode with the new set-mode token to the worker. The agent has no tool for the mode.',
+  wire: ['mocactl → control plane: PUT /v1/sandboxes/{id}/mode {mode:"lease+processes"}',
+         'mocactl → relay → worker: LeaseControl {op:"set_mode", set_mode_token} → mode_epoch 4'],
+  chips: ['upgrade needs a TTY', 'no agent tool for the mode', 'policy gate'],
+  dur: 4800,
+  commit: function(){ scene.mode = 'lease+processes'; scene.epoch = 4; },
+  overlay: function(t){
+    packetSeg(P_MOCCP, t, 0, .22, 'PUT mode: L2', C.accent);
+    packetSeg(P_CPMOC, t, .24, .4, '200 · epoch 4', C.accent);
+    packetSeg(P_MOCREL, t, .48, .72, 'set_mode', C.accent);
+    packetSeg(P_RELWRK, t, .74, .94, 'set_mode', C.accent);
+  }
+},
+{
+  title: 'The agent starts a process',
+  body: 'The agent calls process_start. The MCP server sends an Exec. The Exec kind is process_start. The relay sets the mode claims. The worker routes the Exec to the lease VM.',
+  wire: ['agent → MCP server: process_start {command:"npm run dev", name:"devserver"}',
+         'MCP server → relay → worker: Exec {kind:"process_start"}'],
+  chips: ['Exec.kind = process_start', 'name is unique'],
+  dur: 4000,
+  commit: function(){},
+  overlay: function(t){
+    packetSeg(P_STDIO, t, 0, .22, 'process_start', C.sync);
+    packetSeg(P_MCPREL, t, .26, .5, 'Exec · p_start', C.sync);
+    packetSeg(P_RELWRK, t, .54, .78, 'Exec', C.sync);
+  }
+},
+{
+  title: 'The guest agent tracks the process',
+  body: 'The guest agent starts the process in the tracked/ cgroup. The process gets its own uid. The uid comes from a reserved range. The process runs in its own session. Input comes from /dev/null. Output goes to a ring log. The ring log holds 4 MiB.',
+  wire: ['guest agent: start · cgroup tracked/devserver · uid 20001 · ring log 4 MiB'],
+  chips: ['own uid per process', 'seccomp blocks ptrace and process_vm_*', 'visible in process_list'],
+  dur: 4200,
+  commit: function(){ scene.tracked.push({ name: 'devserver', uid: 20001, state: 'running' }); },
+  overlay: function(t){
+    packetSeg(P_WRKVM, t, .1, .5, 'start tracked', C.sync);
+    boxFlash(X.tracked, seg(t, .3, .85), C.ok);
+  }
+},
+{
+  title: 'The Exec ends. The process lives.',
+  body: 'The end-of-Exec kill touches the exec cgroup only. The tracked process survives. A process started with &, nohup or setsid dies at the end of its Exec. Only a process_start process survives.',
+  wire: ['guest agent: kill exec/14 · tracked/devserver keeps running'],
+  chips: ['strict rule', '& · nohup · setsid die', 'survival is asked for'],
+  dur: 3800,
+  commit: function(){ scene.execId = 14; scene.execPhase = 'done'; },
+  overlay: function(t){
+    boxFlash(X.exec, seg(t, .15, .45), C.danger);
+    boxFlash(X.tracked, seg(t, .5, .9), C.ok);
+  }
+},
+{
+  title: 'A later Exec reaches the process',
+  body: 'A later bash Exec runs in the same guest. The Exec reaches the process on localhost. The Exec can use workspace sockets and files. The guest has no network interface. Nothing outside the guest can reach the process. No port forwarding in v1.',
+  wire: ['agent → MCP server: bash {command:"curl localhost:3000/health"}',
+         'guest: curl → 127.0.0.1:3000 · 200 OK'],
+  chips: ['localhost only', 'no guest network', 'no port forwarding'],
+  dur: 4200,
+  commit: function(){},
+  overlay: function(t){
+    packetSeg(P_MCPREL, t, 0, .28, 'Exec · bash', C.sync);
+    packetSeg(P_RELWRK, t, .3, .52, 'Exec', C.sync);
+    packetSeg(P_WRKVM, t, .54, .68, 'run exec/15', C.sync);
+    var u = seg(t, .7, .95);
+    if (u > 0 && u < 1){
+      rr(740, 468, 132, 20, 5);
+      ctx.fillStyle = C.panel; ctx.fill();
+      ctx.strokeStyle = C.ok; ctx.lineWidth = 1.3; ctx.stroke();
+      ctx.fillStyle = C.ok; ctx.font = '500 9.5px "IBM Plex Mono", monospace';
+      ctx.fillText('curl :3000 → 200', 750, 482);
+    }
+  }
+},
+{
+  title: 'The agent monitors the process',
+  body: 'process_list shows each tracked process. It shows the state, the age and the memory. process_logs reads the ring log. process_stop ends the process. TERM goes first. KILL follows after 10 s. An exited process stays in the list with its exit state.',
+  wire: ['Exec {kind:"process_list"} → id, name, pid, state, age, memory',
+         'Exec {kind:"process_logs", id:"devserver"} → last 200 lines',
+         'Exec {kind:"process_stop", id:"devserver"} → TERM, then KILL after 10 s'],
+  chips: ['state: running | exited(code) | killed(signal)', 'audit: start, stop, exit'],
+  dur: 4200,
+  commit: function(){},
+  overlay: function(t){
+    packetSeg(P_MCPREL, t, 0, .22, 'process_list', C.sync);
+    packetSeg(rev(P_MCPREL), t, .28, .5, 'devserver · running', C.ok);
+    packetSeg(P_MCPREL, t, .58, .78, 'process_logs', C.sync);
+    packetSeg(rev(P_MCPREL), t, .82, .98, 'tail 200 lines', C.ok);
+  }
+},
+{
+  title: 'A downgrade stops the tracked processes',
+  body: 'The owner sets the mode back to lease. mocactl sends a set_mode with a fresh set-mode token. The worker stops every tracked process. The notice lists each stopped process. The lease stays active. An Exec with a stale epoch is refused.',
+  wire: ['mocactl → control plane: PUT /v1/sandboxes/{id}/mode {mode:"lease"}',
+         'mocactl → relay → worker: LeaseControl {op:"set_mode", set_mode_token} → mode_epoch 5',
+         'worker: stop tracked/devserver · TERM → KILL · notice + audit'],
+  chips: ['takes effect right away', 'stale epoch refused', 'lease stays active'],
+  dur: 5000,
+  commit: function(){
+    scene.mode = 'lease'; scene.epoch = 5;
+    if (scene.tracked.length) scene.tracked[0].state = 'stopped';
+  },
+  overlay: function(t){
+    packetSeg(P_MOCCP, t, 0, .18, 'PUT mode: lease', C.accent);
+    packetSeg(P_MOCREL, t, .24, .44, 'set_mode', C.accent);
+    packetSeg(P_RELWRK, t, .46, .62, 'set_mode', C.accent);
+    boxFlash(X.tracked, seg(t, .68, .92), C.danger);
+    if (seg(t, .7, 1) > 0) dangerText('stopped · TERM → KILL', 874, 400);
+  }
+},
+{
+  title: 'Memory pressure reclaims the lease',
+  body: 'The host memory rises above the headroom target. The worker ends the lease idle longest. Level 1 and level 2 are equal here. A lease with an Exec in flight is never reclaimed. The VM is destroyed. The notice rides on the next tool result.',
+  wire: ['worker: reclaim — reason: memory_reclaim · VM destroyed',
+         'tool result: [sandbox] guest restarted (memory_reclaim, 16:40):',
+         '  stopped: devserver (pid 412)'],
+  chips: ['idle-longest first', 'busy leases stay', 'no silent end'],
+  dur: 5600,
+  commit: function(){
+    scene.hostMem = .32; scene.vm = 'gone'; scene.lease = 'ended';
+    scene.execPhase = null; scene.vmWarm = false;
+    scene.notice = { l1: '[sandbox] guest restarted', l2: '(memory_reclaim) · stopped: devserver', shown: true };
+  },
+  overlay: function(t){
+    var rise = .38 + .47 * ease(seg(t, 0, .3));
+    if (seg(t, 0, .55) > 0){
+      drawHostBar(rise);
+      dangerText('MemAvailable < target', 960, 60, 'right');
+    }
+    vmFlash(seg(t, .38, .56));
+    packetSeg(rev(P_RELWRK), t, .58, .74, 'reclaim', C.danger);
+    packetSeg(rev(P_MCPREL), t, .78, .94, 'result + notice', C.ok);
+  }
+}
+];
+
+var SEQS = { l1: { steps: L1 }, l2: { steps: L2 } };
+var active = 'l1';
+function steps(){ return SEQS[active].steps; }
+
+/* ---------- engine ---------- */
+var cur = 0, startT = 0, committed = false, playing = false, holdUntil = 0;
+
+function gotoStep(k){
+  var st = steps();
+  k = Math.max(0, Math.min(st.length - 1, k));
+  scene = freshScene();
+  for (var i = 0; i < k; i++){
+    if (st[i].setup) st[i].setup();
+    st[i].commit();
+  }
+  if (st[k].setup) st[k].setup();
+  cur = k; committed = false;
+  startT = reduced() ? -1e9 : performance.now();
+  holdUntil = 0;
+  renderPanel();
+}
+function renderPanel(){
+  var st = steps()[cur];
+  $('#stepNum').textContent = (cur + 1) + ' / ' + steps().length;
+  $('#stepTitle').textContent = st.title;
+  var wire = $('#stepWire');
+  wire.innerHTML = '';
+  st.wire.forEach(function(m){
+    var el = document.createElement('div');
+    el.textContent = m;
+    wire.appendChild(el);
+  });
+  $('#stepBody').textContent = st.body;
+  var chips = $('#stepChips');
+  chips.innerHTML = '';
+  st.chips.forEach(function(c){
+    var el = document.createElement('span');
+    el.className = 'chip mono';
+    el.textContent = c;
+    chips.appendChild(el);
+  });
+  var dots = $('#dots');
+  dots.innerHTML = '';
+  steps().forEach(function(s, i){
+    var d = document.createElement('button');
+    d.className = 'dot' + (i === cur ? ' on' : '');
+    d.setAttribute('aria-label', 'Step ' + (i + 1) + ': ' + s.title);
+    d.addEventListener('click', function(){ gotoStep(i); });
+    dots.appendChild(d);
+  });
+  $('#prev').disabled = cur === 0;
+  $('#next').disabled = cur === steps().length - 1;
+  $('#tabL1').className = 'tabbtn' + (active === 'l1' ? ' on' : '');
+  $('#tabL2').className = 'tabbtn' + (active === 'l2' ? ' on' : '');
+}
+function setPlaying(on){
+  playing = on;
+  $('#play').innerHTML = on ? '&#9632; Pause' : '&#9654; Play';
+  if (on && committed) holdUntil = performance.now() + 600;
+}
+function draw(t){
+  ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, LW, LH);
+  drawConnections();
+  drawAgent();
+  drawMcp();
+  drawMocactl();
+  drawControl();
+  drawRelay();
+  drawWorker();
+  drawVm();
+  drawWs();
+  drawNotice();
+  /* keep the step's final frame (arrived messages) on stage until the next step starts */
+  steps()[cur].overlay(committed ? 1 : t);
+}
+function tick(now){
+  var st = steps()[cur];
+  var t = clamp01((now - startT) / st.dur);
+  if (t >= 1 && !committed){
+    st.commit();
+    committed = true;
+    holdUntil = now + 1700;
+  }
+  if (playing && committed && now >= holdUntil){
+    if (cur < steps().length - 1) gotoStep(cur + 1);
+    else setPlaying(false);
+  }
+  draw(t);
+  requestAnimationFrame(tick);
+}
+
+$('#next').addEventListener('click', function(){ gotoStep(cur + 1); });
+$('#prev').addEventListener('click', function(){ gotoStep(cur - 1); });
+$('#play').addEventListener('click', function(){ setPlaying(!playing); });
+$('#tabL1').addEventListener('click', function(){ if (active !== 'l1'){ active = 'l1'; gotoStep(0); } });
+$('#tabL2').addEventListener('click', function(){ if (active !== 'l2'){ active = 'l2'; gotoStep(0); } });
+document.addEventListener('keydown', function(e){
+  if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  if (e.key === 'ArrowRight'){ gotoStep(cur + 1); }
+  else if (e.key === 'ArrowLeft'){ gotoStep(cur - 1); }
+});
+
+resize();
+gotoStep(0);
+requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
