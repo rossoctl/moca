@@ -5,9 +5,11 @@ import {
   ExecKind,
   LeaseControlFrame,
   LeaseKeepaliveFrame,
+  ReleaseFrame,
   type Exec,
   type ExecEvent,
   type LeaseControlResult,
+  type ReleaseResult,
   type ServerFrame,
   type WorkerFrame,
 } from '@moca/k8s-sandbox';
@@ -22,6 +24,16 @@ export const LEASE_PROCESSES_CAPABILITY = 'sbx:lease-processes-v1';
 /** The refusal, FAILED_PRECONDITION, of a process kind for a worker without the capability. */
 export const WORKER_WITHOUT_PROCESSES =
   "lease_unsupported: this sandbox's worker does not support tracked processes";
+
+/**
+ * The reserved Hello capability of a worker that serves a ReleaseFrame (#338; remote-worker
+ * internal/exec.ReleaseCapability, the same string). A worker from before it drops the frame unread,
+ * so a release is never sent to a worker whose Hello lacks it.
+ */
+export const RELEASE_CAPABILITY = 'sbx:release-v1';
+/** The refusal, FAILED_PRECONDITION, of a release for a worker without the capability. */
+export const WORKER_WITHOUT_RELEASE =
+  "release_unsupported: this sandbox's worker does not support release";
 
 export interface AttachStream {
   metadata?: { get: (k: string) => string[] };
@@ -111,6 +123,8 @@ interface Parked {
   sinks: Map<number, (ev: ExecEvent) => void>;
   // per-ctlId waiters for in-flight lease controls, populated by routeLeaseControl
   controls: Map<number, PendingControl>;
+  // per-ctlId waiters for in-flight releases, populated by routeRelease
+  releases: Map<number, PendingRelease>;
   // Cancels the attach token's expiry timer; set by an attach-token Hello, called by teardown.
   cancelExpiry?: () => void;
   // Cancels a pending presence-put retry; set by Hello, called by teardown.
@@ -124,6 +138,12 @@ interface Parked {
 /** One routeLeaseControl awaiting the worker's LeaseControlResult. */
 interface PendingControl {
   resolve: (r: LeaseControlResult) => void;
+  reject: (err: Error) => void;
+}
+
+/** One routeRelease awaiting the worker's ReleaseResult. */
+interface PendingRelease {
+  resolve: (r: ReleaseResult) => void;
   reject: (err: Error) => void;
 }
 
@@ -234,6 +254,19 @@ export interface Relay {
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<LeaseControlResult>;
+  /**
+   * Send a ReleaseFrame for `workspaceKey` to the parked worker (#338) under a fresh `ctlId`, and
+   * resolve with the worker's ReleaseResult for that id. Settles as routeLeaseControl does
+   * (DEADLINE_EXCEEDED, UNAVAILABLE, PERMISSION_DENIED for a workload sandbox, CANCELLED), and
+   * rejects FAILED_PRECONDITION with WORKER_WITHOUT_RELEASE, without writing a frame, when the
+   * worker's Hello lacks RELEASE_CAPABILITY. A result's own `error` is the caller's to read.
+   */
+  routeRelease(
+    sandboxId: string,
+    workspaceKey: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<ReleaseResult>;
   /**
    * Activity on a live lease, without an Exec. Fire-and-forget: a no-op without a live worker, and
    * a write that fails is logged, not thrown. Coalesced: at most one frame per workspace per
@@ -389,6 +422,7 @@ export function createRelay(deps: RelayDeps): Relay {
           capabilities: [...frame.hello.capabilities],
           sinks: new Map(),
           controls: new Map(),
+          releases: new Map(),
           keepaliveAtMs: new Map(),
           teardown,
           ...(binding ? { workload: binding.workload } : {}),
@@ -421,6 +455,11 @@ export function createRelay(deps: RelayDeps): Relay {
       if (frame.leaseResult) {
         // Settled once: an answer after the timeout, or a duplicate, finds no waiter.
         parked.controls.get(frame.leaseResult.ctlId)?.resolve(frame.leaseResult);
+        return;
+      }
+      if (frame.releaseResult) {
+        // The same: settled once, a late or duplicate answer finds no waiter.
+        parked.releases.get(frame.releaseResult.ctlId)?.resolve(frame.releaseResult);
         return;
       }
       const reqId =
@@ -479,6 +518,10 @@ export function createRelay(deps: RelayDeps): Relay {
       const waiting = [...parked.controls.values()];
       parked.controls.clear();
       for (const c of waiting) c.reject(statusError(status.UNAVAILABLE, 'worker disconnected'));
+      // And every release.
+      const releasing = [...parked.releases.values()];
+      parked.releases.clear();
+      for (const r of releasing) r.reject(statusError(status.UNAVAILABLE, 'worker disconnected'));
       sessions.delete(sandboxId);
       const removed = deps.records
         .remove(sandboxId)
@@ -635,6 +678,71 @@ export function createRelay(deps: RelayDeps): Relay {
     });
   }
 
+  function routeRelease(
+    sandboxId: string,
+    workspaceKey: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<ReleaseResult> {
+    const parked = sessions.get(sandboxId);
+    if (!parked) {
+      return Promise.reject(
+        statusError(status.UNAVAILABLE, `no live worker for sandbox '${sandboxId}'`),
+      );
+    }
+    const refused = leaseOnWorkload(sandboxId, parked, 'release');
+    if (refused) return Promise.reject(refused);
+    if (!parked.capabilities.includes(RELEASE_CAPABILITY)) {
+      return Promise.reject(statusError(status.FAILED_PRECONDITION, WORKER_WITHOUT_RELEASE));
+    }
+    if (signal?.aborted) return Promise.reject(statusError(status.CANCELLED, 'release cancelled'));
+    const ctlId = ++nextCtlId;
+    return new Promise<ReleaseResult>((resolve, reject) => {
+      let handle: unknown;
+      // As routeLeaseControl's: every way out removes the waiter, the timer and the listener.
+      const settle = () => {
+        if (parked.releases.get(ctlId) === entry) parked.releases.delete(ctlId);
+        timers.clearTimeout(handle);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const entry: PendingRelease = {
+        resolve: (r) => {
+          settle();
+          resolve(r);
+        },
+        reject: (err) => {
+          settle();
+          reject(err);
+        },
+      };
+      const onAbort = () => entry.reject(statusError(status.CANCELLED, 'release cancelled'));
+      parked.releases.set(ctlId, entry);
+      handle = timers.setTimeout(
+        () =>
+          entry.reject(
+            statusError(
+              status.DEADLINE_EXCEEDED,
+              `the worker did not answer the release within ${timeoutMs} ms`,
+            ),
+          ),
+        timeoutMs,
+      );
+      signal?.addEventListener('abort', onAbort);
+      try {
+        parked.stream.write({
+          release: ReleaseFrame.fromPartial({ ctlId, workspaceKey }),
+        } as ServerFrame);
+      } catch (err) {
+        entry.reject(
+          statusError(
+            status.UNAVAILABLE,
+            `release not sent to the worker: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      }
+    });
+  }
+
   function routeKeepalive(sandboxId: string, workspaceKey: string): void {
     const parked = sessions.get(sandboxId);
     if (!parked) return;
@@ -699,6 +807,7 @@ export function createRelay(deps: RelayDeps): Relay {
     routeAbort,
     workerCapabilities: (id) => sessions.get(id)?.capabilities,
     routeLeaseControl,
+    routeRelease,
     routeKeepalive,
     drain,
   };

@@ -10,6 +10,9 @@ import {
   type LeaseControlResponse,
   type LeaseKeepaliveRequest,
   type ProcessArgs,
+  ReleaseOutcome,
+  type ReleaseRequest,
+  type ReleaseResponse,
 } from '@moca/k8s-sandbox';
 import type { SandboxModeName, SandboxTokenClaims, SetModeClaims } from '@moca/control-plane';
 import {
@@ -148,6 +151,34 @@ export type LeaseOpName = 'status' | 'reset' | 'set_mode' | 'sandbox_deleted' | 
  */
 export type LeaseControlOutcome =
   'ok' | 'failed' | 'timeout' | 'error' | 'busy' | 'cancelled' | 'refused';
+
+/**
+ * One audit line per Release (#338), marker `sandbox_workspace_release` (`sandbox_release` is the
+ * drain grace's). `released`, `kept_busy` and `unknown_key` are the worker's outcomes; the rest as
+ * LeaseControlOutcome's, `unsupported` being a worker without RELEASE_CAPABILITY or one that
+ * answered `release_unsupported:`.
+ */
+export interface ReleaseAuditLine {
+  audit: 'sandbox_workspace_release';
+  ts: string;
+  sub?: string;
+  sbx?: string;
+  wrk: string;
+  ms: number;
+  outcome: ReleaseAuditOutcome;
+  reason?: string;
+}
+export type ReleaseAuditOutcome =
+  | 'released'
+  | 'kept_busy'
+  | 'unknown_key'
+  | 'unsupported'
+  | 'failed'
+  | 'timeout'
+  | 'error'
+  | 'busy'
+  | 'cancelled'
+  | 'refused';
 
 export function leaseOpName(op: LeaseOp): LeaseOpName {
   switch (op) {
@@ -306,6 +337,23 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
         ...(l.reason !== undefined ? { reason: l.reason } : {}),
       }));
     },
+    /** One Release's line. `t0` is when the relay received it. */
+    release(
+      t0: number,
+      l: Omit<ReleaseAuditLine, 'audit' | 'ts' | 'ms' | 'sub' | 'sbx'> & {
+        claims?: SandboxTokenClaims;
+      },
+    ): void {
+      emit(() => ({
+        audit: 'sandbox_workspace_release',
+        ts: new Date(t0).toISOString(),
+        ...(l.claims ? { sub: l.claims.sub, sbx: l.claims.sbx } : {}),
+        wrk: utf8Prefix(l.wrk, AUDIT_WRK_BYTES),
+        ms: Math.max(0, Date.now() - t0),
+        outcome: l.outcome,
+        ...(l.reason !== undefined ? { reason: l.reason } : {}),
+      }));
+    },
     /** A refused Abort (not an Exec, so a separate marker that Exec statistics skip). */
     abortRefused(wrk: string, reqId: number, reason: string, claims?: SandboxTokenClaims): void {
       emit(() => ({
@@ -390,6 +438,30 @@ export const LEASE_MUTATE_TIMEOUT_MS = 31 * 60_000;
  */
 export const LEASE_CONTROL_MAX_INFLIGHT = 4;
 
+/**
+ * How long a Release waits for the worker's answer. The worker answers at once (it frees the
+ * standbys and queues the workspace's removal off the request path), so this is the status op's.
+ */
+export const RELEASE_TIMEOUT_MS = 15_000;
+
+/** Releases in flight per `sbx`: a sandbox sends one at its end, so a small cap bounds the waiters. */
+export const RELEASE_MAX_INFLIGHT = 2;
+
+/**
+ * A worker's ReleaseResult.error as the gRPC status a Release ends with (sandbox.proto's
+ * ReleaseResult): `release_unsupported:` FAILED_PRECONDITION and `invalid-workspace-key:` /
+ * `empty-workspace-key:` INVALID_ARGUMENT (don't retry); `busy:` RESOURCE_EXHAUSTED and anything
+ * else UNAVAILABLE (retry; idle reclaim stays the backstop).
+ */
+export function releaseErrorStatus(error: string): number {
+  if (error.startsWith('release_unsupported:')) return status.FAILED_PRECONDITION;
+  if (error.startsWith('invalid-workspace-key:') || error.startsWith('empty-workspace-key:')) {
+    return status.INVALID_ARGUMENT;
+  }
+  if (error.startsWith('busy:')) return status.RESOURCE_EXHAUSTED;
+  return status.UNAVAILABLE;
+}
+
 /** The per-op LeaseControl timeouts; tests set short ones (plan 3 ruling R4). */
 export interface LeaseTimeoutsMs {
   status: number;
@@ -412,6 +484,8 @@ export interface SandboxCallerOpts {
   verifySetMode?: SetModeVerifier;
   /** Defaults to LEASE_STATUS_TIMEOUT_MS and LEASE_MUTATE_TIMEOUT_MS. */
   leaseTimeoutsMs?: LeaseTimeoutsMs;
+  /** Defaults to RELEASE_TIMEOUT_MS; tests set a short one. */
+  releaseTimeoutMs?: number;
 }
 
 /**
@@ -757,10 +831,92 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
     relay.routeKeepalive(req.sandboxId, claims.wsk);
   }
 
+  const releaseTimeoutMs = opts.releaseTimeoutMs ?? RELEASE_TIMEOUT_MS;
+  // Releases in flight per sbx, sent to the worker and not yet settled.
+  const releaseInflight = new Map<string, number>();
+
+  /**
+   * A sandbox caller's Release (#338): its own worker and workspace only, the token's `wsk` (never a
+   * key the caller names), exactly as an Exec is checked. Sent only to a worker that advertises
+   * RELEASE_CAPABILITY. At most RELEASE_MAX_INFLIGHT per sbx; `signal` aborting withdraws the call.
+   * Rejects with the status the call ends with; exactly one audit line either way.
+   */
+  async function sandboxRelease(
+    claims: SandboxTokenClaims,
+    req: ReleaseRequest,
+    t0: number,
+    signal?: AbortSignal,
+  ): Promise<ReleaseResponse> {
+    const line = (outcome: ReleaseAuditOutcome, reason?: string) =>
+      audit.release(t0, {
+        wrk: req.sandboxId,
+        outcome,
+        claims,
+        ...(reason !== undefined ? { reason } : {}),
+      });
+    if (req.sandboxId !== claims.wrk) {
+      const message = "release not permitted: sandbox_id is not this token's worker";
+      line('refused', message);
+      throw grpcError(status.PERMISSION_DENIED, message);
+    }
+    const n = releaseInflight.get(claims.sbx) ?? 0;
+    if (n >= RELEASE_MAX_INFLIGHT) {
+      line('busy');
+      throw grpcError(status.RESOURCE_EXHAUSTED, `busy: ${n} releases already in flight`);
+    }
+    releaseInflight.set(claims.sbx, n + 1);
+    let result;
+    try {
+      result = await relay.routeRelease(req.sandboxId, claims.wsk, releaseTimeoutMs, signal);
+    } catch (err) {
+      const code = (err as { code?: unknown }).code;
+      const outcome =
+        code === status.DEADLINE_EXCEEDED
+          ? 'timeout'
+          : code === status.CANCELLED
+            ? 'cancelled'
+            : code === status.FAILED_PRECONDITION
+              ? 'unsupported' // a worker without RELEASE_CAPABILITY
+              : code === status.PERMISSION_DENIED
+                ? 'refused' // the relay's workload check
+                : 'error';
+      line(outcome, (err as Error).message);
+      throw err;
+    } finally {
+      const left = (releaseInflight.get(claims.sbx) ?? 1) - 1;
+      if (left > 0) releaseInflight.set(claims.sbx, left);
+      else releaseInflight.delete(claims.sbx);
+    }
+    if (result.error) {
+      const code = releaseErrorStatus(result.error);
+      line(code === status.FAILED_PRECONDITION ? 'unsupported' : 'failed', result.error);
+      throw grpcError(code, result.error);
+    }
+    switch (result.outcome) {
+      case ReleaseOutcome.RELEASE_OUTCOME_RELEASED:
+        line('released');
+        break;
+      case ReleaseOutcome.RELEASE_OUTCOME_KEPT_BUSY:
+        line('kept_busy');
+        break;
+      case ReleaseOutcome.RELEASE_OUTCOME_UNKNOWN_KEY:
+        line('unknown_key');
+        break;
+      default: {
+        // An outcome this relay does not know, with no error: report it, don't guess.
+        const message = `the worker answered an unknown release outcome (${result.outcome})`;
+        line('failed', message);
+        throw grpcError(status.UNAVAILABLE, message);
+      }
+    }
+    return { outcome: result.outcome };
+  }
+
   return {
     exec: sandboxExec,
     abort: sandboxAbort,
     leaseControl: sandboxLeaseControl,
     leaseKeepalive: sandboxLeaseKeepalive,
+    release: sandboxRelease,
   };
 }

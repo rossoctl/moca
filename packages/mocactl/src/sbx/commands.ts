@@ -561,15 +561,16 @@ export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
 /**
  * `sbx rm`. `goneOk`: the id is the repository's bound sandbox, so one the control plane no longer
  * knows (purged after its retention) is "already gone" (exit 0), and `rm` can still take back
- * the configuration `up` wrote. Any other id's 404 is the failure it was. A lease sandbox's lease
- * is ended first (`sandbox_deleted`), so its guest does not outlive the record.
+ * the configuration `up` wrote. Any other id's 404 is the failure it was. Before the DELETE, a lease
+ * sandbox's lease is ended (`sandbox_deleted`), so its guest does not outlive the record, and every
+ * sandbox's workspace is released on its worker (#338), so its standbys and disk go at once.
  */
 export async function cmdRm(
   c: SbxCtx,
   id: string,
   o: { goneOk?: boolean; factory?: ExecFactory } = {},
 ): Promise<number> {
-  await endLease(c, id, o.factory);
+  await endOnWorker(c, id, o.factory);
   if (c.signal?.aborted) {
     c.io.err(`sbx: interrupted (exit ${SBX_EXIT.interrupted}): nothing was deleted`);
     return SBX_EXIT.interrupted;
@@ -666,19 +667,22 @@ export async function cmdEgress(
 }
 
 /**
- * How long `rm` waits on `sandbox_deleted`: the worker may block the op up to its grace limit
- * (30 min), but it finishes the op once started, so `rm` stops waiting and deletes.
+ * How long `rm` waits on the worker before its DELETE: `sandbox_deleted` may block up to the
+ * worker's grace limit (30 min), but the worker finishes the op once started, so `rm` stops waiting
+ * and deletes. A release is answered at once.
  */
 const RM_LEASE_WAIT_MS = 15_000;
 
 /**
- * `LeaseControl sandbox_deleted` for a lease sandbox, before its DELETE (spec §4.1): best-effort,
- * so any error (the record, the token, the call) is ignored and the DELETE goes ahead, as it does
- * after RM_LEASE_WAIT_MS. The bound covers the whole step: the record read, the token mint and the
- * dial, then the call (spec §8.3). Ctrl-C cancels it at any point (the caller then deletes
- * nothing). A per-exec sandbox has no lease, and no call is made.
+ * Before a sandbox's DELETE, on its worker (spec §4.1, #338): a lease sandbox's `LeaseControl
+ * sandbox_deleted`, then a Release of the sandbox's workspace for every sandbox, so the worker
+ * frees its standbys and workspace now rather than at idle reclaim. Best-effort: any error (the
+ * record, the token, a call, a worker that predates release) is ignored and the DELETE goes ahead,
+ * as it does after RM_LEASE_WAIT_MS. The bound covers the whole step: the record read, the token
+ * mint and the dial, then the calls (spec §8.3). Ctrl-C cancels it at any point (the caller then
+ * deletes nothing).
  */
-async function endLease(c: SbxCtx, id: string, factory: ExecFactory | undefined): Promise<void> {
+async function endOnWorker(c: SbxCtx, id: string, factory: ExecFactory | undefined): Promise<void> {
   const waited = new AbortController();
   const settled = new AbortController();
   void (c.sleep ?? c.rt.sleep)(RM_LEASE_WAIT_MS, settled.signal).then(() => {
@@ -686,10 +690,18 @@ async function endLease(c: SbxCtx, id: string, factory: ExecFactory | undefined)
   });
   const signal = c.signal ? AbortSignal.any([c.signal, waited.signal]) : waited.signal;
   try {
-    if (modeRank((await c.api.getSandbox(id, { signal })).mode) === 0) return;
-    const x = await openExec(c.api, id, factory, { signal });
+    const leased = modeRank((await c.api.getSandbox(id, { signal })).mode) > 0;
+    // Deleting is not use: the mint does not move the idle deadline.
+    const x = await openExec(c.api, id, factory, { signal, activity: false });
     try {
-      await x.leaseControl('sandbox_deleted', undefined, { signal });
+      if (leased) {
+        try {
+          await x.leaseControl('sandbox_deleted', undefined, { signal });
+        } catch {
+          // The release still goes: it frees what it can.
+        }
+      }
+      if (!signal.aborted) await x.release({ signal });
     } finally {
       x.close();
     }

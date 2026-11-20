@@ -71,6 +71,10 @@ func (f *fakeClient) LeaseKeepalive(context.Context, *pb.LeaseKeepaliveRequest, 
 	return &pb.LeaseKeepaliveResponse{}, nil
 }
 
+func (f *fakeClient) Release(context.Context, *pb.ReleaseRequest, ...grpc.CallOption) (*pb.ReleaseResponse, error) {
+	return &pb.ReleaseResponse{}, nil
+}
+
 func chunk(s pb.Stream, data string) *pb.ExecEvent {
 	return &pb.ExecEvent{Event: &pb.ExecEvent_Chunk{Chunk: &pb.Chunk{Data: []byte(data), Stream: s}}}
 }
@@ -288,6 +292,10 @@ func (s *scriptedClient) LeaseControl(context.Context, *pb.LeaseControlRequest, 
 
 func (s *scriptedClient) LeaseKeepalive(context.Context, *pb.LeaseKeepaliveRequest, ...grpc.CallOption) (*pb.LeaseKeepaliveResponse, error) {
 	return &pb.LeaseKeepaliveResponse{}, nil
+}
+
+func (s *scriptedClient) Release(context.Context, *pb.ReleaseRequest, ...grpc.CallOption) (*pb.ReleaseResponse, error) {
+	return &pb.ReleaseResponse{}, nil
 }
 
 const budgetRefusal = "memory-budget: promoting a standby would re-price it from 33554432 to 4328521728 committed bytes"

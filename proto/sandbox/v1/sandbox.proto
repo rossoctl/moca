@@ -21,6 +21,15 @@ service SandboxExec {
   // keepalive-loss rule); it never resets idle, and the worker gives no answer.
   rpc LeaseControl(LeaseControlRequest) returns (LeaseControlResponse);
   rpc LeaseKeepalive(LeaseKeepaliveRequest) returns (LeaseKeepaliveResponse);
+
+  // Release (#338). The caller's sandbox has ended: the relay sends a ReleaseFrame for the
+  // sandbox's own workspace key to its worker and returns the worker's outcome. Authorized as
+  // an Exec is (the sandbox token's worker and workspace key). Errors are gRPC statuses:
+  // FAILED_PRECONDITION "release_unsupported: …" (the worker predates release; don't retry),
+  // RESOURCE_EXHAUSTED "busy: …" (retry later), INVALID_ARGUMENT for a refused key (don't
+  // retry), DEADLINE_EXCEEDED or UNAVAILABLE (retry; idle reclaim stays the backstop).
+  // Follow the ReleaseFrame's SENDER CONTRACT: send it only at the sandbox's terminal end.
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
 }
 
 // ---- worker → relay ----
@@ -267,6 +276,10 @@ message LeaseControlRequest {
 message LeaseControlResponse   { LeaseStatus status = 1; }
 message LeaseKeepaliveRequest  { string sandbox_id = 1; }
 message LeaseKeepaliveResponse {}
+
+// ---- client ↔ relay (SandboxExec Release) ----
+message ReleaseRequest  { string sandbox_id = 1; }
+message ReleaseResponse { ReleaseOutcome outcome = 1; }
 
 // ---- release (#338) ----
 

@@ -26,6 +26,7 @@ export {
   type ProcessResultByOp,
   type ProcessSelector,
   type ProcessStarted,
+  type ReleaseOutcomeName,
   type SandboxTokenGrant,
   type TokenFn,
   type TokenRequest,

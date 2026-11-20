@@ -712,8 +712,12 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     writeFileSync(join(h.ws.get(NEW).ws, 'src/app.py'), 'print(2)\n');
     expect(await h.run(['pull', '--apply'])).toBe(0);
     const opened = h.ws.counts().opened;
+    const before = h.ws.calls();
     expect(await h.run(['rm'])).toBe(0);
-    expect(h.ws.counts().opened).toBe(opened + 1); // it looked
+    // It looked (one connection, its Execs), then released the workspace (#338) on another.
+    expect(h.ws.counts().opened).toBe(opened + 2);
+    expect(h.ws.calls().execs).toBeGreaterThan(before.execs);
+    expect(h.ws.calls().released).toBe(before.released + 1);
     expect(deletes(h)).toEqual([`/v1/sandboxes/${NEW}`]);
     expect(existsSync(join(h.r, '.sbx'))).toBe(false);
   });
@@ -723,8 +727,11 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
     expect(await h.run(['up'])).toBe(0);
     writeFileSync(join(h.ws.get(NEW).ws, 'src/app.py'), 'print("agent")\n');
     const opened = h.ws.counts().opened;
+    const before = h.ws.calls();
     expect(await h.run(['rm', '--force'])).toBe(0);
-    expect(h.ws.counts().opened).toBe(opened); // no Exec at all
+    // No Exec at all: the one connection is the release's (#338).
+    expect(h.ws.counts().opened).toBe(opened + 1);
+    expect(h.ws.calls()).toEqual({ execs: before.execs, released: before.released + 1 });
     expect(deletes(h)).toEqual([`/v1/sandboxes/${NEW}`]);
     expect(existsSync(join(h.r, '.sbx'))).toBe(false);
     expect(await h.run(['rm', '--force', '--keep-config', OTHER])).toBe(1); // still a real 404
