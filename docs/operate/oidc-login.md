@@ -89,7 +89,9 @@ because the login-start route is unauthenticated, each client address may hold a
 everyone else's logins still start; an abandoned start holds its slot for the state TTL (15
 minutes). The address is the socket peer, or, behind a proxy that appends to `X-Forwarded-For`,
 the entry `SH_TRUSTED_PROXY_HOPS` names. `deploy/k8s/setup.sh` writes 1 for the OpenShift Route
-(both settings are sticky `moca-settings` keys), and every Route to the control plane pins
+(both settings are sticky `moca-settings` keys), and so does `deploy/sbx/setup.sh` for the sandbox
+service's `sbx-api` Route (`SBX_TRUSTED_PROXY_HOPS`, `SBX_OIDC_MAX_PENDING_PER_SOURCE`); every Route
+to the control plane pins
 `haproxy.router.openshift.io/set-forwarded-headers: append`: the trust relies on the router
 appending, since one that passes a client's own header through would let it pick any address,
 a victim's included. Set the count wherever the control plane sits behind a proxy, or every login
