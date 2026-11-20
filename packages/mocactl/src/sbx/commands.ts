@@ -563,16 +563,19 @@ export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
  * knows (purged after its retention) is "already gone" (exit 0), and `rm` can still take back
  * the configuration `up` wrote. Any other id's 404 is the failure it was. Before the DELETE, a lease
  * sandbox's lease is ended (`sandbox_deleted`), so its guest does not outlive the record, and every
- * sandbox's workspace is released on its worker (#338), so its standbys and disk go at once.
+ * sandbox's workspace is released on its worker (#338), so its standbys and disk go at once. A
+ * released workspace takes no more Execs, so when the DELETE then fails, `rm` says so: the sandbox
+ * still exists, and re-running `rm` finishes the job.
  */
 export async function cmdRm(
   c: SbxCtx,
   id: string,
   o: { goneOk?: boolean; factory?: ExecFactory } = {},
 ): Promise<number> {
-  await endOnWorker(c, id, o.factory);
+  const released = await endOnWorker(c, id, o.factory);
   if (c.signal?.aborted) {
     c.io.err(`sbx: interrupted (exit ${SBX_EXIT.interrupted}): nothing was deleted`);
+    if (released) c.io.err(releasedNotDeleted(id));
     return SBX_EXIT.interrupted;
   }
   try {
@@ -595,7 +598,9 @@ export async function cmdRm(
       c.io.err(`${id} is already gone (the control plane no longer has it)`);
       return SBX_EXIT.ok;
     }
-    return failed(c, err);
+    const code = failed(c, err);
+    if (released) c.io.err(releasedNotDeleted(id));
+    return code;
   }
 }
 
@@ -673,6 +678,14 @@ export async function cmdEgress(
  */
 const RM_LEASE_WAIT_MS = 15_000;
 
+/** After a release whose DELETE did not happen: the sandbox is still there, its workspace gone. */
+function releasedNotDeleted(id: string): string {
+  return (
+    `sbx: ${id}'s workspace was released on its worker but the sandbox still exists: ` +
+    `re-run \`mocactl sbx rm ${id}\``
+  );
+}
+
 /**
  * Before a sandbox's DELETE, on its worker (spec §4.1, #338): a lease sandbox's `LeaseControl
  * sandbox_deleted`, then a Release of the sandbox's workspace for every sandbox, so the worker
@@ -680,9 +693,14 @@ const RM_LEASE_WAIT_MS = 15_000;
  * record, the token, a call, a worker that predates release) is ignored and the DELETE goes ahead,
  * as it does after RM_LEASE_WAIT_MS. The bound covers the whole step: the record read, the token
  * mint and the dial, then the calls (spec §8.3). Ctrl-C cancels it at any point (the caller then
- * deletes nothing).
+ * deletes nothing). True when the worker took the release (`released` or `kept_busy`): the
+ * workspace then takes no more Execs, whatever the DELETE does.
  */
-async function endOnWorker(c: SbxCtx, id: string, factory: ExecFactory | undefined): Promise<void> {
+async function endOnWorker(
+  c: SbxCtx,
+  id: string,
+  factory: ExecFactory | undefined,
+): Promise<boolean> {
   const waited = new AbortController();
   const settled = new AbortController();
   void (c.sleep ?? c.rt.sleep)(RM_LEASE_WAIT_MS, settled.signal).then(() => {
@@ -701,12 +719,14 @@ async function endOnWorker(c: SbxCtx, id: string, factory: ExecFactory | undefin
           // The release still goes: it frees what it can.
         }
       }
-      if (!signal.aborted) await x.release({ signal });
+      if (signal.aborted) return false;
+      return (await x.release({ signal })) !== 'unknown_key';
     } finally {
       x.close();
     }
   } catch {
     // Best-effort: the DELETE decides, and reports its own failure.
+    return false;
   } finally {
     settled.abort();
   }
