@@ -3,6 +3,8 @@ package vmpool
 import (
 	"slices"
 	"testing"
+
+	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
 )
 
 // Ruling P5-R37: a microVM worker advertises CapabilityLeaseProcessesV1 in Hello when,
@@ -47,8 +49,8 @@ func TestHelloCapabilitiesNeverPassOnAReservedNameFromTheManifest(t *testing.T) 
 	if slices.Contains(got, CapabilityLeaseProcessesV1) {
 		t.Fatalf("HelloCapabilities = %v: passed on the manifest's reserved %s without lease-processes-v1", got, CapabilityLeaseProcessesV1)
 	}
-	if !slices.Equal(got, []string{"bash"}) {
-		t.Fatalf("HelloCapabilities = %v, want [bash]", got)
+	if !slices.Equal(got, []string{"bash", wexec.ReleaseCapability}) {
+		t.Fatalf("HelloCapabilities = %v, want [bash %s]", got, wexec.ReleaseCapability)
 	}
 	got = HelloCapabilities(Config{VMM: Firecracker, ManifestFeatures: []string{FeatureLeaseV1, FeatureLeaseProcessesV1}},
 		[]string{CapabilityLeaseProcessesV1, "bash"})
@@ -65,4 +67,22 @@ func countOf(xs []string, x string) int {
 		}
 	}
 	return n
+}
+
+// Every vmpool worker serves Release (#338), so every Hello carries sbx:release-v1 once,
+// and a manifest's own copy of it is never passed on.
+func TestHelloCapabilitiesAlwaysAdvertiseReleaseOnce(t *testing.T) {
+	for _, cfg := range []Config{{VMM: Firecracker}, {VMM: CloudHypervisor},
+		{VMM: Firecracker, ManifestFeatures: []string{FeatureLeaseV1, FeatureLeaseProcessesV1}}} {
+		got := HelloCapabilities(cfg, []string{wexec.ReleaseCapability, "bash"})
+		if n := countOf(got, wexec.ReleaseCapability); n != 1 {
+			t.Fatalf("HelloCapabilities(%v) = %v: %s %d times, want once", cfg.VMM, got, wexec.ReleaseCapability, n)
+		}
+		if got[0] != "bash" || got[len(got)-1] != wexec.ReleaseCapability {
+			t.Fatalf("HelloCapabilities(%v) = %v, want the probed bash first and %s last", cfg.VMM, got, wexec.ReleaseCapability)
+		}
+	}
+	if wexec.ReleaseCapability != "sbx:release-v1" {
+		t.Fatalf("ReleaseCapability = %q: a relay matches the exact string sbx:release-v1", wexec.ReleaseCapability)
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
+	wexec "github.com/rossoctl/moca/remote-worker/internal/exec"
 )
 
 // Mode is how a sandbox's Execs use VMs (spec §3). The zero value is per-Exec, so an
@@ -180,18 +181,21 @@ const CapabilityLeaseProcessesV1 = "sbx:lease-processes-v1"
 
 // HelloCapabilities is what a microVM worker advertises in Hello: the snapshot manifest's
 // probed capabilities, in order, with CapabilityLeaseProcessesV1 added when, and only
-// when, LeaseProcessesSupported(cfg). The manifest's own copy of the reserved name, if it
-// has one, is never passed on: only this rule advertises it.
+// when, LeaseProcessesSupported(cfg), and wexec.ReleaseCapability always (#338). The
+// manifest's own copy of either reserved name, if it has one, is never passed on: only
+// this rule advertises them.
 func HelloCapabilities(cfg Config, manifest []string) []string {
-	out := make([]string, 0, len(manifest)+1)
+	out := make([]string, 0, len(manifest)+2)
 	for _, c := range manifest {
-		if c != CapabilityLeaseProcessesV1 {
+		if c != CapabilityLeaseProcessesV1 && c != wexec.ReleaseCapability {
 			out = append(out, c)
 		}
 	}
 	if LeaseProcessesSupported(cfg) {
 		out = append(out, CapabilityLeaseProcessesV1)
 	}
+	// The worker, not the snapshot, serves Release (#338): every vmpool worker does.
+	out = append(out, wexec.ReleaseCapability)
 	return out
 }
 

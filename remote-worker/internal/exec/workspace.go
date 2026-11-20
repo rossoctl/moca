@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	pb "github.com/rossoctl/moca/gen/go/sandbox/v1"
 )
 
 // WorkspaceCapability is the Hello.capabilities entry that tells the harness this worker
@@ -22,6 +24,16 @@ import (
 // child starts in, alone, would leave every session writing to the shared tree (#408).
 // A worker without it keeps today's single shared workspace on both sides.
 const WorkspaceCapability = "workspace-subdir"
+
+// ReleaseCapability is the Hello.capabilities entry of a worker that serves the relay's
+// Release frame (#338): it frees a workspace_key's workspace when its session or sandbox
+// ends, and refuses Execs for the key after. A relay sends Release only to a worker that
+// advertises it; one that predates it never sees the frame.
+const ReleaseCapability = "sbx:release-v1"
+
+// releasedPrefix starts the ExecError of an Exec for a released key, on both tiers
+// (vmpool's RefuseReleased reads the same).
+const releasedPrefix = "released"
 
 // DefaultWorkspaceRoot matches the harness's KAGENTI_SANDBOX_CWD default and the
 // Dockerfile's WORKDIR. The two sides are configured separately, so a deployment that
@@ -100,6 +112,10 @@ type WorkspaceRunner struct {
 
 	mu   sync.Mutex
 	runs map[string]*workspaceRun
+	// released holds each key a Release named, with when, so an Exec for it is refused.
+	// An entry expires after Idle: by then a sweep would have removed the directory
+	// anyway, and a later Exec is in the same position as one after an idle sweep.
+	released map[string]time.Time
 	// cwdsErr is the last process-scan error, so a scan that fails every sweep is logged once.
 	cwdsErr string
 }
@@ -107,6 +123,9 @@ type WorkspaceRunner struct {
 type workspaceRun struct {
 	inflight int
 	last     time.Time
+	// releaseOnIdle marks a key a Release met with an Exec running: its directory is
+	// removed when the last such Exec returns (Run's unwind), not at Idle.
+	releaseOnIdle bool
 	// rmdirErr is the last unexpected error removing this key's empty directory, kept so
 	// a refusal that repeats every sweep (EBUSY on a mount point, EACCES) is logged once.
 	rmdirErr string
@@ -175,6 +194,10 @@ func (w *WorkspaceRunner) Run(ctx context.Context, s Spec, sink Sink) (int32, er
 	// raised before it is released, so a sweep can never rename a directory out from
 	// under a command that is about to start in it.
 	w.mu.Lock()
+	if err := w.refuseReleasedLocked(s.WorkspaceKey); err != nil {
+		w.mu.Unlock()
+		return -1, err
+	}
 	if w.runs == nil {
 		w.runs = map[string]*workspaceRun{}
 	}
@@ -200,7 +223,18 @@ func (w *WorkspaceRunner) Run(ctx context.Context, s Spec, sink Sink) (int32, er
 		w.mu.Lock()
 		run.inflight--
 		run.last = w.now()
+		var tomb string
+		if run.releaseOnIdle && run.inflight == 0 && w.runs[s.WorkspaceKey] == run {
+			// A Release met this key busy: its session has ended, so the directory goes
+			// now that the last command in it has returned.
+			tomb = w.detachLocked(s.WorkspaceKey, dir)
+		}
 		w.mu.Unlock()
+		if tomb != "" {
+			// Off the Exec's goroutine: the session sends this Exec's End after Run
+			// returns, and a large tree's removal must not delay it.
+			go removeTomb(tomb)
+		}
 	}()
 
 	s.Dir = dir
@@ -247,6 +281,7 @@ func (w *WorkspaceRunner) Sweep() []Reclaimed {
 		scanned bool
 	)
 	w.mu.Lock()
+	w.pruneReleasedLocked(now)
 	for key, run := range w.runs {
 		idle := now.Sub(run.last)
 		if run.inflight > 0 || idle < emptyIdle {
@@ -305,8 +340,7 @@ func (w *WorkspaceRunner) Sweep() []Reclaimed {
 			}
 			continue
 		}
-		tomb := filepath.Join(filepath.Dir(dir), fmt.Sprintf("%s%s-%d-%d",
-			workspaceTombstonePrefix, key, now.UnixNano(), workspaceTombstoneSeq.Add(1)))
+		tomb := tombstonePath(dir, key, now)
 		switch err := os.Rename(dir, tomb); {
 		case err == nil:
 			tombs = append(tombs, tomb)
@@ -346,6 +380,103 @@ func (w *WorkspaceRunner) SweepEvery(ctx context.Context, interval time.Duration
 					log.Printf("worker: workspace_key=%q idle for %s; workspace reclaimed", r.Key, w.Idle)
 				}
 			}
+		}
+	}
+}
+
+// Release frees key's directory because its session or sandbox has ended (#338), and
+// refuses Execs for key from then on, for Idle. It never cuts a running command: with one
+// in flight the directory is kept and removed when the last one returns (kept_busy). A key
+// this process has not run is unknown_key, and its directory, if any, is left alone, for
+// the reason Sweep does not adopt directories (Root is also the shared workspace).
+// Idempotent: a second Release is unknown_key, and re-marks the key.
+//
+// It removes a tree with files in it, and skips the sweep's live-cwd check (#872, which
+// keeps an EMPTY directory that a background process still has as its cwd): that check
+// protects a session that is still going, and a Release says its owner has ended. A
+// process the session left running there keeps a deleted cwd, as after an idle sweep.
+func (w *WorkspaceRunner) Release(_ context.Context, key string) (pb.ReleaseOutcome, error) {
+	dir, err := w.dirFor(key)
+	if err != nil {
+		return pb.ReleaseOutcome_RELEASE_OUTCOME_UNSPECIFIED, err
+	}
+	w.mu.Lock()
+	if w.released == nil {
+		w.released = map[string]time.Time{}
+	}
+	now := w.now()
+	w.pruneReleasedLocked(now)
+	w.released[key] = now
+	run := w.runs[key]
+	switch {
+	case run == nil:
+		w.mu.Unlock()
+		return pb.ReleaseOutcome_RELEASE_OUTCOME_UNKNOWN_KEY, nil
+	case run.inflight > 0:
+		run.releaseOnIdle = true
+		w.mu.Unlock()
+		return pb.ReleaseOutcome_RELEASE_OUTCOME_KEPT_BUSY, nil
+	}
+	tomb := w.detachLocked(key, dir)
+	w.mu.Unlock()
+	removeTomb(tomb)
+	return pb.ReleaseOutcome_RELEASE_OUTCOME_RELEASED, nil
+}
+
+// detachLocked renames key's directory to a tombstone and stops tracking key, returning
+// the tombstone to remove off the lock ("" if there was no directory). A rename that
+// fails for another reason is logged and the key stays tracked, so the sweep retries it.
+// Caller holds w.mu.
+func (w *WorkspaceRunner) detachLocked(key, dir string) string {
+	tomb := tombstonePath(dir, key, w.now())
+	switch err := os.Rename(dir, tomb); {
+	case err == nil:
+	case os.IsNotExist(err):
+		tomb = ""
+	default:
+		log.Printf("worker: workspace release: detach %s: %v; the sweep retries", dir, err)
+		return ""
+	}
+	delete(w.runs, key)
+	return tomb
+}
+
+// tombstonePath names the detached copy of key's dir: beside it, under
+// workspaceTombstonePrefix, unique per detachment. Sweep and Release share it.
+func tombstonePath(dir, key string, now time.Time) string {
+	return filepath.Join(filepath.Dir(dir), fmt.Sprintf("%s%s-%d-%d",
+		workspaceTombstonePrefix, key, now.UnixNano(), workspaceTombstoneSeq.Add(1)))
+}
+
+func removeTomb(tomb string) {
+	if tomb == "" {
+		return
+	}
+	if err := os.RemoveAll(tomb); err != nil {
+		log.Printf("worker: workspace release: remove %s: %v", tomb, err)
+	}
+}
+
+// refuseReleasedLocked refuses an Exec for a key released within Idle. Caller holds w.mu.
+func (w *WorkspaceRunner) refuseReleasedLocked(key string) error {
+	at, ok := w.released[key]
+	if !ok {
+		return nil
+	}
+	if w.now().Sub(at) >= w.Idle {
+		delete(w.released, key)
+		return nil
+	}
+	return fmt.Errorf("%s: workspace_key %q was released at %s (its session or sandbox has ended)",
+		releasedPrefix, key, at.UTC().Format(time.RFC3339))
+}
+
+// pruneReleasedLocked drops released keys older than Idle, so the set is bounded by the
+// release rate times Idle. Caller holds w.mu.
+func (w *WorkspaceRunner) pruneReleasedLocked(now time.Time) {
+	for k, at := range w.released {
+		if now.Sub(at) >= w.Idle {
+			delete(w.released, k)
 		}
 	}
 }

@@ -246,6 +246,30 @@ func (r Runner) LeaseControl(_ context.Context, key string, op pb.LeaseOp, mode 
 	return st, nil
 }
 
+// Release answers the relay's Release frame (session.Releaser, #338): the outcome on the
+// wire. A refusal (an invalid key, a closed pool) or a detach failure is its error, with
+// outcome UNSPECIFIED.
+func (r Runner) Release(ctx context.Context, key string) (pb.ReleaseOutcome, error) {
+	o, err := r.Pool.Release(ctx, key)
+	if err != nil {
+		return pb.ReleaseOutcome_RELEASE_OUTCOME_UNSPECIFIED, err
+	}
+	return o.Proto(), nil
+}
+
+// Proto is o on the wire.
+func (o ReleaseOutcome) Proto() pb.ReleaseOutcome {
+	switch o {
+	case ReleaseReleased:
+		return pb.ReleaseOutcome_RELEASE_OUTCOME_RELEASED
+	case ReleaseKeptBusy:
+		return pb.ReleaseOutcome_RELEASE_OUTCOME_KEPT_BUSY
+	case ReleaseUnknownKey:
+		return pb.ReleaseOutcome_RELEASE_OUTCOME_UNKNOWN_KEY
+	}
+	return pb.ReleaseOutcome_RELEASE_OUTCOME_UNSPECIFIED
+}
+
 // LeaseKeepalive records a keepalive for key's live lease (session.LeaseController). It
 // only takes the pool lock, so it is safe on the session's receive loop. Its only errors
 // are an invalid key and a closed pool, neither of which a keepalive can act on.

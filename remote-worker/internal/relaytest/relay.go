@@ -164,6 +164,27 @@ func (c *Conn) LeaseResult(t *testing.T, ctlID uint64) *pb.LeaseControlResult {
 	}
 }
 
+// SendRelease sends a Release frame (#338); the worker answers with a release_result
+// carrying ctlID (ReleaseResult).
+func (c *Conn) SendRelease(t *testing.T, ctlID uint64, key string) {
+	t.Helper()
+	if err := c.stream.Send(&pb.ServerFrame{Msg: &pb.ServerFrame_Release{Release: &pb.ReleaseFrame{
+		CtlId: ctlID, WorkspaceKey: key,
+	}}}); err != nil {
+		t.Fatalf("send release: %v", err)
+	}
+}
+
+// ReleaseResult drains frames until the release_result for ctlID.
+func (c *Conn) ReleaseResult(t *testing.T, ctlID uint64) *pb.ReleaseResult {
+	t.Helper()
+	for {
+		if r := c.Next(t).GetReleaseResult(); r != nil && r.GetCtlId() == ctlID {
+			return r
+		}
+	}
+}
+
 // ExecFrames drains frames until the terminal one for reqID and returns every frame of
 // that Exec, in arrival order, terminal last: chunks, lease events, then End or ExecError.
 func (c *Conn) ExecFrames(t *testing.T, reqID uint64) []*pb.WorkerFrame {

@@ -75,6 +75,10 @@ type runPool struct {
 	// unacquired marks a run created by routeExec (lease.go) that no acquire has seen
 	// yet, so acquire still counts its first cold acquire as ColdFirstExec.
 	unacquired bool
+	// releaseOnIdle marks a run a Release met busy (an Exec in flight, a warming, a live
+	// lease): its workspace is freed as soon as it is not busy, by the Exec's own unwind
+	// (releaseIfPending) or the next sweep (sweepOnce), not at WorkspaceIdle.
+	releaseOnIdle bool
 }
 
 func (rp *runPool) signalSettledLocked() {

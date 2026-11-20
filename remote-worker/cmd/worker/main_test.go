@@ -423,12 +423,14 @@ func TestContainerHelloNeverAdvertisesLeaseProcesses(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 	got := helloCapabilities()
+	// The one reserved name it does advertise is sbx:release-v1 (#338): it serves Release.
 	for _, c := range got {
-		if c == "sbx:lease-processes-v1" || strings.HasPrefix(c, "sbx:") {
+		if c == "sbx:lease-processes-v1" || (strings.HasPrefix(c, "sbx:") && c != wexec.ReleaseCapability) {
 			t.Fatalf("helloCapabilities() = %v: the container worker advertised %q", got, c)
 		}
 	}
-	if len(got) != len(probed)+1 || got[len(got)-1] != wexec.WorkspaceCapability {
-		t.Fatalf("helloCapabilities() = %v, want every probed tool and then %s", got, wexec.WorkspaceCapability)
+	if len(got) != len(probed)+2 || got[len(got)-2] != wexec.WorkspaceCapability || got[len(got)-1] != wexec.ReleaseCapability {
+		t.Fatalf("helloCapabilities() = %v, want every probed tool and then %s, %s", got,
+			wexec.WorkspaceCapability, wexec.ReleaseCapability)
 	}
 }

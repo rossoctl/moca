@@ -498,6 +498,15 @@ entry point it would call, so adding it later changes no structure and no state 
 condition that pulls it in — and the residual arithmetic above plus §4.5's retained fetches are that
 condition being partly met already.
 
+> **Update (#338).** The worker half has landed: `ServerFrame.release`, a `ReleaseFrame` naming the
+> `workspace_key`, is answered by `WorkerFrame.release_result` with an outcome (`released`, `kept_busy`,
+> `unknown_key`), on both tiers, and a worker that serves it advertises `sbx:release-v1`. Two things differ
+> from the shape above, because a workspace is not a per-dispatch derivation after all (#338 showed a
+> reclaimed one comes back empty): a release never cuts an Exec (with one in flight the workspace is freed
+> when it ends), and the key is then refused for new Execs (`released: …`) for `WorkspaceIdle`, so a turn
+> still running after its session ended cannot re-create an empty workspace. Who sends it (the relay, on a
+> sandbox's or session's end) is #338's follow-up work.
+
 ### 4.5 The repo cache the per-run workspace would defeat — an owed decision
 
 Tracing the lifecycle above surfaced a cost the per-run workspace imposes that §3.4 does not mention, and
@@ -897,7 +906,8 @@ KVM-requiring tests gated by an env var and skipped by default so `make test` st
   `ServerFrame` oneof — the same explicit-release-plus-expiry shape `sandbox-lease.ts` already uses.
   Deferred because it is a **second** wire change against §3.4's "one wire change"; see §4.4 for the
   mechanism, the residual it would remove, and the condition — already partly met — that pulls it in.
-  `Pool.Reclaim` is already its call site, so the deferral costs no rework.
+  `Pool.Reclaim` is already its call site, so the deferral costs no rework. The worker half has since
+  landed (#338; §4.4's update).
 - **The `/turn` path on the microVM tier.** It never leases (`run-turn.ts:57`), so it has no run id to
   populate `workspace_key` with, and §3.4 refuses an empty one on the VM path rather than letting it mean
   "share one workspace". Interactive sessions therefore stay on the container tier this slice; giving

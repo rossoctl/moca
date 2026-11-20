@@ -260,3 +260,32 @@ func TestServeOnceTearsTheStreamDownWhenServeEndsItself(t *testing.T) {
 		t.Error("serveOnce cancelled its caller's context")
 	}
 }
+
+// #338 end to end over the Attach contract: an Exec, then a Release of its key (released,
+// the workspace gone), then an Exec for the key refused with released: and nothing re-made.
+func TestAReleaseOverTheAttachContractFreesTheWorkspaceAndRefusesTheKey(t *testing.T) {
+	root := t.TempDir()
+	c, _ := serveOverFakeRelay(t, root)
+	c.SendExec(t, &pb.Exec{ReqId: 1, Command: "echo hi > note.txt", TimeoutS: 30, WorkspaceKey: "leaf-rel"})
+	if _, _, terminal := c.Collect(t, 1); terminal.GetEnd().GetExitCode() != 0 {
+		t.Fatalf("first Exec: %v", terminal)
+	}
+	c.SendRelease(t, 11, "leaf-rel")
+	if r := c.ReleaseResult(t, 11); r.GetOutcome() != pb.ReleaseOutcome_RELEASE_OUTCOME_RELEASED || r.GetError() != "" {
+		t.Fatalf("release_result = %+v, want RELEASED", r)
+	}
+	c.SendExec(t, &pb.Exec{ReqId: 2, Command: "true", TimeoutS: 30, WorkspaceKey: "leaf-rel"})
+	_, _, terminal := c.Collect(t, 2)
+	if msg := terminal.GetError().GetMessage(); !strings.HasPrefix(msg, "released: ") {
+		t.Fatalf("Exec after Release: terminal = %v, want ExecError released: ...", terminal)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "leaf-rel") {
+			t.Fatalf("%s is still in the workspace root after the release", e.Name())
+		}
+	}
+}

@@ -154,6 +154,13 @@ type Pool interface {
 	// Reclaim drops a run's standby VMs AND its workspace directory — the full
 	// form. Dropping standbys alone is internal to the sweep (spec §4.4).
 	Reclaim(ctx context.Context, key string) error
+	// Release is the relay's release of key (#338): the session or sandbox that owned it
+	// has ended. It drops the run's standbys and its workspace, as Reclaim does, and from
+	// then on refuses Execs for key (RefuseReleased) for WorkspaceIdle. It never cuts an
+	// Exec: with one in flight, or a live lease, the workspace is kept and freed when the
+	// run is no longer busy (ReleaseKeptBusy). A key this pool holds nothing for is
+	// ReleaseUnknownKey, and is refused all the same.
+	Release(ctx context.Context, key string) (ReleaseOutcome, error)
 	Stats() Stats
 	// Probe restores one VM, runs a trivial command in it and destroys it, without
 	// otherwise touching the pool's accounting. Spec §6's last row: a pinned hash is
@@ -200,9 +207,17 @@ type pool struct {
 	// mounted guests at once, so ExecPhased consults this instead of Config.VMM.
 	serialize bool
 
-	mu     sync.Mutex
-	runs   map[string]*runPool
-	closed bool
+	mu   sync.Mutex
+	runs map[string]*runPool
+	// released holds each workspace_key a Release named, with when, so an Exec for it is
+	// refused (RefuseReleased). Entries expire after WorkspaceIdle (release.go): by then
+	// idle reclaim would have removed the workspace anyway, and a later Exec is in the
+	// same position as one after an idle reclaim. Guarded by mu.
+	released map[string]time.Time
+	// pendingReleases counts runs marked releaseOnIdle, so releaseIfPending, deferred on
+	// every Exec, takes no lock when none is (dropRunLocked keeps it).
+	pendingReleases atomic.Int64
+	closed          bool
 	// closeSyncBound is Close's one bound on syncing the leases it detaches
 	// (LeaseCloseSyncTimeout); a field so a test need not wait it out.
 	closeSyncBound time.Duration
@@ -280,7 +295,7 @@ func New(cfg Config, lc Launcher, clk Clock) (Pool, error) {
 	if err := markLeaseBoot(cfg.WorkspaceRoot, cfg.LeaseEnabled); err != nil {
 		return nil, err
 	}
-	p := &pool{cfg: cfg, lc: lc, clk: clk, serialize: lc.SerializesExecsPerRun(), runs: map[string]*runPool{}, counters: newCounters(),
+	p := &pool{cfg: cfg, lc: lc, clk: clk, serialize: lc.SerializesExecsPerRun(), runs: map[string]*runPool{}, released: map[string]time.Time{}, counters: newCounters(),
 		closeSyncBound: LeaseCloseSyncTimeout}
 	p.syncCtx, p.syncCancel = context.WithCancel(context.Background())
 	// nil unless DeferReapWorkers > 0, and nil is the whole "off" implementation: destroy
@@ -387,6 +402,16 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	if err := checkKey(key); err != nil {
 		return Result{}, p.countRefusal(err)
 	}
+	if err := p.refuseReleased(key); err != nil {
+		return Result{}, err
+	}
+	if afterReleaseCheck != nil { // test seam (release.go); tests that set it must not use t.Parallel
+		afterReleaseCheck()
+	}
+	// Registered first, so it runs last: after the VM is destroyed and the gate is open. A
+	// Release that met this Exec in flight left the run marked (releaseOnIdle); the
+	// workspace is freed here, as soon as nothing uses it, not at WorkspaceIdle.
+	defer p.releaseIfPending(key)
 	if e.Kind != ExecKindCommand {
 		// Before the lease guard: a process kind on a snapshot without
 		// lease-processes-v1 is lease_unsupported whatever its mode, and nothing of it
@@ -844,6 +869,13 @@ func (p *pool) runAtLocked(key string, price int64) (*runPool, bool, error) {
 	if rp := p.runs[key]; rp != nil {
 		return rp, false, nil
 	}
+	// A released key gets no new run (#338), checked here, under the same p.mu hold that
+	// would create it: ExecPhased's early refuseReleased is a separate hold, so an Exec
+	// that passed it before a Release dropped the run would otherwise re-create the run
+	// with an empty workspace. Uncounted, as every refusal here: the callers count it.
+	if at, ok := p.releasedAtLocked(key); ok {
+		return nil, false, releasedRefusal(key, at)
+	}
 	// admitOrEvictLocked, not admitLocked: a new workspace_key on a full host is #452's
 	// own repro ("create more distinct P4 sessions than the budget holds VMs"), and its
 	// refusal reaches a transcript, so a coldest idle standby is shed first.
@@ -884,10 +916,13 @@ func (p *pool) nextIDLocked() string {
 	return vmIDPrefix + strconv.FormatUint(p.seq, 10)
 }
 
-// Reclaim drops a run's standbys AND its workspace directory. Safe to fire early:
-// spec §4.4 establishes the workspace is a per-dispatch derivation — a detached
-// worktree at a pinned commit, with continuity living in the Redis session log — so
-// reclaiming costs a re-converge, never data.
+// Reclaim drops a run's standbys AND its workspace directory. It DOES cost data: spec §4.4
+// assumed the workspace was a per-dispatch derivation (a detached worktree at a pinned
+// commit, continuity in the Redis session log), so reclaiming would cost only a
+// re-converge, but a session's workspace holds whatever its turns wrote there, and #338
+// showed a reclaimed one comes back empty. So Reclaim is for a key whose owner has ended
+// (Release) or that has been idle past WorkspaceIdle; the harness reports a reset it
+// meets (its workspace marker, #338 option 2).
 //
 // EXCEPT while an Exec is in flight, which is the one case where it costs exactly that.
 // It used to keep the map entry when rp.busy() — correctly — and then remove the
@@ -918,7 +953,7 @@ func (p *pool) Reclaim(ctx context.Context, key string) error {
 	var detachErr error
 	if !busy {
 		if tomb, detachErr = detachWorkspace(rp.dir); detachErr == nil {
-			delete(p.runs, key)
+			p.dropRunLocked(key, rp)
 			if p.cfg.LeaseEnabled { // as the sweep does: see sweepOnce
 				retireLeaseState(p.cfg.WorkspaceRoot, key, p.leaseStateIfAnyLocked(rp))
 			}
