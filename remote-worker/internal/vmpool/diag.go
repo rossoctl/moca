@@ -122,7 +122,8 @@ var timingLog = log.Printf
 
 // logExecTiming emits the `exec-timing` line, the SAME format the container sandbox worker
 // writes (internal/exec/runner.go logExecTiming, webchang 096a6df2), so a benchmark parses both
-// tiers with one reader and compares them field by field. user_ms/sys_ms are the VM's CPU over
+// tiers with one reader and compares them field by field. normalise_us is a lease start's
+// ownership walk, as on the phase line (logPhases). user_ms/sys_ms are the VM's CPU over
 // the Exec (Phases.CPUUser/CPUSys) when measured, else -1. The microVM fields follow `err=`,
 // so a reader of the container format still matches: tier, the phases, cold, and the VM.
 func logExecTiming(reqID uint64, key string, start time.Time, dur time.Duration, ph *Phases, code int32, err error) {
@@ -136,8 +137,8 @@ func logExecTiming(reqID uint64, key string, start time.Time, dur time.Duration,
 		errText = err.Error()
 	}
 	timingLog("exec-timing req=%d workspace_key=%q start_ms=%d dur_ms=%.1f user_ms=%.1f sys_ms=%.1f exit=%d err=%q "+
-		"tier=%q acquire_us=%d resume_us=%d mount_us=%d run_us=%d destroy_us=%d cold=%q vm=%s",
+		"tier=%q acquire_us=%d resume_us=%d mount_us=%d normalise_us=%d run_us=%d destroy_us=%d cold=%q vm=%s",
 		reqID, key, start.UnixMilli(), float64(dur.Microseconds())/1000, userMs, sysMs, code, errText,
 		"microvm", ph.Acquire.Microseconds(), ph.Resume.Microseconds(), ph.Mount.Microseconds(),
-		ph.Run.Microseconds(), ph.Destroy.Microseconds(), string(ph.Cold), ph.VMID)
+		ph.Normalise.Microseconds(), ph.Run.Microseconds(), ph.Destroy.Microseconds(), string(ph.Cold), ph.VMID)
 }

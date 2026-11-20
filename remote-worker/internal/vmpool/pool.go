@@ -515,6 +515,7 @@ func (p *pool) ExecPhased(ctx context.Context, key string, e Exec, out Sink, ph 
 	if ph != nil {
 		ph.Acquire = p.clk.Now().Sub(t0)
 		ph.Cold = cause
+		ph.Normalise = 0 // a per-Exec Exec starts no lease: never a reused Phases' walk
 	}
 	if err != nil {
 		if cErr := p.classify(ctx, &timedOut, timeoutS); cErr != nil {

@@ -321,3 +321,16 @@ func TestPhaseLineReportsNormaliseByValue(t *testing.T) {
 		t.Errorf("resume_us = %q, want 0 -- the walk was counted into the resume phase: %s", got, (*lines)[0])
 	}
 }
+
+// A per-Exec Exec reports normalise_us=0 even on a Phases reused from a lease start: only
+// the lease paths set Normalise, so the per-Exec path must clear it (#966 review).
+func TestPerExecClearsAReusedPhasesNormalise(t *testing.T) {
+	p, _, _ := testPool(t)
+	ph := Phases{Normalise: 7 * time.Millisecond}
+	if _, err := p.ExecPhased(context.Background(), "k1", Exec{Command: "true", TimeoutS: 5}, &capturingSink{}, &ph); err != nil {
+		t.Fatalf("ExecPhased: %v", err)
+	}
+	if ph.Normalise != 0 {
+		t.Fatalf("Normalise = %v after a per-Exec Exec, want 0", ph.Normalise)
+	}
+}
