@@ -119,7 +119,7 @@ describe('continuationPrompt', () => {
   });
 });
 
-import { decideSeed } from '../src/gate';
+import { decideSeed, gateShortCircuit, type Decision } from '../src/gate';
 
 const FRESH = 'FRESH_PROMPT';
 function state(entries: unknown[]) {
@@ -186,5 +186,54 @@ describe('decideSeed', () => {
       kind: 'abort',
       record: null,
     });
+  });
+});
+
+describe('gateShortCircuit', () => {
+  it('pending gate + no decision → paused', () => {
+    expect(gateShortCircuit(state([reqEntry(0)]), null)).toEqual({
+      kind: 'paused',
+      gate: { gateId: 0, summary: 's0', proposed_action: 'a0' },
+    });
+  });
+  it('pending gate + gateId mismatch → paused', () => {
+    expect(gateShortCircuit(state([reqEntry(1)]), { gateId: 0, action: 'approve' })?.kind).toBe(
+      'paused',
+    );
+  });
+  it('pending gate + matching abort → abort, carrying the entry to append', () => {
+    expect(
+      gateShortCircuit(state([reqEntry(0)]), { gateId: 0, action: 'abort', feedback: 'no' }),
+    ).toEqual({ kind: 'abort', record: { gateId: 0, action: 'abort', feedback: 'no' } });
+  });
+  it('approve or reject → null, the caller runs the turn', () => {
+    expect(gateShortCircuit(state([reqEntry(0)]), { gateId: 0, action: 'approve' })).toBeNull();
+    expect(gateShortCircuit(state([reqEntry(0)]), { gateId: 0, action: 'reject' })).toBeNull();
+  });
+  it('no gate at all → null', () => {
+    expect(gateShortCircuit(state([]), null)).toBeNull();
+  });
+  it('already-aborted session → abort, record null', () => {
+    expect(gateShortCircuit(state([reqEntry(0), decEntry(0, 'abort')]), null)).toEqual({
+      kind: 'abort',
+      record: null,
+    });
+  });
+  it('already-decided gate (double resume) → null, so the caller seeds the continuation', () => {
+    expect(
+      gateShortCircuit(state([reqEntry(0), decEntry(0, 'approve')]), {
+        gateId: 0,
+        action: 'approve',
+      }),
+    ).toBeNull();
+  });
+  it('gives the same answer decideSeed does', () => {
+    // The refactor's whole contract: decideSeed delegates, so the two can never disagree.
+    const pending = state([reqEntry(0)]);
+    expect(decideSeed(pending, null, FRESH)).toEqual(gateShortCircuit(pending, null));
+    const abort: Decision = { gateId: 0, action: 'abort' };
+    expect(decideSeed(pending, abort, FRESH)).toEqual(gateShortCircuit(pending, abort));
+    const aborted = state([reqEntry(0), decEntry(0, 'abort')]);
+    expect(decideSeed(aborted, null, FRESH)).toEqual(gateShortCircuit(aborted, null));
   });
 });
