@@ -147,7 +147,7 @@ mkdir -p "$TMP/workers"
 export PATH="$TMP/bin:$PATH" MOCK_LOG="$TMP/log" MOCK_STATE="$TMP/state" MOCK_TOKEN_FILE="$TMP/token" MOCK_GATE="$GATE"
 export SBX_API_URL=https://cp.example.invalid SBX_HOST_ID=host-1 SBX_HOST_TOKEN_FILE="$TMP/token" SBX_KERNEL="$TMP/kernel"
 export SBX_SRV="$TMP/srv" SBX_ENV_DIR="$TMP" SBX_TEMPLATE_BUILD="$TMP/bin/template-build" SBX_DISK_FLOOR_GB=0
-export SBX_INSTALL_HOST="$TMP/bin/install-host"
+export SBX_INSTALL_HOST="$TMP/bin/install-host" SBX_UNIT_DIR="$TMP/units"
 # The system root /proc and /sys/fs/cgroup are read from: a host of 16 GiB, 12 free.
 SYS="$TMP/sys"
 mkdir -p "$SYS/proc/pressure" "$SYS/sys/fs/cgroup/sbx.slice"
@@ -197,6 +197,55 @@ jq -e '.event == "failed" and (.message | test("^probe_failed: template-build.sh
   fail 'the failure report'
 grep -q '"failed":1' "$TMP/out" || fail 'summary of a failure'
 pass 'a failed build is reported failed with its exit and last line'
+
+# 3b. Egress credentials (#923): with install-host.sh's credentials drop-in present, a spec with
+# egress true is built with --egress-ca and the host's CA; without the drop-in, or for a spec
+# without egress, it is not; credentials on with no CA file fail the build, never build it.
+eg_job() { # eg_job true|false: the worked example's build, with that egress
+  jq -n --arg d "$DIGEST" --argjson e "$1" '{builds: [{template: "django-django-11133", build: "b-0123456789abcdef0123456789",
+    image: ("images/moca-microvm@sha256:" + $d),
+    spec: {id: "django-django-11133", image: ("images/moca-microvm@sha256:" + $d), guest_ram_mb: 4096, egress: $e}}]}' >"$TMP/state/claim-answer"
+}
+DROPIN="$TMP/units/moca-egress.service.d/sbx-credentials.conf"
+rm -rf "$TMP/units" "$TMP/egress"
+eg_job true
+run || fail 'an egress build with credentials off failed'
+grep -q -- '--egress-ca' "$MOCK_LOG" && fail 'credentials off, yet the build got --egress-ca'
+mkdir -p "$(dirname "$DROPIN")" "$TMP/egress"
+: >"$DROPIN"
+printf 'ca\n' >"$TMP/egress/ca.crt"
+eg_job true
+run || fail 'an egress build with credentials on failed'
+grep -q -- "^build .* --egress-ca $TMP/egress/ca.crt" "$MOCK_LOG" || fail 'credentials on, yet the egress build did not get --egress-ca with the host CA'
+grep -q '"built":1' "$TMP/out" || fail 'the egress build with the CA was not built'
+eg_job false
+run || fail 'a no-egress build with credentials on failed'
+grep -q -- '--egress-ca' "$MOCK_LOG" && fail 'a spec without egress got --egress-ca'
+rm -f "$TMP/egress/ca.crt"
+eg_job true
+run || fail 'the poll with credentials on and no CA failed'
+grep -q '^build ' "$MOCK_LOG" && fail 'built with credentials on and no CA'
+jq -e '.event == "failed" and .step == "egress" and (.message | test("^agent_error: egress credentials are on but the host has no CA"))' "$R" >/dev/null ||
+  fail 'credentials on with no CA was not reported failed with the reason'
+rm -rf "$TMP/units" "$TMP/egress"
+pass 'egress credentials on: an egress spec is built with --egress-ca and the host CA, a spec without egress is not; no CA fails the build'
+# The agent's drop-in and CA paths are install-host.sh's own (its egress_dropin, and
+# EGRESS_CRED_DIR's ca.crt, which check_snapshot_ca reads): the same strings for the same
+# SBX_UNIT_DIR and SBX_ENV_DIR, so a rename in one cannot silently break the other.
+eg_paths() { # eg_paths SCRIPT: the drop-in and CA paths SCRIPT's own one-line functions render
+  (
+    SBX_UNIT_DIR=/units SBX_ENV_DIR=/env
+    eval "$(grep -E '^(egress_dropin|EGRESS_CRED_DIR|egress_ca)\(\) \{' "$1")"
+    egress_dropin
+    echo
+    if declare -F egress_ca >/dev/null; then egress_ca; else printf '%s/ca.crt' "$(EGRESS_CRED_DIR)"; fi
+  )
+}
+IH="$SRC/deploy/sbx/install-host.sh"
+[[ -n "$(eg_paths "$IH")" && "$(eg_paths "$A")" == "$(eg_paths "$IH")" ]] ||
+  fail "the agent's drop-in and CA paths differ from install-host.sh's: $(eg_paths "$A" | tr '\n' ' ') vs $(eg_paths "$IH" | tr '\n' ' ')"
+grep -q 'crt="$(EGRESS_CRED_DIR)/ca.crt"' "$IH" || fail "install-host.sh's CA check no longer reads EGRESS_CRED_DIR/ca.crt"
+pass "the agent's egress drop-in and CA paths are install-host.sh's"
 
 # 4. A gate record whose bytes do not hash to its name is not built with.
 job "$(printf 'b%.0s' {1..64})"
