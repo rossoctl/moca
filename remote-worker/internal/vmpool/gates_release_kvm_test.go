@@ -15,8 +15,9 @@ import (
 // The Release gates (#338): Pool.Release over real Firecracker VMs, on the lease-pool
 // gate's launcher (pooled VM cgroups under a gate-private parent whose cleanup reports a
 // leaked VM). Per-Exec Execs, StandbyDepth at its default (2). Each checks what a Release
-// must free on the host -- every standby's jail, sockets, cgroup and VMM process, the
-// workspace directory and its workspace.img -- against positive controls taken first.
+// must free on the host -- every standby's jail, sockets and VMM process, its pooled cgroup
+// emptied (a per-exec VM's cgroup goes back to the pool, kept), the workspace directory and
+// its workspace.img -- against positive controls taken first.
 
 // releaseGateLauncher is the Firecracker launcher with Restores counted and each Run's
 // entry signalled, so a gate knows a command is running and how many VMs were restored.
@@ -120,6 +121,45 @@ func vmTrace(t *testing.T, v *firecrackerVM) leaseVMTrace {
 	return tr
 }
 
+// pooledLeftovers is leftovers for a per-exec VM in a POOLED cgroup: its cgroup goes back
+// to the idle pool empty but kept (cgroupPool), so the cgroup counts as left over only
+// while a process is still in it. The jail, sockets and VMM process must be gone, as for a
+// lease VM.
+func (tr leaseVMTrace) pooledLeftovers() []string {
+	var out []string
+	if pids, err := readCgroupProcs(filepath.Join(tr.cgroup, "cgroup.procs")); err == nil && len(pids) > 0 {
+		out = append(out, fmt.Sprintf("cgroup %s with cgroup.procs %v", tr.cgroup, pids))
+	}
+	for _, f := range []struct{ what, path string }{
+		{"jail", tr.jail}, {"API socket", tr.apiSock}, {"vsock socket", tr.vsock},
+	} {
+		if _, err := os.Lstat(f.path); err == nil {
+			out = append(out, f.what+" "+f.path)
+		}
+	}
+	if comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", tr.pid)); err == nil && strings.TrimSpace(string(comm)) == tr.comm {
+		out = append(out, fmt.Sprintf("VMM process %d (%s)", tr.pid, tr.comm))
+	}
+	return out
+}
+
+// requirePooledVMGone fails unless tr's VMM, jail and sockets are gone and its pooled
+// cgroup is empty (or absent) within the bound.
+func requirePooledVMGone(t *testing.T, tr leaseVMTrace, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for {
+		left := tr.pooledLeftovers()
+		if len(left) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("VM %s, %s after the release: still present: %s", tr.id, within, strings.Join(left, "; "))
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 // standbyTraces traces key's Ready standbys, read under the pool lock.
 func standbyTraces(t *testing.T, g *leaseGate, key string) []leaseVMTrace {
 	t.Helper()
@@ -220,7 +260,7 @@ func TestGateReleaseOfAnIdleRunFreesItsVMsAndWorkspace(t *testing.T) {
 		t.Fatalf("Release = %q, %v; want %q", o, err, ReleaseReleased)
 	}
 	for _, tr := range trs {
-		requireLeaseVMGone(t, tr, 10*time.Second)
+		requirePooledVMGone(t, tr, 10*time.Second)
 	}
 	requireWorkspaceGone(t, g, key, 10*time.Second)
 	requireNoVMPids(t, parent, 10*time.Second)
@@ -274,7 +314,7 @@ func TestGateReleaseDuringAnExecIsKeptBusyThenFreed(t *testing.T) {
 		t.Fatalf("Release during an Exec = %q, %v; want %q", o, err, ReleaseKeptBusy)
 	}
 	for _, tr := range trs {
-		requireLeaseVMGone(t, tr, 10*time.Second)
+		requirePooledVMGone(t, tr, 10*time.Second)
 	}
 	for _, p := range []string{dir, img} {
 		if _, err := os.Stat(p); err != nil {
