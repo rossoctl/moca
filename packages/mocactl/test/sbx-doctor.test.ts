@@ -14,6 +14,7 @@ import { checkAgentConfig, writeAgentConfig } from '../src/sbx/agent-config.js';
 import { openSbxRuntime, sbxMain, sbxPaths } from '../src/sbx/cli.js';
 import type { SbxCtx } from '../src/sbx/commands.js';
 import {
+  autoMemoryEnvCheck,
   installedClaudeVersion,
   percentile,
   runDoctor,
@@ -213,6 +214,17 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
     // Right after the agent-config check, which passes: the list itself is fine.
     expect(names(cs).indexOf('claude code')).toBe(names(cs).indexOf('agent config') + 1);
     expect(byName(cs, 'agent config').ok).toBe(true);
+  });
+
+  it('fails a shell value of CLAUDE_CODE_DISABLE_AUTO_MEMORY that turns auto-memory back on', () => {
+    for (const v of ['0', ' FALSE ', 'no', 'off']) {
+      const c = autoMemoryEnvCheck({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: v });
+      expect(c?.ok, v).toBe(false);
+      expect(c?.fix).toMatch(/unset CLAUDE_CODE_DISABLE_AUTO_MEMORY.*mocactl sbx claude/);
+    }
+    for (const v of [undefined, '', '1']) {
+      expect(autoMemoryEnvCheck({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: v }), String(v)).toBeUndefined();
+    }
   });
 
   it("reads the installed Claude Code's version without blocking, and undefined without one (#572 review)", async () => {

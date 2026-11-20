@@ -28,7 +28,9 @@ it stays.
 `autoMemoryEnabled: false` keeps Claude Code from loading your machine's auto-memory
 (`~/.claude/projects/*/memory`): with `Read`, `Edit` and `Write` denied, the agent could see the
 notes but not correct them. `mocactl sbx rm` takes it back. A `true` in `.claude/settings.json` or
-`.claude/settings.local.json` stops `up`.
+`.claude/settings.local.json` stops `up`. A `CLAUDE_CODE_DISABLE_AUTO_MEMORY` of `0`, `false`,
+`no` or `off` in your shell turns auto-memory back on for a plain `claude`, and `mocactl sbx
+doctor` fails on it; `mocactl sbx claude` sets it to `1`.
 
 They are ordinary files in your working tree, so `git status` shows them. Leave them uncommitted:
 committed, they would point every teammate's agents at a sandbox and deny their local tools.

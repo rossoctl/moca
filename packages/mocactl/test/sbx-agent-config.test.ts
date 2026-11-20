@@ -542,6 +542,7 @@ describe('agent configuration (SBX0 §6.3)', () => {
       'disabledMcpjsonServers',
     ],
     ['.claude/settings.json', JSON.stringify({ autoMemoryEnabled: true }), 'autoMemoryEnabled'],
+    ['.claude/settings.json', JSON.stringify({ autoMemoryEnabled: 'false' }), 'autoMemoryEnabled'],
     [
       '.claude/settings.local.json',
       JSON.stringify({ autoMemoryEnabled: true }),
