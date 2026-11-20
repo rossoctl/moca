@@ -118,3 +118,5 @@ and `LeaseControl` reads, resets or changes the lease. See
 [Tracked processes](direct-api.md#tracked-processes-leaseprocesses) in the API guide.
 
 All the flags: [`mocactl sbx` reference](../reference/cli-sbx.md).
+
+**See also.** [Lease mode explainer](../../project/explainers/index.md): a step-through diagram of what a lease keeps and what it costs.

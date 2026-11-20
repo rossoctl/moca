@@ -131,3 +131,5 @@ pipeline runs end to end on `deploy/k8s` as well.
 Archetype C's `CronJob` on-ramp went the same way and has **no P6 equivalent yet**, and no design.
 [#536](https://github.com/rossoctl/moca/issues/536) owns it, and it is expected to build on archetype
 A's consumer rather than a second one.
+
+**See also.** [Async fan-out explainer](../../project/explainers/index.md): a step-through diagram of the drain loop behind archetype A.

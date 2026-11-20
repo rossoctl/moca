@@ -54,3 +54,5 @@ sidebar_position: 2
   keepalive as use, so a sandbox it drives never ends from disuse. At a 30-day `--lifetime`
   that leaves only about 2 days of the margin above. Upgrade `mocactl` everywhere before using
   `--lifetime` above the default.
+
+**See also.** [Admission and the microVM pool](../../project/explainers/index.md): a step-through diagram of how the pool admits, queues and reclaims work.

@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P6 Async Fan-Out — PR #696</title>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Layout: one animated stage up top, quiet reference cards below.
+     Blue = interactive turns, amber = async leaves, teal = control-plane mint. */
+  :root{
+    --bg:#f4f6f8; --fg:#1b2530; --muted:#5b6a79; --line:#dbe2e9; --panel:#ffffff;
+    --accent:#0f766e; --accent-soft:rgba(15,118,110,.08);
+    --c-bg:#f4f6f8; --c-panel:#ffffff; --c-fg:#1b2530; --c-muted:#5b6a79; --c-line:#c9d3dd;
+    --c-async:#b45309; --c-sync:#1d4ed8; --c-danger:#b91c1c; --c-ok:#15803d; --c-accent:#0f766e;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0c1219; --fg:#e6edf3; --muted:#8fa0af; --line:#20303f; --panel:#121b26;
+      --accent:#3fc1b0; --accent-soft:rgba(63,193,176,.10);
+      --c-bg:#0c1219; --c-panel:#121b26; --c-fg:#e6edf3; --c-muted:#8fa0af; --c-line:#2a3b4d;
+      --c-async:#f59e0b; --c-sync:#6ea8ff; --c-danger:#f87171; --c-ok:#4ade80; --c-accent:#3fc1b0;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1219; --fg:#e6edf3; --muted:#8fa0af; --line:#20303f; --panel:#121b26;
+    --accent:#3fc1b0; --accent-soft:rgba(63,193,176,.10);
+    --c-bg:#0c1219; --c-panel:#121b26; --c-fg:#e6edf3; --c-muted:#8fa0af; --c-line:#2a3b4d;
+    --c-async:#f59e0b; --c-sync:#6ea8ff; --c-danger:#f87171; --c-ok:#4ade80; --c-accent:#3fc1b0;
+    color-scheme: dark;
+  }
+  html{background:var(--bg)}
+  body{
+    background:var(--bg); color:var(--fg);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",sans-serif;
+    margin:0; padding-left:max(16px,env(safe-area-inset-left,0px)); padding-right:max(16px,env(safe-area-inset-right,0px));
+  }
+  .mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace}
+  .muted{color:var(--muted)}
+  .accent{color:var(--accent)}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px}
+  .chip{border:1px solid var(--line); border-radius:6px; padding:2px 8px; font-size:11px; color:var(--muted)}
+  .eyebrow{font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); font-weight:600}
+  .btn{
+    border:1px solid var(--line); background:var(--panel); color:var(--fg);
+    border-radius:8px; padding:8px 16px; font-size:14px; font-weight:500; cursor:pointer;
+  }
+  .btn:hover:not(:disabled){border-color:var(--accent); color:var(--accent)}
+  .btn:disabled{opacity:.4; cursor:default}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  .btn.primary:hover{opacity:.9; color:#fff}
+  .btn:focus-visible,.dot:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  .dot{width:10px; height:10px; border-radius:50%; border:1.5px solid var(--muted); background:transparent; cursor:pointer; padding:0}
+  .dot.on{background:var(--accent); border-color:var(--accent)}
+  .legend-sw{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:-1px}
+  canvas{display:block; width:100%}
+  a{color:var(--accent)}
+  .stepnum{font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+<div class="max-w-5xl mx-auto px-0 pb-16">
+
+  <header class="pt-10 pb-6">
+    <p class="eyebrow">MOCA · PR #696 · ADR-0047</p>
+    <h1 class="text-3xl sm:text-4xl font-bold mt-2 tracking-tight">P6 async fan-out</h1>
+    <p class="muted mt-3 max-w-2xl leading-relaxed">A drain loop inside the ordinary turn worker — how N leaf turns are submitted,
+      queued as bare ids, drained under the same admission budget as interactive turns, granted credentials
+      only at dequeue, and recovered after a crash. Step through the mechanism, then read the decisions behind it.</p>
+  </header>
+
+  <section class="card overflow-hidden">
+    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 px-4 pt-3 pb-2 border-b" style="border-color:var(--line)">
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-sync)"></span>interactive turn</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-async)"></span>async leaf</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-accent)"></span>control-plane mint</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-danger)"></span>failure path</span>
+    </div>
+    <div class="px-2 pt-2"><canvas id="stage" aria-label="Animated diagram of the P6 async fan-out design"></canvas></div>
+    <div class="px-5 pb-5">
+      <div class="flex flex-wrap items-center gap-3 pt-2">
+        <button id="prev" class="btn" aria-label="Previous step">&#8249; Prev</button>
+        <button id="next" class="btn primary">Next &#8250;</button>
+        <button id="play" class="btn" aria-label="Play all steps">&#9654; Play</button>
+        <div id="dots" class="flex items-center gap-2 ml-1" role="tablist" aria-label="Steps"></div>
+        <span id="stepNum" class="ml-auto mono text-sm muted stepnum"></span>
+      </div>
+      <div class="mt-4 pt-4 border-t" style="border-color:var(--line)">
+        <h2 id="stepTitle" class="text-lg font-semibold"></h2>
+        <p id="stepBody" class="muted mt-2 text-[15px] leading-relaxed max-w-3xl"></p>
+        <div id="stepChips" class="flex flex-wrap gap-2 mt-3"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mt-12">
+    <p class="eyebrow">The decision</p>
+    <blockquote class="mt-3 text-xl sm:text-2xl font-medium leading-snug max-w-3xl border-l-4 pl-5" style="border-color:var(--accent)">
+      Async fan-out is a drain loop inside the ordinary turn worker, taking its slots from the same
+      <span class="mono text-base sm:text-lg">TurnCounter</span> as interactive turns. The queue carries a turn id
+      and nothing else; the leaf's credentials are minted when a worker claims it.
+    </blockquote>
+  </section>
+
+  <section class="mt-10">
+    <p class="eyebrow">Shape of the answer</p>
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+      <div class="card p-5"><h3 class="font-semibold">One queue, one trust model</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">mocactl, an LLM coding agent and a controller all enqueue through the same
+        authenticated, owner-scoped API. The archetypes spec's deterministic non-LLM orchestrator no longer holds
+        (#378), so every property must survive a misbehaving client.</p></div>
+      <div class="card p-5"><h3 class="font-semibold">The data-plane route stays removed</h3>
+        <p class="muted text-sm mt-2 leading-relaxed"><span class="mono text-xs">/runs {async:true}</span> is unauthenticated when
+        <span class="mono text-xs">SH_REQUIRE_AUTH</span> is off — the second trust model this design rules out. Two submission
+        paths means every safety property is enforced twice and can diverge once. A controller holds a
+        service-account credential instead (#687).</p></div>
+      <div class="card p-5"><h3 class="font-semibold">Shared admission, no headroom</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">No supervisor change: <span class="mono text-xs">onChange</span> already sends the
+        <span class="mono text-xs">load</span> IPC and <span class="mono text-xs">reconcile</span> already treats the worker as
+        authoritative. Dedicated <span class="mono text-xs">--role=leaf</span> workers and a second counter both create two
+        capacity budgets that must be reconciled.</p></div>
+      <div class="card p-5"><h3 class="font-semibold">No credential in the queue</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">At claim the worker presents its own identity plus the turn id; the control plane
+        resolves a credential <em>name</em> and mints the two MI1 grants. "Turn start" for
+        <span class="mono text-xs">turn_exp</span> is dequeue, not enqueue.</p></div>
+      <div class="card p-5"><h3 class="font-semibold">turn_exp can only tighten</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">Clamped at mint:
+        <span class="mono text-xs">dequeue + min(caps.wallClock ?? 1800s, 1800s)</span>. Hour-long turns are an operator
+        decision — raise the ceiling — not a caller's. A caller asking for more is clamped, not refused.</p></div>
+      <div class="card p-5"><h3 class="font-semibold">Abandon without acking on drain</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">The in-flight leaf is left pending for <span class="mono text-xs">XAUTOCLAIM</span>;
+        the slot is released so <span class="mono text-xs">awaitIdle</span> exits early. A 1800&nbsp;s leaf cannot finish in a
+        20&nbsp;s grace window, and nobody is waiting on an async leaf — redelivery beats aborting.</p></div>
+    </div>
+  </section>
+
+  <section class="mt-10">
+    <p class="eyebrow">Four findings worth a reviewer's attention</p>
+    <ol class="mt-4 space-y-4">
+      <li class="card p-5"><p class="mono text-xs accent">1</p>
+        <p class="mt-1 leading-relaxed"><span class="font-semibold">turn_exp is specified in MI1 §6.1 and implemented in no TypeScript.</span>
+        Expiry today is always <span class="mono text-xs">exp = iat + ttlSeconds</span>. #388 is larger than it reads, and this
+        is where the M1/M2 split comes from.</p></li>
+      <li class="card p-5"><p class="mono text-xs accent">2</p>
+        <p class="mt-1 leading-relaxed"><span class="font-semibold">The claim heartbeat, without which every real leaf double-runs.</span>
+        <span class="mono text-xs">minIdleMs</span> is 90&nbsp;s against a <span class="mono text-xs">MOCA_TURN_MAX_S</span> of
+        1800&nbsp;s: a leaf running past 90&nbsp;s goes idle in the PEL <em>while still running</em>, and a peer's
+        <span class="mono text-xs">XAUTOCLAIM</span> reclaims it — idempotent in result, double-spent in budget and sandboxes.
+        The removed <span class="mono text-xs">leaf-job-runner.ts</span> had it solved (touch every 30&nbsp;s, cleared in a
+        <span class="mono text-xs">finally</span>), which is why the restore scope names that file.</p></li>
+      <li class="card p-5"><p class="mono text-xs accent">3</p>
+        <p class="mt-1 leading-relaxed"><span class="font-semibold">All three synchronous leaf aliases occupy no slot today.</span>
+        <span class="mono text-xs">/runs</span>, <span class="mono text-xs">/run-leaf</span> and
+        <span class="mono text-xs">/v1/runs</span> are not in <span class="mono text-xs">TURN_PATHS</span>. Bringing them into the
+        counter fixes a pre-existing over-admission defect — and is a behaviour change on a live path: deployments at their
+        ceiling will see 429s they previously would not.</p></li>
+      <li class="card p-5"><p class="mono text-xs accent">4</p>
+        <p class="mt-1 leading-relaxed"><span class="font-semibold">The consumer group had no lifecycle on P6.</span> The removed drainer
+        reaped once at process start and GC'd idle consumers so KEDA could scale to zero; neither trigger survives. Reclaim
+        becomes periodic and armed by every worker, keyed on
+        <span class="mono text-xs">moca-${HOSTNAME}-w${SH_WORKER_ID}</span> — stable across an in-place restart, unique per
+        live worker.</p></li>
+    </ol>
+  </section>
+
+  <section class="mt-10">
+    <p class="eyebrow">Delivery in three milestones</p>
+    <div class="grid sm:grid-cols-3 gap-4 mt-4">
+      <div class="card p-5"><p class="mono text-xs accent">M1</p>
+        <h3 class="font-semibold mt-1">A working drain, single tenancy</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">Queue restored; drain loop in the worker; quota, status read, queued-only cancel.
+        Gated to <span class="mono text-xs">MOCA_TENANCY=single</span> as a dated conditional refusal — a stated condition
+        with a lifting criterion, not an omission.</p></div>
+      <div class="card p-5"><p class="mono text-xs accent">M2</p>
+        <h3 class="font-semibold mt-1">Multi-tenant</h3>
+        <p class="muted text-sm mt-2 leading-relaxed"><span class="mono text-xs">turn_exp</span> implemented (MI1 §6.1), full
+        grant-at-dequeue with both audiences (#388), and the tenancy gate lifts.</p></div>
+      <div class="card p-5"><p class="mono text-xs accent">M3</p>
+        <h3 class="font-semibold mt-1">deploy/k8s</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">Manifests, Kind and OCP overlays, <span class="mono text-xs">setup.sh</span>,
+        and a queued-leaf smoke test (#688).</p></div>
+    </div>
+  </section>
+
+  <footer class="mt-12 pt-6 border-t text-sm muted flex flex-wrap gap-x-6 gap-y-2" style="border-color:var(--line)">
+    <a href="https://github.com/rossoctl/moca/pull/696" target="_blank" rel="noopener">PR #696</a>
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/adrs/0047-p6-async-fan-out-in-worker-drain.md" target="_blank" rel="noopener">ADR-0047</a>
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/specs/2026-11-05-p6-async-fan-out-design.md" target="_blank" rel="noopener">Spec (2026-11-05)</a>
+    <span>epic #686 · #386 · supersedes ADR-0015</span>
+  </footer>
+</div>
+
+<script>
+(function(){
+"use strict";
+var $ = function(s){ return document.querySelector(s); };
+var canvas = $('#stage');
+var ctx = canvas.getContext('2d');
+
+var LW = 1000, LH = 620;
+var viewScale = 1;
+
+var G = {
+  submitter: {x:30,  y:80,  w:190, h:110},
+  control:   {x:300, y:36,  w:250, h:158},
+  queue:     {x:300, y:270, w:250, h:96},
+  supervisor:{x:640, y:36,  w:330, h:74},
+  workers: [ {x:640, y:140, w:330, h:88},
+             {x:640, y:248, w:330, h:88},
+             {x:640, y:356, w:330, h:88} ],
+  result:    {x:640, y:470, w:330, h:76}
+};
+
+/* ---------- theme colors (canvas reads the CSS tokens) ---------- */
+var C = {};
+function readColors(){
+  var cs = getComputedStyle(document.documentElement);
+  ['bg','panel','fg','muted','line','async','sync','danger','ok','accent'].forEach(function(k){
+    C[k] = cs.getPropertyValue('--c-' + k).trim();
+  });
+}
+readColors();
+var themeMq = matchMedia('(prefers-color-scheme: dark)');
+if (themeMq.addEventListener) themeMq.addEventListener('change', readColors);
+else if (themeMq.addListener) themeMq.addListener(readColors);
+var rmMq = matchMedia('(prefers-reduced-motion: reduce)');
+function reduced(){ return rmMq.matches; }
+
+/* ---------- sizing ---------- */
+function resize(){
+  var w = canvas.parentElement.clientWidth - 16 || canvas.clientWidth;
+  var dpr = window.devicePixelRatio || 1;
+  var cssH = w * LH / LW;
+  canvas.style.height = cssH + 'px';
+  canvas.width  = Math.max(1, Math.round(w * dpr));
+  canvas.height = Math.max(1, Math.round(cssH * dpr));
+  viewScale = canvas.width / LW;
+}
+window.addEventListener('resize', resize);
+
+/* ---------- small helpers ---------- */
+function clamp01(v){ return v < 0 ? 0 : v > 1 ? 1 : v; }
+function ease(t){ return t < .5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2; }
+function seg(t, a, b){ return clamp01((t - a) / (b - a)); }
+function rr(x, y, w, h, r){
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function pathLen(p){
+  var L = 0;
+  for (var i = 1; i < p.length; i++) L += Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
+  return L;
+}
+function pointAt(p, d){
+  var acc = 0;
+  for (var i = 1; i < p.length; i++){
+    var sl = Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
+    if (d <= acc + sl){
+      var u = (d - acc) / sl;
+      return [ p[i-1][0] + (p[i][0]-p[i-1][0])*u, p[i-1][1] + (p[i][1]-p[i-1][1])*u ];
+    }
+    acc += sl;
+  }
+  return p[p.length-1];
+}
+function rev(p){ return p.slice().reverse(); }
+function strokePath(p){
+  ctx.beginPath();
+  ctx.moveTo(p[0][0], p[0][1]);
+  for (var i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+  ctx.stroke();
+}
+
+/* ---------- wire paths ---------- */
+var P_SUB  = [[222,118],[262,118],[262,100],[300,100]];
+var P_RESP = [[300,124],[262,124],[262,142],[222,142]];
+var P_ENQ  = [[425,196],[425,268]];
+function claimPath(i){
+  var ty = G.workers[i].y + 46;
+  return [[550,318],[596,318],[596,ty],[640,ty]];
+}
+function mintPath(i){
+  var ty = G.workers[i].y + 26;
+  return [[640,ty],[572,ty],[572,128],[550,128]];
+}
+function resultPath(i){
+  var ty = G.workers[i].y + 46;
+  return [[970,ty],[990,ty],[990,508],[972,508]];
+}
+var P_HAND = [[700,110],[700,138]];
+var P_DEL  = [[222,162],[262,162],[262,176],[300,176]];
+
+/* ---------- moving packet ---------- */
+function packet(p, t, label, color){
+  var u = ease(clamp01(t));
+  if (u <= 0) return;
+  var pos = pointAt(p, u * pathLen(p));
+  ctx.font = '500 11px "IBM Plex Mono", monospace';
+  var w = ctx.measureText(label).width + 16, h = 20;
+  rr(pos[0] - w/2, pos[1] - h/2, w, h, 5);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.fillText(label, pos[0] - w/2 + 8, pos[1] + 3.5);
+}
+function tiny(text, x, y, align){
+  ctx.font = '400 10px "IBM Plex Mono", monospace';
+  ctx.fillStyle = C.muted;
+  ctx.textAlign = align || 'left';
+  ctx.fillText(text, x, y);
+  ctx.textAlign = 'left';
+}
+
+/* ---------- scene state ---------- */
+var scene;
+function freshScene(){
+  return {
+    quota: 0,
+    records: [],   /* {id, state} */
+    entries: [],   /* {id, status: pending|claimed|gone|cancelled, worker} */
+    slots: [[null,null,null,null],[null,null,null,null],[null,null,null,null]],
+    alive: [true, true, true],
+    dc: {},
+    results: []
+  };
+}
+function rec(id){ return scene.records.filter(function(r){ return r.id === id; })[0]; }
+function ent(id){ return scene.entries.filter(function(e){ return e.id === id; })[0]; }
+
+/* ---------- static drawing ---------- */
+function drawBox(g, title, sub){
+  rr(g.x, g.y, g.w, g.h, 10);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.4; ctx.stroke();
+  ctx.fillStyle = C.fg; ctx.font = '600 13px "IBM Plex Sans", sans-serif';
+  ctx.fillText(title, g.x + 16, g.y + 24);
+  if (sub){
+    ctx.fillStyle = C.muted; ctx.font = '400 10px "IBM Plex Mono", monospace';
+    ctx.fillText(sub, g.x + 16, g.y + 42);
+  }
+}
+function drawConnections(){
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.2;
+  strokePath(P_SUB); strokePath(P_RESP); strokePath(P_ENQ);
+  for (var i = 0; i < 3; i++) strokePath(claimPath(i));
+  strokePath(mintPath(1));
+  strokePath(resultPath(1));
+  [700, 820, 940].forEach(function(x){
+    ctx.beginPath(); ctx.moveTo(x, 110); ctx.lineTo(x, 138); ctx.stroke();
+  });
+  tiny('API', 261, 90, 'center');
+  tiny('enqueue', 433, 240);
+  tiny('claim', 556, 306);
+  tiny('mint', 552, 264);
+  tiny('results', 960, 464, 'right');
+  tiny('hand-off', 708, 128);
+}
+function drawBoxes(){
+  var s = G.submitter;
+  drawBox(s, 'Submitter', null);
+  ctx.font = '400 10.5px "IBM Plex Mono", monospace'; ctx.fillStyle = C.muted;
+  ctx.fillText('mocactl', s.x + 16, s.y + 48);
+  ctx.fillText('coding agent (#387)', s.x + 16, s.y + 66);
+  ctx.fillText('controller · svc acct', s.x + 16, s.y + 84);
+
+  var c = G.control;
+  drawBox(c, 'Control plane', null);
+  ctx.font = '400 10px "IBM Plex Mono", monospace'; ctx.fillStyle = C.muted;
+  ctx.fillText('auth · owner scope', c.x + 16, c.y + 44);
+  rr(c.x + c.w - 104, c.y + 12, 90, 20, 5);
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1; ctx.stroke();
+  ctx.fillStyle = C.muted; ctx.font = '500 10px "IBM Plex Mono", monospace';
+  ctx.fillText('quota ' + scene.quota + '/50', c.x + c.w - 96, c.y + 26);
+
+  drawBox(G.queue, 'Redis Streams', null);
+  ctx.textAlign = 'right';
+  ctx.font = '400 9.5px "IBM Plex Mono", monospace'; ctx.fillStyle = C.muted;
+  ctx.fillText('XREADGROUP · XAUTOCLAIM · touch', G.queue.x + G.queue.w - 14, G.queue.y + 22);
+  ctx.textAlign = 'left';
+
+  drawBox(G.supervisor, 'Supervisor (P6)', null);
+  ctx.font = '400 10px "IBM Plex Mono", monospace'; ctx.fillStyle = C.muted;
+  ctx.fillText('socket hand-off · SH_TURNS_PER_WORKER', G.supervisor.x + 16, G.supervisor.y + 44);
+
+  drawBox(G.result, 'leaf-result-store', null);
+  ctx.textAlign = 'right';
+  ctx.font = '400 9.5px "IBM Plex Mono", monospace'; ctx.fillStyle = C.muted;
+  ctx.fillText('TTL 24 h · keyed by leafSessionId', G.result.x + G.result.w - 14, G.result.y + 22);
+  ctx.textAlign = 'left';
+}
+function stateColor(state){
+  if (state === 'done' || state === 'solved') return C.ok;
+  if (state === 'cancelled' || state === 'lost' || state === 'failed') return C.danger;
+  return C.async; /* queued, running */
+}
+function drawRecords(){
+  tiny('turn records', 316, 128);
+  scene.records.forEach(function(r, i){
+    var x = 316 + i * 68, y = 134, w = 64, h = 26;
+    var col = stateColor(r.state);
+    rr(x, y, w, h, 5);
+    ctx.fillStyle = C.panel; ctx.fill();
+    if (r.state === 'running'){ ctx.globalAlpha = .15; ctx.fillStyle = col; ctx.fill(); ctx.globalAlpha = 1; }
+    ctx.strokeStyle = col; ctx.lineWidth = 1.4; ctx.stroke();
+    ctx.fillStyle = col; ctx.font = '500 9.5px "IBM Plex Mono", monospace';
+    var label = r.id + ' ' + r.state;
+    ctx.fillText(label, x + (w - ctx.measureText(label).width) / 2, y + 16.5);
+  });
+}
+function drawEntries(){
+  scene.entries.forEach(function(e, i){
+    if (e.status === 'gone') return;
+    var x = 318 + i * 58, y = 316, w = 48, h = 26;
+    var col = e.status === 'cancelled' ? C.danger : C.async;
+    rr(x, y, w, h, 5);
+    ctx.fillStyle = C.panel; ctx.fill();
+    if (e.status === 'claimed'){ ctx.globalAlpha = .15; ctx.fillStyle = col; ctx.fill(); ctx.globalAlpha = 1; }
+    ctx.strokeStyle = col; ctx.lineWidth = e.status === 'claimed' ? 1.8 : 1.3; ctx.stroke();
+    ctx.fillStyle = col; ctx.font = '500 10px "IBM Plex Mono", monospace';
+    ctx.fillText(e.id, x + (w - ctx.measureText(e.id).width) / 2, y + 16.5);
+    if (e.status === 'cancelled'){
+      ctx.beginPath(); ctx.moveTo(x + 6, y + 13); ctx.lineTo(x + w - 6, y + 13);
+      ctx.strokeStyle = C.danger; ctx.lineWidth = 1.2; ctx.stroke();
+    }
+    if (e.status === 'claimed'){
+      ctx.font = '500 8.5px "IBM Plex Mono", monospace';
+      ctx.fillText('w' + e.worker, x + w - 15, y + 24);
+    }
+    if (scene.dc[e.id] > 1){
+      ctx.fillStyle = C.danger; ctx.font = '600 9px "IBM Plex Mono", monospace';
+      ctx.fillText('x' + scene.dc[e.id], x + w - 12, y - 4);
+    }
+  });
+}
+function drawWorkers(){
+  G.workers.forEach(function(g, i){
+    var dead = !scene.alive[i];
+    rr(g.x, g.y, g.w, g.h, 10);
+    ctx.globalAlpha = dead ? .55 : 1;
+    ctx.fillStyle = C.panel; ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = dead ? C.danger : C.line; ctx.lineWidth = dead ? 1.8 : 1.4; ctx.stroke();
+    ctx.fillStyle = dead ? C.danger : C.fg; ctx.font = '600 12px "IBM Plex Sans", sans-serif';
+    ctx.fillText(dead ? 'worker w' + i + ' — lost' : 'worker w' + i, g.x + 14, g.y + 22);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = C.muted; ctx.font = '400 9.5px "IBM Plex Mono", monospace';
+    ctx.fillText('moca-host-w' + i, g.x + g.w - 14, g.y + 22);
+    ctx.textAlign = 'left';
+    for (var s = 0; s < 4; s++){
+      var sx = g.x + 14 + s * 52, sy = g.y + 36, sw = 44, sh = 22;
+      var k = scene.slots[i][s];
+      rr(sx, sy, sw, sh, 4);
+      if (k){
+        var col = k === 'sync' ? C.sync : C.async;
+        ctx.globalAlpha = .18; ctx.fillStyle = col; ctx.fill(); ctx.globalAlpha = 1;
+        ctx.strokeStyle = col; ctx.lineWidth = 1.6;
+      } else {
+        ctx.fillStyle = C.bg; ctx.fill();
+        ctx.strokeStyle = C.line; ctx.lineWidth = 1;
+      }
+      ctx.stroke();
+    }
+    var n = scene.slots[i].filter(Boolean).length;
+    var cx = g.x + g.w - 58, cy = g.y + 36;
+    rr(cx, cy, 44, 22, 4);
+    ctx.fillStyle = C.bg; ctx.fill();
+    ctx.strokeStyle = C.line; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = C.muted; ctx.font = '500 10px "IBM Plex Mono", monospace';
+    ctx.fillText(n + '/4', cx + 13, cy + 14.5);
+  });
+}
+function drawResults(){
+  scene.results.forEach(function(id, i){
+    var x = 656 + i * 62, y = 508, w = 54, h = 24;
+    rr(x, y, w, h, 5);
+    ctx.strokeStyle = C.ok; ctx.lineWidth = 1.3; ctx.stroke();
+    ctx.fillStyle = C.ok; ctx.font = '500 10px "IBM Plex Mono", monospace';
+    ctx.fillText(id + ' ok', x + 10, y + 15.5);
+  });
+}
+/* ---------- overlay helpers ---------- */
+function slotPreview(wi, si, kind, a){
+  if (a <= 0) return;
+  var g = G.workers[wi];
+  var sx = g.x + 14 + si * 52, sy = g.y + 36, sw = 44, sh = 22;
+  var col = kind === 'sync' ? C.sync : C.async;
+  rr(sx, sy, sw, sh, 4);
+  ctx.globalAlpha = .18 * a; ctx.fillStyle = col; ctx.fill(); ctx.globalAlpha = 1;
+  ctx.strokeStyle = col; ctx.lineWidth = 1.6; ctx.globalAlpha = a; ctx.stroke(); ctx.globalAlpha = 1;
+}
+function workerCrashOverlay(i, a){
+  var g = G.workers[i];
+  ctx.globalAlpha = a;
+  rr(g.x, g.y, g.w, g.h, 10);
+  ctx.strokeStyle = C.danger; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = C.danger; ctx.font = '500 10px "IBM Plex Mono", monospace';
+  ctx.fillText('x process lost · heartbeat stopped', g.x + 14, g.y + 78);
+  ctx.globalAlpha = 1;
+}
+function ring(x, y, frac, col){
+  ctx.globalAlpha = (1 - frac) * .9;
+  ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(x, y, 5 + 16 * frac, 0, Math.PI * 2); ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+/* ---------- the eight steps ---------- */
+var steps = [
+{
+  title: 'P6 today — no async path',
+  body: '#691 removed the KEDA drainer, @moca/work-queue and the enqueue route. A P6 worker is purely reactive: an HTTP server that never calls listen(), accepting only sockets the supervisor hands it over IPC, admitted against SH_TURNS_PER_WORKER through a per-worker TurnCounter. The execution lane — runLeaf, leaf-result-store, the run-lease reaper — survived intact, and that is the foundation this design builds on.',
+  chips: ['after #691', 'worker = purely reactive', 'execution lane intact'],
+  dur: 4200,
+  commit: function(){ scene.slots[0][0] = 'sync'; },
+  overlay: function(t){
+    var u1 = seg(t, 0, .55);
+    if (u1 > 0) packet(P_HAND, u1, 'socket /turn', C.sync);
+    slotPreview(0, 0, 'sync', ease(seg(t, .55, 1)));
+  }
+},
+{
+  title: 'Submit — one authenticated path',
+  body: 'Every caller — mocactl, an LLM coding agent spawning subagents, a controller with a service-account credential — enqueues through POST /v1/sessions/{id}/turns {async:true} and gets 202 {turnId}. Authenticated and owner-scoped, because the trust model is uniformly "assume a misbehaving client". The control plane checks the per-owner queued-turn quota (MOCA_ASYNC_QUEUED_PER_OWNER, default 50) and resolves caps before anything is enqueued. The unauthenticated data-plane route stays removed, permanently (#687).',
+  chips: ['POST /v1/sessions/{id}/turns {async:true}', '202 {turnId}', 'MOCA_ASYNC_QUEUED_PER_OWNER = 50'],
+  dur: 5400,
+  commit: function(){
+    scene.quota = 3;
+    ['t1','t2','t3'].forEach(function(id){ scene.records.push({id: id, state: 'queued'}); });
+  },
+  overlay: function(t){
+    [[0,.3],[.12,.42],[.24,.54]].forEach(function(w){
+      var u = seg(t, w[0], w[1]);
+      if (u > 0) packet(P_SUB, u, 'POST {async:true}', C.async);
+    });
+    [[.5,.75],[.6,.85],[.7,.95]].forEach(function(w){
+      var u = seg(t, w[0], w[1]);
+      if (u > 0) packet(P_RESP, u, '202 {turnId}', C.accent);
+    });
+  }
+},
+{
+  title: 'Enqueue — a turn id, nothing else',
+  body: 'The queue entry carries {turnId} only: no envelope, no credential, no config. Everything authoritative lives in the turn record the control plane owns, read back at dequeue — which is what makes grant-at-dequeue possible and bounds the damage if the queue is ever read by something that should not have it.',
+  chips: ['queue payload: {turnId}', 'turn record = single source of truth'],
+  dur: 3800,
+  commit: function(){
+    ['t1','t2','t3'].forEach(function(id){ scene.entries.push({id: id, status: 'pending', worker: null}); });
+  },
+  overlay: function(t){
+    [[0,.4],[.14,.54],[.28,.68]].forEach(function(w){
+      var u = seg(t, w[0], w[1]);
+      if (u > 0) packet(P_ENQ, u, '{turnId}', C.async);
+    });
+  }
+},
+{
+  title: 'Claim under shared admission',
+  body: 'A drain loop inside the ordinary turn worker takes its slots from the same TurnCounter as interactive turns — one budget, no reserved headroom, no supervisor change (onChange already sends the load IPC; reconcile already trusts the worker’s count). The slot is taken in the same tick as the check, before the blocking XREADGROUP claim: "check, await, start" would leave the worker looking free for blockMs while the supervisor keeps handing it sockets. A measured spurious refusal is the safer error than a worker running cap + 1 turns.',
+  chips: ['SH_TURNS_PER_WORKER', 'slot taken before XREADGROUP BLOCK', 'no headroom, first come first served'],
+  dur: 5200,
+  commit: function(){
+    scene.slots[2][0] = 'async';
+    ent('t1').status = 'claimed'; ent('t1').worker = 2;
+  },
+  overlay: function(t){
+    slotPreview(2, 0, 'async', ease(seg(t, 0, .25)));
+    var u = seg(t, .25, .8);
+    if (u > 0) packet(claimPath(2), u, 'XREADGROUP', C.async);
+  }
+},
+{
+  title: 'Mint at dequeue — no bearer token in the queue',
+  body: 'The worker presents its own identity plus the turn id. The control plane resolves credentialName against the owner’s subject document and mints an inference grant and a sandbox grant. "Turn start" for turn_exp is dequeue, not enqueue — a leaf that waited an hour must still get its full budget: turn_exp = dequeue + min(caps.wallClock ?? MOCA_TURN_MAX_S, MOCA_TURN_MAX_S), a per-turn expiry that can only tighten, clamped at mint so an untrusted client never controls its own credential’s lifetime. queued → running is a compare-and-set; a record already running is a redelivery and still runs.',
+  chips: ['mint(turnId, worker-id)', 'inference + sandbox grants', 'turn_exp = dequeue + min(caps.wallClock, 1800s)'],
+  dur: 5600,
+  commit: function(){ rec('t1').state = 'running'; },
+  overlay: function(t){
+    var u1 = seg(t, 0, .45);
+    if (u1 > 0) packet(mintPath(2), u1, 'mint(turnId, worker-id)', C.accent);
+    var u2 = seg(t, .5, .92);
+    if (u2 > 0) packet(rev(mintPath(2)), u2, 'inference + sandbox grants', C.async);
+  }
+},
+{
+  title: 'Execute, heartbeat, ack',
+  body: 'runLeaf runs the leaf with the minted grants. processOne arms a touch heartbeat every 30 s — a third of minIdleMs (90 s), so two missed beats do not trigger a reclaim — and clears it in a finally on every exit path. The heartbeat’s absence is the death signal the reaper trusts. The result lands in leaf-result-store; only then is the entry acked and the slot released. Delivery is at-least-once; effectively-once rests on the idempotency key, which defaults to the session id.',
+  chips: ['touch every 30 s', 'minIdleMs 90 s', 'ack only after the result write'],
+  dur: 6400,
+  commit: function(){
+    scene.results.push('t1');
+    ent('t1').status = 'gone';
+    scene.slots[2][0] = null;
+    rec('t1').state = 'done';
+  },
+  overlay: function(t){
+    var exec = seg(t, 0, .55);
+    if (exec > 0){
+      var g = G.workers[2];
+      rr(g.x + 14, g.y + 66, 200, 8, 4);
+      ctx.fillStyle = C.bg; ctx.fill();
+      ctx.strokeStyle = C.line; ctx.lineWidth = 1; ctx.stroke();
+      rr(g.x + 14, g.y + 66, 200 * ease(exec), 8, 4);
+      ctx.fillStyle = C.async; ctx.fill();
+      tiny('runLeaf', g.x + 222, g.y + 74);
+    }
+    for (var k = 0; k < 4; k++){
+      var f = seg(t, .05 + k * .13, .18 + k * .13);
+      if (f > 0 && f < 1) ring(342, 329, f, C.async);
+    }
+    tiny('touch 30 s', 372, 332);
+    var u3 = seg(t, .55, .8);
+    if (u3 > 0) packet(resultPath(2), u3, 'result', C.ok);
+    var u4 = seg(t, .8, 1);
+    if (u4 > 0) packet(rev(claimPath(2)), u4, 'ack', C.ok);
+  }
+},
+{
+  title: 'Crash and drain — abandon, don’t ack',
+  body: 'On drain the loop stops claiming and the in-flight leaf is abandoned without an ack: a 1800 s leaf cannot finish in a 20 s grace window, nobody waits on an async leaf, and the slot is released so awaitIdle exits early. The heartbeat dies with the process; after 90 s idle the entry is visible to every worker’s XAUTOCLAIM — including its restarted self, with no priority. The mint refuses only cancelled and terminal records, so the redelivery re-mints against a record that already says running. Past maxAttempts (3) the entry dead-letters to lost.',
+  chips: ['abandon unacked', 'XAUTOCLAIM after 90 s idle', 'maxAttempts 3 → lost'],
+  dur: 8200,
+  commit: function(){
+    scene.alive[1] = false;
+    scene.slots[1] = [null, null, null, null];
+    ent('t2').status = 'claimed'; ent('t2').worker = 0;
+    scene.slots[0][1] = 'async';
+    scene.dc['t2'] = 2;
+    rec('t2').state = 'running';
+  },
+  overlay: function(t){
+    if (t < .22) slotPreview(1, 0, 'async', ease(seg(t, 0, .15)));
+    var u1 = seg(t, .05, .2);
+    if (u1 > 0) packet(claimPath(1), u1, 'claim t2', C.async);
+    var crash = seg(t, .22, .34);
+    if (crash > 0) workerCrashOverlay(1, ease(crash));
+    var idle = seg(t, .34, .56);
+    if (idle > 0 && idle < 1){
+      ctx.fillStyle = C.danger; ctx.font = '500 10px "IBM Plex Mono", monospace';
+      ctx.fillText('idle ' + Math.round(90 * ease(idle)) + ' s', 376, 356);
+    }
+    var u2 = seg(t, .58, .74);
+    if (u2 > 0) packet(rev(claimPath(0)), u2, 'XAUTOCLAIM', C.danger);
+    var u3 = seg(t, .76, .94);
+    if (u3 > 0) packet(mintPath(0), u3, 're-mint (running)', C.accent);
+    slotPreview(0, 1, 'async', ease(seg(t, .78, .94)));
+  }
+},
+{
+  title: 'Read back, cancel, deliver',
+  body: 'Status is read from the turn record on a new route, GET /v1/sessions/{id}/turns/{turnId} — queued, never-submitted (404) and reaped-as-lost are distinguishable, where the old /runs/status inference from the result store conflated all three. GET /runs/status is untouched: two routes, one source of truth each. DELETE cancels a queued turn — the drain loop skips it at claim — while a running leaf answers 409, because a cancel signal addressed to one specific worker does not exist for async. Delivery comes in three milestones: M1 single-tenancy drain on deploy/vm and compose, M2 turn_exp and multi-tenant grants, M3 deploy/k8s and the queued-leaf smoke test.',
+  chips: ['GET /v1/sessions/{id}/turns/{turnId}', 'DELETE → queued only · running 409', 'M1 → M2 → M3'],
+  dur: 6200,
+  commit: function(){
+    rec('t3').state = 'cancelled';
+    ent('t3').status = 'cancelled';
+  },
+  overlay: function(t){
+    var u1 = seg(t, 0, .3);
+    if (u1 > 0) packet(P_SUB, u1, 'GET /turns/t1', C.accent);
+    var u2 = seg(t, .34, .58);
+    if (u2 > 0) packet(P_RESP, u2, '200 done + result', C.ok);
+    var u3 = seg(t, .62, .8);
+    if (u3 > 0) packet(P_DEL, u3, 'DELETE /turns/t3', C.danger);
+    var flip = ease(seg(t, .8, 1));
+    if (flip > 0 && flip < 1){
+      var x = 316 + 2 * 68, y = 134, w = 64, h = 26;
+      ctx.globalAlpha = flip;
+      rr(x, y, w, h, 5);
+      ctx.strokeStyle = C.danger; ctx.lineWidth = 1.4; ctx.stroke();
+      ctx.fillStyle = C.danger; ctx.font = '500 9.5px "IBM Plex Mono", monospace';
+      ctx.fillText('t3 cancelled', x + (w - ctx.measureText('t3 cancelled').width) / 2, y + 16.5);
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+];
+
+/* ---------- engine ---------- */
+var cur = 0, startT = 0, committed = false, playing = false, holdUntil = 0;
+
+function gotoStep(k){
+  k = Math.max(0, Math.min(steps.length - 1, k));
+  scene = freshScene();
+  for (var i = 0; i < k; i++) steps[i].commit();
+  cur = k; committed = false;
+  startT = reduced() ? -1e9 : performance.now();
+  holdUntil = 0;
+  renderPanel();
+}
+function renderPanel(){
+  $('#stepNum').textContent = (cur + 1) + ' / ' + steps.length;
+  $('#stepTitle').textContent = steps[cur].title;
+  $('#stepBody').textContent = steps[cur].body;
+  var chips = $('#stepChips');
+  chips.innerHTML = '';
+  steps[cur].chips.forEach(function(c){
+    var el = document.createElement('span');
+    el.className = 'chip mono';
+    el.textContent = c;
+    chips.appendChild(el);
+  });
+  var dots = $('#dots');
+  dots.innerHTML = '';
+  steps.forEach(function(s, i){
+    var d = document.createElement('button');
+    d.className = 'dot' + (i === cur ? ' on' : '');
+    d.setAttribute('aria-label', 'Step ' + (i + 1) + ': ' + s.title);
+    d.addEventListener('click', function(){ gotoStep(i); });
+    dots.appendChild(d);
+  });
+  $('#prev').disabled = cur === 0;
+  $('#next').disabled = cur === steps.length - 1;
+}
+function setPlaying(on){
+  playing = on;
+  $('#play').innerHTML = on ? '&#9632; Pause' : '&#9654; Play';
+  if (on && committed) holdUntil = performance.now() + 600;
+}
+function draw(t){
+  ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, LW, LH);
+  drawConnections();
+  drawBoxes();
+  drawRecords();
+  drawEntries();
+  drawWorkers();
+  drawResults();
+  /* keep the step's final frame (arrived messages) on stage until the next step starts */
+  steps[cur].overlay(committed ? 1 : t);
+}
+function tick(now){
+  var st = steps[cur];
+  var t = clamp01((now - startT) / st.dur);
+  if (t >= 1 && !committed){
+    st.commit();
+    committed = true;
+    holdUntil = now + 1700;
+  }
+  if (playing && committed && now >= holdUntil){
+    if (cur < steps.length - 1) gotoStep(cur + 1);
+    else setPlaying(false);
+  }
+  draw(t);
+  requestAnimationFrame(tick);
+}
+
+$('#next').addEventListener('click', function(){ gotoStep(cur + 1); });
+$('#prev').addEventListener('click', function(){ gotoStep(cur - 1); });
+$('#play').addEventListener('click', function(){ setPlaying(!playing); });
+document.addEventListener('keydown', function(e){
+  if (e.key === 'ArrowRight'){ gotoStep(cur + 1); }
+  else if (e.key === 'ArrowLeft'){ gotoStep(cur - 1); }
+});
+
+resize();
+gotoStep(0);
+requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
