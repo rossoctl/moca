@@ -12,8 +12,13 @@
  * `spawn --async` is opt-in rather than the default; without a drain the turn stays `queued` until
  * the reaper calls it `lost`.
  */
-import type { ControlPlaneApi, SubmitTurnRequest, TurnStatus } from '../api/types.js';
-import type { LeafEnvelope, LeafResultBody } from './leaf-turn.js';
+import type { ControlPlaneApi, SubmitTurnRequest, TurnEvent, TurnStatus } from '../api/types.js';
+import {
+  terminalFromBody,
+  type LeafEnvelope,
+  type LeafResultBody,
+  type StateView,
+} from './leaf-turn.js';
 
 /** The two methods of the control-plane API this transport uses, so a test can pass a stub. */
 export type TurnApi = Pick<ControlPlaneApi, 'submitTurn' | 'getTurn' | 'getTurnArtifact'>;
@@ -110,4 +115,25 @@ function bodyFromTurn(turn: TurnStatus): LeafResultBody | 'queued' {
     // text, the gate's summary, the diffstat, the reason), and `get` writes files from the bytes.
     artifacts: (result.artifacts ?? []).map((a) => a.kind),
   };
+}
+
+/**
+ * A turn EVENT as the state `watch` prints (#392). The three special cases are `bodyFromTurn`'s own,
+ * for the same reasons it gives; everything else goes through `terminalFromBody`, so the stream and
+ * a status read cannot disagree about a turn.
+ *
+ * `queued` and `running` are both honestly `running`, as they are on the status path: a finer
+ * `queued` line here would differ from the one the safety-net sweep prints for the same unchanged
+ * turn, which is a spurious transition, not information.
+ */
+export function viewFromTurnEvent(e: TurnEvent): StateView {
+  if (e.state === 'queued' || e.state === 'running') return { state: 'running' };
+  if (e.state === 'lost') return { state: 'failed', detail: 'lost' };
+  if (e.state === 'cancelled') return { state: 'failed', detail: 'aborted' };
+  // A gate is what the status path reads as `paused`; the event carries it in place of the result.
+  if (e.gate) return { state: 'paused', detail: 'gate requested' };
+  return terminalFromBody({
+    status: e.state as LeafResultBody['status'],
+    ...(e.reason ? { reason: e.reason } : {}),
+  });
 }

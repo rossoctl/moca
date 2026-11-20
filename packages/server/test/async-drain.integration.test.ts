@@ -167,8 +167,8 @@ function jobFor(
     runLeaf: (env) => runLeaf(env),
     // asyncFinalizeState, not a hand-rolled map: it is what Task 7 wires in production, and
     // `aborted -> cancelled` exists only there.
-    finalize: async (turnId, status) => {
-      await turns.finalize(turnId, asyncFinalizeState(status), Date.now());
+    finalize: async (turnId, status, detail) => {
+      await turns.finalize(turnId, asyncFinalizeState(status), Date.now(), detail);
     },
     deadLetter: (turnId) =>
       deadLetterTurn(turnId, { turns, resultStore: client as never, ttlSeconds: TTL }),
@@ -532,6 +532,42 @@ describe('§8 — parity carry-overs (§10)', () => {
     expect(out).toMatchObject({ kind: 'completed', turnId, status });
     expect(await queue.pending()).toBe(pending);
     expect((await turns.get(turnId))?.state).toBe(state);
+  });
+
+  // #392, over the production wiring rather than the store API: `finalize`'s detail is derived in
+  // `processOne` and forwarded by the dep `armAsyncLeafWorker` builds, so a dep that drops the
+  // argument -- how the field went missing from the wire once already -- fails here.
+  it("carries a failed leaf's reason and a gate's summary onto the owner's event", async () => {
+    const owner = `owner-ev-${tag}`;
+    const failed = await submit(owner);
+    const paused = await submit(owner);
+    const queue = await newQueue();
+    await processOne(
+      jobFor(
+        queue,
+        'w-ev-f',
+        async () => ({ status: 'failed', reason: 'bad_inputs' }) as LeafResult,
+      ),
+    );
+    await processOne(
+      jobFor(
+        queue,
+        'w-ev-p',
+        async () =>
+          ({
+            status: 'paused',
+            gateId: 1,
+            gate: { summary: 'writes outside the workspace', proposed_action: 'refuse' },
+          }) as LeafResult,
+      ),
+    );
+    const events = await turns.readEvents(owner, '0-0', 50);
+    expect(events.filter((e) => e.turnId === failed.turnId && e.state === 'failed')).toMatchObject([
+      { reason: 'bad_inputs' },
+    ]);
+    expect(events.filter((e) => e.turnId === paused.turnId && e.state === 'paused')).toMatchObject([
+      { gate: 'writes outside the workspace' },
+    ]);
   });
 
   it('does NOT ack a failed/saturated leaf, so it is redelivered', async () => {

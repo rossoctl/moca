@@ -75,8 +75,18 @@ export interface LeafJobDeps {
    * holds. It must not throw; a failed release is the caller's to swallow.
    */
   admitOwner?: (turnId: string) => Promise<(() => void | Promise<void>) | null>;
-  /** Stamp the terminal state on the record. 'aborted' has no TurnState; the caller maps it. */
-  finalize: (turnId: string, status: LeafResult['status']) => Promise<void>;
+  /**
+   * Stamp the terminal state on the record. 'aborted' has no TurnState; the caller maps it.
+   *
+   * `detail` is the terminal event's reason and gate summary (#392) and MUST be forwarded: an
+   * implementation that drops it leaves a `watch`ing client a bare `failed` with no reason, which
+   * is the one line a background monitor exists to surface.
+   */
+  finalize: (
+    turnId: string,
+    status: LeafResult['status'],
+    detail?: { reason?: string; gate?: string },
+  ) => Promise<void>;
   /**
    * The dead-letter path: read the record, write a failed result under its session id, finalize.
    * Injected separately from `claimTurn` so that a turn which will never run never causes a
@@ -293,6 +303,20 @@ function entryAgeMs(entryId: string): number {
 const noRelease = () => {};
 
 /**
+ * What the terminal event carries besides the state (#392): a failure's reason, a gate's summary.
+ *
+ * Derived HERE rather than in the `finalize` dep because this is the only place that holds the whole
+ * `LeafResult` -- the dep is handed a status, and a status alone cannot say why. The other two
+ * finalize call sites have no result at all (a pre-run cancel, the reaper's `lost`), and both are
+ * states a client reads without a reason.
+ */
+function finalizeDetail(result: LeafResult): { reason?: string; gate?: string } | undefined {
+  if (result.status === 'failed') return { reason: result.reason };
+  if (result.status === 'paused') return { gate: result.gate.summary };
+  return undefined;
+}
+
+/**
  * Everything from the claim handshake to the ack. Its own function so that the owner's fairness
  * slot can be released in one `finally` wrapped around all of it.
  */
@@ -415,7 +439,7 @@ async function runClaimedEntry(deps: LeafJobDeps, claimed: ClaimedEntry): Promis
     deps.ttlSeconds,
     claimed.turnId,
   );
-  await deps.finalize(claimed.turnId, result.status);
+  await deps.finalize(claimed.turnId, result.status, finalizeDetail(result));
   await deps.queue.ack(claimed.entryId);
   return {
     kind: 'completed',

@@ -5,9 +5,18 @@ import { join } from 'node:path';
 import { cmdWatch, type WatchOptions } from '../src/subagent.js';
 import { openLedger, type LedgerRecord } from '../src/core/subagent-ledger.js';
 import { LeafTransport } from '../src/transport/leaf-turn.js';
+import type { TurnEvent } from '../src/api/types.js';
 
-function makeRt(scratch: string) {
-  const cp = { mintSessionToken: vi.fn(async () => ({ token: 'tok', expiresAt: 9 })) };
+function makeRt(scratch: string, events: TurnEvent[] = []) {
+  const cp = {
+    mintSessionToken: vi.fn(async () => ({ token: 'tok', expiresAt: 9 })),
+    // The real client always has this; without it `cmdWatch` has no stream to read and these cases
+    // would be exercising only the fallback path. An empty stream ENDS at once, which is what sends
+    // `watch` down the sweep path these cases were written for.
+    streamEvents: vi.fn(async function* () {
+      for (const e of events) yield e;
+    }),
+  };
   const harness = { baseUrl: vi.fn(async () => 'https://harness.test') };
   // The poll loop sleeps on the runtime clock, so advancing it from `sleep` drives `watch`
   // without any real time passing.
@@ -145,6 +154,8 @@ describe('cmdWatch', () => {
       kind: 'prompt',
       state: 'paused',
       detail: 'gate requested',
+      // A line the sweep produced carries no cursor (#392).
+      cursor: null,
       at: 1,
     });
   });

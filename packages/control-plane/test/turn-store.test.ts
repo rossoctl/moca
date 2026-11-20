@@ -1,6 +1,12 @@
 import { expect, it } from 'vitest';
 import { TurnStore } from '../src/turn-store.js';
-import { sessionTurnsKey, turnKey, type TurnRecord } from '../src/turn-record.js';
+import {
+  EVENTS_MAXLEN,
+  ownerEventsKey,
+  sessionTurnsKey,
+  turnKey,
+  type TurnRecord,
+} from '../src/turn-record.js';
 import { leafResultKey } from '../src/turn-result.js';
 import { fakeRedis } from './helpers/fake-redis.js';
 import { turnStoreContract } from './helpers/turn-store-contract.js';
@@ -24,6 +30,7 @@ turnStoreContract('fake', async () => {
     ttlMarginSeconds,
     ttlOf: async (turnId: string) => lastExpire(expires, turnKey(turnId)),
     ttlOfSession: async (sessionId: string) => lastExpire(expires, sessionTurnsKey(sessionId)),
+    ttlOfEvents: async (owner: string) => lastExpire(expires, ownerEventsKey(owner)),
     indexedTurns: async (sessionId: string) =>
       (zsets.get(sessionTurnsKey(sessionId)) ?? []).map((m) => m.value),
     // No key tag to work around here: this fake's keyspace is one Map per store.
@@ -67,4 +74,15 @@ it('reaches a turn that has NO index entry through the owner set', async () => {
   await store.deleteSessionTurns('s-1', 'github:1234');
   expect(await store.get('t-pre')).toBeNull();
   expect(await store.countOpen('github:1234')).toBe(0);
+});
+
+// Fake-only: `XADD MAXLEN ~` is APPROXIMATE in real Redis, so an exact bound asserted against it
+// would be a flake. The fake trims exactly, which is what makes the bound observable at all.
+it('bounds the owner event log to EVENTS_MAXLEN', async () => {
+  const { redis } = fakeRedis();
+  const store = new TurnStore(redis, { resultTtlSeconds: 10, ttlMarginSeconds: 1 });
+  for (let i = 0; i < EVENTS_MAXLEN + 5; i++) {
+    await store.create(rec({ turnId: `t-${i}` }));
+  }
+  expect((await store.readEvents('github:1234', '0-0', 10_000)).length).toBe(EVENTS_MAXLEN);
 });

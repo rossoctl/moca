@@ -2,9 +2,23 @@ import { createHash } from 'node:crypto';
 import { countAsync } from './counters.js';
 import { CpError } from './errors.js';
 import { auditBestEffort } from './handler-util.js';
-import { assertOwner, type CpDeps, type Handler, type RequestCtx } from './handlers.js';
+import {
+  assertOwner,
+  requirePrincipal,
+  type CpDeps,
+  type Handler,
+  type RequestCtx,
+} from './handlers.js';
 import type { SessionRecord } from './ownership.js';
-import { isTerminalState, parseTurnSubmission, type TurnRecord } from './turn-record.js';
+import {
+  compareCursor,
+  CURSOR_RE,
+  FROM_START,
+  isTerminalState,
+  parseTurnSubmission,
+  type TurnEvent,
+  type TurnRecord,
+} from './turn-record.js';
 import { pickArtifact, projectLeafResult, readLeafResult } from './turn-result.js';
 import type { TurnQueue } from './turn-queue.js';
 import type { TurnStore } from './turn-store.js';
@@ -84,6 +98,64 @@ async function claimKey(
   await turns.releaseIdempotencyKeyIf(owner, key, held);
   const second = await turns.claimIdempotencyKey(owner, key, turnId);
   return { turnId: second, fresh: second === turnId };
+}
+
+/**
+ * SSE pacing (#392). Not settings: a client that wants different pacing reconnects with its
+ * cursor, and every one of these is invisible on the wire except as timing.
+ */
+export const EVENT_PAGE = 100;
+export const EVENT_IDLE_MS = 1_000;
+export const EVENT_HEARTBEAT_MS = 15_000;
+export const EVENT_MAX_MS = 3_600_000;
+
+const turnFrame = (e: TurnEvent) => `id: ${e.cursor}\nevent: turn\ndata: ${JSON.stringify(e)}\n\n`;
+
+/**
+ * The caller's transitions as SSE frames, from `from` (exclusive) until the client leaves or the
+ * hour cap. Separate from the handler so a test can drive it with an injected clock; `sleep` and
+ * `maxMs` are test seams, not settings.
+ *
+ * Backpressure is server.ts's `writeStream`, which stops pulling from this generator while the
+ * socket is full and calls `return()` when it closes -- so a slow client slows the READS, which is
+ * the whole point of streaming from a bounded log rather than buffering a page.
+ */
+export async function* eventFrames(o: {
+  turns: TurnStore;
+  owner: string;
+  from: string;
+  gap: boolean;
+  now: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  maxMs?: number;
+}): AsyncGenerator<string> {
+  // writeStream pulls the first chunk BEFORE writing the status, so yield at once: without this the
+  // client has no headers until its first transition, which on a quiet account is never.
+  yield ': ok\n\n';
+  if (o.gap) yield `event: gap\ndata: ${JSON.stringify({ since: o.from })}\n\n`;
+  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const started = o.now();
+  const maxMs = o.maxMs ?? EVENT_MAX_MS;
+  let cursor = o.from;
+  let quiet = o.now();
+  while (o.now() - started < maxMs) {
+    const batch = await o.turns.readEvents(o.owner, cursor, EVENT_PAGE);
+    if (batch.length > 0) {
+      for (const e of batch) {
+        yield turnFrame(e);
+        cursor = e.cursor!;
+      }
+      quiet = o.now();
+      continue; // drain a backlog without pausing between pages
+    }
+    // The keepalive is also how a departed client is noticed: writeStream only learns the socket
+    // closed on a write, so an idle stream with no keepalive holds a dead connection open.
+    if (o.now() - quiet >= EVENT_HEARTBEAT_MS) {
+      quiet = o.now();
+      yield ': keepalive\n\n';
+    }
+    await sleep(EVENT_IDLE_MS);
+  }
 }
 
 export const TURN_HANDLERS: Record<string, Handler> = {
@@ -307,5 +379,46 @@ export const TURN_HANDLERS: Record<string, Handler> = {
     return outcome === 'cancelling'
       ? { status: 202, body: { turnId: turn.turnId, state: 'running', cancelRequested: true } }
       : { status: 202, body: { turnId: turn.turnId, state: 'cancelled' } };
+  },
+
+  /**
+   * GET /v1/events (#392). An SSE stream of the caller's OWN turn transitions, resumable by the
+   * cursor every event carries. `requirePrincipal` comes first because the authz enumeration sweep
+   * calls this with no principal and requires `token_required` -- and because `service(deps)`
+   * answers `internal_error`, which must not shadow a missing token.
+   */
+  streamEvents: async (ctx, deps) => {
+    const principal = requirePrincipal(ctx);
+    const owner = principal.sub;
+    const { turns } = service(deps);
+    const since = ctx.query.get('since') ?? undefined;
+    if (since !== undefined && !CURSOR_RE.test(since)) {
+      throw new CpError('invalid_request', 'since must be an event cursor');
+    }
+    // No `since` means "from now": replaying a weekend of transitions to a client that asked for
+    // none is the surprise, not the service.
+    const from = since ?? (await turns.lastEventId(owner));
+    const oldest = await turns.firstEventId(owner);
+    // Retention moved past the client's cursor: say so rather than imply continuity it lost.
+    //
+    // An EMPTY log counts, and is the case that matters most: `EXPIRE` is re-armed only by an
+    // append, so an owner idle for the window loses the WHOLE stream rather than its head. Without
+    // `!oldest` such a client resumes silently at a later id -- the hole the frame exists to name.
+    //
+    // `'0-0'` is exempt, empty log or not: it is the documented "everything retained" sentinel
+    // rather than a cursor this service ever issued, so its holder saw nothing it could have
+    // missed. The frame answers "did my cursor fall out of the window", which that caller has not
+    // asked.
+    const gap = Boolean(
+      since && since !== FROM_START && (!oldest || compareCursor(since, oldest) < 0),
+    );
+    return {
+      status: 200,
+      contentType: 'text/event-stream',
+      // `x-accel-buffering` is for an nginx/OpenShift route in front: without it a proxy may hold
+      // frames until its buffer fills, which turns a live stream into a batch one.
+      headers: { 'cache-control': 'no-store', 'x-accel-buffering': 'no' },
+      body: eventFrames({ turns, owner, from, gap, now: deps.now }),
+    };
   },
 };

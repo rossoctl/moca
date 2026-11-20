@@ -18,8 +18,10 @@ import type {
   SessionToken,
   SubmitTurnRequest,
   SubmittedTurn,
+  TurnEvent,
   TurnStatus,
 } from './types.js';
+import { readSse } from './sse-parser.js';
 
 type Query = Record<string, string | number | undefined>;
 
@@ -55,13 +57,15 @@ export class ControlPlaneClient implements ControlPlaneApi {
       query?: Query;
       retried?: boolean;
       signal?: AbortSignal;
+      /** Overrides the JSON default; the event stream asks for `text/event-stream`. */
+      accept?: string;
     } = {},
   ): Promise<Response> {
     const url = new URL(this.base + path);
     for (const [k, v] of Object.entries(opts.query ?? {})) {
       if (v !== undefined) url.searchParams.set(k, String(v));
     }
-    const headers: Record<string, string> = { accept: 'application/json' };
+    const headers: Record<string, string> = { accept: opts.accept ?? 'application/json' };
     if (opts.body !== undefined) headers['content-type'] = 'application/json';
     if (opts.auth !== false) {
       const token = this.getToken();
@@ -262,6 +266,30 @@ export class ControlPlaneClient implements ControlPlaneApi {
       'DELETE',
       `/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`,
     );
+  }
+
+  /**
+   * The owner-scoped event stream (#392): one `TurnEvent` per transition of the caller's own turns,
+   * `since` EXCLUSIVE. Without `since` the server starts from now and replays nothing.
+   *
+   * The generator ends when the server closes the stream (it caps one at an hour) or the body is
+   * cut short; reopen it with the last event's `cursor` to continue exactly where it stopped.
+   * `onGap` fires at most once, before any event, when `since` fell out of retention: the caller has
+   * a hole and must read the turns themselves rather than assume continuity.
+   */
+  async *streamEvents(
+    opts: { since?: string; signal?: AbortSignal; onGap?: (since: string) => void } = {},
+  ): AsyncGenerator<TurnEvent> {
+    const res = await this.request('GET', '/v1/events', {
+      accept: 'text/event-stream',
+      ...(opts.since === undefined ? {} : { query: { since: opts.since } }),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    });
+    if (!res.body) return;
+    for await (const e of readSse(res.body)) {
+      if (e.event === 'turn') yield JSON.parse(e.data) as TurnEvent;
+      else if (e.event === 'gap') opts.onGap?.((JSON.parse(e.data) as { since: string }).since);
+    }
   }
 
   async listCredentials(): Promise<CredentialDescriptor[]> {

@@ -2,6 +2,7 @@ import type { BundleRedisLike } from '@moca/config-bundle';
 import type { BundleBudgetRedisLike } from '../../src/bundle-budget.js';
 import type { CpRedisLike } from '../../src/ownership.js';
 import { CAS_STATE_LUA, RESERVE_RUNNING_LUA } from '../../src/turn-store.js';
+import { compareCursor } from '../../src/turn-record.js';
 import type { ResultRedisLike } from '../../src/turn-result.js';
 
 /**
@@ -18,6 +19,13 @@ export function fakeRedis() {
   const strings = new Map<string, string>();
   const zsets = new Map<string, { score: number; value: string }[]>();
   const streams = new Map<string, Record<string, string>[]>();
+  /**
+   * The same rows WITH their entry ids, which is what a cursor is. `streams` keeps the bare fields
+   * because every audit assertion in this package reads it that way; the field objects are shared,
+   * so the two views cannot disagree.
+   */
+  const entries = new Map<string, { id: string; message: Record<string, string> }[]>();
+  let streamSeq = 0;
   const ops: string[] = [];
   const expires: { key: string; seconds: number }[] = [];
   const redis: CpRedisLike & ResultRedisLike = {
@@ -101,10 +109,26 @@ export function fakeRedis() {
     async zScore(key, member) {
       return (zsets.get(key) ?? []).find((m) => m.value === member)?.score ?? null;
     },
-    async xAdd(key, _id, fields) {
+    async xAdd(key, id, fields, options) {
       ops.push(`xAdd ${key}`);
-      streams.set(key, [...(streams.get(key) ?? []), fields]);
-      return '1-0';
+      // The id was DISCARDED here before #392, and the id is the cursor -- a fake that minted none
+      // could not serve a resume at all. Monotonic across keys, which is all a cursor needs.
+      const entryId = id === '*' ? `${++streamSeq}-0` : id;
+      const max = options?.TRIM?.threshold;
+      // MAXLEN exactly, not `~`: approximating is a free pass a fake does not need, and a test that
+      // asserts the log is bounded has to see it bounded. Both views are trimmed together.
+      const trim = <T>(rows: T[]): T[] => (max === undefined ? rows : rows.slice(-max));
+      streams.set(key, trim([...(streams.get(key) ?? []), fields]));
+      entries.set(key, trim([...(entries.get(key) ?? []), { id: entryId, message: fields }]));
+      return entryId;
+    },
+    async xRange(key, start, end, options) {
+      const rows = (entries.get(key) ?? []).filter((r) => inIdRange(r.id, start, end));
+      return options?.COUNT === undefined ? rows : rows.slice(0, options.COUNT);
+    },
+    async xRevRange(key, end, start, options) {
+      const rows = (entries.get(key) ?? []).filter((r) => inIdRange(r.id, start, end)).reverse();
+      return options?.COUNT === undefined ? rows : rows.slice(0, options.COUNT);
     },
     async hSetNX(key, field, value) {
       ops.push(`hSetNX ${key} ${field}`);
@@ -152,10 +176,22 @@ export function fakeRedis() {
       const next = { ...h };
       for (let i = 0; i < flat.length; i += 2) next[flat[i]!] = flat[i + 1]!;
       hashes.set(keys[0]!, next);
-      return 1;
+      // The three-element table CAS_STATE_LUA returns to a winner; a loser is still 0 above.
+      return [state, next.owner ?? '', next.sessionId ?? ''];
     },
   };
-  return { redis, hashes, strings, zsets, streams, ops, expires };
+  return { redis, hashes, strings, zsets, streams, entries, ops, expires };
+}
+
+/** `-`/`+`/`<id>`/`(<id>` as XRANGE reads them: a bare id inclusive, a `(`-prefixed one not. */
+function inIdRange(id: string, start: string, end: string): boolean {
+  const lo =
+    start === '-' ||
+    (start.startsWith('(') ? compareCursor(id, start.slice(1)) > 0 : compareCursor(id, start) >= 0);
+  const hi =
+    end === '+' ||
+    (end.startsWith('(') ? compareCursor(id, end.slice(1)) < 0 : compareCursor(id, end) <= 0);
+  return lo && hi;
 }
 
 /** Parse a node-redis score bound: a number, '+inf'/'-inf', or '(' for exclusive. */

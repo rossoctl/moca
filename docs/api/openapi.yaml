@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.33.0
+  version: 1.34.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -293,6 +293,22 @@ components:
           description: |
             the model the session's turns run on, as chosen at creation or by PATCH; null when it
             runs on the deployment default
+    TurnEvent:
+      type: object
+      description: One turn state transition, as a `turn` frame's `data` (API 1.34.0).
+      required: [cursor, ts, sessionId, turnId, state, attempts]
+      additionalProperties: false
+      properties:
+        cursor: { type: string, pattern: '^[0-9]+-[0-9]+$', description: this event's `since` }
+        ts: { type: integer, description: epoch ms the transition was recorded }
+        sessionId: { type: string }
+        turnId: { type: string }
+        state:
+          type: string
+          enum: [queued, running, paused, responded, done, solved, failed, cancelled, lost]
+        attempts: { type: integer }
+        reason: { type: string, description: the terminal reason, when there is one }
+        gate: { type: string, description: the gate the turn is waiting on, when there is one }
     TurnStatus:
       type: object
       required: [turnId, state, attempts]
@@ -2192,6 +2208,63 @@ paths:
               schema: { type: string }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+  /v1/events:
+    get:
+      operationId: streamEvents
+      summary: The caller's own turn transitions, as they happen
+      description: |
+        A Server-Sent Events stream of every state change of the CALLER'S OWN turns -- `queued` at
+        submission, `running` at the claim, and the terminal state -- oldest first, resumable by the
+        cursor each event carries. Scoped by the token's subject: another subject's transitions are
+        never on this stream.
+
+        Frames:
+
+        - `event: turn` -- a transition. `id:` is its cursor and `data` is a `TurnEvent`.
+        - `event: gap` -- sent once, before any `turn` frame, when `since` is older than the oldest
+          retained event, or when nothing at all is retained (a subject idle for the retention
+          window loses the whole log, not just its head): transitions between the two are gone, so
+          read the turns themselves (`GET /v1/sessions/{id}/turns/{turnId}`) rather than assume
+          continuity. `since=0-0` is exempt -- it asks for everything retained rather than resuming
+          from an issued cursor, so there is nothing it could have missed.
+        - a comment line (`: ok` at the start, `: keepalive` while idle) -- not an event; no `id:`,
+          so no cursor moves.
+
+        Reconnect with `since=<the last id you saw>` to continue immediately after it. Without
+        `since` the stream starts from now and replays nothing. Events are retained as long as a
+        turn record (`MOCA_TURN_RESULT_TTL_SECONDS`, 7 days by default) and bounded to the newest
+        500 per subject, so a client away longer than that is told `gap`.
+
+        The server ends the stream after an hour; reconnect with the last cursor.
+      security: [{ sessionToken: [] }]
+      parameters:
+        - name: since
+          in: query
+          description: >
+            the cursor of the last event seen; absent means "from now", and `0-0` means everything
+            retained
+          schema: { type: string, pattern: '^[0-9]+-[0-9]+$' }
+      responses:
+        '200':
+          description: the event stream
+          content:
+            text/event-stream:
+              schema: { type: string, description: SSE frames as described above }
+        '400':
+          description: invalid_request -- `since` is not a cursor
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401':
+          description: token_required
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: redis_unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
   /v1/credentials:
     get:
       operationId: listCredentials
