@@ -69,7 +69,8 @@ a repository's sandbox, in the order you use it:
                                                  yourself for your own servers). Its local tools
                                                  are denied (--disallowed-tools) from any
                                                  directory, except in a repo up --cortex set up,
-                                                 where Cortex blocks them
+                                                 where Cortex blocks them. Auto-memory is off
+                                                 in every mode (CLAUDE_CODE_DISABLE_AUTO_MEMORY=1)
   mocactl sbx codex [-- CODEX_ARGS ...]          run Codex CLI on this sandbox's MCP tools, for one
                                                  run (-c, nothing written: Codex reads no
                                                  project-local config, so up cannot configure it).
