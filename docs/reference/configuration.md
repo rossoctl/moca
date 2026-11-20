@@ -381,8 +381,8 @@ It reads the same `RELAY_*` and `SANDBOX_*` variables (defaults `SANDBOX_ID=sbx-
 | `SH_SNAPSHOT_IMAGE`                                     | `default`                                   |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 
 `SH_EXEC_TIMING=1` (off unless exactly `1`) writes the container worker's `exec-timing` line per Exec, with the
-same fields, plus the phases `ExecPhased` computes (`acquire_us`, `resume_us`, `mount_us`, `run_us`, `destroy_us`,
-`cold`) and the VM's CPU from its pooled cgroup's `cpu.stat`, read after the acquire and before the destroy.
+same fields, plus the phases `ExecPhased` computes (`acquire_us`, `resume_us`, `mount_us`, `normalise_us`, `run_us`,
+`destroy_us`, `cold`; `normalise_us` is a lease start's ownership walk, 0 on every other Exec) and the VM's CPU from its pooled cgroup's `cpu.stat`, read after the acquire and before the destroy.
 `user_ms=-1 sys_ms=-1` means not measured, never no CPU. Scheduling, admission and teardown are unchanged (#576).
 
 `SH_VIRTIOFSD_UID` and `SH_VIRTIOFSD_GID` (default `65534`) are read only in the Cloud Hypervisor arm, so
