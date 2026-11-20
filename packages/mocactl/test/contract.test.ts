@@ -89,6 +89,9 @@ const USED: Array<{ method: string; path: string; reads?: string[]; sends?: stri
   { method: 'delete', path: '/v1/sessions/{id}/turns/{turnId}' },
   // No `reads`: the body is the artifact's own bytes, not JSON.
   { method: 'get', path: '/v1/sessions/{id}/turns/{turnId}/artifacts/{kind}' },
+  // Nor here: the body is an SSE stream, and the frame's own shape is `TurnEvent` (#392), which
+  // the control plane's own openapi-contract test pins field by field.
+  { method: 'get', path: '/v1/events' },
 ];
 
 // The same for `mocactl sbx`'s SandboxApiClient (SBX0 §5.1), beyond the calls it inherits.
@@ -380,6 +383,8 @@ describe('control-plane contract (docs/api/openapi.yaml)', () => {
     await cProxy.getTurn('ID', 'TURN');
     await cProxy.getTurnArtifact('ID', 'TURN', 'patch');
     await cProxy.cancelTurn('ID', 'TURN');
+    // Drained, not just opened: the request is made on the first `next()`.
+    for await (const _e of cProxy.streamEvents()) break;
     const seen = calls.map((k) => {
       const path = new URL(k.url).pathname
         .replace('/ID', '/{id}')

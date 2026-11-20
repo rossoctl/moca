@@ -67,9 +67,10 @@ usage:
                                                  refuse the dispatch when N of your subagents are
                                                  already running (default 4)
   mocactl subagents [--tag T] [--json]            list spawned subagents + current state
-  mocactl watch [--tag T] [--json]                one line per state change, until every watched
+  mocactl watch [--tag T] [--since C] [--json]   one line per state change, until every watched
                                                  subagent is finished (--json: one JSON object per
-                                                 line, for an agent's background monitor)
+                                                 line, for an agent's background monitor; --since
+                                                 resumes the event stream after cursor C)
   mocactl get SESSIONID [--out DIR] [--json]      write result files + bounded summary
   mocactl get SESSIONID --wait [--timeout S]     block until the result is there, then write it
                                                  (default 300 s; exit 1 and status 'queued' if the
@@ -298,9 +299,17 @@ hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo
   `subagents` lists, read the same way (a `turnId` row through its turn, any other through
   `GET /runs/status`), and persisted the same way. The first sweep reports every row, so watching a
   batch that is already over says so rather than printing nothing; after that a row is printed only
-  when its state or detail changes. It polls every 5 s, slower than `get --wait`'s 2 s, because it
-  is meant to run as a background monitor rather than as an interactive wait. The ledger is re-read
-  each tick, so a `spawn --tag T` from another terminal joins a running `watch --tag T` — spawn
+  when its state or detail changes. It follows the owner-scoped event stream
+  `GET /v1/events` (#392), so a transition appears within milliseconds instead of at the next poll,
+  and a turn that starts and finishes quickly still produces its `running` line. `--since C` resumes
+  the stream after cursor `C`; every `--json` line carries the `cursor` of the event that produced
+  it (`null` on a line from the fallback read), which is what a reattach hook stores. A cursor older
+  than the server's retention window prints a note on stderr and the state comes from a read.
+  Behind the stream is a 60 s read of every non-final row, which is what `watch` did before the
+  stream existed and is still the whole answer for three cases: a synchronous row, which has no turn
+  and therefore no events; a deployment whose control plane has no `/v1/events`, which is not an
+  error; and an event the server lost. The ledger is re-read
+  each sweep, so a `spawn --tag T` from another terminal joins a running `watch --tag T` — spawn
   some, watch, spawn more. It exits 0 once every watched row is `done`, `failed`, `paused` or
   `unknown`. `unknown` counts as finished even though it is not a terminal state: it is the client's
   "no result is coming" — a child that exited without writing one, past the 60 s result-write grace,
@@ -331,8 +340,9 @@ hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo
     with `--async`, which has no local process to name.
   - `subagents` → `{"subagents":[{"sessionId","tag","label"?,"kind","state","detail","bundle","workload","writable"?,"submittedAt"}]}` (`label` and `writable` are present only on rows dispatched with them). The non-`--json` table columns are `SESSION TAG LABEL KIND STATE BUNDLE` (`-` on unlabeled rows).
   - `watch` → NDJSON, one event per line:
-    `{"sessionId","tag","label"?,"kind","state","detail","at"}` (`at` is epoch milliseconds; the
-    other fields are `subagents --json`'s, so one parser reads both). Without `--json` each line is
+    `{"sessionId","tag","label"?,"kind","state","detail","cursor","at"}` (`at` is epoch
+    milliseconds; `cursor` is the event this line came from, `null` on a line from the fallback
+    read; the other fields are `subagents --json`'s, so one parser reads both). Without `--json` each line is
     `state  sessionId  [label or tag]  (detail)`, the state padded so the ids line up.
   - `get` → `{"sessionId","status","files":[…],"reason"?,"message"?}`, or
     `{"sessionId","status":"queued"}` with nothing to collect, or

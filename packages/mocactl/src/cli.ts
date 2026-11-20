@@ -90,9 +90,10 @@ export const USAGE = `usage:
                                                  refuse the dispatch when N of your subagents are
                                                  already running (default 4)
   mocactl subagents [--tag T] [--json]            list spawned subagents + current state
-  mocactl watch [--tag T] [--json]                one line per state change, until every watched
+  mocactl watch [--tag T] [--since C] [--json]   one line per state change, until every watched
                                                  subagent is finished (--json: one JSON object per
-                                                 line, for an agent's background monitor)
+                                                 line, for an agent's background monitor; --since
+                                                 resumes the event stream after cursor C)
   mocactl get SESSIONID [--out DIR] [--json]      write result files + bounded summary
   mocactl get SESSIONID --wait [--timeout S]     block until the result is there, then write it
                                                  (default 300 s; exit 1 and status 'queued' if the
@@ -198,6 +199,7 @@ const OPTIONS = {
   repo: { type: 'string' },
   ref: { type: 'string' },
   tag: { type: 'string' },
+  since: { type: 'string' },
   label: { type: 'string' },
   out: { type: 'string' },
   wait: { type: 'boolean' },
@@ -329,6 +331,10 @@ async function mainWith(
     io.err(
       `--tag only applies to \`mocactl spawn\`, \`mocactl subagents\` and \`mocactl watch\`\n${help}`,
     );
+    return 2;
+  }
+  if (values.since !== undefined && command !== 'watch') {
+    io.err(`--since only applies to \`mocactl watch\`\n${help}`);
     return 2;
   }
   if (values.label !== undefined && command !== 'spawn') {
@@ -603,7 +609,7 @@ async function mainWith(
     }
     case 'watch': {
       if (rest.length > 0) return usage(io, help);
-      return cmdWatch(rt, io, { tag: values.tag, json, signal });
+      return cmdWatch(rt, io, { tag: values.tag, since: values.since, json, signal });
     }
     case 'get': {
       const [sid, ...extra] = rest;
