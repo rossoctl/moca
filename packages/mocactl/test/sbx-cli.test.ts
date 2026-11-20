@@ -1174,6 +1174,42 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       if (outcome === 'unknown_key') expect(io.errs).not.toContain(note);
       else expect(io.errs.at(-1)).toBe(note);
     }
+    // A release that got no answer (cancelled, timed out, unavailable) may still have reached the
+    // worker: the relay writes the frame before it waits (#951 review). Before a failed DELETE, rm
+    // says the workspace may have been released; a refused or unsupported release says nothing.
+    for (const code of ['cancelled', 'timeout', 'unavailable', 'failed', 'denied'] as const) {
+      const { home, env, io } = setup();
+      const cp = fakeCp({
+        [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox({ mode: 'per-exec' }) }),
+        [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+        [`DELETE /v1/sandboxes/${SBX}`]: () => ({
+          status: 500,
+          body: { error: 'internal', message: 'boom' },
+        }),
+      });
+      const execFactory: ExecFactory = () => ({
+        exec: async () => {
+          throw new Error('no command runs in this test');
+        },
+        close: () => {},
+        ...fakeLease(() => new LeaseControlError('unavailable', 'no worker')),
+        release: async () => {
+          throw new LeaseControlError(code, `release ${code}`);
+        },
+      });
+      expect(
+        await sbxMain(['rm', '--force', SBX], env, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+          execFactory,
+        }),
+      ).not.toBe(0);
+      const maybe =
+        `sbx: ${SBX}'s workspace may have been released on its worker (the release got no answer); ` +
+        `if it was, the sandbox takes no more commands until it is deleted: re-run \`mocactl sbx rm ${SBX}\``;
+      if (code === 'failed' || code === 'denied') expect(io.errs).not.toContain(maybe);
+      else expect(io.errs.at(-1)).toBe(maybe);
+    }
     for (const broken of ['lease', 'get'] as const) {
       const { home, env, io } = setup();
       const cp = fakeCp({
@@ -1267,6 +1303,46 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(await p).toBe(130);
     expect(x.cp.calls.some((c) => c.method === 'DELETE')).toBe(false);
     expect(x.io.errs.join('\n')).toContain('nothing was deleted');
+    // Ctrl-C while the RELEASE waits (#951 review): the frame may be on the worker's stream, so
+    // besides "nothing was deleted" rm says the workspace may have been released.
+    const r = setup();
+    const rcp = fakeCp({
+      [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox({ mode: 'per-exec' }) }),
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+      [`DELETE /v1/sandboxes/${SBX}`]: () => ({
+        status: 200,
+        body: { id: SBX, state: 'terminated', reason: 'deleted' },
+      }),
+    });
+    let releasing = 0;
+    const rFactory: ExecFactory = () => ({
+      exec: async () => {
+        throw new Error('no command runs in this test');
+      },
+      close: () => {},
+      leaseControl: async () => ({}) as never,
+      leaseKeepalive: async () => {},
+      release: (o) =>
+        new Promise((_res, rej) => {
+          releasing += 1;
+          o?.signal?.addEventListener('abort', () =>
+            rej(new LeaseControlError('cancelled', 'the release was cancelled')),
+          );
+        }),
+    });
+    const rac = new AbortController();
+    const rp = sbxMain(['rm', '--force', SBX], r.env, r.io, {
+      home: r.home,
+      fetchImpl: rcp.fetchImpl,
+      execFactory: rFactory,
+      signal: rac.signal,
+    });
+    await vi.waitFor(() => expect(releasing).toBe(1));
+    rac.abort();
+    expect(await rp).toBe(130);
+    expect(rcp.calls.some((c) => c.method === 'DELETE')).toBe(false);
+    expect(r.io.errs.join('\n')).toContain('nothing was deleted');
+    expect(r.io.errs.at(-1)).toContain('may have been released on its worker');
   });
 
   it("rm's 15 s bound covers the record read and the token mint too; Ctrl-C there deletes nothing (review #4569829061)", async () => {
