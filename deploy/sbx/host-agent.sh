@@ -11,6 +11,12 @@
 # from the template record template-build.sh wrote, with its relay token from setup.sh). A wanted
 # build whose worker is not installed is reported `refused`, never installed here.
 #
+# Egress credentials (#923): on a host where install-host.sh --egress turned them on (its drop-in
+# exists), a claimed spec with egress true is built with --egress-ca and the host's CA, so the
+# snapshot trusts this host's TLS interception and install-host.sh's CA check passes. The CA is part
+# of the build's identity (its manifest hash). With credentials on and no CA file, the build is
+# reported failed rather than built into a snapshot the worker install would refuse.
+#
 #   sudo deploy/sbx/host-agent.sh --once          one poll (the unit's timer runs it)
 #   sudo deploy/sbx/host-agent.sh --wanted-only   the inventory and the wanted state only: no claim,
 #                                                 no build (sbx-host-agent-wanted's timer, every 15 s,
@@ -91,6 +97,8 @@
 #   SBX_API_CA_FILE          optional; the CA to verify the API Route with
 #   SBX_SRV                  default /srv/sbx: snapshots under $SBX_SRV/snapshots, records under templates/
 #   SBX_ENV_DIR              default /etc/sbx
+#   SBX_UNIT_DIR             default /etc/systemd/system: where install-host.sh put moca-egress's
+#                            credentials drop-in (read only, to tell whether egress credentials are on)
 #   SBX_DISK_FLOOR_GB        default 60: no build is claimed below this much free disk on $SBX_SRV
 #                            (template-build.sh's own refusal)
 #   SBX_BUILD_CONCURRENCY    default 1 (1-4): builds claimed per poll
@@ -214,7 +222,7 @@ error() { ERRORS=$((ERRORS + 1)); say "{\"agent\":\"error\",\"why\":$(jq -Rn --a
 check_settings() {
   local t
   for t in jq curl df mktemp base64 sha256sum systemctl flock; do command -v "$t" >/dev/null || refuse "needs $t on PATH"; done
-  SBX_SRV="${SBX_SRV-/srv/sbx}" SBX_ENV_DIR="${SBX_ENV_DIR-/etc/sbx}"
+  SBX_SRV="${SBX_SRV-/srv/sbx}" SBX_ENV_DIR="${SBX_ENV_DIR-/etc/sbx}" SBX_UNIT_DIR="${SBX_UNIT_DIR-/etc/systemd/system}"
   [[ "$SBX_SRV" =~ ^(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$ ]] || refuse "SBX_SRV='$SBX_SRV' must be an absolute path other than /"
   [[ "${SBX_API_URL:-}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || refuse 'SBX_API_URL must be https://<api host>'
   [[ "${SBX_HOST_ID:-}" =~ $HOST_ID_RE ]] || refuse "SBX_HOST_ID must match $HOST_ID_RE"
@@ -407,6 +415,12 @@ log_tail() { # log_tail HANDLE FILE: the build log's last 200 lines, redacted, a
   api POST "/v1/hosts/$SBX_HOST_ID/builds/$1/log" "$WORK/log.json" >/dev/null || error "log upload for $1 failed"
 }
 
+# The egress-credentials layout install-host.sh writes (its EGRESS_CRED_DIR and egress_dropin):
+# credentials are on when the drop-in exists, and the CA a snapshot must trust is the ca.crt beside
+# the other credential files. Kept in step with install-host.sh by hand.
+egress_dropin() { printf '%s/moca-egress.service.d/sbx-credentials.conf' "$SBX_UNIT_DIR"; }
+egress_ca() { printf '%s/egress/ca.crt' "$SBX_ENV_DIR"; }
+
 # fail_claimed HANDLE STEP WHY: a claimed build that the agent cannot carry on with is reported
 # failed (best effort), so it does not stay `building`, and count against its owner's queue, until
 # cancelled by hand. WHY is the agent's own fixed wording, never a build's output.
@@ -438,6 +452,12 @@ build_one() { # build_one JOB_JSON
     args+=(--gate-record "$WORK/$handle.gate.json")
   fi
   [[ -z "${SBX_REGISTRY:-}" ]] || args+=(--registry "$SBX_REGISTRY")
+  # A spec with egress true on a host with egress credentials on is built to trust the host's CA
+  # (#923); template-build.sh refuses --egress-ca for a spec without egress.
+  if [[ -f "$(egress_dropin)" ]] && jq -e '.egress == true' "$spec" >/dev/null; then
+    [[ -f "$(egress_ca)" ]] || { fail_claimed "$handle" egress 'egress credentials are on but the host has no CA: run install-host.sh --egress'; return; }
+    args+=(--egress-ca "$(egress_ca)")
+  fi
   report "$handle" '{"event":"building"}' >/dev/null || { fail_claimed "$handle" report 'the building report was not accepted'; return; }
   "$SBX_TEMPLATE_BUILD" "$spec" --kernel "$SBX_KERNEL" ${args[@]+"${args[@]}"} >"$WORK/$handle.log" 2>&1 || rc=$?
   # The full, unredacted log stays on the host (root-only), for whoever runs it; only redacted text
