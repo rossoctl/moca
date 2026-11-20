@@ -149,6 +149,7 @@ components:
             - async_quota_exhausted
             - workload_runs_unavailable
             - turn_not_cancellable
+            - gate_not_pending
             - turn_not_claimable
             - turn_not_found
             - credential_required

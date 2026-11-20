@@ -146,6 +146,14 @@ export interface TurnRecord {
    * turn is still cancelled outright and never carries this.
    */
   cancelRequested?: boolean;
+  /**
+   * The PAUSED turn this one resumes (#393). A decision does not reopen a paused record -- it cannot:
+   * `toTerminal` CASes against the open states, so a terminal record never transitions again. So the
+   * resume is a new turn that copies the paused one's envelope and appends the decision, and this
+   * field is the only link between them. It is also the "already answered" marker the decision route
+   * reads, which is why it is on the RESUME rather than on the paused turn.
+   */
+  resumeOf?: string;
 }
 
 export const turnKey = (turnId: string): string => `sh:cp:turn:${turnId}`;
@@ -310,6 +318,16 @@ export function compareCursor(a: string, b: string): number {
  * on every terminal transition, so the index never expires before a member it would have to reach.
  */
 export const sessionTurnsKey = (sessionId: string): string => `sh:cp:session:${sessionId}:turns`;
+
+/**
+ * Paused turns awaiting a decision, scored by their deadline (#393, design §3). One global zset
+ * rather than one per owner: the sweep is a single pass for the whole deployment, and an owner with
+ * no gates must cost it nothing.
+ *
+ * Takes the key tag the way nothing else in this block does, because it is the only key here with no
+ * id to tag -- and an untagged global index would leak between the test suites `keyTag` isolates.
+ */
+export const gateIndexKey = (tag?: string): string => (tag ? `sh:cp:gates:${tag}` : 'sh:cp:gates');
 
 /** Owner-scoped, so one owner's key cannot address another's turn. */
 export const idempotencyKeyKey = (owner: string, key: string): string =>

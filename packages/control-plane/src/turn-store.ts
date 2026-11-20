@@ -210,6 +210,8 @@ export class TurnStore {
         state: rec.state,
         attempts: String(rec.attempts),
         createdAt: String(rec.createdAt),
+        // Only when set: an empty string here would read back as a resume of a turn named ''.
+        ...(rec.resumeOf ? { resumeOf: rec.resumeOf } : {}),
       }),
     );
     // The OPEN set, written after the hash: a member whose hash is missing reads as "already gone"
@@ -291,7 +293,38 @@ export class TurnStore {
       createdAt: Number(h.createdAt ?? 0),
       ...(h.endedAt ? { endedAt: Number(h.endedAt) } : {}),
       ...(h.cancelRequested === '1' ? { cancelRequested: true } : {}),
+      ...(h.resumeOf ? { resumeOf: h.resumeOf } : {}),
     };
+  }
+
+  /**
+   * This session's newest `paused` turn, and whether a later turn already resumed it (#393).
+   *
+   * Newest-first over the session index, stopping at the first paused record: a resume is created
+   * after the turn it resumes, so every candidate resume has been seen by then. Bounded by `scan`
+   * rather than walking a week of turns -- a session whose last 50 turns are all unpaused has no
+   * pending gate worth finding, and the alternative (a second index keyed by session) would have to
+   * be kept in step with every transition.
+   */
+  async findPausedBySession(
+    sessionId: string,
+    scan = 50,
+  ): Promise<{ paused: TurnRecord; resumed: boolean } | null> {
+    const ids = await this.guard(() =>
+      this.redis.zRange(this.sessionKey(sessionId), '+inf', '-inf', {
+        BY: 'SCORE',
+        REV: true,
+        LIMIT: { offset: 0, count: scan },
+      }),
+    );
+    const resumed = new Set<string>();
+    for (const id of ids) {
+      const rec = await this.get(id);
+      if (!rec) continue;
+      if (rec.resumeOf) resumed.add(rec.resumeOf);
+      if (rec.state === 'paused') return { paused: rec, resumed: resumed.has(rec.turnId) };
+    }
+    return null;
   }
 
   /**

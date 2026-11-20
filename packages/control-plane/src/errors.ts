@@ -55,6 +55,7 @@ export const CP_ERROR_CODES = [
   'async_quota_exhausted',
   'workload_runs_unavailable',
   'turn_not_cancellable',
+  'gate_not_pending',
   'turn_not_found',
   'turn_not_claimable',
   'credential_required',
@@ -171,6 +172,12 @@ const STATUS: Record<CpErrorCode, number> = {
   // 409: DELETE on a turn that is not `queued`. A running leaf finishes and writes its result; the
   // message names the state so a client need not guess why (async spec §4.5).
   turn_not_cancellable: 409,
+  // 409: ONE code for every way a decision can arrive too late -- no paused turn on the session, a
+  // `gateId` that is not the pending one, and a gate already answered (by a human or by the deadline
+  // sweep). Deliberately not split: the client's move is the same in all three (re-read the turn),
+  // and separate codes would tell a caller which of them it was for a session it may not be racing
+  // alone.
+  gate_not_pending: 409,
   // 404: the dequeue exchange was handed a turn id with no record, and it is what tells a worker
   // holding a stale queue entry to ack and drop rather than retry. Deliberately DISTINGUISHABLE
   // from the other claim refusals, and NOT the 404-not-403 of spec §8.1 -- the argument lives in
