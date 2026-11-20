@@ -593,8 +593,20 @@ sudo rm -rf "$O"
 
 ## Workspace lifetime (#338)
 
-Idle reclaim is the **only** thing that deletes a session's workspace, and a later turn is not told
-it happened. The next turn simply starts in an empty workspace.
+Idle reclaim deletes a session's workspace once it has been idle for the worker's workspace lifetime,
+and a later turn is not told it happened: the next turn simply starts in an empty workspace. A worker
+that supports it also frees a workspace when a client sends `Release` for its key (#338).
+
+**After a restart.** A restarted worker starts with no record of the previous process's workspaces,
+so its idle reclaim cannot reach them. At startup, before it serves anything, it frees what the
+previous process left under `SH_WORKSPACE_ROOT`: every `.reclaiming-*` tombstone, and every directory
+named as a workspace key whose newest mtime (the directory's or its `workspace.img`'s) is older than
+`SH_WORKSPACE_IDLE`, the rule the sandbox service's host janitor applies to an unknown directory. A
+younger one is kept: its session may be between turns. Entries no key can name (`.lease-state`,
+`_probe`) are left alone, and a symlink is removed as the link, never its target. The worker logs a
+count when it frees anything. (The container tier removes only tombstones at startup: its root is
+also the shared workspace, so a directory's name alone cannot tell a key's workspace from shared
+content.)
 
 The worker's default lifetime is 30 minutes. That is too short for a session waiting on a person, so
 `SH_WORKSPACE_IDLE` (a Go duration) sets it, and the installer writes `8h`. The worker refuses a value

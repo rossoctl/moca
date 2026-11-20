@@ -339,6 +339,10 @@ func main() {
 	if wsErr != nil {
 		log.Fatalf("%v", wsErr)
 	}
+	// A previous process's unfinished deletes (#338); unknown directories are never adopted.
+	if n := runner.SweepTombstonesAtStart(); n > 0 {
+		log.Printf("worker: startup sweep: removed %d tombstone(s) under %s", n, runner.Root)
+	}
 	go runner.SweepEvery(ctx, sweepInterval(runner.Idle))
 
 	// One Session across every connection: its dedup cache must survive reconnects,

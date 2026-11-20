@@ -80,9 +80,9 @@ var tombstoneSeq atomic.Uint64
 // and RemoveAll, and holding p.mu across a recursive delete would put an rm -rf of a
 // 2 GiB image in front of every other run's Exec.
 //
-// A tombstone left behind by a crashed worker is no worse than the workspace it replaced,
-// which also survives a crash today with nothing that reclaims it — a restarted worker
-// starts with an empty runs map and never sweeps a directory it does not know about.
+// A tombstone left behind by a crashed worker is no worse than the workspace it replaced:
+// the next process's startupSweep removes both, a tombstone at once and an unknown
+// workspace once it is older than WorkspaceIdle (#338).
 func detachWorkspace(dir string) (string, error) {
 	tomb := filepath.Join(filepath.Dir(dir), fmt.Sprintf("%s%s-%d-%d",
 		tombstonePrefix, filepath.Base(dir), time.Now().UnixNano(), tombstoneSeq.Add(1)))
