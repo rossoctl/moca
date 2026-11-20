@@ -862,9 +862,13 @@ export async function resolveForUse(
     (b?.status === 'retired' ||
       (!b && d.builds.length > 0 && d.builds.every((x) => x.status === 'retired')))
   ) {
+    const tag = 'build' in r ? undefined : (r.tag ?? 'default');
     throw new CpError(
       'template_retired',
-      `template '${d.id}'${b ? ` build ${b.buildId}` : ''} is retired`,
+      b && tag !== undefined
+        ? `template '${d.id}': its '${tag}' tag names retired build ${b.buildId}; tag another build ` +
+            `(POST /v1/templates/${d.id}/tags) or pin one (${d.id}@<build id>)`
+        : `template '${d.id}'${b ? ` build ${b.buildId}` : ''} is retired`,
     );
   }
   if (!d || !b || b.status !== 'registered' || !b.worker) {
@@ -1876,6 +1880,12 @@ async function adminTemplate(ctx: RequestCtx, deps: CpDeps) {
  * `retire` record naming the caller, the status before (`from`) and the build's `build` record
  * (`buildRecord`). Idempotent: an already retired build is answered with `record: null`.
  *
+ * A retire (or a reject) that ends the build the template's `default` tag names moves `default` to
+ * the newest registered build it leaves (#909), so a bare id keeps resolving; the move is a `tag`
+ * record, as an owner's tag is, and the answer names it (`default`). With no such build, `default`
+ * stays, and a bare id answers `410 template_retired` naming the tag; the next build to register
+ * takes `default` (hostBuildReport).
+ *
  * Reject after the fact (§5.2, `mode: 'reject'`) takes the same path: an admin only, with a
  * reason, on a registered build. The build becomes `rejected` (`reason.rule: admin`) rather than
  * `retired`, and the record is a `reject` one; the rest (leases, the host's stop, the refusal under
@@ -1886,7 +1896,12 @@ async function retireBuilds(
   deps: CpDeps,
   which: (b: TemplateBuild, builds: readonly TemplateBuild[]) => boolean,
   mode: 'retire' | 'reject' = 'retire',
-): Promise<{ templateId: string; subject: string; builds: RetiredBuild[] }> {
+): Promise<{
+  templateId: string;
+  subject: string;
+  builds: RetiredBuild[];
+  default: { buildId: string; before: string; record: string } | null;
+}> {
   // Retire: the owner, or an admin; the owner's check is made on the template as read and again
   // under its lock (ownerCheck), so a retire by an owner it was transferred away from meanwhile is
   // refused. Reject: an admin only, whoever owns the template (adminTemplate).
@@ -1903,6 +1918,7 @@ async function retireBuilds(
     mode === 'reject' ? rejectedByAdmin(x) : x.status === 'retired';
   const done: TemplateBuild[] = [];
   const records = new Map<string, string>();
+  let movedDefault: { buildId: string; before: string; record: string } | null = null;
   // Under the activation lock, so an activation never writes a lease onto a build retired or
   // rejected after it resolved the build: it re-reads the build's status under the same lock
   // (takeLeaseLocked).
@@ -1926,6 +1942,7 @@ async function retireBuilds(
         const cur = own(c);
         done.length = 0;
         records.clear();
+        movedDefault = null;
         const targets = cur.builds.filter((x) => which(x, cur.builds));
         if (targets.length === 0)
           throw new CpError('template_not_found', 'no such build of this template');
@@ -1959,8 +1976,38 @@ async function retireBuilds(
           });
           records.set(x.handle ?? x.buildId, rec.digest);
         }
+        // #909: a retire or a reject that ends the build `default` names moves `default` to the
+        // newest registered build left (builds are newest first; createdAt orders them, the list
+        // order breaks a tie), so a bare id keeps resolving. Newest registered, not newest active:
+        // active is per request (leases), so `default` would flap with it.
+        let tags = cur.tags;
+        let tagsMeta = cur.tagsMeta;
+        const def = Object.hasOwn(cur.tags, 'default') ? cur.tags.default : undefined;
+        if (def !== undefined && done.some((x) => x.buildId === def)) {
+          const next = cur.builds
+            .filter((x) => x.status === 'registered' && !done.includes(x) && x.buildId !== def)
+            .reduce<TemplateBuild | undefined>(
+              (a, x) => (a && a.createdAt >= x.createdAt ? a : x),
+              undefined,
+            );
+          if (next) {
+            const [rec] = await appendRecords(prov, [
+              {
+                stream: `template/${d0.id}`,
+                kind: 'tag',
+                subject: p.sub,
+                body: { tag: 'default', buildId: next.buildId, before: def },
+              },
+            ]);
+            movedDefault = { buildId: next.buildId, before: def, record: rec! };
+            tags = { ...cur.tags, default: next.buildId };
+            tagsMeta = { ...(cur.tagsMeta ?? {}), default: { at: seconds(deps), by: p.sub } };
+          }
+        }
         return {
           ...cur,
+          tags,
+          ...(tagsMeta !== undefined ? { tagsMeta } : {}),
           builds: cur.builds.map((x) =>
             done.includes(x)
               ? mode === 'reject'
@@ -1979,6 +2026,11 @@ async function retireBuilds(
   );
   const decision = mode === 'reject' ? 'template_build_rejected' : 'template_retired';
   if (done.length > 0) await auditBestEffort(deps, decision, d0.id, { subject: p.sub, decision });
+  if (movedDefault)
+    await auditBestEffort(deps, 'template_tags_moved', d0.id, {
+      subject: p.sub,
+      decision: 'template_tags_moved',
+    });
   // Each build, its id, its readiness and the record written now (null for one already retired),
   // so a client can tie the answer to the template's chain.
   const after = (await cat.get(d0.id))!;
@@ -1998,6 +2050,7 @@ async function retireBuilds(
         readiness: 'retired' as const,
         record: records.get(x.handle ?? x.buildId) ?? null,
       })),
+    default: movedDefault,
   };
 }
 
@@ -2049,7 +2102,13 @@ async function retireTemplateBuild(ctx: RequestCtx, deps: CpDeps) {
   const r = await retireBuilds(ctx, deps, (x, all) => x === buildByRef(all, ref));
   return {
     status: 200,
-    body: { templateId: r.templateId, subject: r.subject, ...r.builds[0], status: 'retired' },
+    body: {
+      templateId: r.templateId,
+      subject: r.subject,
+      ...r.builds[0],
+      status: 'retired',
+      default: r.default,
+    },
   };
 }
 
@@ -2071,6 +2130,7 @@ async function rejectTemplateBuild(ctx: RequestCtx, deps: CpDeps) {
       buildId: b?.buildId ?? null,
       record: b?.record ?? null,
       status: 'rejected',
+      default: r.default,
     },
   };
 }

@@ -17,6 +17,28 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
+## 1.33.0
+
+A retire no longer strands a template's `default` tag on a retired build
+([#909](https://github.com/rossoctl/moca/issues/909)). Additive on the wire: one field on three
+answers.
+
+- A retire (`DELETE /v1/templates/{id}/builds/{build}` or `POST /v1/templates/{id}/retire`) that
+  ends the build `default` names moves `default` to the newest registered build it leaves, writes a
+  `tag` record for the move (as an owner's tag does) and says so in the answer's new `default`
+  (`DefaultTagMove`: the build it names now, the one before, the record). Before, `default` kept
+  naming the retired build, and every create through a bare id was refused `410 template_retired`
+  while another build was registered.
+- A reject (`POST …/builds/{build}/reject`) of the build `default` names moves it the same way,
+  and its answer gains `default` too: a create naming a rejected build answers
+  `400 unknown_template`, so leaving `default` there was worse than a retire.
+- With no registered build left, `default` stays and `default` in the answer is null, and the next
+  build to register takes `default`, with a `tag` record (until now only a template's first build
+  did).
+- The `410 template_retired` for a tag that names a retired build now names the tag and the fix
+  (tag another build, or pin one).
+- A superseding rebuild is unchanged: it keeps the twin's id, so its tags already follow.
+
 ## 1.32.0
 
 An async turn's assistant reply is fetchable

@@ -84,7 +84,7 @@ The `hosts` list in `GET /v1/templates` is empty until a host agent reports, whi
 | PATCH  | `/v1/templates/{id}`                       | owner, admin | change `visibility` (`private` or `deployment`) or `description` (at most 1024 characters)       | `templates edit ID`                 |
 | PUT    | `/v1/templates/{id}/owner`                 | admin        | hand the template to another enrolled subject (`{owner}`: `github:<id>` or `oidc:<sub>`)         | `templates transfer ID SUBJECT`     |
 | POST   | `/v1/templates/{id}/retire`                | owner, admin | retire every build (`{reason?}`, at most 1024 characters)                                        | `templates retire ID`               |
-| DELETE | `/v1/templates/{id}/builds/{build}`        | owner, admin | retire one build; the others stay                                                                | `templates retire ID --build B`     |
+| DELETE | `/v1/templates/{id}/builds/{build}`        | owner, admin | retire one build; the others stay; a `default` on it moves to the newest registered one          | `templates retire ID --build B`     |
 | POST   | `/v1/templates/{id}/builds/{build}/reject` | admin        | reject a registered build after the fact (`{reason}`, 1 to 1024 characters); it cannot be undone | none: call the route                |
 
 - Each change writes a provenance record naming who made it and the value before. A change that

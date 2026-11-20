@@ -382,8 +382,10 @@ from other subjects (a 404, as for an id that does not exist) and refuses their 
 
 Known limits:
 
-- A tag that points at a retired build still resolves to it, and is refused; so does `default`
-  when the default build is retired, even with another registered build.
+- A tag that points at a retired build still resolves to it, and is refused (the `410` names the
+  tag). `default` is the exception: a retire or a reject that ends the build it names moves it to
+  the newest registered build left, with a `tag` record (#909), so a bare id keeps resolving; with
+  no registered build left it stays, and is refused, until the next build to register takes it.
 - A retired build is removed only from hosts whose agent polls: a host that is down removes it on
   its next poll, and the build lists that host in `heldBy` until then. The removal keeps the worker's workspace data,
   as `install-host.sh --uninstall` does; freeing it is the host janitor's.
@@ -554,7 +556,8 @@ more reports; the check is made again inside the template's update, with the rep
 an owner's cancel that lands while a report is being written stands and no record says it
 registered. On `built` the control plane stores T and S byte for byte, writes a `build` record
 and the registration `check` (§8.2); a registered build's id becomes its manifest hash, and a
-template's first registered build takes the `default` tag. A build id names one build in use of a
+template's first registered build takes the `default` tag, and so does a build registering
+while `default` names a retired or rejected build (#909). A build id names one build in use of a
 template: a build whose manifest hash another build of the template already has (the same image and
 spec created again under another profile or gate record, which the build finds already built) is
 rejected, rule `T.unique`, naming that build, unless it is that build's rebuild (below). When that

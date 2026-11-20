@@ -21,8 +21,10 @@ This page is the model behind `mocactl sbx templates`. To make and use a templat
 - **A tag names a registered build.** `default` is what a bare template id names. A template's
   **first** registered build takes `default`; a later build does not move it, so a bare id keeps
   naming the first build until the owner moves the tag
-  (`mocactl sbx templates tag ID default --build BUILD`). It can be moved to another build, but
-  never removed. Moving a tag rebuilds nothing, and sandboxes and sessions
+  (`mocactl sbx templates tag ID default --build BUILD`). Retiring (or rejecting) the build
+  `default` names moves `default` to the newest registered build left; with none, the next build
+  to register takes it. It can be moved to another
+  build, but never removed. Moving a tag rebuilds nothing, and sandboxes and sessions
   already created keep their build.
 - **A policy, not a person, admits a build.** An admin writes the policy as named **profiles**
   (the gating rules a create must pass, and a size envelope). A create is checked against it before
