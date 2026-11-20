@@ -335,7 +335,7 @@
         "token (separate call): ttl = 900 s  (SH_SANDBOX_TOKEN_TTL_SECONDS)"
       ],
       knobs: ["SH_SANDBOX_LIFETIME_SECONDS", "SH_SANDBOX_TOKEN_TTL_SECONDS"],
-      scene: { packet: { path: "return", t: 0.5, label: "201 sandbox" }, hl: ["cp", "client"], token: true,
+      scene: { packet: { path: "return", t: 0.5, label: "201 sandbox" }, hl: ["cp", "client"],
                cp: { live: 28, mine: 3, rec: "ready" }, relay: 0, worker: { q: 0, s: 0, gate: "free" },
                run: "absent", idle: "—", vms: { inflight: false, warming: false, destroying: false, standby: 0, parked: false, chip: null, janitor: false },
                budget: BASE, counters: { warm: 0, coldF: 0, coldP: 0, refused: 0, evicted: 0 }, ghost: null }
@@ -359,7 +359,7 @@
         "execGate: held"
       ],
       knobs: ["SH_SANDBOX_MAX_INFLIGHT", "WORKER_MAX_CONCURRENT", "QueueCap"],
-      scene: { packets: [ { path: "exec", t: 0.45, label: "Exec #1 (req_id)" }, { path: "relayworker", t: 0.7, label: "" } ],
+      scene: { token: true, packets: [ { path: "exec", t: 0.45, label: "Exec #1 (req_id)" }, { path: "relayworker", t: 0.7, label: "" } ],
                hl: ["client", "relay", "worker"],
                cp: { live: 28, mine: 3, rec: "ready" }, relay: 1, worker: { q: 1, s: 1, gate: "held" },
                run: "absent", idle: "0 s", vms: { inflight: false, warming: false, destroying: false, standby: 0, parked: false, chip: null, janitor: false },
