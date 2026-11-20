@@ -38,6 +38,7 @@ import {
   resolveModelSelection,
   requireModel,
   applyModelGateway,
+  sharedSessionStore,
   oauthAuthStorage,
   seedOrigin,
   seedWorkspace,
@@ -64,9 +65,11 @@ import type { GateCapture } from './request-approval-tool.js';
 import {
   computeGateState,
   decideSeed,
+  gatePromptNote,
   gateShortCircuit,
   validateDecision,
   type Decision,
+  type GateDecision,
   GATE_DECISION_ENTRY_TYPE,
 } from './gate.js';
 import { requestApprovalExtension } from './request-approval-tool.js';
@@ -167,6 +170,11 @@ export interface LeafEnvelope {
   };
   item: LeafItem; // inputs inline (was inputsRef)
   decision?: Decision; // resume/approve only (was decisionRef)
+  /**
+   * Ask for a human gate on a prompt or solve leaf (#393). A converge leaf keeps using
+   * `item.require_approval`, which predates this and means the same thing for that kind.
+   */
+  requireApproval?: boolean;
   model?: string;
   provider?: string;
   workspaceRef?: string; // derived from the worktree in P2 when repoUrl+ref are given
@@ -611,6 +619,75 @@ export async function runSolveLeaf(
   };
 }
 
+type LeafGatePlan =
+  | { kind: 'result'; result: LeafResult }
+  | { kind: 'run'; continuation?: string; nextGateId: number };
+
+/** One entry appended durably outside a running turn: the decision that resolved a gate. */
+async function appendGateDecision(
+  env: LeafEnvelope,
+  config: TurnConfig | undefined,
+  record: GateDecision,
+): Promise<void> {
+  const store = sharedSessionStore(config?.redisUrl ?? 'redis://localhost:6379');
+  const backend = new BufferedRedisBackend(store);
+  const sm = await SessionManager.openFromCheckpoint(
+    env.sessionId,
+    backend,
+    config?.cwd ?? process.cwd(),
+  );
+  sm.appendCustomEntry(GATE_DECISION_ENTRY_TYPE, record);
+  await backend.flush();
+}
+
+/**
+ * The gate front-end for the prompt and solve kinds (design §1), BEFORE either leases a sandbox: a
+ * parked or aborted leaf must hold nothing. `kind: 'result'` is the leaf's answer; `kind: 'run'`
+ * carries the continuation prompt to use instead of the leaf's own (absent on a fresh run) and the
+ * id the next `request_approval` call takes.
+ *
+ * Reads the durable session ONLY for a leaf that is gated or carries a decision: an ungated prompt
+ * leaf is the common case and pays nothing for this. The cost is that a stale pending gate does not
+ * park an ungated turn of the same session -- which is the point of #393, where the gate belongs to
+ * the turn that asked for one.
+ */
+async function planLeafGate(
+  env: LeafEnvelope,
+  config: TurnConfig | undefined,
+): Promise<LeafGatePlan> {
+  if (!env.requireApproval && !env.decision) return { kind: 'run', nextGateId: 0 };
+  const store = sharedSessionStore(config?.redisUrl ?? 'redis://localhost:6379');
+  const state = computeGateState((await store.read(env.sessionId)).map((r) => r.entry));
+  const dv = env.decision ? validateDecision(env.decision) : null;
+  const decision = dv && dv.ok ? dv.value : null;
+
+  const short = gateShortCircuit(state, decision);
+  if (short?.kind === 'paused') {
+    return {
+      kind: 'result',
+      result: {
+        status: 'paused',
+        gateId: short.gate.gateId,
+        gate: { summary: short.gate.summary, proposed_action: short.gate.proposed_action },
+      },
+    };
+  }
+  if (short?.kind === 'abort') {
+    if (short.record) await appendGateDecision(env, config, short.record);
+    return { kind: 'result', result: { status: 'aborted' } };
+  }
+  // '' is the sentinel for "the caller builds its own fresh prompt": every kind's fresh prompt is
+  // different (and the prompt leaf's needs a sandbox path), so only the CONTINUATION comes from here.
+  const seed = decideSeed(state, decision, '');
+  if (seed.kind !== 'seed') throw new Error('unreachable: gateShortCircuit missed a short circuit');
+  if (seed.record) await appendGateDecision(env, config, seed.record);
+  return {
+    kind: 'run',
+    ...(seed.prompt ? { continuation: seed.prompt } : {}),
+    nextGateId: state.nextGateId,
+  };
+}
+
 async function runPromptLeaf(
   env: LeafEnvelope,
   config?: TurnConfig,
@@ -631,6 +708,11 @@ async function runPromptLeaf(
     provider: env.provider ?? config?.provider,
   });
   const exec = deps?.executeTurn ?? executeTurn;
+
+  // BEFORE the lease (design §1): a parked or aborted leaf must hold no sandbox.
+  const plan = await planLeafGate(env, config);
+  if (plan.kind === 'result') return plan.result;
+  const gateCapture: GateCapture = {};
 
   // Lease a pool sandbox the way the verdict and solve paths do, then hand it to the turn, so a
   // prompt leaf's tool calls land in the sandbox it actually holds a lease on — including a remote
@@ -825,11 +907,16 @@ async function runPromptLeaf(
             : {}),
         }
       : undefined;
+    // A resumed gate seeds the human's decision INSTEAD of the leaf's own prompt, which the model
+    // already has in its session; a fresh gated run gets the prompt plus the steer toward the tool.
+    const userPrompt =
+      plan.continuation ??
+      (env.requireApproval ? `${env.prompt}\n\n${gatePromptNote()}` : env.prompt);
     const r: TurnResult = await exec({
       prompt:
         contextPath && selected
-          ? `${env.prompt}\n\n${contextNote(contextPath, contextMode(env), selected.podCwd)}`
-          : env.prompt,
+          ? `${userPrompt}\n\n${contextNote(contextPath, contextMode(env), selected.podCwd)}`
+          : userPrompt,
       sessionId: env.sessionId,
       config: leafTurnConfig(config, { untemplated: workload !== undefined }),
       createIfAbsent: true,
@@ -840,6 +927,9 @@ async function runPromptLeaf(
       // here: it comes back as `r.budgetExceeded`.
       ...(signal ? { signal } : {}),
       ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
+      ...(env.requireApproval
+        ? { gate: { capture: gateCapture, nextGateId: plan.nextGateId } }
+        : {}),
     });
     // The signal decides WHICH stop this was, so it is read before `stopReason`: a deadline abort is
     // `failed: budget` and a cancel is `aborted`, and both arrive here as `stopReason: 'aborted'`.
@@ -848,6 +938,20 @@ async function runPromptLeaf(
     if (r.stopReason === 'aborted') return { status: 'aborted' };
     if (r.stopReason === 'error')
       return { status: 'failed', reason: 'error', message: r.errorMessage };
+    // Gate outcome ahead of the response, as the verdict path puts it ahead of the verdict: a leaf
+    // that parked produced no answer, and reporting `responded` with the model's pre-gate chatter
+    // would read as a finished turn.
+    if (gateCapture.gate) {
+      return {
+        status: 'paused',
+        gateId: gateCapture.gate.gateId,
+        gate: {
+          summary: gateCapture.gate.summary,
+          proposed_action: gateCapture.gate.proposed_action,
+        },
+      };
+    }
+    if (gateCapture.aborted) return { status: 'aborted' };
     if (!selected || !template) return { status: 'responded', text: r.response, usage: r.usage };
     // A templated session's end state, taken in the session's workspace while the lease is still
     // held (spec §5.1). A failed capture is `{ error }` and never fails the leaf.

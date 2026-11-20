@@ -116,6 +116,19 @@ export function continuationPrompt(action: 'approve' | 'reject', feedback?: stri
   ].join('\n');
 }
 
+/**
+ * The instruction a gated prompt or solve leaf gets appended to its own prompt. The converge leaf's
+ * equivalent is inline in `buildLeafPrompt`, which also WITHHOLDS the submit_verdict instruction --
+ * there is nothing to withhold here, so this is only the steer toward request_approval.
+ */
+export function gatePromptNote(): string {
+  return [
+    'A human MUST approve before you act on this. Your FIRST action is to call the request_approval',
+    'tool exactly once, with a short summary of what you intend and a proposed_action stating what',
+    'you will do. Then stop: the session pauses and resumes with the human decision.',
+  ].join('\n');
+}
+
 export type SeedDecision =
   | { kind: 'paused'; gate: GateRequest }
   | { kind: 'abort'; record: GateDecision | null }
