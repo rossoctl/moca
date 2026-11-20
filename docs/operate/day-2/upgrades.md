@@ -126,6 +126,11 @@ that use a promoted bundle.
 Changes that alter a default or what a re-run of `setup.sh` writes ([change policy](../../reference/change-policy.md),
 rule 5).
 
+- **Rotating a `moca-mu1` key rolls the control plane ([#939](https://github.com/rossoctl/moca/issues/939)).** The
+  sandbox service's settings hash now covers `moca-mu1` (the signing key, the janitor and installer tokens, and on
+  the combined profile the exchange token and the credential KEK), so deleting a key and re-running `setup.sh`
+  rotates it and rolls the pods that read it. The first `setup.sh` run after the upgrade rolls the control plane
+  once (and, on the combined profile, the supervisor), even with no other change.
 - **A turn is told when its session's workspace was reset
   ([#338](https://github.com/rossoctl/moca/issues/338)).** The harness keeps a `.moca-session` marker in each
   session's workspace and checks it at every turn's start: one extra Exec per turn, about 2 ms on the container

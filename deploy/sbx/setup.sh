@@ -136,7 +136,8 @@
 # synthetic subject `installer` with the admin role, so automation (an enrollment sync, say) needs
 # no login and no refresh tokens. Read it from the Secret (kubectl get secret moca-mu1 -o
 # jsonpath='{.data.SH_INSTALLER_TOKEN}' | base64 -d); rotate it by deleting the key and re-running
-# (every pod rolls). Refused everywhere when the key is absent.
+# (the control plane rolls: moca-mu1 is in its settings hash). Refused everywhere when the key is
+# absent.
 # SBX_CLIENTS, increment 1a's static client tokens, is gone and refused.
 #
 # Re-runnable: every token, password, key and certificate is generated once and kept. A worker
@@ -1069,12 +1070,12 @@ apply_configmap() {
 # moca-settings (the keys base/control-plane.yaml reads) and sbx-settings (the sandbox profile's and
 # the relay's), then two hashes of what each pod reads at boot (write_overlay stamps them, so a change
 # rolls the pod that reads it): SETTINGS_HASH, the control plane's, covers every setting, the public
-# keyset and the certificates; RELAY_HASH covers only the relay's (ocp-sbx/patch-relay.yaml: the
-# issuer and the in-flight cap) with the keyset and the certificates. So a template, subject or quota
+# keyset, the certificates and moca-mu1's keys; RELAY_HASH covers only the relay's
+# (ocp-sbx/patch-relay.yaml: the issuer and the in-flight cap) with the keyset and the certificates. So a template, subject or quota
 # change rolls the control plane alone and leaves running Execs be (docs/operate/sandbox-service/runbook.md §5). Runs after
 # route_cert: it reads exec-ca.crt.
 ensure_settings() {
-  local ca='' moca sbx relay keys attach_crt exec_crt moca_crt egress hosts
+  local ca='' moca sbx relay keys attach_crt exec_crt moca_crt mu1 egress hosts
   [[ ! -f "$GEN/exec-ca.crt" ]] || ca="$(cat "$GEN/exec-ca.crt")"
   # The TTLs are '' (the control plane's defaults); the base reads both keys, so both must exist.
   # The identity block follows the provider: github writes only the client id (an empty
@@ -1124,9 +1125,15 @@ ensure_settings() {
   exec_crt="$(secret_json sbx-exec-tls)"
   moca_crt=''
   [[ -z "$COMBINED" ]] || moca_crt="$(secret_json moca-supervisor-tls)"
+  # moca-mu1's data is hashed too (names and base64 values, sorted, never logged): the control plane
+  # reads its signing key, janitor token and installer token once at start, so a rotated one (a key
+  # deleted and re-run, ensure_signing_key) must roll it, or it keeps accepting the old token (#939).
+  # The hash is a truncated sha256 over secret values, the precedent sbx-egress and the template
+  # hosts' Secret already set below: over high-entropy keys, 16 hex characters reveal nothing usable.
   # With egress on, the Secret's data is hashed too (names and base64 values, sorted): a new host
   # token or KEK changes the pod template, so the control plane rolls and rereads its files.
   # With the store on, the host tokens' Secret likewise: a new or revoked host token rolls it.
+  mu1="$(secret_json moca-mu1 | jq -cS '.data // {}')"
   egress='' hosts=''
   [[ -z "$EGRESS_ON" ]] || egress="$(secret_json sbx-egress | jq -cS '.data // {}')"
   [[ -z "$STORE_ON" ]] || hosts="$(secret_json sbx-template-hosts | jq -cS '.data // {}')"
@@ -1136,6 +1143,7 @@ ensure_settings() {
     json_value "$attach_crt" tls.crt
     json_value "$exec_crt" tls.crt
     [[ -z "$COMBINED" ]] || json_value "$moca_crt" tls.crt
+    printf '%s\n' "$mu1"
     [[ -z "$EGRESS_ON" ]] || printf '%s\n' "$egress"
     [[ -z "$STORE_ON" ]] || printf '%s\n' "$hosts"
   } | openssl dgst -sha256 -hex | awk '{print substr($NF, 1, 16)}')"
