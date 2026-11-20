@@ -66,7 +66,7 @@ var manualOnlyGates = map[string]string{
 	"TestGateNoNetworkDevice":                           "reads /sys/class/net, resolv.conf, a direct dial and the env of a restored guest (P4.1 T7); /dev/kvm + golden snapshot built with the egress init",
 	"TestGateEgressThroughVsock":                        "real guest -> vsock 1025 -> in-process moca-egress -> host upstream; /dev/kvm + a snapshot built with Task 6's init",
 	"TestGateCredentialNeverInGuest":                    "real guest -> in-process moca-egress with a fake control plane; scans the guest's files, environ and memory for the fixture credential; /dev/kvm + a snapshot built with --egress-ca, SH_EGRESS_CA_CERT and SH_EGRESS_CA_KEY",
-	"TestGateLeakFreeTeardown":                          "counts pids in the VM cgroup slice against a wall-clock bound; needs real VMMs under /sys/fs/cgroup",
+	"TestGateLeakFreeTeardown":                          "counts pids in a gate-private parent cgroup (Firecracker; SH_VM_CGROUP_SLICE on Cloud Hypervisor) against a wall-clock bound, and fails if the count never sees a VM; needs real VMMs, root and cgroup v2",
 	"TestGateClock":                                     "reads the guest's own `date +%s`; only a restored snapshot can have a stale clock to catch",
 	"TestGateOutputCapAtSource":                         "16 MiB of guest stdout against the 8 MiB cap, including the wall-time signature of capping in the guest",
 	"TestGateLeaseExecKillsProcesses":                   "a real lease-v1 guest; /dev/kvm + a golden snapshot built by Task 5's build-snapshot.sh; its level2 subtest also needs lease-processes-v1 in the snapshot (plan 5) and skips, NOT RUN, without it; process_start survivors (a tracked process and its child) are the only ones",

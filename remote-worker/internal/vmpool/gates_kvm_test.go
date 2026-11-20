@@ -428,7 +428,6 @@ func countCgroupPids(parentSlice string) (int, error) {
 // failure message rather than looping forever.
 func TestGateLeakFreeTeardown(t *testing.T) {
 	requireKVM(t)
-	lc := launcherForArm(t)
 
 	const standbyIdle = 2 * time.Second
 	const workspaceIdle = 4 * time.Second
@@ -436,11 +435,10 @@ func TestGateLeakFreeTeardown(t *testing.T) {
 	// See poolFor's identical comment: WorkspaceRoot must share a device with the
 	// Firecracker arm's SnapshotDir/ChrootBase, so it is routed through
 	// sameDeviceSiblingDir rather than a bare t.TempDir(), keyed to the same
-	// snapshotDir value fcLauncher used to build lc above.
+	// snapshotDir value fcLauncherWith uses to build lc below.
 	snapshotDir := envOr("SH_SNAPSHOT_IMAGE_DIR", "/srv/snapshots/swebench-py311")
 	workspaceRoot := sameDeviceSiblingDir(t, snapshotDir)
 	cfg := Config{
-		VMM:                 lc.Kind(),
 		SnapshotDir:         t.TempDir(),
 		WorkspaceRoot:       workspaceRoot,
 		MaxRuns:             4,
@@ -449,13 +447,35 @@ func TestGateLeakFreeTeardown(t *testing.T) {
 		WorkspaceIdle:       workspaceIdle,
 		ReclaimScanInterval: reclaimScan,
 	}
+	// The VM count below must see this pool's VMs, or its half of the gate passes vacuously (0
+	// before, 0 after). On the Firecracker arm the pool's VMs go into a gate-private parent
+	// cgroup, as the lease gates' do, and that parent is what is counted; on the Cloud
+	// Hypervisor arm SH_VM_CGROUP_SLICE names where its VMs land. Either way, the count must
+	// rise after the Execs (the check below), so a count that cannot see a VM fails instead.
+	var lc Launcher
+	parentSlice := envOr("SH_VM_CGROUP_SLICE", "/sys/fs/cgroup/microvm-vms.slice")
+	if envOr("SH_VMM", "firecracker") == "firecracker" {
+		norm := cfg
+		norm.VMM = Firecracker
+		if err := norm.Normalize(); err != nil {
+			t.Fatalf("Config: %v", err)
+		}
+		parent := leaseGateCgroupParent(t)
+		parentSlice = ParentCgroupPath(parent)
+		lc = fcLauncherWith(t, func(o *FirecrackerOptions) {
+			o.ParentCgroup = parent
+			o.CgroupMemoryMaxBytes = PerVMBytes(norm)
+		})
+	} else {
+		lc = launcherForArm(t)
+	}
+	cfg.VMM = lc.Kind()
 	p, err := New(cfg, lc, RealClock())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	defer func() { _ = p.Close() }()
 
-	parentSlice := envOr("SH_VM_CGROUP_SLICE", "/sys/fs/cgroup/microvm-vms.slice")
 	baseline, err := countCgroupPids(parentSlice)
 	if err != nil {
 		t.Fatalf("baseline cgroup count: %v", err)
@@ -463,10 +483,45 @@ func TestGateLeakFreeTeardown(t *testing.T) {
 
 	const runs = 3
 	keys := make([]string, runs)
-	for i := 0; i < runs; i++ {
+	for i := range keys {
 		keys[i] = fmt.Sprintf("gate-teardown-%d", i)
-		if _, err := p.Exec(context.Background(), keys[i], Exec{Command: "true", TimeoutS: 30}, &capturingSink{}); err != nil {
-			t.Fatalf("Exec %s: %v", keys[i], err)
+	}
+
+	// The precondition that makes the leak check below mean something: the count must see this
+	// pool's VMs. The first run's Exec sleeps, and the count is sampled WHILE it runs, so its
+	// own VMM is in parentSlice then, independent of when standbys are restored. A count that
+	// never rises during it cannot see this pool's VMs, and the leak check would pass vacuously.
+	execDone := make(chan error, 1)
+	go func() {
+		_, err := p.Exec(context.Background(), keys[0], Exec{Command: "sleep 2", TimeoutS: 30}, &capturingSink{})
+		execDone <- err
+	}()
+	seen := false
+	for !seen {
+		n, err := countCgroupPids(parentSlice)
+		if err != nil {
+			t.Fatalf("cgroup count during an Exec: %v", err)
+		}
+		if n > baseline {
+			seen = true
+			break
+		}
+		select {
+		case err := <-execDone:
+			if err != nil {
+				t.Fatalf("Exec %s: %v", keys[0], err)
+			}
+			t.Fatalf("VM cgroup pid count stayed at %d (baseline %d) for the whole of a running Exec: the "+
+				"count cannot see this pool's VMs under %s, so the leak check would pass vacuously", n, baseline, parentSlice)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if err := <-execDone; err != nil {
+		t.Fatalf("Exec %s: %v", keys[0], err)
+	}
+	for _, key := range keys[1:] {
+		if _, err := p.Exec(context.Background(), key, Exec{Command: "true", TimeoutS: 30}, &capturingSink{}); err != nil {
+			t.Fatalf("Exec %s: %v", key, err)
 		}
 	}
 

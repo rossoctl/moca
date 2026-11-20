@@ -203,3 +203,46 @@ func TestStartupSweepRemovesTombstonesOnly(t *testing.T) {
 		t.Fatalf("the symlinked tombstone's target lost %s: %q, %v", keep, b, err)
 	}
 }
+
+// A Release whose rename fails (here: Root not writable) answers an error, not RELEASED,
+// since the directory is still there; the key is refused all the same, and stays tracked,
+// so a later Release (or the sweep) finishes the job. vmpool's Release answers the same.
+func TestReleaseWhoseDetachFailsAnswersAnErrorNotReleased(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root renames in a read-only directory")
+	}
+	w, _ := newWorkspaceRunner(t, wexec.BashRunner{})
+	runIn(t, w, "sess-d", "echo d > clone.txt")
+	dir := filepath.Join(w.Root, "sess-d")
+	if err := os.Chmod(w.Root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(w.Root, 0o755) })
+
+	o, err := w.Release(context.Background(), "sess-d")
+	if err == nil || o != pb.ReleaseOutcome_RELEASE_OUTCOME_UNSPECIFIED {
+		t.Fatalf("Release with a failing rename = (%v, %v), want (UNSPECIFIED, an error)", o, err)
+	}
+	// The error travels to the client and the relay's audit: no host path, no OS error text.
+	if msg := err.Error(); strings.Contains(msg, "/") || strings.Contains(msg, w.Root) {
+		t.Fatalf("Release's error %q names a path; it must be path-free", msg)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "clone.txt")); err != nil {
+		t.Fatalf("the workspace is gone though the rename failed: %v", err)
+	}
+	var rec recorder
+	if _, err := w.Run(context.Background(), wexec.Spec{Command: "true", WorkspaceKey: "sess-d"}, &rec); err == nil ||
+		!strings.HasPrefix(err.Error(), "released: ") {
+		t.Fatalf("Run after a failed Release: err = %v, want a released: refusal", err)
+	}
+
+	if err := os.Chmod(w.Root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if o := release(t, w, "sess-d"); o != pb.ReleaseOutcome_RELEASE_OUTCOME_RELEASED {
+		t.Fatalf("Release once the rename can succeed = %v, want RELEASED (the key stayed tracked)", o)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("stat(%s) after the retried Release = %v, want it removed", dir, err)
+	}
+}

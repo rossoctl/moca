@@ -228,7 +228,10 @@ func (w *WorkspaceRunner) Run(ctx context.Context, s Spec, sink Sink) (int32, er
 		if run.releaseOnIdle && run.inflight == 0 && w.runs[s.WorkspaceKey] == run {
 			// A Release met this key busy: its session has ended, so the directory goes
 			// now that the last command in it has returned.
-			tomb = w.detachLocked(s.WorkspaceKey, dir)
+			var err error
+			if tomb, err = w.detachLocked(s.WorkspaceKey, dir); err != nil {
+				log.Printf("worker: workspace release %q after its Exec: %v; the sweep retries", s.WorkspaceKey, err)
+			}
 		}
 		w.mu.Unlock()
 		if tomb != "" {
@@ -449,29 +452,43 @@ func (w *WorkspaceRunner) Release(_ context.Context, key string) (pb.ReleaseOutc
 		w.mu.Unlock()
 		return pb.ReleaseOutcome_RELEASE_OUTCOME_KEPT_BUSY, nil
 	}
-	tomb := w.detachLocked(key, dir)
+	tomb, err := w.detachLocked(key, dir)
 	w.mu.Unlock()
+	if err != nil {
+		// Not RELEASED: the directory is still there. The key is refused all the same
+		// (released, above), and the sweep finishes the job; the sender may retry. As
+		// vmpool's Release answers the same failure.
+		return pb.ReleaseOutcome_RELEASE_OUTCOME_UNSPECIFIED, err
+	}
 	removeTomb(tomb)
 	return pb.ReleaseOutcome_RELEASE_OUTCOME_RELEASED, nil
 }
 
 // detachLocked renames key's directory to a tombstone and stops tracking key, returning
 // the tombstone to remove off the lock ("" if there was no directory). A rename that
-// fails for another reason is logged and the key stays tracked, so the sweep retries it.
+// fails for another reason is logged, errWorkspaceDetach is returned, and the key stays
+// tracked, so the sweep retries it.
 // Caller holds w.mu.
-func (w *WorkspaceRunner) detachLocked(key, dir string) string {
+func (w *WorkspaceRunner) detachLocked(key, dir string) (string, error) {
 	tomb := tombstonePath(dir, key, w.now())
 	switch err := os.Rename(dir, tomb); {
 	case err == nil:
 	case os.IsNotExist(err):
 		tomb = ""
 	default:
+		// The detail stays in this log: the error goes back over the wire (the relay's answer
+		// and audit), so it names no host path or OS error text.
 		log.Printf("worker: workspace release: detach %s: %v; the sweep retries", dir, err)
-		return ""
+		return "", errWorkspaceDetach
 	}
 	delete(w.runs, key)
-	return tomb
+	return tomb, nil
 }
+
+// errWorkspaceDetach is what a failed detach returns: fixed and path-free, since it travels
+// to the client and the relay's audit. It does not start with release_unsupported:, busy: or
+// invalid-, so the relay answers it as a retryable failure.
+var errWorkspaceDetach = errors.New("workspace removal failed; the sweep retries")
 
 // tombstonePath names the detached copy of key's dir: beside it, under
 // workspaceTombstonePrefix, unique per detachment. Sweep and Release share it.
