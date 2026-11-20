@@ -43,11 +43,15 @@ import { versionLine } from './version.js';
 import { commandUsage, typedWords } from './core/usage.js';
 
 export const USAGE = `usage:
-  mocactl [--setup] [--no-animation]             interactive terminal UI
+  mocactl [--setup] [--no-animation]             interactive terminal UI (--setup: run the first-start
+                                                 setup again, server, login and credential, each
+                                                 step skipped when already done; --no-animation:
+                                                 a still spinner)
   mocactl --version                              print this build's version (a release tag, edge-<sha>,
                                                  or dev-<sha> from a source checkout)
   mocactl login [--no-browser]                   log in with the GitHub device flow (in a local
-                                                 terminal: copies the code, opens the browser)
+                                                 terminal: copies the code, opens the browser;
+                                                 --no-browser: only prints the URL and the code)
   mocactl login --test-user N                    log in as test user N (needs the control plane's
                                                  SH_TEST_USERS; secret in MOCA_TEST_USER_SECRET)
   mocactl logout [--all]                         end this login (--all: every login of yours)
@@ -55,6 +59,12 @@ export const USAGE = `usage:
                                                  (exit 3: log in first; 4: control plane unreachable)
   mocactl doctor [--json]                        check the setup; one fix per failure
   mocactl run "prompt" [--session ID | --new] [--option key=value ...] [--json]
+                                                 run one turn and print its reply: in session ID
+                                                 (--session), or in a new session (--new, the
+                                                 default); --option sets a new session's model,
+                                                 inferenceCredential, sandboxTier or sandboxTemplate
+                                                 (repeatable; one that has several choices and is
+                                                 not given is refused, naming the choices)
   mocactl run "prompt" --config DIGEST            start the new session with a promoted config bundle
   mocactl run "prompt" --show-tools              print each tool call the turn makes, between its
                                                  text (not with --json, which streams the frames)
@@ -71,44 +81,62 @@ export const USAGE = `usage:
   mocactl sessions delete ID [--json]
   mocactl credentials [--json]                   list your credentials (never their secrets)
   mocactl credentials add NAME --host HOST [--host HOST ...] [--kind KIND] [--consumer CONSUMER]
-      [--endpoint URL] [--json]                  the secret is read from stdin
+      [--endpoint URL] [--json]                  the secret is read from stdin; --host: a host it is
+                                                 sent to (repeatable, or a comma list); --kind:
+                                                 bearer (default), api-key, oauth2-token or basic
+                                                 (stdin is username=... and password=... lines);
+                                                 --consumer: inference (default: the model calls),
+                                                 sandbox-egress or control-plane; --endpoint: the
+                                                 model API URL it is for (inference only)
   mocactl credentials delete NAME [--json]
   mocactl spawn "prompt" [--config DIGEST] --kind prompt|solve
       [--repo URL --ref REF] [--tag T] [--label L] [--json]
-                                                 fork a detached subagent (solve needs --repo/--ref;
+                                                 fork a detached subagent (--kind prompt: it answers
+                                                 in text; solve: it returns a patch to the
+                                                 repository --repo at --ref, which solve needs;
+                                                 --config: its session's promoted config bundle;
+                                                 --tag groups spawns for subagents and watch;
                                                  --label names one dispatch within a --tag group,
                                                  surfaced on 'mocactl subagents --json' as label)
   mocactl spawn --prompt-file FILE [...]         read the prompt from FILE (UTF-8, trimmed); use when
                                                  the prompt would otherwise be awkward on argv
   mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]
-                                                 run the subagent on a workload's context
-                                                 (--writable: its own copy, discarded after)
+                                                 run the subagent on the context of workload ID
+                                                 (--workload needs --kind prompt; --writable: its
+                                                 own copy, discarded after)
   mocactl spawn "prompt" --async [...]            dispatch as a cancellable async turn instead of a
                                                  local worker process (needs SH_ASYNC_DRAIN on the
                                                  deployment; not available with --workload)
   mocactl spawn "prompt" --max-concurrent N [...]
                                                  refuse the dispatch when N of your subagents are
                                                  already running (default 4)
-  mocactl subagents [--tag T] [--json]            list spawned subagents + current state
+  mocactl subagents [--tag T] [--json]            list spawned subagents + current state (--tag:
+                                                 only those spawned with --tag T)
   mocactl watch [--tag T] [--json]                one line per state change, until every watched
-                                                 subagent is finished (--json: one JSON object per
-                                                 line, for an agent's background monitor)
-  mocactl get SESSIONID [--out DIR] [--json]      write result files + bounded summary
-  mocactl get SESSIONID --wait [--timeout S]     block until the result is there, then write it
-                                                 (default 300 s; exit 1 and status 'queued' if the
+                                                 subagent is finished (--tag: only those spawned
+                                                 with --tag T; --json: one JSON object per line,
+                                                 for an agent's background monitor)
+  mocactl get SESSIONID [--out DIR] [--json]      write result files + bounded summary (--out: into
+                                                 DIR; default: the current directory)
+  mocactl get SESSIONID --wait [--timeout S]     --wait: block until the result is there, then write
+                                                 it (--timeout: at most S seconds, default 300;
+                                                 exit 1 and status 'queued' if the
                                                  budget runs out, 'unknown' if the run is over
                                                  without one)
   mocactl workloads create --context FILE [--name NAME] [--json]
       [--sandboxes N [--mount read-only|writable]]
-                                                 upload a context file (contextctl ctx pack) to a
-                                                 new workload; prints its id (--sandboxes: N
+                                                 upload a context file (--context, made by
+                                                 contextctl ctx pack) to a new workload; prints
+                                                 its id (--name: the id; default: wl- and 8 hex
+                                                 digits; --sandboxes: N
                                                  sandboxes of its own; --mount: its context on
                                                  their own volume, no per-run copy)
   mocactl workloads list [--json]                your own live workloads, newest first
   mocactl workloads get ID [--json]
   mocactl workloads delete ID [--json]           delete a workload and its context
 flags for every command: --control-plane-url URL
-  (the control plane says where the harness is; --harness-url URL overrides that)`;
+  (the control plane says where the harness is; --harness-url URL overrides that)
+--json: print the result as JSON on stdout, for a script`;
 
 const CREDENTIAL_FLAGS = ['kind', 'consumer', 'host', 'endpoint'] as const;
 
