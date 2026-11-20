@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.32.0
+  version: 1.33.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -834,6 +834,18 @@ components:
         record:
           type: [string, 'null']
           description: the retire record written now (`sha256:...`); null if it was already retired
+    DefaultTagMove:
+      type: [object, 'null']
+      description: |
+        The `default` tag's move a retire or a reject made (#909): when it ended the build
+        `default` named, `default` moves to the newest registered build left, with a `tag` record.
+        Null when `default` did not move (it named another build, or no registered build is left;
+        then the next build to register takes `default`).
+      required: [buildId, before, record]
+      properties:
+        buildId: { type: string, description: the build `default` names now }
+        before: { type: string, description: the retired build it named }
+        record: { type: string, description: 'the `tag` record written (`sha256:...`)' }
     WantedWorker:
       type: object
       required: [template, buildId, worker]
@@ -2765,9 +2777,12 @@ paths:
       summary: Retire one build (the owner, or an admin)
       description: |
         Template lifecycle spec §5.1. As `POST /v1/templates/{id}/retire`, for one build named by
-        its build id or its handle; the template's other builds stay. A tag that points at it
-        (`default` included) still resolves to it, and a create through that tag is refused
-        `410 template_retired`. The retire record carries no reason (a DELETE has no body).
+        its build id or its handle; the template's other builds stay. If `default` names it,
+        `default` moves to the newest registered build left (`default` in the answer, and a `tag`
+        record), so a bare id keeps resolving; with none left it stays. Any other tag that points
+        at it still resolves to it, and a create through that tag is refused
+        `410 template_retired`, naming the tag. The retire record carries no reason (a DELETE has no
+        body).
       security: [{ sessionToken: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
@@ -2781,11 +2796,12 @@ paths:
                 allOf:
                   - $ref: '#/components/schemas/RetiredBuild'
                   - type: object
-                    required: [templateId, subject, status]
+                    required: [templateId, subject, status, default]
                     properties:
                       templateId: { type: string }
                       subject: { type: string, description: who retired it }
                       status: { type: string, enum: [retired] }
+                      default: { $ref: '#/components/schemas/DefaultTagMove' }
         '400':
           description: '`invalid_request`: this deployment stores no templates'
           content:
@@ -2820,8 +2836,9 @@ paths:
         registration. A `reject` record names the admin, `from` (the status before),
         `buildRecord` (the digest of the build's `build` record) and the reason. Refused
         `409 build_in_use` while a live sandbox runs on it or an active session is pinned to it.
-        Idempotent: an already rejected build is answered with `record: null`. Not reversible: a new build is the way back. Needs
-        SH_PROVENANCE_DIR.
+        Idempotent: an already rejected build is answered with `record: null`. If `default` names
+        it, `default` moves to the newest registered build left, as on a retire (`default` in the
+        answer). Not reversible: a new build is the way back. Needs SH_PROVENANCE_DIR.
       security: [{ sessionToken: [] }]
       parameters:
         - { name: id, in: path, required: true, schema: { type: string } }
@@ -2846,10 +2863,11 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [templateId, subject, build, buildId, record, status]
+                required: [templateId, subject, build, buildId, record, status, default]
                 properties:
                   templateId: { type: string }
                   subject: { type: string, description: the admin }
+                  default: { $ref: '#/components/schemas/DefaultTagMove' }
                   build: { type: string, description: the build's handle }
                   buildId: { type: [string, 'null'] }
                   record:
@@ -2954,11 +2972,12 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [templateId, subject, builds, status]
+                required: [templateId, subject, builds, status, default]
                 properties:
                   templateId: { type: string }
                   subject: { type: string, description: who retired it }
                   status: { type: string, enum: [retired] }
+                  default: { $ref: '#/components/schemas/DefaultTagMove' }
                   builds:
                     type: array
                     items: { $ref: '#/components/schemas/RetiredBuild' }
