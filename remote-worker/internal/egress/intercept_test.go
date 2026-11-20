@@ -685,24 +685,31 @@ func TestInterceptUncoveredKeepsGuestAuthorization(t *testing.T) {
 	}
 }
 
-func TestInterceptUpstreamClosesAfterInjectionKeepsCredentialInAudit(t *testing.T) {
-	e := newICEnv(t, icOpts{})
-	e.up.custom = func(w http.ResponseWriter, r *http.Request) {
-		hj, _ := w.(http.Hijacker)
-		c, _, err := hj.Hijack()
-		if err == nil {
-			c.Close()
-		}
-	}
-	e.pol.Set(e.cred("gh", "/", authHdr("Bearer real")))
-	g := e.open()
-	g.raw(e.reqLine("GET", "/x"))
-	ev := e.h.sink.waitEvent(t, DecisionUpstreamUnreachable)
-	if ev.Credential != "gh" {
-		t.Fatalf("event %+v", ev)
-	}
-	if strings.Contains(e.h.sink.jsonText(), "Bearer real") {
-		t.Fatal("audit leaked a value")
+// Both refusals after injection, a closed conn and an unasked 101, keep the
+// credential and subject in the audit.
+func TestInterceptUpstreamFailsAfterInjectionKeepsCredentialInAudit(t *testing.T) {
+	for name, reply := range map[string]string{"closed": "", "101": "HTTP/1.1 101 Switching Protocols\r\n\r\n"} {
+		t.Run(name, func(t *testing.T) {
+			e := newICEnv(t, icOpts{})
+			e.up.custom = func(w http.ResponseWriter, r *http.Request) {
+				hj, _ := w.(http.Hijacker)
+				c, _, err := hj.Hijack()
+				if err == nil {
+					io.WriteString(c, reply)
+					c.Close()
+				}
+			}
+			e.pol.Set(e.cred("gh", "/", authHdr("Bearer real")))
+			g := e.open()
+			g.raw(e.reqLine("GET", "/x"))
+			ev := e.h.sink.waitEvent(t, DecisionUpstreamUnreachable)
+			if ev.Credential != "gh" || ev.Sub != "user-1" {
+				t.Fatalf("event %+v", ev)
+			}
+			if strings.Contains(e.h.sink.jsonText(), "Bearer real") {
+				t.Fatal("audit leaked a value")
+			}
+		})
 	}
 }
 
