@@ -193,6 +193,26 @@ describe('a gated solve leaf', () => {
     expect(await customTypes(sid)).toContain(GATE_DECISION_ENTRY_TYPE);
   });
 
+  it('re-converges on a resume: produce gets the repo inputs again (#393 §4)', async () => {
+    const sid = 'gate-kinds-solve-reconverge';
+    await pendingGate(sid);
+    const produceSolve = vi.fn(async (e, _c, capture) => {
+      // `realProduceSolve` converges from exactly these two fields, and a resume reaches it by the
+      // same path a fresh dispatch does -- which is what makes an hour-long gate survivable: the
+      // workspace is REBUILT rather than carried. The script's own self-healing and
+      // keep-the-baseline behaviour is pinned in converge.test.ts.
+      expect(e).toMatchObject({ repoUrl: 'https://example.invalid/r.git', ref: 'main' });
+      // And nothing pins the resume to the sandbox it paused on: no workspaceRef crossed the gate.
+      expect((e as { workspaceRef?: string }).workspaceRef).toBeUndefined();
+      capture.patch = 'diff --git a/x b/x\n';
+    });
+    const res = await runLeaf(solve(sid, { decision: { gateId: 0, action: 'approve' } }), CONFIG, {
+      produceSolve,
+    } as never);
+    expect(res).toMatchObject({ status: 'solved' });
+    expect(produceSolve).toHaveBeenCalledTimes(1);
+  });
+
   it('aborts without producing', async () => {
     const sid = 'gate-kinds-solve-abort';
     await pendingGate(sid);

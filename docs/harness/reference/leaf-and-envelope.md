@@ -130,6 +130,28 @@ To resolve it, re-POST the **same envelope** to `/v1/runs` with an inline decisi
   `resumeOf`, so it shows up in the session's turn list exactly as a human decision's would.
 - `/turn` has no gate: the tool is registered only when its caller asks for one.
 
+### What survives an open gate
+
+A gate can stay open for an hour, and the sandbox the leaf was using may be gone when the decision
+lands. What that costs, and what it does not:
+
+- **The gate and the conversation survive.** Both the request and the decision are **session
+  entries** in Redis, which is also where the transcript lives. No gate state is held in the
+  sandbox, so nothing about reclaiming one can lose a pending gate or a recorded decision.
+- **A solve resume rebuilds its workspace.** The resume runs the ordinary dispatch path, which
+  converges unconditionally: a missing or corrupt `/workspace/repo` is re-created from `repoUrl` and
+  `ref`, and a leaf worktree that did survive is reused with the baseline it was first pinned to —
+  so a patch captured after the gate still applies against the commit the turn started from.
+- **A prompt leaf has no repo to rebuild.** There is no `repoUrl`, so if its sandbox was reclaimed
+  while the gate was open, the resume runs in a fresh sandbox with an empty workspace. The
+  conversation survives (it is session entries, like the gate); the files do not.
+- **Uncommitted edits do not survive a move, on any kind.** A model's unstaged work lives in the
+  leaf worktree, not in Redis. A resume that lands on a different sandbox re-creates that worktree at
+  the pinned commit, so those edits are gone and the model continues from the transcript alone.
+
+Closing the last two means holding the lease across the pause, which is
+[#338](https://github.com/rossoctl/moca/issues/338)'s explicit-release work, not the gate's.
+
 ## Async and scheduled dispatch
 
 `async: true` on this route and the cron on-ramp were both removed with the Knative/KEDA path
