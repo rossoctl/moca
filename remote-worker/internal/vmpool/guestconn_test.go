@@ -598,3 +598,18 @@ func TestRunOverConnAbortThenCancelStillCloses(t *testing.T) {
 		t.Fatal("runOverConn did not unblock on cancel after an abort frame")
 	}
 }
+
+// F1: the idle page-cache drop's delay reaches the guest's request, and a Command without
+// one sends no key, so a request to an older agent is byte-identical.
+func TestGuestRequestCarriesTheCacheDrop(t *testing.T) {
+	if got := guestRequest(Command{Command: "true", Lease: true, CacheDropAfterS: 30}, OutputCapBytes, time.Now()); got.CacheDropAfterS != 30 {
+		t.Fatalf("CacheDropAfterS = %d, want 30", got.CacheDropAfterS)
+	}
+	enc, err := json.Marshal(guestRequest(Command{Command: "true", Lease: true}, OutputCapBytes, time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(enc, []byte("cache_drop_after_s")) {
+		t.Fatalf("a request without a delay carries the key: %s", enc)
+	}
+}

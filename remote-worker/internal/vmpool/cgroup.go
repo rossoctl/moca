@@ -396,6 +396,45 @@ func readMemoryCurrent(dir string) (int64, error) {
 	return n, nil
 }
 
+// readLeaseFootprint is a lease VM's measured footprint (F1 of the E17b report):
+// memory.current less the page cache the kernel can drop at once -- file pages that are
+// unmapped, clean and not shmem, read from memory.stat. Firecracker reads the workspace
+// image through the host page cache, charged to the VM's cgroup, and that cache is what
+// makes a replacement lease fast (E17b criterion 5b); it is not memory the VM holds, and
+// MemAvailable already counts it free. Mapped pages (the guest's memory), shmem (tmpfs)
+// and dirty or writeback pages stay in the footprint. Clamped at zero. A memory.stat
+// that lacks a field is an error, so the caller keeps its last sample rather than guess.
+func readLeaseFootprint(dir string) (int64, error) {
+	cur, err := readMemoryCurrent(dir)
+	if err != nil {
+		return 0, err
+	}
+	path := filepath.Join(dir, "memory.stat")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("vmpool: reading %s: %w", path, err)
+	}
+	want := map[string]int64{"file": -1, "file_mapped": -1, "shmem": -1, "file_dirty": -1, "file_writeback": -1}
+	for _, line := range strings.Split(string(b), "\n") {
+		k, v, ok := strings.Cut(line, " ")
+		if _, needed := want[k]; !ok || !needed {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("vmpool: parsing %s %s %q: %w", path, k, v, err)
+		}
+		want[k] = n
+	}
+	for k, n := range want {
+		if n < 0 {
+			return 0, fmt.Errorf("vmpool: %s has no %s", path, k)
+		}
+	}
+	reclaimable := max(want["file"]-want["file_mapped"]-want["shmem"]-want["file_dirty"]-want["file_writeback"], 0)
+	return max(cur-reclaimable, 0), nil
+}
+
 // SweepResult reports what one sweep did AND what it deliberately refused to touch.
 //
 // Skipped is not decoration. A fail-closed filter and a broken filter look identical

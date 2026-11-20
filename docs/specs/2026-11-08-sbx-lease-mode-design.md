@@ -456,7 +456,12 @@ port in the static client (`remote-worker/cmd/sbx/notice.go`):
     leases.
   - **Memory, idle or busy:** a new lease VM is charged a starting estimate (`SH_LEASE_START_MB`,
     default 192 MiB, near E16's p95 at age 0) until its first sample. After that it is charged its
-    measured `memory.current` × `SH_LEASE_HEADROOM` (default 1.25), **also while an Exec runs in it**.
+    measured footprint × `SH_LEASE_HEADROOM` (default 1.25), **also while an Exec runs in it**. The
+    footprint (v0.12.0, F1 of the E17b report) is `memory.current` less the page cache the kernel can
+    drop at once: from `memory.stat`, `file` − `file_mapped` − `shmem` − `file_dirty` −
+    `file_writeback`. That is mostly the host's cache of the workspace image, which makes a replacement
+    lease fast (E17b criterion 5b) and which `MemAvailable` already counts free. Mapped guest memory,
+    tmpfs and dirty pages stay charged.
     It is never re-priced to `PerVMBytes`. This reuses #644's footprinter and its cache. A lease VM's
     growth during a long Exec is caught by the next sample and by reclaim, not by a reservation.
   - Per-`Exec` VMs keep the full `PerVMBytes` charge.
@@ -469,6 +474,15 @@ port in the static client (`remote-worker/cmd/sbx/notice.go`):
   `memory.current`, so the measured charge above follows the working set. Free page _hinting_ and a
   deflate-on-OOM policy are not needed. Firecracker and both guest kernels support it, and a restored VM
   returned 650 of 734 MiB within 15 s in a test (§16 item 5).
+- **Idle page-cache drop (v0.12.0, F1 of the E17b report).** Free-page reporting returns only
+  what the guest frees, and a guest never frees its clean page cache: in E17b a lease VM that had
+  read its dataset and venv settled at 0.9–1.0 GiB of its 1024 and stayed there through idle
+  minutes. So once a lease has served no request for `SH_LEASE_CACHE_DROP_S` (default 30; 0 turns
+  it off), the guest agent runs `sync` and writes 1 to `/proc/sys/vm/drop_caches`. The freed pages
+  are reported, and the next sample charges the lease its working set. The host sends the delay on
+  every lease request (`cache_drop_after_s`); each request restarts it, so commands within a turn
+  keep the warm cache, and the next command after a drop re-reads from the host page cache. An
+  agent built before v0.12.0 ignores the field.
 - **Page-cache headroom in the lease cgroup (v0.2).** Each VM's cgroup has `memory.max` =
   `PerVMBytes` (guest RAM + VMM overhead, `remote-worker/internal/vmpool/cgroup.go` `writeMemoryMax`).
   Host page cache for a VM's own disk reads is charged to that cgroup. A lease VM whose guest is full

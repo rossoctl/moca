@@ -54,6 +54,9 @@ type Command struct {
 	// (Result.Aborted). Cancelling ctx still closes the connection at once; that is the
 	// bound on a guest that does not answer. nil (every other Run): ctx alone.
 	Abort <-chan struct{}
+	// CacheDropAfterS is forwarded to the guest's Request (Config.LeaseCacheDropAfter in
+	// whole seconds; 0 = never), on every lease Run.
+	CacheDropAfterS uint32
 
 	// ctxDone is TEST-ONLY plumbing: the fake launcher fills it so a run hook can
 	// block until the run context ends, which is how the timeout and abort tests

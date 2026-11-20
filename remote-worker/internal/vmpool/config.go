@@ -73,6 +73,11 @@ const (
 	DefaultLeaseHeadroom             = 1.25
 	DefaultLeasePageCacheBytes       = 256 << 20
 	DefaultLeaseScanInterval         = 5 * time.Second
+	// DefaultLeaseCacheDrop is SH_LEASE_CACHE_DROP_S' default (F1 of the E17b report):
+	// how long a lease serves no request before its guest drops its clean page cache.
+	// MaxLeaseCacheDrop bounds it, as the guest's field is whole seconds.
+	DefaultLeaseCacheDrop = 30 * time.Second
+	MaxLeaseCacheDrop     = 24 * time.Hour
 	// DefaultLeaseMaxProcesses is SH_LEASE_MAX_PROCESSES' default (spec §7): the running
 	// tracked processes one lease may hold.
 	DefaultLeaseMaxProcesses = 4
@@ -153,7 +158,7 @@ type Config struct {
 	LeaseGraceLimit           time.Duration // how long an expiring lease's Exec may run on
 	LeaseKeepaliveLoss        time.Duration // no keepalive for this long ends an opted-in lease
 	LeaseStartBytes           int64         // a new lease VM's admission charge, before it is measured
-	LeaseHeadroom             float64       // multiplier on a lease VM's measured memory.current
+	LeaseHeadroom             float64       // multiplier on a lease VM's measured footprint (LeaseBytes)
 	LeasePageCacheBytes       int64         // lease cgroup memory.max = PerVMBytes + this
 	// LeaseReclaimFreeBytes is the MemAvailable reclaim keeps free. 0 derives
 	// 2 x PerVMBytes + max(2 GiB, 2 x (bound - LeaseStartBytes)), where bound =
@@ -163,6 +168,11 @@ type Config struct {
 	// LeaseMaxProcesses caps a level-2 lease's running tracked processes
 	// (SH_LEASE_MAX_PROCESSES), sent to the guest on every process_start.
 	LeaseMaxProcesses int
+	// LeaseCacheDropAfter is how long a lease serves no request before its guest drops
+	// its clean page cache (SH_LEASE_CACHE_DROP_S), sent to the guest on every lease
+	// request, rounded up to whole seconds. 0 fills DefaultLeaseCacheDrop; a negative
+	// value turns the drop off (SH_LEASE_CACHE_DROP_S=0).
+	LeaseCacheDropAfter time.Duration
 }
 
 // Normalize fills defaults and then validates, returning the first violation.
@@ -280,6 +290,12 @@ func (c *Config) normalizeLease() error {
 	}
 	if c.LeasePageCacheBytes <= 0 {
 		c.LeasePageCacheBytes = DefaultLeasePageCacheBytes
+	}
+	switch {
+	case c.LeaseCacheDropAfter == 0:
+		c.LeaseCacheDropAfter = DefaultLeaseCacheDrop
+	case c.LeaseCacheDropAfter > MaxLeaseCacheDrop:
+		return fmt.Errorf("vmpool: LeaseCacheDropAfter (%v) must be at most %v", c.LeaseCacheDropAfter, MaxLeaseCacheDrop)
 	}
 	switch {
 	case c.LeaseMaxProcesses == 0:

@@ -1241,3 +1241,33 @@ func TestPerExecOnlyWorkerLeavesTheStateFileAlone(t *testing.T) {
 		}
 	}
 }
+
+// F1: every lease Run carries the configured idle page-cache drop in whole seconds,
+// rounded up; the default is DefaultLeaseCacheDrop, and a negative setting sends 0 (off).
+func TestLeaseRunsCarryTheCacheDrop(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  time.Duration
+		want uint32
+	}{
+		{"default", 0, uint32(DefaultLeaseCacheDrop / time.Second)},
+		{"rounded up", 1500 * time.Millisecond, 2},
+		{"off", -1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, lc, _ := leasePool(t, func(c *Config) { c.LeaseCacheDropAfter = tc.set })
+			mustSetMode(t, p, "k", ModeLease, 1)
+			mustExec(t, p, "k", leaseExec("one", 1))
+			mustExec(t, p, "k", leaseExec("two", 1))
+			cmds := lc.commands()
+			if len(cmds) != 2 {
+				t.Fatalf("Commands = %+v, want two", cmds)
+			}
+			for _, c := range cmds {
+				if c.CacheDropAfterS != tc.want {
+					t.Errorf("%q: CacheDropAfterS = %d, want %d", c.Command, c.CacheDropAfterS, tc.want)
+				}
+			}
+		})
+	}
+}

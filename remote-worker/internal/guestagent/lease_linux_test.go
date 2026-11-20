@@ -1536,3 +1536,67 @@ func TestLeaseTrackedUIDDefaults(t *testing.T) {
 		t.Fatalf("uid allocator %+v, want 20000 and 4", a.lease.uids)
 	}
 }
+
+// scratchDropCaches points dropCachesPath at a scratch file for the test, so the idle drop
+// never touches the test host's page cache, and returns a reader of what was written.
+func scratchDropCaches(t *testing.T) func() string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "drop_caches")
+	if err := os.WriteFile(f, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := dropCachesPath
+	dropCachesPath = f
+	t.Cleanup(func() { dropCachesPath = orig })
+	return func() string {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+}
+
+// F1 of the E17b report: a lease idle for the host's cache_drop_after_s after a request
+// drops the guest's clean page cache (drop_caches 1), once.
+func TestLeaseIdleDropsThePageCacheAfterTheDelay(t *testing.T) {
+	written := scratchDropCaches(t)
+	a, _ := newLeaseAgent(t)
+	req := leaseReq(`true`)
+	req.CacheDropAfterS = 1
+	if _, _, end, errMsg := drive(t, a, req, nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("end %+v, err %q", end, errMsg)
+	}
+	if got := written(); got != "" {
+		t.Fatalf("drop_caches written %q at once, want only after the delay", got)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for written() == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("no page-cache drop 5 s after a request with cache_drop_after_s 1")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := written(); got != "1\n" {
+		t.Fatalf("drop_caches written %q, want \"1\\n\" (page cache only)", got)
+	}
+}
+
+// A request before the delay restarts it, and a request without the field disarms it: the
+// drop is of an idle lease's cache, never one a busy lease is using.
+func TestLeaseRequestBeforeTheDelayDisarmsTheDrop(t *testing.T) {
+	written := scratchDropCaches(t)
+	a, _ := newLeaseAgent(t)
+	req := leaseReq(`true`)
+	req.CacheDropAfterS = 1
+	if _, _, _, errMsg := drive(t, a, req, nil); errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	if _, _, _, errMsg := drive(t, a, leaseReq(`true`), nil); errMsg != "" { // no delay: off
+		t.Fatal(errMsg)
+	}
+	time.Sleep(2500 * time.Millisecond)
+	if got := written(); got != "" {
+		t.Fatalf("drop_caches written %q after a later request without a delay, want nothing", got)
+	}
+}

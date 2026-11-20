@@ -2,6 +2,7 @@ package vmpool
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -677,4 +678,65 @@ func TestReadMemoryCurrent(t *testing.T) {
 			t.Fatalf("readMemoryCurrent on a directory = %d, want an error", got)
 		}
 	})
+}
+
+// F1 of the E17b report: a lease VM's footprint is memory.current less the page cache the
+// kernel can drop at once -- unmapped, clean, not tmpfs -- such as the host's cache of the
+// workspace image. Mapped pages (the snapshot's guest memory), shmem and dirty or
+// writeback pages stay charged, and the footprint never goes below zero.
+func TestLeaseFootprintExcludesReclaimablePageCache(t *testing.T) {
+	stat := func(file, mapped, shmem, dirty, wb int64) string {
+		return fmt.Sprintf("anon 100\nfile %d\nkernel 7\nshmem %d\nfile_mapped %d\nfile_dirty %d\nfile_writeback %d\nactive_file 1\n",
+			file, shmem, mapped, dirty, wb)
+	}
+	for _, tc := range []struct {
+		name    string
+		current int64
+		stat    string
+		want    int64
+	}{
+		{"image cache excluded", 1000, stat(600, 100, 50, 0, 0), 1000 - 450},
+		{"dirty and writeback stay", 1000, stat(600, 100, 50, 30, 20), 1000 - 400},
+		{"all mapped: nothing excluded", 1000, stat(300, 300, 0, 0, 0), 1000},
+		{"never below zero", 100, stat(600, 0, 0, 0, 0), 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "memory.current"), []byte(fmt.Sprintf("%d\n", tc.current)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "memory.stat"), []byte(tc.stat), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := readLeaseFootprint(dir)
+			if err != nil || got != tc.want {
+				t.Fatalf("readLeaseFootprint = %d, %v; want %d", got, err, tc.want)
+			}
+		})
+	}
+}
+
+// A memory.stat that cannot be read or lacks a field the subtraction needs is an error,
+// never "nothing reclaimable" or "all of it": the caller keeps its last sample.
+func TestLeaseFootprintRefusesAnIncompleteStat(t *testing.T) {
+	for name, stat := range map[string]string{
+		"missing":       "",
+		"no file_dirty": "file 10\nshmem 0\nfile_mapped 0\nfile_writeback 0\n",
+		"garbled":       "file ten\nshmem 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "memory.current"), []byte("1000\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if stat != "" {
+				if err := os.WriteFile(filepath.Join(dir, "memory.stat"), []byte(stat), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got, err := readLeaseFootprint(dir); err == nil {
+				t.Fatalf("readLeaseFootprint = %d, nil; want an error", got)
+			}
+		})
+	}
 }
