@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sandbox auth and exec flow · MOCA</title>
+<title>Sandbox authentication and exec flow · moca</title>
 <meta name="description" content="Interactive walkthrough of how a client obtains a sandbox token and how one Exec reaches a microVM and returns.">
-<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
 <style>
   :root {
     --bg: #f5f6fb;
@@ -172,8 +172,8 @@
 
   <header class="mb-5 flex flex-wrap items-end justify-between gap-4">
     <div class="max-w-2xl">
-      <p class="text-[11px] font-bold uppercase tracking-[0.14em]" style="color: var(--accent)">MOCA · sandbox service</p>
-      <h1 class="mt-1 text-2xl font-bold tracking-tight sm:text-3xl">Auth and exec flow</h1>
+      <p class="text-[11px] font-bold uppercase tracking-[0.14em]" style="color: var(--accent)">moca · sandbox service</p>
+      <h1 class="mt-1 text-2xl font-bold tracking-tight sm:text-3xl">Sandbox authentication and exec flow</h1>
       <p class="mt-1.5 text-sm leading-relaxed" style="color: var(--muted)">
         How a client obtains a sandbox token, and how one Exec reaches a fresh microVM and comes back.
         Press <span class="mono text-[12px]">Next</span> to advance one step at a time, or click any step.
@@ -185,6 +185,7 @@
       <span class="chip"><span class="dot" style="background: var(--warn)"></span>worker credential</span>
       <span class="chip"><span class="dot" style="background: var(--bad)"></span>refusal</span>
     </div>
+  <p class="muted" style="margin-top:10px;font-size:13px"><a href="https://www.rossoctl.dev/moca/" target="_blank" rel="noopener">&lsaquo; moca docs</a> · written page: <a href="https://www.rossoctl.dev/moca/sandbox/concepts/isolation" target="_blank" rel="noopener">Isolation and data handling</a></p>
   </header>
 
   <div class="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
@@ -374,7 +375,7 @@
       phase: AUTH,
       title: 'Ask for a sandbox token',
       detail: "Only the owner can mint. An admin gets the same 404 as anyone else, so no one can exec into another user's code.",
-      packets: [{ from: 'client', to: 'cp', edge: 'client>cp', label: 'POST /sandboxes/{id}/token', start: 0, span: 0.8 }],
+      packets: [{ from: 'client', to: 'cp', edge: 'client>cp', label: 'POST /v1/sandboxes/{id}/token', start: 0, span: 0.8 }],
       token: 'mint'
     },
     {
@@ -425,7 +426,7 @@
     {
       phase: EXEC,
       title: 'Admit the Exec',
-      detail: 'The relay renames req_id with HMAC(sbx ‖ req_id) so two sandboxes never share a result. It admits at most two in-flight Execs per sandbox and arms a timer at the token expiry.',
+      detail: 'The relay renames req_id with HMAC(sbx ‖ req_id) so two sandboxes never share a result. It admits at most SH_SANDBOX_MAX_INFLIGHT in-flight Execs per sandbox (default 2) and arms a timer at the token expiry plus a 30 s clock leeway.',
       event: true,
       arrive: ['relay']
     },

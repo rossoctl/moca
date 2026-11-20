@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>SBX Admission &amp; Pool</title>
+<title>Admission and the microVM pool · moca</title>
+<meta name="description" content="Interactive walkthrough of the sandbox service's four admission gates, its microVM pool and the memory budget, step by step.">
 <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -91,12 +92,14 @@
 </style>
 </head>
 <body>
+<noscript><p style="margin:16px;color:#b42318">This page needs JavaScript: the steps are built by script.</p></noscript>
 <div class="mx-auto" style="max-width: 1120px; padding: 28px max(16px, env(safe-area-inset-left, 0px)) 56px max(16px, env(safe-area-inset-right, 0px));">
 
   <header class="mb-6">
-    <div class="mono muted" style="font-size: 11.5px; letter-spacing: 0.14em; text-transform: uppercase;">MOCA · sandbox service</div>
-    <h1 class="mt-1 font-bold" style="font-size: clamp(24px, 4vw, 34px); text-wrap: balance;">SBX Admission Control &amp; VM Pool</h1>
+    <div class="mono muted" style="font-size: 11.5px; letter-spacing: 0.14em; text-transform: uppercase;">moca · sandbox service</div>
+    <h1 class="mt-1 font-bold" style="font-size: clamp(24px, 4vw, 34px); text-wrap: balance;">Admission and the microVM pool</h1>
     <p class="muted mt-2" style="max-width: 68ch; line-height: 1.55;">A request for a sandbox passes through four admission gates. This page shows each gate, each computation, and the pool that serves the Execs. Step through the sequence with the controls.</p>
+  <p class="muted" style="margin-top:10px;font-size:13px"><a href="https://www.rossoctl.dev/moca/" target="_blank" rel="noopener">&lsaquo; moca docs</a> · written page: <a href="https://www.rossoctl.dev/moca/sandbox/concepts/limits" target="_blank" rel="noopener">Limits</a></p>
   </header>
 
   <!-- ============ interactive visualization ============ -->
@@ -161,7 +164,7 @@
           <li>The pool checks the memory budget. The check adds the full price of one VM to the committed bytes. The price is guest RAM plus VM overhead.</li>
           <li>A paused standby costs less than a running VM. The pool charges the measured dirty pages times the headroom factor.</li>
           <li>A promotion over the budget evicts standbys from colder runs. The eviction picks the run with the oldest last use first.</li>
-          <li>Every refusal is retryable. The caller sees HTTP 429, HTTP 503, or <span class="mono" style="font-size: 12.5px;">RESOURCE_EXHAUSTED</span>. Each refusal carries a distinct reason code.</li>
+          <li>A capacity refusal is retryable. The capacity reasons are <span class="mono" style="font-size: 12.5px;">memory-budget:</span>, <span class="mono" style="font-size: 12.5px;">max-runs:</span> and <span class="mono" style="font-size: 12.5px;">busy: queue full</span>. The caller sees HTTP 429, HTTP 503, or <span class="mono" style="font-size: 12.5px;">RESOURCE_EXHAUSTED</span>. A <span class="mono" style="font-size: 12.5px;">host-memory:</span> refusal is not a capacity refusal and is not retried. Each refusal carries a distinct reason code.</li>
         </ul>
       </div>
       <div class="card p-5">
@@ -171,12 +174,12 @@
           <li>The pool keeps standby VMs for each run. A standby VM is paused. The target count per run is 2.</li>
           <li>An Exec acquires one standby. The acquire pops the newest standby first.</li>
           <li>The VM runs one command. The pool destroys the VM after the command. The pool never reuses a VM.</li>
-          <li>The destroy runs as a deferred step. The background workers finish the reap. The workspace gate opens at the barrier.</li>
+          <li>The destroy runs to the end before the workspace gate opens. A benchmark-only option (<span class="mono" style="font-size: 12.5px;">DeferReapWorkers</span>, default 0) can move the reap to background workers. The deployed worker does not enable it.</li>
           <li>The pool refills a popped slot after a delay. The delay is 200 ms. The delay keeps a finished run from getting new VMs. A failed refill backs off. The backoff starts at 250 ms, doubles, and stops at 30 s.</li>
           <li>The sweep runs on every Exec. The sweep also runs on a timer. The timer fires every 22.5 s.</li>
           <li>A run with no Exec for 90 s drops its standbys. The run keeps the workspace. The run enters the state parked. A parked run holds disk, not memory.</li>
           <li>The sweep destroys at most 8 VMs per scan. This rate limits the reclaim work.</li>
-          <li>A run with no Exec for a longer time loses the workspace. The default time is 30 minutes. A sandbox-service deployment typically sets it longer than the sandbox lifetime (for example 216 hours). A live sandbox keeps its workspace for its whole lifetime.</li>
+          <li>A run with no Exec for a longer time loses the workspace. The default time is 30 minutes. A sandbox-service deployment typically sets it longer than the sandbox lifetime (for example 768 hours with the default 30-day maximum lifetime). A live sandbox keeps its workspace for its whole lifetime.</li>
           <li>The host janitor runs every 15 minutes. The janitor asks the control plane for the live and terminated sandboxes. The janitor frees the disk of a terminated sandbox after a grace period.</li>
         </ul>
       </div>
@@ -199,7 +202,7 @@
           <tr><td>pool</td><td>memory budget</td><td>SH_MAX_COMMITTED_MB / SH_MEMORY_RESERVE_MB</td><td>required / 0</td><td>"memory-budget:" → 503</td></tr>
           <tr><td>pool</td><td>standby charge</td><td>SH_STANDBY_HEADROOM</td><td>4.0 ("full" = full RAM)</td><td>&mdash;</td></tr>
           <tr><td>pool</td><td>unparked runs</td><td>SH_MAX_RUNS</td><td>64</td><td>"max-runs:" → 503</td></tr>
-          <tr><td>pool</td><td>host free memory floor</td><td>SH_HOST_MEM_FLOOR_MB</td><td>0, off</td><td>"host-memory:" → 503</td></tr>
+          <tr><td>pool</td><td>host free memory floor</td><td>SH_HOST_MEM_FLOOR_MB</td><td>0, off</td><td>"host-memory:" → refused, not retryable (no 503)</td></tr>
         </tbody>
       </table>
     </div>
@@ -321,18 +324,18 @@
       title: "The control plane creates the sandbox",
       phase: "gate 1 · control plane",
       narr: [
-        "The control plane writes the sandbox record. The record gets the state ready.",
+        "The control plane writes the sandbox record. The state ready is derived when the record is read.",
         "The control plane computes the expiry date. The date is now plus SH_SANDBOX_LIFETIME_SECONDS. The default is 7 days.",
-        "The control plane mints a sandbox token. The token is valid for 900 seconds.",
-        "The control plane does no worker I/O. The worker builds the workspace at the first Exec."
+        "Create returns the record and no token. The control plane does no worker I/O. The worker builds the workspace at the first Exec.",
+        "The client mints a sandbox token with a separate call, POST /v1/sandboxes/{id}/token. The token is valid for 900 seconds."
       ],
       comp: [
-        "record.state  = ready",
+        "state = ready  (derived on read, not stored)",
         "record.expiresAt = now + 7 d",
-        "token.ttl     = 900 s  (SH_SANDBOX_TOKEN_TTL_SECONDS)"
+        "token (separate call): ttl = 900 s  (SH_SANDBOX_TOKEN_TTL_SECONDS)"
       ],
       knobs: ["SH_SANDBOX_LIFETIME_SECONDS", "SH_SANDBOX_TOKEN_TTL_SECONDS"],
-      scene: { packet: { path: "return", t: 0.5, label: "sandbox token" }, hl: ["cp", "client"], token: true,
+      scene: { packet: { path: "return", t: 0.5, label: "201 sandbox" }, hl: ["cp", "client"], token: true,
                cp: { live: 28, mine: 3, rec: "ready" }, relay: 0, worker: { q: 0, s: 0, gate: "free" },
                run: "absent", idle: "—", vms: { inflight: false, warming: false, destroying: false, standby: 0, parked: false, chip: null, janitor: false },
                budget: BASE, counters: { warm: 0, coldF: 0, coldP: 0, refused: 0, evicted: 0 }, ghost: null }
@@ -409,7 +412,7 @@
       phase: "exec teardown",
       narr: [
         "The command ends. The pool destroys the VM.",
-        "The reap runs as a deferred step. Background workers finish the reap. The workspace gate opens at the barrier, not at the end of the reap.",
+        "The reap runs to the end. The workspace gate opens when the destroy ends.",
         "The committed bytes drop by 288 MiB.",
         "The relay releases the in-flight slot."
       ],
@@ -418,9 +421,9 @@
         "committed = 9,376 - 288 = 9,088 MiB",
         "execGate: released"
       ],
-      knobs: ["defer-reap workers"],
+      knobs: [],
       scene: { cp: { live: 28, mine: 3, rec: "ready" }, relay: 0, worker: { q: 0, s: 0, gate: "free" },
-               run: "active", idle: "0 s", vms: { inflight: false, warming: false, destroying: true, standby: 0, parked: false, chip: "reap deferred", janitor: false },
+               run: "active", idle: "0 s", vms: { inflight: false, warming: false, destroying: true, standby: 0, parked: false, chip: "destroying", janitor: false },
                budget: BASE, counters: { warm: 0, coldF: 1, coldP: 0, refused: 0, evicted: 0 }, ghost: null }
     },
     {
@@ -491,13 +494,13 @@
       phase: "pool reclaim · janitor",
       narr: [
         "The run stays parked. The workspace stays idle. The idle time passes SH_WORKSPACE_IDLE. The default is 30 minutes.",
-        "A sandbox-service deployment typically sets SH_WORKSPACE_IDLE to 216 hours, longer than the sandbox lifetime. A live sandbox keeps its workspace.",
+        "A sandbox-service deployment typically sets SH_WORKSPACE_IDLE to 768 hours (the default 30-day maximum lifetime plus 48 hours), longer than the sandbox lifetime. A live sandbox keeps its workspace.",
         "The pool deletes the workspace. The run enters the state absent.",
         "The host janitor runs every 15 minutes. The janitor asks the control plane for the live and terminated sandboxes. The janitor frees the disk of a terminated sandbox after the grace period.",
         "The cycle is complete. The next request starts at step 1."
       ],
       comp: [
-        "idle 216 h ≥ SH_WORKSPACE_IDLE  → reclaim",
+        "idle 768 h ≥ SH_WORKSPACE_IDLE  → reclaim",
         "run: parked → absent",
         "janitor: every 15 min, age ≥ token TTL + 5 min"
       ],
@@ -646,7 +649,7 @@
 
   function ghostPill(where, p) {
     var g = { cp: { x: 210, y: 156, w: 190 }, relay: { x: 450, y: 186, w: 170 }, pool: { x: 640, y: 216, w: 208 } }[where];
-    var text = { cp: "on limit: 429 quota_exceeded", relay: "on limit: RESOURCE_EXHAUSTED", pool: "on refusal: 503, retryable" }[where];
+    var text = { cp: "on limit: 429 quota_exceeded", relay: "on limit: RESOURCE_EXHAUSTED", pool: "on capacity refusal: 503, retryable" }[where];
     ctx.font = "500 10.5px 'IBM Plex Mono', monospace";
     var w = ctx.measureText(text).width + 16;
     ctx.fillStyle = "rgba(0,0,0,0)";
@@ -820,7 +823,7 @@
       }
     }
     if (v.warming) vmCard(510, cy, "warm", "restore from snapshot|charge 288 MiB full|cause: " + (v.chip || ""), p, t);
-    else if (v.destroying) vmCard(510, cy, "destroy", "reap on background|workers · gate open|at the barrier", p, t);
+    else if (v.destroying) vmCard(510, cy, "destroy", "VM destroyed|gate opens when|the destroy ends", p, t);
     else vmCard(510, cy, "none", "", p, t);
 
     // slot notes

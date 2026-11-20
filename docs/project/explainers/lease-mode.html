@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SBX lease mode — PR #698</title>
+<title>Lease mode · moca</title>
+<meta name="description" content="Interactive walkthrough of the sandbox service's lease mode: what a lease keeps between commands, and what it costs.">
 <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <style>
@@ -66,17 +67,19 @@
 </style>
 </head>
 <body>
+<noscript><p style="margin:16px;color:#b42318">This page needs JavaScript: the steps are built by script.</p></noscript>
 <div class="max-w-5xl mx-auto px-0 pb-16">
 
   <header class="pt-10 pb-6">
-    <p class="eyebrow">MOCA · PR #698 · ADR-0048</p>
-    <h1 class="text-3xl sm:text-4xl font-bold mt-2 tracking-tight">SBX lease mode</h1>
+    <p class="eyebrow">moca · sandbox service · ADR-0048</p>
+    <h1 class="text-3xl sm:text-4xl font-bold mt-2 tracking-tight">Lease mode</h1>
     <p class="muted mt-3 max-w-2xl leading-relaxed">Per-<span class="mono text-sm">Exec</span> mode gives each Exec a fresh microVM.
       Files persist. Nothing else persists. Repeated CPU-heavy work pays a cold start every time.
       Lease mode keeps one guest warm between Execs. Level 1 kills every process at the end of each
       Exec. Level 2 lets <span class="mono text-sm">process_start</span> processes survive. Step through each flow.
       Press Next for one step. Press Prev to go back one step. The wire box below the stage shows the
       messages of the current step. The messages stay until you move on.</p>
+  <p class="muted" style="margin-top:10px;font-size:13px"><a href="https://www.rossoctl.dev/moca/" target="_blank" rel="noopener">&lsaquo; moca docs</a> · written page: <a href="https://www.rossoctl.dev/moca/sandbox/how-to/lease-mode" target="_blank" rel="noopener">Keep a guest between commands (lease mode)</a></p>
   </header>
 
   <section class="card overflow-hidden">
@@ -145,8 +148,9 @@
         cannot escape.</p></div>
       <div class="card p-5"><h3 class="font-semibold">The mode switch</h3>
         <p class="muted text-sm mt-2 leading-relaxed">The owner changes the mode through mocactl, with the user API
-        token. The agent gets no tool for it. The relay sets <span class="mono text-xs">mode</span> and
-        <span class="mono text-xs">mode_epoch</span> from the token claims on every frame. The worker refuses a
+        token. The agent gets no tool for it. The control plane signs the mode and the epoch into a set-mode token, and into
+        every sandbox token. The relay sets <span class="mono text-xs">mode</span> and
+        <span class="mono text-xs">mode_epoch</span> from the verified claims on every frame. The worker refuses a
         stale epoch. An unknown epoch fails closed to <span class="mono text-xs">per-exec</span>.</p></div>
       <div class="card p-5"><h3 class="font-semibold">No silent end</h3>
         <p class="muted text-sm mt-2 leading-relaxed">Every end reason sends one notice on the next tool result and in
@@ -181,12 +185,11 @@
   </section>
 
   <footer class="mt-12 pt-6 border-t text-sm muted flex flex-wrap gap-x-6 gap-y-2" style="border-color:var(--line)">
-    <a href="https://github.com/rossoctl/moca/pull/698" target="_blank" rel="noopener">PR #698</a>
     <a href="https://github.com/rossoctl/moca/blob/main/docs/adrs/0048-sbx-lease-mode.md" target="_blank" rel="noopener">ADR-0048</a>
     <a href="https://github.com/rossoctl/moca/blob/main/docs/specs/2026-11-08-sbx-lease-mode-design.md" target="_blank" rel="noopener">Spec (2026-11-08)</a>
     <a href="https://github.com/rossoctl/moca/blob/main/docs/adrs/0035-per-exec-microvm-warm-standby.md" target="_blank" rel="noopener">ADR-0035</a>
     <a href="https://github.com/rossoctl/moca-experiments/issues/21" target="_blank" rel="noopener">E17</a>
-    <span>status: design, not approved · nothing is built</span>
+    <span>status: built (v0.11.0), off by default (<span class="mono">SH_SANDBOX_MODES_ALLOWED=per-exec</span>)</span>
   </footer>
 </div>
 
@@ -615,10 +618,10 @@ var L1 = [
 },
 {
   title: 'The owner sets the mode',
-  body: 'The owner runs mocactl. mocactl sends the new mode to the control plane. The request carries the user API token. The control plane writes mode = lease. It raises modeEpoch. It writes an audit record. A sandbox token cannot change the mode.',
+  body: 'The owner runs mocactl. mocactl sends the new mode to the control plane. The request carries the user API token. The control plane writes mode = lease. It raises modeEpoch. It writes an audit record. It returns the sandbox record and a set-mode token. A sandbox token cannot change the mode.',
   wire: ['mocactl → control plane: PUT /v1/sandboxes/{id}/mode {mode:"lease"}',
-         'control plane → mocactl: 200 {mode:"lease", modeEpoch:3}'],
-  chips: ['user API token', 'owner only', 'audit record'],
+         'control plane → mocactl: 200 {sandbox:{mode:"lease", modeEpoch:3, …}, setModeToken}'],
+  chips: ['user API token', 'owner only', 'audit record', 'returns setModeToken'],
   dur: 4200,
   commit: function(){ scene.mode = 'lease'; scene.epoch = 3; },
   overlay: function(t){
@@ -628,10 +631,11 @@ var L1 = [
 },
 {
   title: 'mocactl pushes the mode to the worker',
-  body: 'mocactl mints a fresh sandbox token. The token carries the mode and the epoch. mocactl sends a LeaseControl set_mode call through the relay. The worker stores the epoch next to the workspace. The epoch survives a worker restart. The worker refuses an Exec with a stale epoch.',
-  wire: ['mocactl → relay → worker: LeaseControl {op:"set_mode", mode:"lease", mode_epoch:3}',
+  body: 'mocactl sends the set-mode token from the last step in a LeaseControl set_mode call through the relay. The control plane minted that token. It carries the mode and the epoch. The relay verifies it and sets the mode and the epoch on the frame it forwards. A set_mode without a verified set-mode token gets PERMISSION_DENIED. The worker stores the epoch next to the workspace. The epoch survives a worker restart. The worker refuses an Exec with a stale epoch.',
+  wire: ['mocactl → relay: LeaseControlRequest {sandbox_id, op:"set_mode", set_mode_token}',
+         'relay → worker: LeaseControlFrame {op:"set_mode", mode:"lease", mode_epoch:3}',
          'worker: epoch 3 stored on the host disk'],
-  chips: ['token claims: mode, mode_epoch', 'stale epoch = refused', 'fails closed to per-exec'],
+  chips: ['set-mode token claims: mode, mode_epoch', 'stale epoch = refused', 'fails closed to per-exec'],
   dur: 4600,
   commit: function(){},
   overlay: function(t){
@@ -803,9 +807,9 @@ var L2 = [
 },
 {
   title: 'The owner sets level 2',
-  body: 'The owner runs mocactl. The mode changes to lease+processes. An upgrade needs a TTY. Operator policy must allow the mode. The control plane raises the epoch. mocactl sends a signed set_mode to the worker. The agent has no tool for the mode.',
+  body: 'The owner runs mocactl. The mode changes to lease+processes. An upgrade needs a TTY. Operator policy must allow the mode. The control plane raises the epoch. mocactl sends a set_mode with the new set-mode token to the worker. The agent has no tool for the mode.',
   wire: ['mocactl → control plane: PUT /v1/sandboxes/{id}/mode {mode:"lease+processes"}',
-         'mocactl → relay → worker: LeaseControl {op:"set_mode", mode_epoch:4}'],
+         'mocactl → relay → worker: LeaseControl {op:"set_mode", set_mode_token} → mode_epoch 4'],
   chips: ['upgrade needs a TTY', 'no agent tool for the mode', 'policy gate'],
   dur: 4800,
   commit: function(){ scene.mode = 'lease+processes'; scene.epoch = 4; },
@@ -894,9 +898,9 @@ var L2 = [
 },
 {
   title: 'A downgrade stops the tracked processes',
-  body: 'The owner sets the mode back to lease. mocactl sends a signed set_mode with a fresh token. The worker stops every tracked process. The notice lists each stopped process. The lease stays active. An Exec with a stale epoch is refused.',
+  body: 'The owner sets the mode back to lease. mocactl sends a set_mode with a fresh set-mode token. The worker stops every tracked process. The notice lists each stopped process. The lease stays active. An Exec with a stale epoch is refused.',
   wire: ['mocactl → control plane: PUT /v1/sandboxes/{id}/mode {mode:"lease"}',
-         'mocactl → relay → worker: LeaseControl {op:"set_mode", mode_epoch:5}',
+         'mocactl → relay → worker: LeaseControl {op:"set_mode", set_mode_token} → mode_epoch 5',
          'worker: stop tracked/devserver · TERM → KILL · notice + audit'],
   chips: ['takes effect right away', 'stale epoch refused', 'lease stays active'],
   dur: 5000,

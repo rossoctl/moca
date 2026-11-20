@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>P6 Async Fan-Out — PR #696</title>
+<title>Async fan-out · moca</title>
+<meta name="description" content="Step-through diagram of moca's async fan-out: leaf turns submitted, queued as bare ids, drained inside the turn worker under the same admission budget, granted credentials only at dequeue, and recovered after a crash.">
 <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <style>
@@ -62,14 +63,16 @@
 </style>
 </head>
 <body>
+<noscript><p style="max-width:48rem;margin:2rem auto;padding:0 1rem;font-family:sans-serif">This explainer is a step-through diagram drawn by script, so it needs JavaScript. The written version is on the <a href="https://www.rossoctl.dev/moca/harness/concepts/dispatch-archetypes">dispatch archetypes</a> page of the moca docs.</p></noscript>
 <div class="max-w-5xl mx-auto px-0 pb-16">
 
   <header class="pt-10 pb-6">
-    <p class="eyebrow">MOCA · PR #696 · ADR-0047</p>
-    <h1 class="text-3xl sm:text-4xl font-bold mt-2 tracking-tight">P6 async fan-out</h1>
+    <p class="eyebrow"><a href="https://www.rossoctl.dev/moca/" style="text-decoration:none">&#8249; Back to the moca docs</a> · moca · ADR-0047</p>
+    <h1 class="text-3xl sm:text-4xl font-bold mt-2 tracking-tight">Async fan-out</h1>
     <p class="muted mt-3 max-w-2xl leading-relaxed">A drain loop inside the ordinary turn worker — how N leaf turns are submitted,
       queued as bare ids, drained under the same admission budget as interactive turns, granted credentials
-      only at dequeue, and recovered after a crash. Step through the mechanism, then read the decisions behind it.</p>
+      only at dequeue, and recovered after a crash. Step through the mechanism, then read the decisions behind it. The written version is
+      <a href="https://www.rossoctl.dev/moca/harness/concepts/dispatch-archetypes">Dispatch archetypes</a>.</p>
   </header>
 
   <section class="card overflow-hidden">
@@ -79,7 +82,7 @@
       <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-accent)"></span>control-plane mint</span>
       <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-danger)"></span>failure path</span>
     </div>
-    <div class="px-2 pt-2"><canvas id="stage" aria-label="Animated diagram of the P6 async fan-out design"></canvas></div>
+    <div class="px-2 pt-2"><canvas id="stage" aria-label="Animated diagram of moca async fan-out"></canvas></div>
     <div class="px-5 pb-5">
       <div class="flex flex-wrap items-center gap-3 pt-2">
         <button id="prev" class="btn" aria-label="Previous step">&#8249; Prev</button>
@@ -138,55 +141,57 @@
   </section>
 
   <section class="mt-10">
-    <p class="eyebrow">Four findings worth a reviewer's attention</p>
+    <p class="eyebrow">History: why the design needed these four things</p>
+    <p class="muted text-sm mt-2 max-w-3xl leading-relaxed">These were the findings of the design review (2026-11-05). All four are resolved on <span class="mono text-xs">main</span>; they are kept here because each explains a choice above.</p>
     <ol class="mt-4 space-y-4">
       <li class="card p-5"><p class="mono text-xs accent">1</p>
-        <p class="mt-1 leading-relaxed"><span class="font-semibold">turn_exp is specified in MI1 §6.1 and implemented in no TypeScript.</span>
-        Expiry today is always <span class="mono text-xs">exp = iat + ttlSeconds</span>. #388 is larger than it reads, and this
-        is where the M1/M2 split comes from.</p></li>
+        <p class="mt-1 leading-relaxed"><span class="font-semibold">turn_exp was specified but not implemented.</span>
+        Expiry was always <span class="mono text-xs">exp = iat + ttlSeconds</span>. It is implemented now: a grant expires at
+        <span class="mono text-xs">min(now + ttl, turn_exp)</span>, and the control plane sets
+        <span class="mono text-xs">turn_exp</span> when it mints.</p></li>
       <li class="card p-5"><p class="mono text-xs accent">2</p>
         <p class="mt-1 leading-relaxed"><span class="font-semibold">The claim heartbeat, without which every real leaf double-runs.</span>
         <span class="mono text-xs">minIdleMs</span> is 90&nbsp;s against a <span class="mono text-xs">MOCA_TURN_MAX_S</span> of
         1800&nbsp;s: a leaf running past 90&nbsp;s goes idle in the PEL <em>while still running</em>, and a peer's
-        <span class="mono text-xs">XAUTOCLAIM</span> reclaims it — idempotent in result, double-spent in budget and sandboxes.
-        The removed <span class="mono text-xs">leaf-job-runner.ts</span> had it solved (touch every 30&nbsp;s, cleared in a
-        <span class="mono text-xs">finally</span>), which is why the restore scope names that file.</p></li>
+        <span class="mono text-xs">XAUTOCLAIM</span> would reclaim it &mdash; idempotent in result, double-spent in budget and
+        sandboxes. The drain loop therefore touches its claim while a leaf runs, and the heartbeat dies with the process, so a
+        crashed worker's leaf is reclaimed.</p></li>
       <li class="card p-5"><p class="mono text-xs accent">3</p>
-        <p class="mt-1 leading-relaxed"><span class="font-semibold">All three synchronous leaf aliases occupy no slot today.</span>
+        <p class="mt-1 leading-relaxed"><span class="font-semibold">The synchronous leaf aliases occupied no slot.</span>
         <span class="mono text-xs">/runs</span>, <span class="mono text-xs">/run-leaf</span> and
-        <span class="mono text-xs">/v1/runs</span> are not in <span class="mono text-xs">TURN_PATHS</span>. Bringing them into the
-        counter fixes a pre-existing over-admission defect — and is a behaviour change on a live path: deployments at their
-        ceiling will see 429s they previously would not.</p></li>
+        <span class="mono text-xs">/v1/runs</span> were not counted against the worker's turn budget, which over-admitted. All five
+        paths (<span class="mono text-xs">/turn</span>, <span class="mono text-xs">/v1/turn</span> and those three) are in
+        <span class="mono text-xs">TURN_PATHS</span> now.</p></li>
       <li class="card p-5"><p class="mono text-xs accent">4</p>
-        <p class="mt-1 leading-relaxed"><span class="font-semibold">The consumer group had no lifecycle on P6.</span> The removed drainer
-        reaped once at process start and GC'd idle consumers so KEDA could scale to zero; neither trigger survives. Reclaim
-        becomes periodic and armed by every worker, keyed on
-        <span class="mono text-xs">moca-${HOSTNAME}-w${SH_WORKER_ID}</span> — stable across an in-place restart, unique per
+        <p class="mt-1 leading-relaxed"><span class="font-semibold">The consumer group needed a lifecycle on P6.</span> The earlier
+        drainer reaped once at process start and GC'd idle consumers so KEDA could scale to zero; neither trigger exists on P6.
+        Reclaim is periodic and armed by every worker, keyed on
+        <span class="mono text-xs">moca-${HOSTNAME}-w${SH_WORKER_ID}</span> &mdash; stable across an in-place restart, unique per
         live worker.</p></li>
     </ol>
   </section>
 
   <section class="mt-10">
-    <p class="eyebrow">Delivery in three milestones</p>
+    <p class="eyebrow">How it shipped</p>
+    <p class="muted text-sm mt-2 max-w-3xl leading-relaxed">ADR-0047 is Accepted and all three milestones are implemented. Async fan-out is opt-in: set <span class="mono text-xs">SH_ASYNC_DRAIN=1</span> on the workers.</p>
     <div class="grid sm:grid-cols-3 gap-4 mt-4">
       <div class="card p-5"><p class="mono text-xs accent">M1</p>
-        <h3 class="font-semibold mt-1">A working drain, single tenancy</h3>
-        <p class="muted text-sm mt-2 leading-relaxed">Queue restored; drain loop in the worker; quota, status read, queued-only cancel.
-        Gated to <span class="mono text-xs">MOCA_TENANCY=single</span> as a dated conditional refusal — a stated condition
-        with a lifting criterion, not an omission.</p></div>
+        <h3 class="font-semibold mt-1">A working drain</h3>
+        <p class="muted text-sm mt-2 leading-relaxed">Queue (<span class="mono text-xs">@moca/work-queue</span>), the drain loop in
+        the worker (<span class="mono text-xs">leaf-drain-loop.ts</span>, <span class="mono text-xs">async-worker.ts</span>),
+        per-owner quota and the status read (#704, #713, #717).</p></div>
       <div class="card p-5"><p class="mono text-xs accent">M2</p>
         <h3 class="font-semibold mt-1">Multi-tenant</h3>
-        <p class="muted text-sm mt-2 leading-relaxed"><span class="mono text-xs">turn_exp</span> implemented (MI1 §6.1), full
-        grant-at-dequeue with both audiences (#388), and the tenancy gate lifts.</p></div>
+        <p class="muted text-sm mt-2 leading-relaxed"><span class="mono text-xs">turn_exp</span>, grant-at-dequeue with both
+        audiences, and the single-tenancy gate lifted (#788, #807, #822).</p></div>
       <div class="card p-5"><p class="mono text-xs accent">M3</p>
         <h3 class="font-semibold mt-1">deploy/k8s</h3>
-        <p class="muted text-sm mt-2 leading-relaxed">Manifests, Kind and OCP overlays, <span class="mono text-xs">setup.sh</span>,
-        and a queued-leaf smoke test (#688).</p></div>
+        <p class="muted text-sm mt-2 leading-relaxed">Manifests, overlays, <span class="mono text-xs">setup.sh</span> and a
+        queued-leaf smoke test (#765). Per-turn budgets, running-turn cancel and per-worker fairness followed in #391.</p></div>
     </div>
   </section>
 
   <footer class="mt-12 pt-6 border-t text-sm muted flex flex-wrap gap-x-6 gap-y-2" style="border-color:var(--line)">
-    <a href="https://github.com/rossoctl/moca/pull/696" target="_blank" rel="noopener">PR #696</a>
     <a href="https://github.com/rossoctl/moca/blob/main/docs/adrs/0047-p6-async-fan-out-in-worker-drain.md" target="_blank" rel="noopener">ADR-0047</a>
     <a href="https://github.com/rossoctl/moca/blob/main/docs/specs/2026-11-05-p6-async-fan-out-design.md" target="_blank" rel="noopener">Spec (2026-11-05)</a>
     <span>epic #686 · #386 · supersedes ADR-0015</span>
@@ -394,7 +399,7 @@ function drawBoxes(){
   drawBox(G.result, 'leaf-result-store', null);
   ctx.textAlign = 'right';
   ctx.font = '400 9.5px "IBM Plex Mono", monospace'; ctx.fillStyle = C.muted;
-  ctx.fillText('TTL 24 h · keyed by leafSessionId', G.result.x + G.result.w - 14, G.result.y + 22);
+  ctx.fillText('TTL 7 d · leaf:result:<session>:<turn>', G.result.x + G.result.w - 14, G.result.y + 22);
   ctx.textAlign = 'left';
 }
 function stateColor(state){
@@ -516,9 +521,9 @@ function ring(x, y, frac, col){
 /* ---------- the eight steps ---------- */
 var steps = [
 {
-  title: 'P6 today — no async path',
-  body: '#691 removed the KEDA drainer, @moca/work-queue and the enqueue route. A P6 worker is purely reactive: an HTTP server that never calls listen(), accepting only sockets the supervisor hands it over IPC, admitted against SH_TURNS_PER_WORKER through a per-worker TurnCounter. The execution lane — runLeaf, leaf-result-store, the run-lease reaper — survived intact, and that is the foundation this design builds on.',
-  chips: ['after #691', 'worker = purely reactive', 'execution lane intact'],
+  title: 'A worker is reactive; the drain loop lives inside it',
+  body: 'A P6 worker is an HTTP server that never calls listen(), accepting only sockets the supervisor hands it over IPC, admitted against SH_TURNS_PER_WORKER through a per-worker TurnCounter. Async fan-out adds no new process type: with SH_ASYNC_DRAIN=1 the same worker also runs a drain loop (leaf-drain-loop.ts, async-worker.ts) over the @moca/work-queue stream, and takes its slots from the same counter. The execution lane — runLeaf, leaf-result-store, the run-lease reaper — is shared with synchronous leaves.',
+  chips: ['SH_ASYNC_DRAIN=1', 'one TurnCounter', 'execution lane shared'],
   dur: 4200,
   commit: function(){ scene.slots[0][0] = 'sync'; },
   overlay: function(t){
@@ -529,7 +534,7 @@ var steps = [
 },
 {
   title: 'Submit — one authenticated path',
-  body: 'Every caller — mocactl, an LLM coding agent spawning subagents, a controller with a service-account credential — enqueues through POST /v1/sessions/{id}/turns {async:true} and gets 202 {turnId}. Authenticated and owner-scoped, because the trust model is uniformly "assume a misbehaving client". The control plane checks the per-owner queued-turn quota (MOCA_ASYNC_QUEUED_PER_OWNER, default 50) and resolves caps before anything is enqueued. The unauthenticated data-plane route stays removed, permanently (#687).',
+  body: 'Every caller — mocactl, an LLM coding agent spawning subagents, a controller with a service-account credential — enqueues through POST /v1/sessions/{id}/turns {async:true} and gets 202 {turnId}. Authenticated and owner-scoped, because the trust model is uniformly "assume a misbehaving client". The control plane checks the per-owner queued-turn quota (MOCA_ASYNC_QUEUED_PER_OWNER, default 50) and resolves caps before anything is enqueued. The unauthenticated data-plane route does not exist and will not return (#687).',
   chips: ['POST /v1/sessions/{id}/turns {async:true}', '202 {turnId}', 'MOCA_ASYNC_QUEUED_PER_OWNER = 50'],
   dur: 5400,
   commit: function(){
@@ -656,8 +661,8 @@ var steps = [
 },
 {
   title: 'Read back, cancel, deliver',
-  body: 'Status is read from the turn record on a new route, GET /v1/sessions/{id}/turns/{turnId} — queued, never-submitted (404) and reaped-as-lost are distinguishable, where the old /runs/status inference from the result store conflated all three. GET /runs/status is untouched: two routes, one source of truth each. DELETE cancels a queued turn — the drain loop skips it at claim — while a running leaf answers 409, because a cancel signal addressed to one specific worker does not exist for async. Delivery comes in three milestones: M1 single-tenancy drain on deploy/vm and compose, M2 turn_exp and multi-tenant grants, M3 deploy/k8s and the queued-leaf smoke test.',
-  chips: ['GET /v1/sessions/{id}/turns/{turnId}', 'DELETE → queued only · running 409', 'M1 → M2 → M3'],
+  body: 'Status is read from the turn record on GET /v1/sessions/{id}/turns/{turnId} — queued, never-submitted (404) and reaped-as-lost are distinguishable, where the old /runs/status inference from the result store conflated all three. GET /runs/status is untouched: two routes, one source of truth each. DELETE answers 202 either way: a queued turn flips to cancelled and the drain loop skips it at claim; a running turn is only requested (cancelRequested: true) — the worker holding the leaf polls the record, aborts the run and finalizes cancelled, and a leaf that finishes first stays finished. Any other state answers 409. Results are kept for 7 days by default (LEAF_RESULT_TTL_SECONDS), under leaf:result:<session>:<turn>.',
+  chips: ['GET /v1/sessions/{id}/turns/{turnId}', 'DELETE → 202 (running: cancelRequested)', 'result TTL 7 d'],
   dur: 6200,
   commit: function(){
     rec('t3').state = 'cancelled';
