@@ -22,6 +22,15 @@
 #                           in SBX_ALLOWED_SUBJECTS and SBX_ADMIN_SUBJECTS are then oidc:<provider
 #                           sub> entries, per the control plane's subject grammar; a mixed list is
 #                           accepted, so a GitHub enrollment survives the switch
+#   SBX_TRUSTED_PROXY_HOPS  optional, with oidc only; how many proxies in front of the control plane
+#                           append to X-Forwarded-For, default 1 (the sbx-api Route's router, whose
+#                           Route pins append); 0 keys every client by the socket peer. It decides
+#                           the client address the OIDC login start's per-source bound keys on
+#                           (#716): with 0 behind the router, every login shares the router's
+#                           address
+#   SBX_OIDC_MAX_PENDING_PER_SOURCE
+#                           optional, with oidc only; live OIDC login starts one client address may
+#                           hold; empty (the default) is the control plane's 20, 0 turns it off
 #   SBX_ALLOWED_SUBJECTS    required; comma-separated github:<numeric id> or oidc:<provider sub>,
 #                           who may log in
 #   SBX_ADMIN_SUBJECTS      optional; comma-separated github:<numeric id> or oidc:<provider sub>
@@ -244,12 +253,22 @@ validate() {
   if [[ "$SBX_IDENTITY_PROVIDER" == github ]]; then
     [[ "${SBX_GITHUB_CLIENT_ID:-}" =~ ^[A-Za-z0-9._-]+$ ]] ||
       die 'SBX_GITHUB_CLIENT_ID is required with SBX_IDENTITY_PROVIDER=github (the GitHub OAuth app for device-flow login)'
+    # The two oidc-only knobs (#937) are written only with oidc: say so rather than drop them silently.
+    local gv
+    for gv in SBX_TRUSTED_PROXY_HOPS SBX_OIDC_MAX_PENDING_PER_SOURCE; do
+      [[ -z "${!gv:-}" ]] || log "WARNING: $gv is set but ignored: the identity provider is github"
+    done
   else
     # The base's env wiring reads all four from moca-settings; the client secret never does (it is
     # a file under CREDENTIALS_DIRECTORY, projected from the moca-oidc Secret the operator creates).
     local ov
     for ov in SBX_OIDC_ISSUER SBX_OIDC_CLIENT_ID SBX_OIDC_REDIRECT_URI; do
       [[ -n "${!ov:-}" ]] || die "$ov is required with SBX_IDENTITY_PROVIDER=oidc"
+    done
+    # The control plane refuses to BOOT on anything but a whole number, so a typo is refused here.
+    for ov in SBX_TRUSTED_PROXY_HOPS SBX_OIDC_MAX_PENDING_PER_SOURCE; do
+      [[ -z "${!ov:-}" || "${!ov}" =~ ^(0|[1-9][0-9]{0,5})$ ]] ||
+        die "$ov must be a whole number, 0 to 6 digits (empty: the default), got '${!ov}'"
     done
   fi
   [[ "${SBX_ALLOWED_SUBJECTS:-}" =~ $SUBJECTS_RE ]] ||
@@ -1094,6 +1113,13 @@ ensure_settings() {
       'SH_SESSION_TOKEN_TTL_SECONDS=' "SH_IDENTITY_PROVIDER=oidc" "SH_OIDC_ISSUER=$SBX_OIDC_ISSUER"
       "SH_OIDC_CLIENT_ID=$SBX_OIDC_CLIENT_ID" "SH_OIDC_REDIRECT_URI=$SBX_OIDC_REDIRECT_URI")
     [[ -z "${SBX_OIDC_SCOPE:-}" ]] || moca+=("SH_OIDC_SCOPE=$SBX_OIDC_SCOPE")
+    # The client address behind the Route (#716, #937): the per-source login bound keys on the
+    # X-Forwarded-For entry the sbx-api Route appends, so the hop count is 1 unless the operator
+    # sets another (the control plane's own default, 0, would key every login by the router's
+    # address). An empty bound is the control plane's default. GitHub logins have no per-source
+    # bound, so the github array above stays as it was.
+    moca+=("SH_TRUSTED_PROXY_HOPS=${SBX_TRUSTED_PROXY_HOPS:-1}"
+      "SH_OIDC_MAX_PENDING_PER_SOURCE=${SBX_OIDC_MAX_PENDING_PER_SOURCE:-}")
   fi
   # Combined: the keys the base's control plane reads beside these (base/control-plane.yaml), with
   # the harness's public URL the supervisor Route serves; no operator key fallback, no tiers.

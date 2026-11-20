@@ -201,6 +201,8 @@ refusals=(
   'export SBX_IDENTITY_PROVIDER=oidc => SBX_OIDC_ISSUER is required with SBX_IDENTITY_PROVIDER=oidc'
   'export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid => SBX_OIDC_CLIENT_ID is required with SBX_IDENTITY_PROVIDER=oidc'
   'export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid SBX_OIDC_CLIENT_ID=abc => SBX_OIDC_REDIRECT_URI is required with SBX_IDENTITY_PROVIDER=oidc'
+  'export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid SBX_OIDC_CLIENT_ID=abc SBX_OIDC_REDIRECT_URI=https://sbx-api.example.invalid/cb SBX_TRUSTED_PROXY_HOPS=one => SBX_TRUSTED_PROXY_HOPS must be a whole number'
+  'export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid SBX_OIDC_CLIENT_ID=abc SBX_OIDC_REDIRECT_URI=https://sbx-api.example.invalid/cb SBX_OIDC_MAX_PENDING_PER_SOURCE=-1 => SBX_OIDC_MAX_PENDING_PER_SOURCE must be a whole number'
   'unset SBX_ALLOWED_SUBJECTS => SBX_ALLOWED_SUBJECTS is required'
   'export SBX_ALLOWED_SUBJECTS=alice => SBX_ALLOWED_SUBJECTS is required'
   'export SBX_ALLOWED_SUBJECTS="github:1, github:2" => SBX_ALLOWED_SUBJECTS is required'
@@ -389,6 +391,11 @@ fi
 cm sbx-settings SH_SANDBOX_TEMPLATES | jq -e 'length == 2 and .[1].worker == "sbx_py312"' >/dev/null || fail 'templates'
 cm sbx-settings SH_SANDBOX_EXEC_CA | grep -q 'BEGIN CERTIFICATE' || fail 'the self-signed exec CA is not advertised'
 [[ "$(cm moca-settings SH_GITHUB_CLIENT_ID)" == Iv1.example ]] || fail 'client id'
+# A GitHub deployment's settings stay byte-identical (#937 writes the hop count and the OIDC bound
+# only with oidc; the per-source bound is the OIDC login start's), so its settings hash does not move.
+jq -e '.data | (has("SH_TRUSTED_PROXY_HOPS") or has("SH_OIDC_MAX_PENDING_PER_SOURCE")) | not' "$MOCK_STATE/configmap-moca-settings.json" >/dev/null ||
+  fail 'a github deployment must not write SH_TRUSTED_PROXY_HOPS or SH_OIDC_MAX_PENDING_PER_SOURCE'
+! grep -q 'is set but ignored: the identity provider is github' "$TMP/out" || fail 'a github run with neither knob set warns about them'
 [[ "$(cm moca-settings SH_ADMIN_SUBJECTS)" == github:1 ]] || fail 'admin subjects'
 jq -e '.data | has("SH_API_TOKEN_TTL_SECONDS") and has("SH_SESSION_TOKEN_TTL_SECONDS")' \
   "$MOCK_STATE/configmap-moca-settings.json" >/dev/null || fail 'moca-settings lacks the token TTL keys the base reads'
@@ -1034,6 +1041,12 @@ jq -e '.data | has("SH_GITHUB_CLIENT_ID") and (.SH_GITHUB_CLIENT_ID == "")' "$MO
   fail 'an oidc deployment must write an empty SH_GITHUB_CLIENT_ID (the base reads the key unconditionally)'
 [[ "$(cm sbx-settings SH_ALLOWED_SUBJECTS)" == 'oidc:ghe@us.ibm.com,github:1' ]] || fail 'oidc allowed subjects not written'
 [[ "$(cm moca-settings SH_ADMIN_SUBJECTS)" == oidc:ghe@us.ibm.com ]] || fail 'oidc admin subject not written'
+# The client address behind the Route (#937): the per-source login bound keys on the X-Forwarded-For
+# entry the Route appends, so the hop count defaults to 1 there, and an empty bound is the control
+# plane's default (20).
+[[ "$(cm moca-settings SH_TRUSTED_PROXY_HOPS)" == 1 ]] || fail 'an oidc deployment must write SH_TRUSTED_PROXY_HOPS=1 (the Route appends X-Forwarded-For)'
+jq -e '.data | has("SH_OIDC_MAX_PENDING_PER_SOURCE") and (.SH_OIDC_MAX_PENDING_PER_SOURCE == "")' "$MOCK_STATE/configmap-moca-settings.json" >/dev/null ||
+  fail 'an oidc deployment must write SH_OIDC_MAX_PENDING_PER_SOURCE, empty by default (the control plane default)'
 render
 oidc_cp_hash="$(pod_hash moca-control-plane)"
 [[ "$oidc_cp_hash" =~ ^[0-9a-f]{16}$ ]] || fail 'the oidc run stamps no settings hash'
@@ -1048,6 +1061,38 @@ for ref in $(jq -r '.[] | select(.kind == "Deployment" and .metadata.name == "mo
     fail "the control plane reads $ref non-optionally, but setup.sh wrote no such key"
 done
 pass 'an oidc deployment writes the identity settings, oidc: subjects and no GitHub client id'
+
+# 13b'. The two #937 knobs set: written as given; and both reach the control plane's env (the base
+# reads them as optional keys of moca-settings).
+reset_state
+( base_env; unset SBX_GITHUB_CLIENT_ID
+  export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid/oidc/endpoint/default \
+    SBX_OIDC_CLIENT_ID=0123456789abcdef SBX_OIDC_REDIRECT_URI=https://sbx-api.apps.example.invalid/v1/auth/oidc/callback \
+    SBX_ALLOWED_SUBJECTS='oidc:user1' SBX_TRUSTED_PROXY_HOPS=2 SBX_OIDC_MAX_PENDING_PER_SOURCE=0
+  bash "$SETUP" ) >"$TMP/out" 2>&1 || { cat "$TMP/out" >&2; fail 'the oidc run with the hop count and the bound set failed'; }
+[[ "$(cm moca-settings SH_TRUSTED_PROXY_HOPS)" == 2 ]] || fail 'SBX_TRUSTED_PROXY_HOPS=2 not written'
+[[ "$(cm moca-settings SH_OIDC_MAX_PENDING_PER_SOURCE)" == 0 ]] || fail 'SBX_OIDC_MAX_PENDING_PER_SOURCE=0 not written'
+render
+KUBECONFIG=/dev/null "$REAL_KUBECTL" label --local -f "$TMP/render.yaml" sbx-render- -o json 2>/dev/null | jq -s . >"$TMP/render.json"
+for k in SH_TRUSTED_PROXY_HOPS SH_OIDC_MAX_PENDING_PER_SOURCE; do
+  jq -e --arg k "$k" '.[] | select(.kind == "Deployment" and .metadata.name == "moca-control-plane")
+      | .spec.template.spec.containers[].env[]? | select(.name == $k) | .valueFrom.configMapKeyRef.name == "moca-settings"' \
+    "$TMP/render.json" >/dev/null || fail "the rendered control plane does not read $k from moca-settings"
+done
+pass 'an oidc deployment writes SH_TRUSTED_PROXY_HOPS and SH_OIDC_MAX_PENDING_PER_SOURCE, and the control plane reads them'
+
+# 13b''. On a github deployment the two oidc-only knobs are ignored, with a warning naming each, and
+# written nowhere (the default github run above warns about neither).
+reset_state
+run_setup export SBX_TRUSTED_PROXY_HOPS=2 SBX_OIDC_MAX_PENDING_PER_SOURCE=5 ||
+  { cat "$TMP/out" >&2; fail 'the github run with the oidc-only knobs set failed'; }
+for k in SBX_TRUSTED_PROXY_HOPS SBX_OIDC_MAX_PENDING_PER_SOURCE; do
+  grep -q "WARNING: $k is set but ignored: the identity provider is github" "$TMP/out" ||
+    fail "a github run with $k set does not warn that it is ignored"
+done
+jq -e '.data | (has("SH_TRUSTED_PROXY_HOPS") or has("SH_OIDC_MAX_PENDING_PER_SOURCE")) | not' "$MOCK_STATE/configmap-moca-settings.json" >/dev/null ||
+  fail 'a github run must not write the oidc-only keys, set or not'
+pass 'a github deployment warns about the oidc-only knobs and writes neither'
 
 # 13c. SBX_STORAGE_CLASS: one class on every claim this run renders. The base shape (no store, no
 # egress) patches only the redis StatefulSet's volumeClaimTemplates -- a patch naming an absent PVC
