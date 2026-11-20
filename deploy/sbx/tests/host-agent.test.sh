@@ -245,6 +245,8 @@ IH="$SRC/deploy/sbx/install-host.sh"
 [[ -n "$(eg_paths "$IH")" && "$(eg_paths "$A")" == "$(eg_paths "$IH")" ]] ||
   fail "the agent's drop-in and CA paths differ from install-host.sh's: $(eg_paths "$A" | tr '\n' ' ') vs $(eg_paths "$IH" | tr '\n' ' ')"
 grep -q 'crt="$(EGRESS_CRED_DIR)/ca.crt"' "$IH" || fail "install-host.sh's CA check no longer reads EGRESS_CRED_DIR/ca.crt"
+[[ "$(grep -E "^PLAIN_PATH_RE=" "$A" | cut -d' ' -f1)" == "$(grep -E "^PLAIN_PATH_RE=" "$IH")" ]] ||
+  fail "the agent's PLAIN_PATH_RE (for SBX_UNIT_DIR) differs from install-host.sh's"
 pass "the agent's egress drop-in and CA paths are install-host.sh's"
 
 # 4. A gate record whose bytes do not hash to its name is not built with.
@@ -265,7 +267,8 @@ grep -q 'below the floor' "$TMP/out" || fail 'the floor skip was not said'
 pass 'no build is claimed below the disk floor'
 
 # 6. Its own settings, refused (exit 2) before any call.
-for bad in 'SBX_HOST_ID=HOST-1' 'SBX_API_URL=http://cp.example.invalid' 'SBX_BUILD_CONCURRENCY=9' 'SBX_DISK_FLOOR_GB=060'; do
+for bad in 'SBX_HOST_ID=HOST-1' 'SBX_API_URL=http://cp.example.invalid' 'SBX_BUILD_CONCURRENCY=9' 'SBX_DISK_FLOOR_GB=060' \
+  'SBX_UNIT_DIR=units' 'SBX_UNIT_DIR=/etc/systemd/system ' 'SBX_UNIT_DIR=/etc/systemd/system/'; do
   : >"$MOCK_LOG"
   rc=0; env "$bad" bash "$A" --once >"$TMP/out" 2>&1 || rc=$?
   [[ "$rc" == 2 ]] || fail "accepted $bad (rc $rc)"
@@ -277,7 +280,7 @@ if [[ "$rc" != 2 ]] || ! grep -q 'mode 0600' "$TMP/out"; then fail 'accepted a t
 chmod 0600 "$TMP/token"
 rc=0; bash "$A" >"$TMP/out" 2>&1 || rc=$?
 [[ "$rc" == 2 ]] || fail 'ran without --once'
-pass 'refuses a bad host id, a non-https URL, a bad concurrency or floor, a shared token file, and no --once, before calling anything'
+pass 'refuses a bad host id, a non-https URL, a bad concurrency or floor, a unit dir that is not a plain absolute path, a shared token file, and no --once, before calling anything'
 
 # 7. Nothing that names where an image lives leaves the host (a private registry's host carries its
 #    account). A failure whose last line names one is reported redacted, the log upload too; the
