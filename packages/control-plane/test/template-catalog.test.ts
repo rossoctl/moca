@@ -418,6 +418,48 @@ describe('both profiles, lastUsedAt, tags (§4.1)', () => {
     expect(ts.find((t) => t.id === 'node22')!.builds[0].lastUsedAt).toBeNull();
   });
 
+  it("reports each build's own lastUsedAt when two builds of a template share one worker id (#936)", async () => {
+    // Two builds of one template from one image: one worker id, as template-build.sh names it.
+    const doc = docFromDeclared(DECLARED[1]!, 100);
+    const old = doc.builds[0]!;
+    old.status = 'retired';
+    doc.builds.push({
+      ...old,
+      buildId: 'sha256:' + 'b'.repeat(64),
+      status: 'registered',
+      createdAt: 200,
+    });
+    doc.tags.default = doc.builds[1]!.buildId;
+    // Sandboxes on the old build only, and one record from before tracing (no buildId).
+    const rec = (createdAt: number, buildId?: string) => ({
+      id: `s${createdAt}`,
+      owner: alice.sub,
+      template: doc.id,
+      worker: old.worker,
+      createdAt,
+      expiresAt: createdAt + 3600,
+      ...(buildId ? { buildId } : {}),
+    });
+    const lastUsed = async (records: Body[]) => {
+      const d = sbxDeps({
+        templates: fixed([doc]),
+        presence: presence([]),
+        sandboxes: { listAll: async () => records } as unknown as TestDeps['sandboxes'],
+      });
+      const t = (await call('getTemplate', d, { id: doc.id })) as Body;
+      return t.builds.map((b: Body) => [b.status, b.lastUsedAt]);
+    };
+    expect(await lastUsed([rec(150, old.buildId)])).toEqual([
+      ['retired', 150],
+      ['registered', null],
+    ]);
+    // A record with no buildId still counts for every build of its worker, as before.
+    expect(await lastUsed([rec(150, old.buildId), rec(120)])).toEqual([
+      ['retired', 150],
+      ['registered', 120],
+    ]);
+  });
+
   it('lists tags with their build, and when and by whom they were set', async () => {
     const d = sbxDeps({ templates: new MemoryTemplateCatalog(DECLARED, 500) });
     const { tags } = (await call('listTemplateTags', d, { id: 'default' })) as { tags: Body[] };

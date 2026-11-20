@@ -747,8 +747,12 @@ components:
         lastUsedAt:
           type: [integer, 'null']
           description: |
-            epoch seconds of the newest sandbox created on it (retained records included); null
-            when it has none, and on the harness profile
+            epoch seconds of the newest sandbox created on this build (retained records included),
+            not on its worker: builds of one template from one image share a worker id. A build
+            superseded by a rebuild of the same snapshot (#818) shares its build id with the build
+            that replaced it, so the retired twin reports its successor's use. A sandbox record from
+            before build tracing (no build id) counts for every build of its worker. Null when it
+            has none, and on the harness profile
         heldBy:
           type: [array, 'null']
           items: { type: string }
