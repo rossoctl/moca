@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -397,13 +398,18 @@ func leaseEndDrivers() []leaseEndDriver {
 		}},
 		{reason: LeaseEndAgentDead, end: func(t *testing.T, g *leaseGate, key string) *leaseGate {
 			t.Helper()
-			// An aborted Exec ends without an End: the VM is not one to run the next Exec in,
-			// whether or not the agent survived. (A timeout no longer does: the guest's own
-			// timeout fires first and keeps the lease, TestGateLeaseTimeoutKeepsTheLease.)
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			if _, err := g.p.Exec(ctx, key, g.lease("sleep 30", 1), &capturingSink{}); !errors.Is(err, ErrAborted) {
-				t.Fatalf("an Exec aborted after 2 s: err = %v, want ErrAborted", err)
+			// A guest that does not answer by the host's deadline: the VM is paused, so
+			// neither the guest's own timeout nor its answer can arrive. (Neither a timeout
+			// nor an abort ends the lease any more: the guest answers both after tearing the
+			// Exec down, TestGateLeaseTimeoutKeepsTheLease, TestGateLeaseAbortKeepsTheLease.)
+			pauseGateVM(t, g.leaseVM(t, key))
+			e := g.lease("sleep 30", 1)
+			e.TimeoutS = 2
+			// Which error depends on which of two ~10 s bounds fires first, the host's
+			// deadline (2 s + LeaseTimeoutSlack) or the vsock dial's: either fails the Exec
+			// without an answer, and the caller checks that the lease ended agent_dead.
+			if _, err := g.p.Exec(context.Background(), key, e, &capturingSink{}); err == nil {
+				t.Fatal("an Exec on a paused VM succeeded, want it to fail without the guest's answer")
 			}
 			return g
 		}},
@@ -1250,6 +1256,53 @@ echo checked`
 	}
 	if s := g.p.Stats(); leaseEndTotal(s) != 0 {
 		t.Fatalf("LeaseEnds = %v, want none: a timeout ends the Exec, not the lease", s.LeaseEnds)
+	}
+}
+
+// pauseGateVM pauses v's vcpus over its Firecracker API: the guest stops answering
+// anything, as a wedged agent would.
+func pauseGateVM(t *testing.T, v *firecrackerVM) {
+	t.Helper()
+	if err := newFCClient(v.apiSockHost).do(context.Background(), http.MethodPatch, "/vm", struct {
+		State string `json:"state"`
+	}{State: "Paused"}); err != nil {
+		t.Fatalf("pause %s: %v", v.ID(), err)
+	}
+}
+
+// TestGateLeaseAbortKeepsTheLease (F3 of the E17b report): the caller's abort of a running
+// lease command reaches the guest as KindAbort, the guest kills and empties the command's
+// cgroup and answers End with aborted, and the lease is kept: the Exec fails ErrAborted
+// soon after the abort, the next Exec runs in the same VM with /tmp kept, and nothing of
+// the aborted command is left running.
+func TestGateLeaseAbortKeepsTheLease(t *testing.T) {
+	requireKVM(t)
+	g := newLeaseGate(t, nil)
+	const key = "lease-abort"
+	mustSetMode(t, g.p, key, ModeLease, 1)
+	g.run(t, key, gateLease("echo kept > /tmp/marker", 1))
+	v := g.leaseVM(t, key)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := g.p.Exec(ctx, key, gateLease("sleep 300 & sleep 300", 1), &capturingSink{}); !errors.Is(err, ErrAborted) {
+		t.Fatalf("an Exec aborted after 2 s: err = %v, want ErrAborted", err)
+	}
+	if took := time.Since(start); took > 2*time.Second+LeaseAbortGrace {
+		t.Fatalf("the aborted Exec returned after %s, want within the abort grace (2 s + %s)", took, LeaseAbortGrace)
+	}
+	if g.leaseVM(t, key) != v {
+		t.Fatal("after the abort: the lease runs in another VM")
+	}
+	check := `cat /proc/1/comm /tmp/marker
+for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2>/dev/null)" = sleep ] && echo sleep-left; done
+echo checked`
+	if got := g.run(t, key, gateLease(check, 1)); got != "agent\nkept\nchecked\n" {
+		t.Fatalf("after the abort: %q, want the agent as PID 1, /tmp kept and no sleep left", got)
+	}
+	if s := g.p.Stats(); leaseEndTotal(s) != 0 {
+		t.Fatalf("LeaseEnds = %v, want none: an abort ends the Exec, not the lease", s.LeaseEnds)
 	}
 }
 

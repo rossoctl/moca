@@ -334,8 +334,13 @@ with the reason, the mode, the lease age and, at level 2, the tracked processes 
 Like every SBX record, it has no command text.
 
 A lease Exec's timeout keeps the lease: the guest kills the Exec's cgroup and reports the timeout,
-and the next Exec runs in the same guest. In v1 an abort (the caller cancels the Exec) ends the lease
-with `agent_dead`, as does a guest that has not answered a few seconds after the Exec's timeout.
+and the next Exec runs in the same guest. So does an abort of a command (the caller cancels the
+Exec; F3 of the E17b report): the host sends the guest an abort frame instead of closing the
+connection, the guest kills and empties the Exec's cgroup as on a timeout and answers with an
+aborted End, and the Exec fails as aborted. The lease ends with `agent_dead` when the guest does not
+answer the abort within 8 s, answers it with an error (an agent built before the abort frame, which
+tears the Exec down the same way), or has not answered a few seconds after the Exec's timeout. An
+abort of a process kind still ends the lease with `agent_dead`.
 The budget counts from the Exec's arrival, so a wait behind another Exec of the sandbox and a lease
 start are charged to it. An Exec whose budget is spent before its command starts fails with the
 timeout without running, and the lease is kept.

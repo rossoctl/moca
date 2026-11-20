@@ -283,10 +283,13 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter, conn io.Read
 // serves many Execs, so a shell's variables, cwd, aliases and functions would leak
 // from one to the next.
 //
-// conn is the request's connection, already drained of stdin. The host sends nothing
-// more on it, so a read that returns at all means the host closed it: that is how the
-// host aborts an Exec (vmpool's closeConn on ctx.Done), and the Exec is torn down as
-// on a timeout (spec §3.1: killed when it "exits, times out or is aborted").
+// conn is the request's connection, already drained of stdin. The one frame the host
+// may send on it after that is KindAbort, its abort of the Exec (vmpool's runOverConn,
+// on a caller's abort): the Exec is torn down as on a timeout (spec §3.1: killed when it
+// "exits, times out or is aborted"), and End carries Aborted, so the host keeps the
+// lease. Any other read that returns -- the host closing the connection on its own
+// deadline, a cut, or a host that predates KindAbort -- is the same teardown, answered
+// with an error the host is not waiting to read.
 //
 // The kill is of this Exec's e<seq> only: a tracked process lives in tracked/p<id>,
 // which no Exec's teardown touches (spec §3.1). runLease holds the lease mutex.
@@ -358,10 +361,11 @@ func (a *Agent) runLeaseCommand(req Request, stdin []byte, w *frameWriter, conn 
 		timeout = tm.C
 	}
 	gone := make(chan struct{})
+	var abortFrame bool // written before gone is closed, read after
 	go func() {
 		// Returns, at the latest, when ServeConn closes the connection after this Exec.
-		var b [1]byte
-		_, _ = conn.Read(b[:])
+		k, _, err := ReadFrame(conn)
+		abortFrame = err == nil && k == KindAbort
 		close(gone)
 	}()
 
@@ -375,6 +379,8 @@ func (a *Agent) runLeaseCommand(req Request, stdin []byte, w *frameWriter, conn 
 	case <-gone:
 		aborted = true
 	}
+	// The host asked, and is reading: answer End rather than an error.
+	polite := aborted && abortFrame
 
 	// Kill whatever the command left behind, then wait for the cgroup to empty. This
 	// comes before End by design: the host may send the next Exec the moment End
@@ -398,6 +404,7 @@ func (a *Agent) runLeaseCommand(req Request, stdin []byte, w *frameWriter, conn 
 		if timedOut || aborted {
 			end.ExitCode = -1
 		}
+		end.Aborted = polite
 		return a.teardownFailed(end, terr), nil
 	}
 	// Every writer is dead, so both drains reach EOF.
@@ -409,6 +416,10 @@ func (a *Agent) runLeaseCommand(req Request, stdin []byte, w *frameWriter, conn 
 	// The cgroup is empty, so rmdir succeeds; if it somehow does not, the leftover is
 	// an empty, unused directory and the next Exec gets a fresh e<seq> regardless.
 	_ = c.remove()
+	if polite {
+		// The cgroup is empty and gone: the VM is as fit for the next Exec as after an exit.
+		return End{ExitCode: -1, Aborted: true}, nil
+	}
 	if aborted {
 		// The host is gone; ServeConn's write of this fails harmlessly.
 		return End{}, errors.New("guest-agent: the connection closed; the Exec was aborted")
