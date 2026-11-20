@@ -104,8 +104,11 @@ mocactl sbx proc stop web                                          # TERM, then 
 
 Lease mode is experimental in v0.11.0:
 
-- **Cancelling a running command ends the lease.** If you or your agent abort a command (Ctrl-C),
-  the lease ends with it and the next command starts a new guest. `/workspace` is kept.
+- **Cancelling a running command ends the lease on an older snapshot.** If your operator's golden
+  snapshot was built before v0.12.0 and you or your agent abort a command (Ctrl-C), the lease ends
+  with it and the next command starts a new guest. `/workspace` is kept. On a snapshot built from
+  v0.12.0 on, the guest stops the aborted command and the lease is kept. Aborting a process command
+  (`lease+processes`) still ends the lease.
 - **A lease holds its guest's memory while it lives**, including files it has read. Your operator
   may keep the idle timeout short, or the mode off, on a busy host.
 - **At most 4 tracked processes** run at once at `lease+processes`, unless your operator changed it.

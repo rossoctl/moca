@@ -1126,6 +1126,59 @@ func TestLeaseConnectionCloseKillsTheExec(t *testing.T) {
 	}
 }
 
+// The host's polite abort (F3 of the E17b report): a KindAbort frame instead of a close.
+// The Exec's cgroup is killed and emptied as on a close, but the agent answers with an
+// End carrying aborted and exit -1, so the host learns the teardown finished and keeps
+// the lease. Nothing of the Exec may be running by the time that End arrives, and the
+// agent must take the next Exec.
+func TestLeaseAbortFrameKillsTheExecAndAnswersEnd(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	host, guest := net.Pipe()
+	defer host.Close()
+	go func() { _ = a.ServeConn(guest) }()
+	if err := WriteJSON(host, KindRequest, leaseReq(`sleep 30 & sleep 30`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFrame(host, KindStdinEOF, nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	sleeps := regexp.MustCompile(`^sleep 30$`)
+	if n := len(procsMatching(t, sleeps, 7000)); n != 2 {
+		t.Fatalf("%d `sleep 30`s running as 7000 before the abort, want 2: the test would prove nothing", n)
+	}
+	if err := WriteFrame(host, KindAbort, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = host.SetReadDeadline(time.Now().Add(6 * time.Second))
+	var end End
+	for {
+		k, p, err := ReadFrame(host)
+		if err != nil {
+			t.Fatalf("read after the abort frame: %v, want an End", err)
+		}
+		if k == KindError {
+			t.Fatalf("the agent answered the abort frame with an error: %s", p)
+		}
+		if k == KindEnd {
+			if err := DecodeJSON(p, &end); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if left := procsMatching(t, sleeps, 7000); len(left) > 0 {
+		t.Fatalf("End arrived with the aborted Exec's processes still running: %v", left)
+	}
+	if !end.Aborted || end.ExitCode != -1 || end.TeardownFailed {
+		t.Fatalf("end %+v, want aborted with exit -1 and a clean teardown", end)
+	}
+	if out, _, end, errMsg := drive(t, a, leaseReq(`echo ok`), nil); errMsg != "" || end.ExitCode != 0 || end.Aborted || out != "ok\n" {
+		t.Fatalf("lease request after an abort: end %+v, err %q, stdout %q", end, errMsg, out)
+	}
+}
+
 // Close must not wait for a running lease Exec: it once took the lease mutex, which
 // runLease holds for the Exec's whole run.
 func TestLeaseCloseDoesNotWaitForARunningExec(t *testing.T) {

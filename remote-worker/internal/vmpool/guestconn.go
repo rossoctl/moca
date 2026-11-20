@@ -57,11 +57,34 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 
 	stop := make(chan struct{})
 	defer close(stop)
+	// sent is closed once the whole request is written, stdin EOF included: the guest reads
+	// a KindAbort only after that, and only then is this goroutine the connection's one
+	// writer.
+	sent := make(chan struct{})
 	go func() {
-		select {
-		case <-ctx.Done():
-			closeConn()
-		case <-stop:
+		abort := c.Abort // nil blocks forever: no abort frame
+		for {
+			select {
+			case <-ctx.Done():
+				closeConn()
+				return
+			case <-stop:
+				return
+			case <-abort:
+				abort = nil
+				select {
+				case <-sent:
+				case <-ctx.Done():
+					closeConn()
+					return
+				case <-stop:
+					return
+				}
+				if err := ga.WriteFrame(rw, ga.KindAbort, nil); err != nil {
+					closeConn()
+					return
+				}
+			}
 		}
 	}()
 
@@ -81,6 +104,9 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 	go func() {
 		err := sendRequest(rw, req, c.Stdin)
 		writeErr <- err
+		if err == nil {
+			close(sent)
+		}
 		// A failed write means the guest never got a whole request and will never
 		// answer: close, so the read below returns instead of waiting for it.
 		if err != nil {
@@ -118,6 +144,7 @@ func runOverConn(ctx context.Context, rw io.ReadWriteCloser, c Command, out Sink
 				DroppedStderr:  e.DroppedStderr,
 				TeardownFailed: e.TeardownFailed,
 				Tracked:        trackedFromGuest(e.Tracked),
+				Aborted:        e.Aborted,
 			}, nil
 		case ga.KindError:
 			return Result{}, &guestError{msg: string(payload)}

@@ -492,3 +492,109 @@ func TestGuestTrackedRowWithANewlineNeverReachesAnAuditLine(t *testing.T) {
 		t.Fatalf("want web's start record with its id quoted:\n%s", out)
 	}
 }
+
+// drainToStdinEOF reads the frames the host sends after the request, up to the stdin EOF.
+func drainToStdinEOF(rw io.Reader) bool {
+	for {
+		k, _, err := ga.ReadFrame(rw)
+		if err != nil {
+			return false
+		}
+		if k == ga.KindStdinEOF {
+			return true
+		}
+	}
+}
+
+// F3 of the E17b report: a lease command's Abort sends KindAbort, after the request and
+// its stdin EOF, and the guest's End{Aborted} comes back as Result.Aborted with no error,
+// so the lease can tell a torn-down command from a guest that did not answer.
+func TestRunOverConnSendsAbortAndReturnsTheAbortedEnd(t *testing.T) {
+	gotAbort := make(chan struct{})
+	conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
+		if !drainToStdinEOF(rw) {
+			return
+		}
+		if k, _, err := ga.ReadFrame(rw); err != nil || k != ga.KindAbort {
+			return // no End: the host reports a short response
+		}
+		close(gotAbort)
+		_ = ga.WriteJSON(rw, ga.KindEnd, ga.End{ExitCode: -1, Aborted: true})
+	})
+	abort := make(chan struct{})
+	close(abort)
+	res, err := runOverConn(context.Background(), conn, Command{
+		Command: "sleep 99", CapBytes: OutputCapBytes, Lease: true, Abort: abort,
+	}, &capturingSink{}, time.Now())
+	if err != nil {
+		t.Fatalf("runOverConn: %v", err)
+	}
+	select {
+	case <-gotAbort:
+	default:
+		t.Fatal("the guest never read a KindAbort frame")
+	}
+	if !res.Aborted || res.ExitCode != -1 {
+		t.Fatalf("result %+v, want Aborted with exit -1", res)
+	}
+}
+
+// A guest built before KindAbort reads any byte after the stdin EOF as the host closing,
+// tears the command down and answers KindError: the host sees a guest error, which ends
+// the lease as an abort always did.
+func TestRunOverConnAbortAgainstAnOlderGuestIsAGuestError(t *testing.T) {
+	conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
+		if !drainToStdinEOF(rw) {
+			return
+		}
+		var b [1]byte
+		_, _ = rw.Read(b[:])
+		_ = ga.WriteFrame(rw, ga.KindError, []byte("guest-agent: the connection closed; the Exec was aborted"))
+	})
+	abort := make(chan struct{})
+	close(abort)
+	res, err := runOverConn(context.Background(), conn, Command{
+		Command: "sleep 99", CapBytes: OutputCapBytes, Lease: true, Abort: abort,
+	}, &capturingSink{}, time.Now())
+	if !errors.Is(err, ErrGuest) || res.Aborted {
+		t.Fatalf("result %+v, err %v; want ErrGuest and no Aborted", res, err)
+	}
+}
+
+// Abort asks; it does not wait forever. A guest that reads the abort frame and never
+// answers is still cut off by ctx, as before (the lease's bound cancels it).
+func TestRunOverConnAbortThenCancelStillCloses(t *testing.T) {
+	read := make(chan struct{})
+	conn := fakeGuest(t, func(rw io.ReadWriteCloser, req ga.Request) {
+		if !drainToStdinEOF(rw) {
+			return
+		}
+		_, _, _ = ga.ReadFrame(rw)
+		close(read)
+		time.Sleep(10 * time.Second) // never answers
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	abort := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := runOverConn(ctx, conn, Command{
+			Command: "sleep 99", CapBytes: OutputCapBytes, Lease: true, Abort: abort,
+		}, &capturingSink{}, time.Now())
+		done <- err
+	}()
+	close(abort)
+	select {
+	case <-read:
+	case <-time.After(testWaitBound):
+		t.Fatal("the guest never read the abort frame")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrAborted) {
+			t.Fatalf("err = %v, want ErrAborted", err)
+		}
+	case <-time.After(testWaitBound):
+		t.Fatal("runOverConn did not unblock on cancel after an abort frame")
+	}
+}
