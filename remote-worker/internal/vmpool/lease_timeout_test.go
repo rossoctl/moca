@@ -526,3 +526,19 @@ func TestLeaseExecSpentDuringAColdStartNeverRuns(t *testing.T) {
 		t.Fatalf("LeaseEnds = %v, want none", s.LeaseEnds)
 	}
 }
+
+// An End with aborted that the host never asked for (#970 review) is not an answer: the guest
+// is not behaving as the protocol says, so the Exec fails as a guest error rather than
+// returning exit -1 as a success, and the lease ends agent_dead.
+func TestLeaseUnsolicitedAbortedEndEndsTheLeaseAgentDead(t *testing.T) {
+	p, lc, _ := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	lc.setRunFn(func(_ *fakeVM, c Command, _ Sink) (Result, error) {
+		return Result{ExitCode: -1, Aborted: true}, nil
+	})
+	_, err := p.Exec(context.Background(), "k", leaseExec("true", 1), &capturingSink{})
+	if !errors.Is(err, ErrGuest) {
+		t.Fatalf("err = %v, want ErrGuest", err)
+	}
+	assertEnded(t, p, lc, LeaseEndAgentDead)
+}

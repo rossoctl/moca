@@ -798,6 +798,16 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 	if ph != nil {
 		ph.Run = p.clk.Now().Sub(t0)
 	}
+	if runErr == nil && res.Aborted {
+		// An aborted End answers the host's KindAbort and nothing else: one the host did
+		// not ask for is a guest off the protocol, failed as a guest error, never a success
+		// with exit -1 (#970 review). abort is closed once and only by the caller's abort.
+		select {
+		case <-abort:
+		default:
+			runErr = &guestError{msg: "an aborted End for an Exec the host did not abort"}
+		}
+	}
 	cErr := p.classify(ctx, timedOut, timeoutS)
 	// The guest answered with its own timeout: the command is dead, its cgroup empty.
 	guestTimeout := guestTimedOut(runErr)
@@ -820,7 +830,9 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 		// The host's deadline (the guest did not answer within the budget and the slack),
 		// a transport error, an abort the guest did not answer with End, or a guest error:
 		// the agent may have survived, but a VM whose last Exec ended without its answer is
-		// not one to run the next in. A clean aborted End (res.Aborted) is an answer.
+		// not one to run the next in. A clean aborted End is an answer: it keeps the lease
+		// because runErr is nil, and an aborted End the host did not ask for was made a
+		// guest error above.
 		reason = LeaseEndAgentDead
 	}
 
