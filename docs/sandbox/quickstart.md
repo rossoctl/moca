@@ -115,6 +115,29 @@ What `up` does:
 - Each clone and each git worktree gets its own sandbox. Two worktrees of one repository do not
   share one.
 
+### If `up` stops at a large file
+
+`up` pushes no file over 12 MiB, and no tree over 256 MiB. A file over the limit stops `up`, and
+it creates no sandbox:
+
+```
+sbx: files over 12 MiB (12582912 bytes) are not pushed; remove them, or .gitignore them: usage.ndjson (16.4 MiB, 17176795 bytes)
+```
+
+The agent almost never needs such a file. Exclude it, then run `up` again. For a file only you
+have, use `.git/info/exclude`, which stays on your laptop:
+
+```bash
+echo usage.ndjson >> .git/info/exclude
+mocactl sbx up
+```
+
+To exclude the file for everybody, add the same line to `.gitignore`.
+
+Both files work for an untracked file. A **tracked** file is pushed even when a rule ignores it,
+so first run `git rm --cached <file>`. For a tree over 256 MiB, `--max-push` raises the limit. No
+flag raises the 12 MiB limit for one file.
+
 ## 4. Run your agent
 
 Start Claude Code or OpenCode in the **repository root**:
