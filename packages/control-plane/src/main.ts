@@ -59,6 +59,7 @@ import { refuseMisnamedIdentityProvider } from './identity-switch.js';
 import { TurnStore } from './turn-store.js';
 import { resultTtlSeconds, TURN_RECORD_TTL_MARGIN_SECONDS } from './turn-record.js';
 import { RedisTurnQueue } from './turn-queue.js';
+import { startGateSweep } from './gate-sweep.js';
 import { guardSchemaVersion } from './schema-version.js';
 import type { ResultRedisLike } from './turn-result.js';
 
@@ -891,6 +892,10 @@ if (isMainModule) {
   const env = withCredentials(process.env, CONTROL_PLANE_SECRETS);
   const deps = depsFromEnv(env);
   startControlPlane(deps, portFromEnv(env), hostFromEnv(env));
+  // #393 §3: answers gates nobody answered. Unconditional -- a per-submission `gateDeadlineS` works
+  // with MOCA_GATE_DEADLINE_S unset, so the sweep cannot be gated on the config value. Costs one
+  // ZRANGEBYSCORE per 30 s when no gate is open.
+  startGateSweep(deps);
   // The Redis schema version (#509): written if absent, and the process exits on a newer one once
   // Redis answers. In the background, because this server starts before Redis and waits for it.
   void guardSchemaVersion({

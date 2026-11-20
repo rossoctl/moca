@@ -120,6 +120,14 @@ To resolve it, re-POST the **same envelope** to `/v1/runs` with an inline decisi
 - An ASYNC turn is not resolved by re-POSTing an envelope: the client holds no envelope. Answer it
   with `POST /v1/sessions/{id}/decision` ({`gateId`, `action`, `feedback`}), which copies the paused
   turn's envelope, appends the decision and 202s with a new turn id (`docs/api/openapi.yaml`).
+- An async turn may also carry a **deadline**. `gateDeadlineS` on the submission bounds how long its
+  gate may stay unanswered, and `MOCA_GATE_DEADLINE_S` bounds it for the whole deployment (default
+  `0`, never); both are ceilings, and the tightest in force wins — including the turn record's own
+  TTL, since a gate whose record is gone can no longer be answered by anyone. When the deadline
+  passes, the control plane decides the gate itself with the submission's `onTimeout`: `abort` by
+  default, `reject` by request, and **never `approve`** — an expired gate is the absence of a yes,
+  and a clock cannot consent. The resume it submits is an ordinary turn with its own id and
+  `resumeOf`, so it shows up in the session's turn list exactly as a human decision's would.
 - `/turn` has no gate: the tool is registered only when its caller asks for one.
 
 ## Async and scheduled dispatch
