@@ -6,6 +6,7 @@ import {
   isTerminalState,
   ownerTurnsKey,
   parseTurnSubmission,
+  resolveGateDeadline,
   resultTtlSeconds,
   TURN_STATES,
   turnKey,
@@ -180,6 +181,30 @@ describe('parseTurnSubmission (spec §4.1)', () => {
     expect(p.envelope).toEqual({ item: { ...item, require_approval: true } });
   });
 
+  it('parses gateDeadlineS and onTimeout', () => {
+    const p = parseTurnSubmission({
+      async: true,
+      kind: 'prompt',
+      prompt: 'hi',
+      gateDeadlineS: 60,
+      onTimeout: 'reject',
+    });
+    expect(p).toMatchObject({ gateDeadlineS: 60, onTimeout: 'reject' });
+    // CP-side scheduling, not model input: they must NOT reach the harness.
+    expect(p.envelope.gateDeadlineS).toBeUndefined();
+    expect(p.envelope.onTimeout).toBeUndefined();
+  });
+
+  it('refuses a non-positive or non-integer gateDeadlineS and an unknown onTimeout', () => {
+    const bad = (extra: object) => () =>
+      parseTurnSubmission({ async: true, kind: 'prompt', prompt: 'hi', ...extra });
+    expect(bad({ gateDeadlineS: 0 })).toThrow(/gateDeadlineS/);
+    expect(bad({ gateDeadlineS: -1 })).toThrow(/gateDeadlineS/);
+    expect(bad({ gateDeadlineS: 1.5 })).toThrow(/gateDeadlineS/);
+    // Never 'approve': an unanswered gate must not be read as consent.
+    expect(bad({ onTimeout: 'approve' })).toThrow(/onTimeout/);
+  });
+
   it('refuses a body that is not one of the three kinds', () => {
     expect(codeOf(() => parseTurnSubmission({ async: true }))).toBe('envelope_invalid');
     expect(codeOf(() => parseTurnSubmission({ kind: 'prompt', async: true }))).toBe(
@@ -255,6 +280,27 @@ describe('parseTurnSubmission (spec §4.1)', () => {
     expect(codeOf(() => parseTurnSubmission({ item, async: true, idempotencyKey: 'a b' }))).toBe(
       'invalid_request',
     );
+  });
+});
+
+describe('resolveGateDeadline', () => {
+  it('is undefined when neither side asks for one', () => {
+    expect(resolveGateDeadline(0, undefined)).toBeUndefined();
+  });
+  it('takes the deployment ceiling when the submission is silent', () => {
+    expect(resolveGateDeadline(600, undefined)).toBe(600);
+  });
+  it('takes the submission when it is tighter', () => {
+    expect(resolveGateDeadline(600, 60)).toBe(60);
+  });
+  it('clamps a submission that asks for longer than the ceiling', () => {
+    expect(resolveGateDeadline(600, 9000)).toBe(600);
+  });
+  it('honours a submission deadline with no ceiling configured', () => {
+    expect(resolveGateDeadline(0, 60)).toBe(60);
+  });
+  it('takes the tightest of three', () => {
+    expect(resolveGateDeadline(600, 60, 30)).toBe(30);
   });
 });
 

@@ -101,6 +101,30 @@ describe('submitTurn (spec §4.1)', () => {
     expect(JSON.stringify(raw)).not.toContain('sk-fake');
   });
 
+  it('clamps a submitted gate deadline to the record TTL (#393)', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    const res = await submit(d, sid, {
+      item,
+      async: true,
+      requireApproval: true,
+      gateDeadlineS: 10 ** 7,
+    });
+    const rec = await d.turns.get((res.body as { turnId: string }).turnId);
+    expect(rec!.gateDeadlineS).toBe(d.config.turnRecordTtlSeconds);
+  });
+
+  it('stores no deadline when neither the deployment nor the submission asks for one', async () => {
+    // `turnRecordTtlSeconds` is a ceiling, not a default: a deployment with gates off must not
+    // acquire a 25-hour sweep entry on every turn it records.
+    const d = turnDeps();
+    const sid = await session(d);
+    const res = await submit(d, sid, { item, async: true, onTimeout: 'reject' });
+    const rec = await d.turns.get((res.body as { turnId: string }).turnId);
+    expect(rec!.gateDeadlineS).toBeUndefined();
+    expect(rec!.onTimeout).toBeUndefined();
+  });
+
   it('mints an id the dequeue exchange will accept, with production newId', async () => {
     // The COUPLING, and the only test that fails when it breaks. `isMintedTurnId` encodes
     // `t-${deps.newId()}`, but newId is injectable: point it at anything shorter and every

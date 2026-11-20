@@ -222,6 +222,10 @@ export class TurnStore {
         createdAt: String(rec.createdAt),
         // Only when set: an empty string here would read back as a resume of a turn named ''.
         ...(rec.resumeOf ? { resumeOf: rec.resumeOf } : {}),
+        // Same rule: absent rather than '' or '0', because `get` reads the deadline with `Number()`
+        // and 0 is not a value `resolveGateDeadline` can ever produce.
+        ...(rec.gateDeadlineS ? { gateDeadlineS: String(rec.gateDeadlineS) } : {}),
+        ...(rec.onTimeout ? { onTimeout: rec.onTimeout } : {}),
       }),
     );
     // The OPEN set, written after the hash: a member whose hash is missing reads as "already gone"
@@ -304,6 +308,8 @@ export class TurnStore {
       ...(h.endedAt ? { endedAt: Number(h.endedAt) } : {}),
       ...(h.cancelRequested === '1' ? { cancelRequested: true } : {}),
       ...(h.resumeOf ? { resumeOf: h.resumeOf } : {}),
+      ...(h.gateDeadlineS ? { gateDeadlineS: Number(h.gateDeadlineS) } : {}),
+      ...(h.onTimeout === 'abort' || h.onTimeout === 'reject' ? { onTimeout: h.onTimeout } : {}),
     };
   }
 

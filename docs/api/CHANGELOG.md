@@ -18,6 +18,19 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
+## 1.36.0
+
+A gate can be given a deadline ([#393](https://github.com/rossoctl/moca/issues/393)). Additive: two
+optional fields on the async submission.
+
+- `gateDeadlineS` bounds how long THIS turn's gate may stay unanswered, and `onTimeout` (`abort` or
+  `reject`, default `abort`) says what the control plane decides when it expires. There is no
+  `approve`: an unanswered gate is never read as consent.
+- Every bound is a ceiling and the tightest wins -- the deployment's `MOCA_GATE_DEADLINE_S`
+  (default `0`, never), the submission's `gateDeadlineS`, and the turn record's own TTL. A
+  submission may ask to be bounded sooner and never later.
+- The deadline is carried onto a resume, so a second gate on the same work is bounded too.
+
 ## 1.35.0
 
 A human gate works on any leaf kind, and an async one is resolved over HTTP

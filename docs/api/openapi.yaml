@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.35.0
+  version: 1.36.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -2061,6 +2061,21 @@ paths:
                     result; resolve it with `POST /v1/sessions/{id}/decision`, which resumes the work
                     as a NEW turn linked by `resumeOf`. Applies to the `prompt` and `solve` kinds; a
                     `converge` leaf carries the same request on `item.require_approval`.
+                gateDeadlineS:
+                  type: integer
+                  minimum: 1
+                  description: |
+                    seconds this turn's gate may stay unanswered before the control plane answers it
+                    itself (#393). A CEILING only: the deployment's `MOCA_GATE_DEADLINE_S` and the
+                    turn record's own TTL also bound it, and the tightest wins. Absent, and with no
+                    deployment ceiling, a gate waits indefinitely.
+                onTimeout:
+                  type: string
+                  enum: [abort, reject]
+                  description: |
+                    what the deadline decides when it expires; defaults to `abort`. There is no
+                    `approve`: an unanswered gate is never read as consent. Ignored without a
+                    deadline in force.
                 idempotencyKey:
                   type: string
                   maxLength: 128

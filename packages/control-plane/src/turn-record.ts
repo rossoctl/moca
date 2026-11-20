@@ -154,6 +154,14 @@ export interface TurnRecord {
    * reads, which is why it is on the RESUME rather than on the paused turn.
    */
   resumeOf?: string;
+  /**
+   * Seconds this turn's gate may stay unanswered (#393 §3), already clamped by `resolveGateDeadline`
+   * at submission to the tightest of the deployment ceiling, the submission and the record's TTL.
+   * Absent means no deadline, which is the default: expiring a gate spends the owner's decision for
+   * them. `onTimeout` is never stored without it.
+   */
+  gateDeadlineS?: number;
+  onTimeout?: GateTimeoutAction;
 }
 
 export const turnKey = (turnId: string): string => `sh:cp:turn:${turnId}`;
@@ -340,6 +348,26 @@ export interface ParsedSubmission {
   idempotencyKey?: string;
   /** Reported, not refused: the 501 is the handler's, before admission and before enqueue (§4.2). */
   workloadId?: string;
+  /** Seconds a gate on this turn may stay unanswered (#393 §3); absent = forever. A CEILING. */
+  gateDeadlineS?: number;
+  /** What the sweep decides when that deadline passes (#393 §3); absent = `'abort'`. */
+  onTimeout?: GateTimeoutAction;
+}
+
+/** What the deadline sweep decides for a gate nobody answered (#393, design §3). */
+export type GateTimeoutAction = 'abort' | 'reject';
+
+/**
+ * The tightest gate deadline in force (#393 §3). EVERY input is a CEILING and the tightest one wins
+ * -- the same rule budgets follow, for the same reason: a submission may ask to be bounded sooner
+ * and never later.
+ *
+ * 0 and undefined both mean "this side imposes no bound": 0 is `countEnv`'s convention for a count
+ * where 0 is meaningful rather than missing, and it is also what an unset env var produces.
+ */
+export function resolveGateDeadline(...bounds: (number | undefined)[]): number | undefined {
+  const real = bounds.filter((v): v is number => typeof v === 'number' && v > 0);
+  return real.length ? Math.min(...real) : undefined;
 }
 
 const KEY_RE = /^[\x21-\x7e]{1,128}$/;
@@ -402,11 +430,29 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
     idempotencyKey = b.idempotencyKey;
   }
 
+  // CP-side scheduling, so they stay OFF the envelope: the harness has no sweep and no clock for
+  // this -- a gate's deadline is enforced by whoever is still running when the gate is not.
+  if (
+    b.gateDeadlineS !== undefined &&
+    (typeof b.gateDeadlineS !== 'number' ||
+      !Number.isSafeInteger(b.gateDeadlineS) ||
+      b.gateDeadlineS <= 0)
+  ) {
+    throw new CpError('invalid_request', 'gateDeadlineS must be a positive integer');
+  }
+  // No 'approve' here. An unanswered gate must never be read as consent -- the whole point of the
+  // gate is that a human said yes, and a clock cannot. 'reject' is the lenient end of the range.
+  if (b.onTimeout !== undefined && b.onTimeout !== 'abort' && b.onTimeout !== 'reject') {
+    throw new CpError('invalid_request', 'onTimeout must be "abort" or "reject"');
+  }
+
   const workloadId = typeof b.workloadId === 'string' ? b.workloadId : undefined;
   const common = {
     caps,
     ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
     ...(workloadId !== undefined ? { workloadId } : {}),
+    ...(b.gateDeadlineS !== undefined ? { gateDeadlineS: b.gateDeadlineS as number } : {}),
+    ...(b.onTimeout !== undefined ? { onTimeout: b.onTimeout as GateTimeoutAction } : {}),
   };
 
   // #393: a gate on a prompt or solve turn. The converge kind has carried this on

@@ -17,6 +17,7 @@ import {
   isTerminalState,
   parseGateDecision,
   parseTurnSubmission,
+  resolveGateDeadline,
   type GateDecisionSubmission,
   type TurnEvent,
   type TurnRecord,
@@ -161,6 +162,14 @@ export async function submitResume(
     attempts: 0,
     createdAt: deps.now(),
     resumeOf: paused.turnId,
+    // Carried over like every other field: a resumed turn can hit a SECOND gate, and the deadline
+    // its submitter asked for applies to that one too.
+    ...(paused.gateDeadlineS
+      ? {
+          gateDeadlineS: paused.gateDeadlineS,
+          ...(paused.onTimeout ? { onTimeout: paused.onTimeout } : {}),
+        }
+      : {}),
   };
   await turns.create(turn);
   try {
@@ -263,6 +272,17 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       );
     }
 
+    // Third ceiling: the record's own TTL, armed when the turn goes terminal (`toTerminal`'s
+    // `expire`). A deadline past it would fire on a record that no longer exists -- neither the human
+    // nor the sweep can answer a gate whose turn is gone, so the deadline is the shorter of the two.
+    // It clamps an EXISTING deadline rather than joining the other two as an equal: the TTL is always
+    // set, so folding it in unconditionally would put a deadline on every turn of a deployment that
+    // asked for none.
+    const asked = resolveGateDeadline(deps.config.gateDeadlineS, parsed.gateDeadlineS);
+    const gateDeadlineS = asked
+      ? resolveGateDeadline(asked, deps.config.turnRecordTtlSeconds)
+      : undefined;
+
     // Pre-enqueue, so a refusal leaves nothing behind (§4.3): no record, no entry, no key claimed,
     // no slot held. The slot is RESERVED rather than counted, because a read-then-check cannot hold
     // a limit against parallel submitters -- they all read the same under-limit count and all pass.
@@ -312,6 +332,10 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       state: 'queued',
       attempts: 0,
       createdAt: deps.now(),
+      // Both or neither: an `onTimeout` with no deadline is a field nothing will ever read.
+      ...(gateDeadlineS
+        ? { gateDeadlineS, ...(parsed.onTimeout ? { onTimeout: parsed.onTimeout } : {}) }
+        : {}),
     };
     await turns.create(turn);
     try {

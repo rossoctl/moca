@@ -66,6 +66,7 @@ export function makeDeps(
     bundleSubjectBytes: 16 * 1024 * 1024,
     bundleTotalBytes: 64 * 1024 * 1024,
     asyncQueuedPerOwner: 50,
+    gateDeadlineS: 0,
     tenancy: 'single',
     turnRecordTtlSeconds: 86_400 + 3_600,
     turnSummaryBytes: 2048,
