@@ -1118,9 +1118,22 @@ pass 'SBX_STORAGE_CLASS against an existing redis StatefulSet: both mismatch dir
 # run renders pins the knob the same way -- refused before anything is applied, both directions.
 # A claim with no class passes against a set knob (the one transition the API allows, nil -> set),
 # and a claim this run does NOT render is neither patched nor read.
+# $3: who set the class, as a client-side `apply -k` leaves it. `knob` (the default): an earlier
+# SBX_STORAGE_CLASS run, so the class is in the last-applied-configuration annotation; `admission`:
+# the DefaultStorageClass admission plugin filled it in at create, so it is on the claim but not in
+# last-applied (#935). managedFields follow the same split (admission runs after the create
+# computes them), so only `knob` gives kubectl-client-side-apply the class.
 pvc_class() {
-  jq -n --arg n "$1" --arg c "$2" '{apiVersion: "v1", kind: "PersistentVolumeClaim", metadata: {name: $n},
-    spec: (if $c == "" then {} else {storageClassName: $c} end)}' >"$MOCK_STATE/pvc-$1.json"
+  jq -n --arg n "$1" --arg c "$2" --arg by "${3:-knob}" '
+    ({apiVersion: "v1", kind: "PersistentVolumeClaim", metadata: {name: $n},
+      spec: ({accessModes: ["ReadWriteOnce"], resources: {requests: {storage: "1Gi"}}}
+        + (if $by == "knob" and $c != "" then {storageClassName: $c} else {} end))} | tojson) as $last
+    | {apiVersion: "v1", kind: "PersistentVolumeClaim",
+       metadata: {name: $n, annotations: {"kubectl.kubernetes.io/last-applied-configuration": $last},
+         managedFields: [{manager: "kubectl-client-side-apply", operation: "Update", fieldsType: "FieldsV1",
+           fieldsV1: {"f:spec": ({"f:accessModes": {}, "f:resources": {"f:requests": {"f:storage": {}}}}
+             + (if $by == "knob" and $c != "" then {"f:storageClassName": {}} else {} end))}}]},
+       spec: (if $c == "" then {} else {storageClassName: $c} end)}' >"$MOCK_STATE/pvc-$1.json"
 }
 reset_state
 pvc_class moca-sbx-templates old-class
@@ -1136,6 +1149,32 @@ pvc_class moca-sbx-templates ocs-storagecluster-ceph-rbd
   fail 'the knob unset against a live claim class was not refused'
 grep -q 'SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd' "$TMP/out" ||
   fail "the claim reverse refusal does not name the fix: $(tail -2 "$TMP/out")"
+# #935: a class the cluster's default StorageClass filled in (no knob run applied it, so sbx-setup's
+# Apply does not own it) passes a knob-unset run: the apply leaves an unowned field alone.
+reset_state
+pvc_class moca-sbx-templates default-class admission
+pvc_class moca-sbx-credentials default-class admission
+run_setup export SBX_TEMPLATE_STORE=1 SBX_EGRESS_CREDENTIALS=1 ||
+  { cat "$TMP/out" >&2; fail 'a knob-unset run was refused by a claim class the default StorageClass filled in (#935)'; }
+grep -q "PVC moca-sbx-templates carries storageClassName 'default-class' that no SBX_STORAGE_CLASS run applied" "$TMP/out" ||
+  fail "the kept admission-filled class is not logged: $(tail -2 "$TMP/out")"
+# An annotation that is there but not valid JSON can't tell who set the class: refused, fail-closed,
+# naming the claim and the fix, before anything is applied.
+reset_state
+pvc_class moca-sbx-templates default-class admission
+jq '.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] = "{not json"' \
+  "$MOCK_STATE/pvc-moca-sbx-templates.json" >"$TMP/pvc.json" && mv "$TMP/pvc.json" "$MOCK_STATE/pvc-moca-sbx-templates.json"
+: >"$MOCK_LOG"
+! run_setup export SBX_TEMPLATE_STORE=1 ||
+  fail 'a knob-unset run passed a claim whose last-applied-configuration is not valid JSON'
+grep -q 'PVC moca-sbx-templates' "$TMP/out" && grep -q 'not valid JSON' "$TMP/out" && grep -q 'SBX_STORAGE_CLASS=default-class' "$TMP/out" ||
+  fail "the unparsable-annotation refusal does not name the claim, the cause and the fix: $(tail -2 "$TMP/out")"
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the unparsable-annotation refusal changed something first'
+# ... and the same claim still pins a set knob to its class (it is immutable either way).
+reset_state
+pvc_class moca-sbx-templates default-class admission
+! run_setup export SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd SBX_TEMPLATE_STORE=1 ||
+  fail 'a knob differing from an admission-filled claim class was not refused'
 reset_state
 pvc_class moca-sbx-templates ocs-storagecluster-ceph-rbd
 pvc_class moca-sbx-credentials ocs-storagecluster-ceph-rbd
@@ -1154,7 +1193,7 @@ run_setup export SBX_STORAGE_CLASS=ocs-storagecluster-ceph-rbd ||
   { cat "$TMP/out" >&2; fail 'the base-shape run was refused by a PVC it does not render'; }
 ! grep -q 'get pvc moca-sbx-templates' "$MOCK_LOG" ||
   fail 'the preflight read a PVC this run does not render'
-pass 'SBX_STORAGE_CLASS against existing component PVCs: both mismatch directions refused before anything applies, match and classless pass, unrendered claims unread'
+pass 'SBX_STORAGE_CLASS against existing component PVCs: both mismatch directions refused before anything applies, match, classless and default-class-filled pass, unrendered claims unread'
 
 
 # 13c''. Combined renders its own third claim (moca-credentials, the harness's file credential

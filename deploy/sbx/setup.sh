@@ -81,15 +81,18 @@
 #                           StatefulSet's volumeClaimTemplates outright, a PVC's
 #                           storageClassName once set -- the API allows only nil to set), so a run
 #                           whose knob disagrees with what is live (a different class, or a class
-#                           where the live object has one and the knob is unset: the server-side
-#                           apply would DROP the field its manager owns) is refused before
+#                           an earlier knob run applied while the knob is now unset: the apply
+#                           would DROP it -- the StatefulSet's server-side apply the field its
+#                           manager owns, a claim's client-side apply by its three-way merge;
+#                           a class the cluster's default StorageClass filled in is kept) is refused before
 #                           anything is applied (check_storage_class, on the StatefulSet and on
 #                           every claim this run renders). To move a deployment onto the knob,
 #                           keep SBX_STORAGE_CLASS at the live class; to change an existing one,
 #                           kubectl delete sts redis --cascade=orphan first (the pod and the
 #                           data-redis-0 claim survive; the re-run's StatefulSet adopts both),
 #                           and delete any PVC whose class must change (its contents do not
-#                           survive).
+#                           survive). A claim class the cluster's default StorageClass filled in
+#                           (no SBX_STORAGE_CLASS run applied it) is left alone with the knob unset.
 #   SBX_REDIS_IMAGE         optional; repository[:tag]@sha256:<digest>: the image Redis runs instead of the
 #                           base's valkey/valkey:9-alpine. For a namespace whose data a Redis 7.4 wrote
 #                           (RDB format 12, which Valkey 9 cannot read: its AOF load aborts), e.g.
@@ -738,7 +741,13 @@ check_sts_class() {
 # run whose knob disagrees with a live claim this run renders is the same Forbidden one object later
 # in the stream -- redis applies, then the claim fails, partway through. A claim with NO class
 # passes in both directions: nil -> set is the one transition the API allows, and a knob-unset run
-# writes nothing.
+# writes nothing. A knob-unset run is refused only when an earlier SBX_STORAGE_CLASS run applied the
+# live class, since only then does the apply drop it (#935). The claims come from the overlay,
+# which apply_stack applies client-side (`kc apply -k`): its three-way merge removes a field only
+# when the last-applied-configuration annotation has it and the new config does not. On a cluster
+# with a default StorageClass, the DefaultStorageClass admission plugin fills the class in when the
+# claim is created, so it is on the claim but not in last-applied, and a knob-unset apply leaves it
+# alone. The StatefulSet half above has no such case: admission does not fill volumeClaimTemplates.
 check_claim_class() {
   local json live
   # Captured first (errexit), as in check_redis_image: a failing get must not read as "no PVC".
@@ -746,12 +755,35 @@ check_claim_class() {
   [[ -n "$json" ]] || return 0
   live="$(jq -r '.spec.storageClassName // empty' <<<"$json")"
   [[ -z "$live" ]] && return 0
+  if [[ -z "${SBX_STORAGE_CLASS:-}" ]]; then
+    case "$(claim_class_owner "$json")" in
+      none)
+        log "PVC $1 carries storageClassName '$live' that no SBX_STORAGE_CLASS run applied (the cluster's default class); kept"
+        return 0 ;;
+      unknown)
+        die "PVC $1 in $NS carries storageClassName '$live', and its kubectl.kubernetes.io/last-applied-configuration annotation is not valid JSON, so this run cannot tell whether an earlier SBX_STORAGE_CLASS run applied the class (a knob-unset apply would then remove it, which the API refuses on a set class). Set SBX_STORAGE_CLASS=$live (the claim keeps that class either way)" ;;
+    esac
+  fi
   if [[ -n "${SBX_STORAGE_CLASS:-}" ]]; then
     [[ "$live" == "$SBX_STORAGE_CLASS" ]] ||
       die "PVC $1 in $NS already exists with storageClassName '$live', which the API refuses to change in place (PVC.spec.storageClassName is immutable, apart from nil to set), so SBX_STORAGE_CLASS=$SBX_STORAGE_CLASS cannot be applied: keep SBX_STORAGE_CLASS=$live for this deployment (the claim keeps the class it was created with), or, to change it, kubectl -n $NS delete pvc $1 (its contents do not survive) and re-run"
   else
-    die "PVC $1 in $NS carries storageClassName '$live' an earlier SBX_STORAGE_CLASS run set, and this run has SBX_STORAGE_CLASS unset: the apply would remove the field (server-side apply drops what its field manager no longer owns), which the API refuses on a set class. Set SBX_STORAGE_CLASS=$live (the claim keeps that class either way)"
+    die "PVC $1 in $NS carries storageClassName '$live' an earlier SBX_STORAGE_CLASS run set, and this run has SBX_STORAGE_CLASS unset: the apply would remove the field (the client-side merge drops what the last applied configuration had and this one lacks), which the API refuses on a set class. Set SBX_STORAGE_CLASS=$live (the claim keeps that class either way)"
   fi
+}
+
+# Who applied spec.storageClassName to the PVC whose JSON is $1, printed as one word: `run` (an
+# earlier run applied it), `none` (no run did: a class the cluster defaulted at create), or `unknown`
+# (the annotation is there but is not valid JSON, so the run cannot tell; refused, fail-closed). The
+# overlay is applied client-side, so what a run applied is its last-applied-configuration
+# annotation, which is also what the client-side three-way merge removes fields by; no annotation
+# means no run applied anything.
+claim_class_owner() {
+  jq -r '(.metadata.annotations["kubectl.kubernetes.io/last-applied-configuration"] // "{}")
+    | (fromjson? // "\u0000unparsable")
+    | if . == "\u0000unparsable" then "unknown"
+      elif type == "object" and ((.spec.storageClassName? // "") | tostring | length > 0) then "run"
+      else "none" end' <<<"$1"
 }
 
 # SBX_PROFILE=combined in an SBX0 namespace would add the harness's keys to its moca-mu1 and switch
