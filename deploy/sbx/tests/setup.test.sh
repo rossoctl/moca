@@ -473,6 +473,23 @@ render
   fail 'a settings hash moved on a re-run with the same inputs'
 pass 'a re-run keeps every token, password, key and certificate, and the settings hash'
 
+# 4'. Rotating the installer token (delete the key, re-run) rolls the control plane (#939): it reads
+# the token once at start, so the settings hash must move with it, and only the control plane's.
+jq 'del(.data.SH_INSTALLER_TOKEN)' "$MOCK_STATE/secret-moca-mu1.json" >"$TMP/mu1" && mv "$TMP/mu1" "$MOCK_STATE/secret-moca-mu1.json"
+run_setup true || fail 'the rotation run failed'
+itok2="$(secret_val moca-mu1 SH_INSTALLER_TOKEN)"
+[[ "$itok2" =~ ^[0-9a-f]{64}$ && "$itok2" != "$itok" ]] || fail 'deleting SH_INSTALLER_TOKEN did not rotate it'
+! grep -qF "$itok2" "$TMP/out" "$MOCK_LOG" || fail 'the new installer token reached the log or argv'
+render
+rot_hash="$(pod_hash moca-control-plane)"
+[[ "$rot_hash" != "$cp_hash" ]] || fail 'a rotated installer token did not move the settings hash, so the control plane keeps the old one'
+[[ "$(pod_hash sandbox-relay)" == "$relay_hash" ]] || fail 'a rotated installer token rolled the relay, which never reads it'
+run_setup true || fail 're-run after the rotation failed'
+render
+[[ "$(pod_hash moca-control-plane)" == "$rot_hash" ]] || fail 'the settings hash moved on a re-run with an unchanged installer token'
+cp_hash="$rot_hash" itok="$itok2" before="$(state_hash)"
+pass "a rotated installer token moves the control plane's settings hash (and not the relay's); an unchanged one keeps it"
+
 # 4a. A list separated by newlines or tabs is the same list: nothing is revoked, nothing rotates.
 : >"$MOCK_LOG"
 run_setup export SBX_WORKERS=$'sbx_default\n\tsbx_py312' || fail 'newline-separated run failed'
@@ -1210,6 +1227,7 @@ HASH="$({
   raw_val sbx-token-keys PUBLIC_KEYS
   raw_val moca-relay-tls tls.crt
   raw_val sbx-exec-tls tls.crt
+  jq -cS '.data // {}' "$MOCK_STATE/secret-moca-mu1.json"
 } | openssl dgst -sha256 -hex | awk '{print substr($NF, 1, 16)}')"
 RELAY_HASH="$({
   printf '%s\n' 'SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane' 'SH_SANDBOX_MAX_INFLIGHT=2'

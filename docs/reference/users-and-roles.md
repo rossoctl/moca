@@ -90,8 +90,8 @@ constant time. A request bearing it on a `/v1/subjects*` route acts as the synth
 admins, so it can change enrollment and roles and appears in `GET /v1/subjects` as an admin from
 the settings (`server.ts`, `main.ts`, `identity.ts` `INSTALLER_SUBJECT`). On every other route it
 is not a token. On the sandbox service, `deploy/sbx/setup.sh` generates it once into the
-`moca-mu1` Secret; rotate it by deleting the key and re-running `setup.sh`. Treat it as you treat
-a settings admin's login.
+`moca-mu1` Secret; rotate it by deleting the key and re-running `setup.sh`, which rolls the control
+plane so the old token stops working. Treat it as you treat a settings admin's login.
 
 ### A damaged `members.json`
 

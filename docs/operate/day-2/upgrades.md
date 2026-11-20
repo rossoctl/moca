@@ -126,6 +126,11 @@ that use a promoted bundle.
 Changes that alter a default or what a re-run of `setup.sh` writes ([change policy](../../reference/change-policy.md),
 rule 5).
 
+- **Rotating a `moca-mu1` key rolls the control plane ([#939](https://github.com/rossoctl/moca/issues/939)).** The
+  sandbox service's settings hash now covers `moca-mu1` (the signing key, the janitor and installer tokens, and on
+  the combined profile the exchange token and the credential KEK), so deleting a key and re-running `setup.sh`
+  rotates it and rolls the pods that read it. The first `setup.sh` run after the upgrade rolls the control plane
+  once (and, on the combined profile, the supervisor), even with no other change.
 - **On the combined profile, the installer token becomes live
   ([#938](https://github.com/rossoctl/moca/issues/938)).** `deploy/sbx/setup.sh` already generates `SH_INSTALLER_TOKEN`
   into `moca-mu1` on both profiles; from this upgrade the combined control plane mounts and reads it, so a combined
