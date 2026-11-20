@@ -183,7 +183,9 @@ const BOB_SETTINGS = '.bob/settings.json';
 const BOB_MCP = '.bob/mcp.json';
 const SETTINGS_LOCAL = '.claude/settings.local.json';
 const MANIFEST = '.sbx/agent-config.json';
-const WRITE_HINT = 'edit it by hand, or run mocactl sbx up --no-agent-config';
+/** What --no-agent-config costs, said wherever it is offered. */
+const NO_CONFIG = '--no-agent-config (no sandbox server, local tools left on)';
+const WRITE_HINT = `edit it by hand, or configure the agents yourself with mocactl sbx up ${NO_CONFIG}`;
 /**
  * Claude Code's own wording for the option that accepts the server, so what we tell the user to
  * pick reads the same as what they see. Its prompt also offers "Use this and all future MCP
@@ -191,8 +193,7 @@ const WRITE_HINT = 'edit it by hand, or run mocactl sbx up --no-agent-config';
  */
 export const CLAUDE_PROMPT_PICK = 'Use this MCP server';
 /** For an edit this module could not make safely: nothing was written. */
-const EDIT_HINT =
-  'nothing was changed; edit it by hand (and please report it), or use --no-agent-config / --keep-config';
+const EDIT_HINT = `nothing was changed; edit it by hand (and please report it), or use up ${NO_CONFIG} or rm --keep-config`;
 
 export class ConfigConflict extends Error {
   constructor(
@@ -1055,6 +1056,8 @@ export function writeAgentConfig(
       settings.rel,
       'permissions.allow',
       `lists local built-in tools (${reenabled.join(', ')}), which would act on this machine`,
+      // Cortex mode writes no deny list to outrank the rule in settings.local.json.
+      cortex ? 'delete it' : `move it to ${SETTINGS_LOCAL}, which up leaves alone, or delete it`,
     );
   }
   for (const [file, data] of [

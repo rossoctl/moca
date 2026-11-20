@@ -218,6 +218,22 @@ describe('the push list (SBX0 §6.2)', () => {
     );
   });
 
+  it('says why a file over 12 MiB is refused and how to leave it out, tracked or not', async () => {
+    const r = repo();
+    writeFileSync(join(r, 'big.bin'), Buffer.alloc(MAX_FILE + 1));
+    const untracked = String(await planPush(r).catch((e: unknown) => e));
+    expect(untracked).toContain(
+      `a file goes whole into one sandbox command, whose input is at most ${MAX_STDIN >> 20} MiB compressed`,
+    );
+    expect(untracked).toContain('.git/info/exclude');
+    expect(untracked).not.toContain('git rm --cached');
+    // An ignore rule does not keep a tracked file out.
+    git(r, 'add', 'big.bin');
+    const tracked = String(await planPush(r).catch((e: unknown) => e));
+    expect(tracked).toContain(`big.bin (12.0 MiB, ${MAX_FILE + 1} bytes, tracked)`);
+    expect(tracked).toContain('git rm --cached it, which once committed removes it for everyone');
+  });
+
   it('is exactly at the limits it names', () => {
     expect(CHUNK_TARGET).toBe(8 << 20);
     expect(MAX_FILE).toBe(12 << 20);

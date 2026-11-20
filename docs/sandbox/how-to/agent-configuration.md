@@ -9,7 +9,8 @@ sidebar_position: 4
 
 `up` **merges** into these files and never overwrites what you have. If a value already there
 conflicts (say, a `sandbox` MCP server of your own), it stops before doing anything and names the
-file and key.
+file and key. An allow rule for a local tool in `.claude/settings.json` (`Bash(ls:*)`, say) is one:
+move it to `.claude/settings.local.json`, which `up` leaves alone, or delete it.
 
 | File                                  | What `up` adds                                                                                                                                                                                                                                                                                |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -34,7 +35,8 @@ doctor` fails on it; `mocactl sbx claude` sets it to `1`.
 
 They are ordinary files in your working tree, so `git status` shows them. Leave them uncommitted:
 committed, they would point every teammate's agents at a sandbox and deny their local tools.
-`mocactl sbx up --no-agent-config` creates and pushes without touching them.
+`mocactl sbx up --no-agent-config` creates and pushes without touching them, so it is not a way past
+a conflict: the agents get no sandbox server, and their local tools stay on.
 
 **Whether they reach the sandbox is up to your `.gitignore`.** `up` writes them after its push, so
 the first push never carries them. From then on, `up` and `push` treat them like any other file:
@@ -55,7 +57,8 @@ instead:
 - `up` runs `agentop script install moca-sandbox` before it creates anything, and stops if that
   fails.
 - `.claude/settings.json` gets the allow rule, `enabledMcpjsonServers` and `autoMemoryEnabled`,
-  but no `permissions.deny`.
+  but no `permissions.deny`. With no deny list to outrank it, an allow rule for a local tool must
+  be deleted, not moved to `.claude/settings.local.json`.
 - Later `up` runs keep the mode. `mocactl sbx doctor` checks the script is installed and loaded.
 
 Claude Code must reach the model through Cortex (`agentop configure claude-code`). Without it,
