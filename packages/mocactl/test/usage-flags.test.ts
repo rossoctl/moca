@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { USAGE } from '../src/cli.js';
+import { USAGE, usageFor } from '../src/cli.js';
 import { usageEntries } from '../src/core/usage.js';
 import { SBX_USAGE } from '../src/sbx/cli.js';
 
@@ -80,6 +80,12 @@ describe('every flag is explained in its own usage entry (#875)', () => {
       expect(notes.filter((l) => l.startsWith('--json:'))).toHaveLength(1);
     });
   }
+
+  it('mocactl COMMAND --help notes --json only for a command that takes it', () => {
+    expect(usageFor(['doctor'])).toMatch(/^--json: /m);
+    expect(usageFor(['login'])).not.toMatch(/^--json: /m);
+    expect(usageFor(['login'])).toMatch(/^flags for every command: /m);
+  });
 
   it('would catch a flag left out of its description', () => {
     const broken = SBX_USAGE.replace(

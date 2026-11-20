@@ -55,10 +55,15 @@ a repository's sandbox, in the order you use it:
                                                  (a reused sandbox with changes not yet pulled is
                                                  left unpushed, with a warning, and up exits 0)
                                                  (--template: a new sandbox's template, default
-                                                 default; a reused one must have it; --name: a new
-                                                 sandbox's name; --include-secrets: push .env*,
-                                                 *.pem, *.key and id_* files too; --max-push: refuse
-                                                 a tree over MiB, default 256; --no-agent-config:
+                                                 'default'; a bound sandbox of another template is
+                                                 refused, an unbound one is left and a new sandbox
+                                                 created; matched by bare id, so ID:TAG or
+                                                 ID@BUILD never reuses one; --name: a new
+                                                 sandbox's name, as sbx create's (a second live
+                                                 one of the name is refused); --include-secrets:
+                                                 push .env*, *.pem, *.key and id_* files too;
+                                                 --max-push: refuse a tree over MiB, default 256;
+                                                 --no-agent-config:
                                                  write no agent configuration, only push and bind)
                                                  (--cortex: Cortex v0.9.3+ blocks the local tools
                                                  instead of a deny list, so Claude Code loads the
@@ -128,7 +133,8 @@ a sandbox by hand: create one, its lease and processes, a direct client:
                                                  create a sandbox; prints its id; --template: its
                                                  template, at a TAG or one BUILD (default: default,
                                                  at its default tag); --name: a name sbx ls shows
-                                                 (a-z, 0-9 and -, not unique); --label: a key=value
+                                                 (a-z, 0-9 and -, not first; at most 63; unique
+                                                 among your live sandboxes); --label: a key=value
                                                  label (repeatable, at most 16);
                                                  --seed: run the served build's seed, then check
                                                  /workspace is a clean tree (its HEAD becomes the
@@ -218,14 +224,17 @@ templates: what a sandbox is created from:
                                                  spec's; --profile: the policy profile it must pass
                                                  (sbx policy; default: the policy's defaultProfile);
                                                  --visibility: a new template's, default deployment
-                                                 (a self-attested one is always private);
+                                                 (a self-attested one must be private: deployment
+                                                 is refused);
                                                  --gate-record: F is the image's gate record (one
                                                  --spec, at most 1 MiB), sent byte for byte.
-                                                 Several --spec: one create each. --timeout: each
-                                                 create waits for a queue slot while your
-                                                 buildsQueued quota is full, up to S seconds in
-                                                 all (default 3600). An id already yours: a new
-                                                 build of it (the same inputs: that build, reused).
+                                                 Several --spec: one create each. --timeout: S
+                                                 seconds for all the creates together (default
+                                                 3600) to wait for queue slots while your
+                                                 buildsQueued quota is full; specs not yet sent
+                                                 when it runs out are not sent. An id already
+                                                 yours: a new build of it (the same inputs: that
+                                                 build, reused).
                                                  --dry-run: reads the policy, then its checks that
                                                  need only the inputs; nothing created
   mocactl sbx templates build ID --spec F [--image REF] [--profile P] [--gate-record F] [--dry-run]
@@ -258,7 +267,8 @@ templates: what a sandbox is created from:
   mocactl sbx templates edit ID [--visibility private|deployment] [--description TEXT] [--json]
                                                  change who sees it (--visibility: private, only
                                                  you, others' sandboxes already made keep running;
-                                                 deployment, everyone), or its description
+                                                 deployment, everyone; refused for a template with
+                                                 a self-attested build), or its description
                                                  (--description)
   mocactl sbx templates activate ID [--build BUILD] [--lease S] [--wait [--timeout S]] [--json]
                                                  take or renew your activation lease on a build (tag

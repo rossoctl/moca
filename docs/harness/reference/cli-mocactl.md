@@ -21,9 +21,9 @@ UPDATE_MOCACTL_REFERENCE=1 pnpm -C packages/mocactl exec vitest run test/mocactl
 ```text
 usage:
   mocactl [--setup] [--no-animation]             interactive terminal UI (--setup: run the first-start
-                                                 setup again, server, login and credential, each
-                                                 step skipped when already done; --no-animation:
-                                                 a still spinner)
+                                                 setup again: the server form, then login and
+                                                 credential, each skipped when already done;
+                                                 --no-animation: a still spinner)
   mocactl --version                              print this build's version (a release tag, edge-<sha>,
                                                  or dev-<sha> from a source checkout)
   mocactl login [--no-browser]                   log in with the GitHub device flow (in a local
@@ -40,8 +40,10 @@ usage:
                                                  (--session), or in a new session (--new, the
                                                  default); --option sets a new session's model,
                                                  inferenceCredential, sandboxTier or sandboxTemplate
-                                                 (repeatable; one that has several choices and is
-                                                 not given is refused, naming the choices)
+                                                 (repeatable; other keys are ignored; with several
+                                                 inference credentials and none given, refused,
+                                                 naming them; the others not given take the
+                                                 server's default; ignored with --session)
   mocactl run "prompt" --config DIGEST            start the new session with a promoted config bundle
   mocactl run "prompt" --show-tools              print each tool call the turn makes, between its
                                                  text (not with --json, which streams the frames)
@@ -61,7 +63,9 @@ usage:
       [--endpoint URL] [--json]                  the secret is read from stdin; --host: a host it is
                                                  sent to (repeatable, or a comma list); --kind:
                                                  bearer (default), api-key, oauth2-token or basic
-                                                 (stdin is username=... and password=... lines);
+                                                 (stdin is username=... and password=... lines;
+                                                 basic needs --consumer sandbox-egress or
+                                                 control-plane: inference takes one secret);
                                                  --consumer: inference (default: the model calls),
                                                  sandbox-egress or control-plane; --endpoint: the
                                                  model API URL it is for (inference only)
