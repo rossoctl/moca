@@ -3,7 +3,7 @@ import { HANDLERS } from '../src/handlers.js';
 import { OwnershipIndex } from '../src/ownership.js';
 import { MemoryTurnQueue } from '../src/turn-queue.js';
 import { TurnStore } from '../src/turn-store.js';
-import type { TurnRecord } from '../src/turn-record.js';
+import { compareCursor, type TurnRecord } from '../src/turn-record.js';
 import { eventFrames, EVENT_HEARTBEAT_MS, EVENT_IDLE_MS } from '../src/turn-handlers.js';
 import { alice, bob, codeOf, ctx, makeDeps, NOW_MS } from './helpers/deps.js';
 import { fakeRedis } from './helpers/fake-redis.js';
@@ -108,13 +108,12 @@ describe('GET /v1/events (#392)', () => {
     expect(dataOf(frames[1]!)).toMatchObject({ turnId: 'a-1', sessionId: 's-a' });
 
     // And the mirror image, so the test cannot pass by alice's stream being empty. bob's log
-    // already had an entry when this stream opened, so '0-0' predates it and the gap frame comes
-    // first -- the transition after it is bob's own, and only bob's.
+    // already had an entry when this stream opened, and '0-0' replays it: no gap frame, because
+    // '0-0' asks for everything retained rather than resuming from an issued cursor.
     const theirs = await stream(d, bob, '0-0');
-    const bobFrames = await take(theirs.body, 3);
+    const bobFrames = await take(theirs.body, 2);
     expect(bobFrames[0]).toBe(': ok\n\n');
-    expect(bobFrames[1]).toContain('event: gap');
-    expect(bobFrames.slice(2).map((f) => dataOf(f).turnId)).toEqual(['b-1']);
+    expect(bobFrames.slice(1).map((f) => dataOf(f).turnId)).toEqual(['b-1']);
   });
 
   it('a reconnect with the last cursor misses no transition and repeats none', async () => {
@@ -147,19 +146,35 @@ describe('GET /v1/events (#392)', () => {
   it('sends one gap frame when the cursor is older than the oldest retained event', async () => {
     const d = eventDeps();
     await d.turns.create(rec());
-    // '1-0' is before the fake's first minted id only when the log already has entries; assert
-    // against the real first id so the test states the rule rather than a minting detail.
+    // An issued cursor this log can no longer serve: later than `FROM_START`, so it is not the
+    // "everything retained" sentinel, and asserted to precede the oldest entry rather than assumed
+    // to -- the fake's ids are its own business.
     const oldest = await d.turns.firstEventId(alice.sub);
-    expect(oldest).not.toBe('');
-    const res = await stream(d, alice, '0-0');
+    const trimmed = '0-1';
+    expect(compareCursor(trimmed, oldest)).toBeLessThan(0);
+    const res = await stream(d, alice, trimmed);
     const frames = await take(res.body, 3);
     expect(frames[0]).toBe(': ok\n\n');
-    expect(frames[1]).toBe('event: gap\ndata: {"since":"0-0"}\n\n');
+    expect(frames[1]).toBe(`event: gap\ndata: {"since":"${trimmed}"}\n\n`);
     expect(dataOf(frames[2]!).state).toBe('queued');
 
     // A cursor still inside the window gets no gap.
     const warm = await stream(d, alice, oldest);
     expect((await take(warm.body, 1))[0]).toBe(': ok\n\n');
+  });
+
+  it('sends the gap frame when NOTHING is retained, not just when the head was trimmed', async () => {
+    // The whole key expired, which is what an owner idle for `resultTtl + margin` gets: there is no
+    // oldest id to compare against, and a `since` cannot be continuous with a log that is gone.
+    // Without this the client resumes silently at a later id -- the hole the frame exists to name.
+    const d = eventDeps();
+    expect(await d.turns.firstEventId(alice.sub)).toBe('');
+    const res = await stream(d, alice, '5-0');
+    expect((await take(res.body, 2))[1]).toBe('event: gap\ndata: {"since":"5-0"}\n\n');
+
+    // No `since` on an empty log is NOT a gap: a client that asked for nothing lost nothing.
+    const fresh = await stream(d, alice);
+    expect((await take(fresh.body, 1))[0]).toBe(': ok\n\n');
   });
 
   it('refuses a `since` that is not a cursor', async () => {

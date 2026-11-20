@@ -671,12 +671,19 @@ export async function cmdWatch(rt: Runtime, io: Io, opts: WatchOptions): Promise
   // between two sweeps still gets its `running` line. A deployment without the route, or any stream
   // failure, drops `events` and `watch` behaves exactly as it did on the poll alone.
   let cursor = opts.since;
-  let events: AsyncGenerator<TurnEvent> | undefined = rt.cp.streamEvents({
-    ...(cursor === undefined ? {} : { since: cursor }),
-    ...(opts.signal ? { signal: opts.signal } : {}),
-    onGap: (since) =>
-      io.err(`missed events before cursor ${sanitizeRemote(since)}; state below is from a read\n`),
-  });
+  // One opener for both the first stream and every reopen: a reopen is where a gap is LIKELIEST
+  // (the cursor has been sitting out sweeps, or a whole retention window), so the note must not be
+  // wired to the first open only.
+  const open = (): AsyncGenerator<TurnEvent> =>
+    rt.cp.streamEvents({
+      ...(cursor === undefined ? {} : { since: cursor }),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      onGap: (since) =>
+        io.err(
+          `missed events before cursor ${sanitizeRemote(since)}; state below is from a read\n`,
+        ),
+    });
+  let events: AsyncGenerator<TurnEvent> | undefined = open();
   let pending: Promise<IteratorResult<TurnEvent>> | undefined;
   for (;;) {
     // Re-read each tick so a `spawn --tag T` from another terminal joins a running `watch --tag T`,
@@ -715,11 +722,14 @@ export async function cmdWatch(rt: Runtime, io: Io, opts: WatchOptions): Promise
         events = undefined;
         break;
       }
+      // Advanced for EVERY event, including the ones skipped below: this subject's other work
+      // shares the log, and a cursor that only moved over our own rows would make each reopen
+      // replay up to the log's whole length of foreign events.
+      cursor = got.value.cursor;
       const row = byId.get(got.value.sessionId);
       // An event for a session this `watch` does not hold, or for a different turn of a session it
       // does (a follow-up turn on the same session), is not this row's transition.
       if (!row || row.turnId !== got.value.turnId) continue;
-      cursor = got.value.cursor;
       const view = viewFromTurnEvent(got.value);
       report(row, view, got.value.cursor);
       // Persist it, so a later `subagents` starts from what the stream already said.
@@ -734,10 +744,7 @@ export async function cmdWatch(rt: Runtime, io: Io, opts: WatchOptions): Promise
       // `sleep` resolves on abort rather than rejecting, so without this the loop would go round once
       // more and turn a Ctrl-C into a full sweep of failed reads.
       if (aborted(opts.signal)) return 130;
-      events = rt.cp.streamEvents({
-        ...(cursor === undefined ? {} : { since: cursor }),
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      });
+      events = open();
     }
   }
 }

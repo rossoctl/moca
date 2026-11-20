@@ -148,7 +148,7 @@ reconciled on the next poll instead of reported as failed; a connect-phase failu
 line per state change, exiting 0 once every row it watches is finished — `done`, `failed`,
 `paused`, or `unknown` for one that will never produce a result. The first sweep reports every
 row, so watching a batch that is already over says so. It follows the owner-scoped event stream
-`GET /v1/events`, so a transition shows up within milliseconds, and `--since C` resumes after a
+`GET /v1/events`, so a transition shows up within about a second, and `--since C` resumes after a
 cursor `C` (every `--json` line carries the one it came from). Behind the stream is a 60-second
 read of every unfinished row, which is the whole answer for a row with no turn, a control plane
 without the route, and an event the server lost. It re-reads the

@@ -599,6 +599,11 @@ export class TurnStore {
       await this.redis.expire(key, this.ttlSeconds());
     } catch {
       // Best effort, by the shortcut above.
+      //
+      // shortcut: the append and the EXPIRE are two commands, so an append that lands before a
+      // failed EXPIRE leaves the key with no TTL -- bounded at EVENTS_MAXLEN entries, but immortal
+      // until the owner's next transition re-arms it. Wrap the pair in a MULTI when CpRedisLike
+      // grows one (nothing else here needs a transaction today).
     }
   }
 

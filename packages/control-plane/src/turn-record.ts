@@ -229,6 +229,13 @@ export const EVENTS_MAXLEN = 500;
 export const CURSOR_RE = /^[0-9]+-[0-9]+$/;
 
 /**
+ * "Everything retained", as a `since` a client can write by hand -- and the only cursor shape this
+ * service never issues, which is why it is exempt from the `gap` frame: its holder is not resuming
+ * from a position it was given, so it cannot have lost one.
+ */
+export const FROM_START = '0-0';
+
+/**
  * One state transition, as a client reads it. `reason` and `gate` are carried so the stream is
  * self-sufficient: a notifier (#394) and `mocactl watch` can both render a finished turn without a
  * second request per event.

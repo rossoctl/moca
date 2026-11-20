@@ -300,7 +300,7 @@ hex>`, `--kind` other than `prompt`/`solve`, `--kind solve` without both `--repo
   `GET /runs/status`), and persisted the same way. The first sweep reports every row, so watching a
   batch that is already over says so rather than printing nothing; after that a row is printed only
   when its state or detail changes. It follows the owner-scoped event stream
-  `GET /v1/events` (#392), so a transition appears within milliseconds instead of at the next poll,
+  `GET /v1/events` (#392), so a transition appears within about a second instead of at the next poll,
   and a turn that starts and finishes quickly still produces its `running` line. `--since C` resumes
   the stream after cursor `C`; every `--json` line carries the `cursor` of the event that produced
   it (`null` on a line from the fallback read), which is what a reattach hook stores. A cursor older

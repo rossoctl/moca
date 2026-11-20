@@ -38,17 +38,28 @@ function makeIo(): { io: any; out: string[]; err: string[] } {
   return { io: { out: (s: string) => out.push(s), err: (s: string) => err.push(s) }, out, err };
 }
 
-/** A stream that yields `events` and then ends, recording the `since` it was opened with. */
+/**
+ * A stream that yields `events` and then ends, recording the `since` it was opened with.
+ *
+ * The `since` is recorded by the CALL, not by the generator's body: an async generator runs nothing
+ * until its first `next()`, so a stream that is opened and then never drained -- which is what a
+ * reopen on the sweep that ends the watch is -- would otherwise record nothing.
+ */
 function fakeStream(events: TurnEvent[], gap?: string) {
   const opened: (string | undefined)[] = [];
+  const frames = async function* (opts: {
+    onGap?: (s: string) => void;
+  }): AsyncGenerator<TurnEvent> {
+    if (gap !== undefined) opts.onGap?.(gap);
+    for (const e of events) yield e;
+  };
   return {
     opened,
-    streamEvents: async function* (
+    streamEvents: (
       opts: { since?: string; onGap?: (s: string) => void } = {},
-    ): AsyncGenerator<TurnEvent> {
+    ): AsyncGenerator<TurnEvent> => {
       opened.push(opts.since);
-      if (gap !== undefined) opts.onGap?.(gap);
-      for (const e of events) yield e;
+      return frames(opts);
     },
   };
 }
@@ -155,6 +166,25 @@ describe('watch over the event stream (#392)', () => {
       ['s-1', 'running', null],
       ['s-1', 'done', '3-0'],
     ]);
+  });
+
+  it('advances the cursor over skipped events, so a reopen replays none of them', async () => {
+    // One subject's log carries all their work. A cursor that only moved over this `watch`'s own
+    // rows would re-read every foreign event on each reopen -- harmless but unbounded by the log's
+    // own length, and the reason to advance before the filter rather than after it.
+    const stream = fakeStream([
+      ev({ cursor: '1-0', sessionId: 's-other', state: 'running' }),
+      ev({ cursor: '2-0', sessionId: 's-other', state: 'solved' }),
+    ]);
+    const { rt } = makeRt(scratch, stream);
+    const ledger = openLedger(rt.paths.subagentsFile, rt.now);
+    ledger.append(seedRecord());
+    const { io, out } = makeIo();
+    expect(await cmdWatch(rt, io, base({ ledger, turns: queuedThen({ status: 'solved' }) }))).toBe(
+      0,
+    );
+    expect(stream.opened).toEqual([undefined, '2-0']);
+    expect(parsed(out).map((l) => l.state)).toEqual(['running', 'done']);
   });
 
   it('prints no second line when the safety-net sweep re-reads a state the stream reported', async () => {

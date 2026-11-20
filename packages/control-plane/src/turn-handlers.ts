@@ -13,6 +13,7 @@ import type { SessionRecord } from './ownership.js';
 import {
   compareCursor,
   CURSOR_RE,
+  FROM_START,
   isTerminalState,
   parseTurnSubmission,
   type TurnEvent,
@@ -399,7 +400,18 @@ export const TURN_HANDLERS: Record<string, Handler> = {
     const from = since ?? (await turns.lastEventId(owner));
     const oldest = await turns.firstEventId(owner);
     // Retention moved past the client's cursor: say so rather than imply continuity it lost.
-    const gap = Boolean(since && oldest && compareCursor(since, oldest) < 0);
+    //
+    // An EMPTY log counts, and is the case that matters most: `EXPIRE` is re-armed only by an
+    // append, so an owner idle for the window loses the WHOLE stream rather than its head. Without
+    // `!oldest` such a client resumes silently at a later id -- the hole the frame exists to name.
+    //
+    // `'0-0'` is exempt, empty log or not: it is the documented "everything retained" sentinel
+    // rather than a cursor this service ever issued, so its holder saw nothing it could have
+    // missed. The frame answers "did my cursor fall out of the window", which that caller has not
+    // asked.
+    const gap = Boolean(
+      since && since !== FROM_START && (!oldest || compareCursor(since, oldest) < 0),
+    );
     return {
       status: 200,
       contentType: 'text/event-stream',

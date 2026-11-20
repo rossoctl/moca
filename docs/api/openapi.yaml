@@ -2222,8 +2222,11 @@ paths:
 
         - `event: turn` -- a transition. `id:` is its cursor and `data` is a `TurnEvent`.
         - `event: gap` -- sent once, before any `turn` frame, when `since` is older than the oldest
-          retained event: transitions between the two are gone, so read the turns themselves
-          (`GET /v1/sessions/{id}/turns/{turnId}`) rather than assume continuity.
+          retained event, or when nothing at all is retained (a subject idle for the retention
+          window loses the whole log, not just its head): transitions between the two are gone, so
+          read the turns themselves (`GET /v1/sessions/{id}/turns/{turnId}`) rather than assume
+          continuity. `since=0-0` is exempt -- it asks for everything retained rather than resuming
+          from an issued cursor, so there is nothing it could have missed.
         - a comment line (`: ok` at the start, `: keepalive` while idle) -- not an event; no `id:`,
           so no cursor moves.
 
@@ -2237,7 +2240,9 @@ paths:
       parameters:
         - name: since
           in: query
-          description: the cursor of the last event seen; absent means "from now"
+          description: >
+            the cursor of the last event seen; absent means "from now", and `0-0` means everything
+            retained
           schema: { type: string, pattern: '^[0-9]+-[0-9]+$' }
       responses:
         '200':
