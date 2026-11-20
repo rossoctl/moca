@@ -82,8 +82,9 @@ because that is what Preview requires.
   side there is no refusal at all: an entry claimed past its owner's cap is handed back unrun and
   retried, with its attempt budget untouched. This bounds MIXED load only -- a worker runs one queued
   leaf at a time, so an owner's async-only fan-out never reaches the cap, and the queue is still one
-  FIFO stream. A deep async backlog from one owner therefore still delays another owner's async turn;
-  bounding that needs a cluster-wide count and stays open on #391.
+  FIFO stream. A deep async backlog from one owner therefore still delays another owner's async turn.
+  (Since then: `MOCA_ASYNC_RUNNING_PER_OWNER` bounds that one too, cluster-wide, and is off unless
+  an operator sets it. No wire change, so it has no section of its own.)
 - `DELETE /v1/sessions/{id}/turns/{turnId}` now cancels a **running** turn as well as a queued one.
   It answers `202` with `{turnId, state: "running", cancelRequested: true}`; the worker stops the
   leaf within a few seconds, releases its sandbox, and the turn reaches `cancelled`. `409`
