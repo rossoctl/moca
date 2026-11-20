@@ -14,7 +14,7 @@ file and key.
 | File                                  | What `up` adds                                                                                                                                                                                                                                                                                |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `.mcp.json`                           | `mcpServers.sandbox`: `mocactl sbx mcp`, the sandbox's tools over stdio                                                                                                                                                                                                                       |
-| `.claude/settings.json`               | `permissions.allow`: `mcp__sandbox__*`; `permissions.deny`: Claude Code's local tools (`Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `NotebookEdit`, `WebFetch`, `WebSearch`, `Agent`, `Task`, …); `enabledMcpjsonServers`: `sandbox`                                                      |
+| `.claude/settings.json`               | `permissions.allow`: `mcp__sandbox__*`; `permissions.deny`: Claude Code's local tools (`Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `NotebookEdit`, `WebFetch`, `WebSearch`, `Agent`, `Task`, …); `enabledMcpjsonServers`: `sandbox`; `autoMemoryEnabled`: `false` (below)                |
 | `opencode.json`                       | `mcp.sandbox`: `mocactl sbx mcp`; `tools.<name>: false` for OpenCode's local tools (`bash`, `read`, `edit`, `write`, `patch`, `apply_patch`, `glob`, `grep`, `list`, `lsp`, `webfetch`, `websearch`, `task`, `multiedit`, `skill`)                                                            |
 | `.bob/settings.json`, `.bob/mcp.json` | `mcpServers.sandbox`: `mocactl sbx mcp`, the same entry `.mcp.json` gets, in both files — which one Bob reads depends on its version (2.0.9 reads `mcp.json`). Bob has no deny list, so its local tools are **not** denied, and it prefers them unless the prompt names the sandbox's (below) |
 | `CLAUDE.md`, `AGENTS.md`              | A block between `<!-- sbx:begin -->` and `<!-- sbx:end -->` telling the agent how the sandbox works (below)                                                                                                                                                                                   |
@@ -24,6 +24,11 @@ An older mocactl also denied `MultiEdit`, `LS` and `NotebookRead`, which current
 not know: it warns about each one at every start. Re-running `mocactl sbx up` takes those three
 back out — the ones its own record says it added. One you wrote yourself is not in that record, so
 it stays.
+
+`autoMemoryEnabled: false` keeps Claude Code from loading your machine's auto-memory
+(`~/.claude/projects/*/memory`): with `Read`, `Edit` and `Write` denied, the agent could see the
+notes but not correct them. `mocactl sbx rm` takes it back. A `true` in `.claude/settings.json` or
+`.claude/settings.local.json` stops `up`.
 
 They are ordinary files in your working tree, so `git status` shows them. Leave them uncommitted:
 committed, they would point every teammate's agents at a sandbox and deny their local tools.
@@ -47,8 +52,8 @@ instead:
 
 - `up` runs `agentop script install moca-sandbox` before it creates anything, and stops if that
   fails.
-- `.claude/settings.json` gets the allow rule and `enabledMcpjsonServers`, but no
-  `permissions.deny`.
+- `.claude/settings.json` gets the allow rule, `enabledMcpjsonServers` and `autoMemoryEnabled`,
+  but no `permissions.deny`.
 - Later `up` runs keep the mode. `mocactl sbx doctor` checks the script is installed and loaded.
 
 Claude Code must reach the model through Cortex (`agentop configure claude-code`). Without it,
