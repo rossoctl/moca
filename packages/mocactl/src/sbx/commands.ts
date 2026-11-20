@@ -575,7 +575,7 @@ export async function cmdRm(
   const released = await endOnWorker(c, id, o.factory);
   if (c.signal?.aborted) {
     c.io.err(`sbx: interrupted (exit ${SBX_EXIT.interrupted}): nothing was deleted`);
-    if (released) c.io.err(releasedNotDeleted(id));
+    if (released !== 'none') c.io.err(releasedNotDeleted(id, released));
     return SBX_EXIT.interrupted;
   }
   try {
@@ -599,7 +599,7 @@ export async function cmdRm(
       return SBX_EXIT.ok;
     }
     const code = failed(c, err);
-    if (released) c.io.err(releasedNotDeleted(id));
+    if (released !== 'none') c.io.err(releasedNotDeleted(id, released));
     return code;
   }
 }
@@ -679,11 +679,28 @@ export async function cmdEgress(
 const RM_LEASE_WAIT_MS = 15_000;
 
 /** After a release whose DELETE did not happen: the sandbox is still there, its workspace gone. */
-function releasedNotDeleted(id: string): string {
-  return (
-    `sbx: ${id}'s workspace was released on its worker but the sandbox still exists: ` +
-    `re-run \`mocactl sbx rm ${id}\``
-  );
+function releasedNotDeleted(id: string, released: 'took' | 'unknown'): string {
+  return released === 'took'
+    ? `sbx: ${id}'s workspace was released on its worker but the sandbox still exists: ` +
+        `re-run \`mocactl sbx rm ${id}\``
+    : // The release frame may be on the worker's stream already (the relay writes it before it waits):
+      // a cancelled or timed-out call only drops the answer.
+      `sbx: ${id}'s workspace may have been released on its worker (the release got no answer); ` +
+        `if it was, the sandbox takes no more commands until it is deleted: re-run \`mocactl sbx rm ${id}\``;
+}
+
+/**
+ * What `rm` knows about its release: `took` (the worker released it or will when its Exec ends),
+ * `unknown` (the call ended without an answer: cancelled, timed out or unavailable, so the worker
+ * may hold it; an unavailable relay may also have sent nothing, which the "may" covers), or `none`
+ * (not sent, refused, an unknown key, or a worker without release).
+ */
+type ReleaseKnown = 'took' | 'unknown' | 'none';
+
+/** A release error whose call may have reached the worker: no answer came back. */
+function releaseAnswerLost(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'cancelled' || code === 'timeout' || code === 'unavailable';
 }
 
 /**
@@ -693,14 +710,14 @@ function releasedNotDeleted(id: string): string {
  * record, the token, a call, a worker that predates release) is ignored and the DELETE goes ahead,
  * as it does after RM_LEASE_WAIT_MS. The bound covers the whole step: the record read, the token
  * mint and the dial, then the calls (spec §8.3). Ctrl-C cancels it at any point (the caller then
- * deletes nothing). True when the worker took the release (`released` or `kept_busy`): the
- * workspace then takes no more Execs, whatever the DELETE does.
+ * deletes nothing). Returns `took`, `unknown` or `none` (ReleaseKnown): after `took`, the
+ * workspace takes no more Execs whatever the DELETE does; after `unknown`, it may not.
  */
 async function endOnWorker(
   c: SbxCtx,
   id: string,
   factory: ExecFactory | undefined,
-): Promise<boolean> {
+): Promise<ReleaseKnown> {
   const waited = new AbortController();
   const settled = new AbortController();
   void (c.sleep ?? c.rt.sleep)(RM_LEASE_WAIT_MS, settled.signal).then(() => {
@@ -719,14 +736,18 @@ async function endOnWorker(
           // The release still goes: it frees what it can.
         }
       }
-      if (signal.aborted) return false;
-      return (await x.release({ signal })) !== 'unknown_key';
+      if (signal.aborted) return 'none';
+      try {
+        return (await x.release({ signal })) === 'unknown_key' ? 'none' : 'took';
+      } catch (err) {
+        return releaseAnswerLost(err) ? 'unknown' : 'none';
+      }
     } finally {
       x.close();
     }
   } catch {
     // Best-effort: the DELETE decides, and reports its own failure.
-    return false;
+    return 'none';
   } finally {
     settled.abort();
   }
