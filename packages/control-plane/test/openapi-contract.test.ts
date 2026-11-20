@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { ROUTES } from '../src/routes.js';
 import { CP_ERROR_CODES } from '../src/errors.js';
-import { MINTED_TURN_ID_RE, TURN_STATES } from '../src/turn-record.js';
+import { CURSOR_RE, MINTED_TURN_ID_RE, TURN_STATES } from '../src/turn-record.js';
 import { CREDENTIAL_NAME_RE } from '../src/credential-store.js';
 import { LABEL_KEY_RE, SANDBOX_ID_RE } from '../src/sandbox-handlers.js';
 import { SANDBOX_MODE_NAMES } from '../src/sandbox-store.js';
@@ -293,6 +293,22 @@ describe('§9.3 test 3 — contract drift', () => {
     // document is the only mechanical link between the two nine-state lists.
     const enumerated = doc().components.schemas.TurnStatus.properties.state.enum as string[];
     expect([...enumerated].sort()).toEqual([...TURN_STATES].sort());
+  });
+
+  it("documents the event stream's state enum and cursor shape (#392)", () => {
+    const d = doc();
+    // Same reading as the TurnStatus check above: an event's state is the same nine-value enum, and
+    // two copies of it in one document is how one of them starts lying.
+    const ev = d.components.schemas.TurnEvent;
+    expect(ev.properties.state.enum).toEqual(d.components.schemas.TurnStatus.properties.state.enum);
+    expect([...ev.required].sort()).toEqual(
+      ['attempts', 'cursor', 'sessionId', 'state', 'ts', 'turnId'].sort(),
+    );
+    // The cursor pattern the server validates `since` against, in both places it appears.
+    const param = d.paths['/v1/events'].get.parameters[0];
+    expect(param.name).toBe('since');
+    expect(param.schema.pattern).toBe(CURSOR_RE.source);
+    expect(ev.properties.cursor.pattern).toBe(CURSOR_RE.source);
   });
 });
 

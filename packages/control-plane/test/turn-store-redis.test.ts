@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createClient } from 'redis';
 import { randomUUID } from 'node:crypto';
 import { TurnStore } from '../src/turn-store.js';
-import { sessionTurnsKey, turnKey, type TurnRecord } from '../src/turn-record.js';
+import { ownerEventsKey, sessionTurnsKey, turnKey, type TurnRecord } from '../src/turn-record.js';
 import { leafResultKey } from '../src/turn-result.js';
 import type { CpRedisLike } from '../src/ownership.js';
 import { turnStoreContract } from './helpers/turn-store-contract.js';
@@ -44,6 +44,7 @@ async function isolated() {
     // applies internally, wrapped in the same `turnKey()` the store uses.
     ttlOf: async (turnId: string) => client.ttl(turnKey(`${turnId}:${tag}`)),
     ttlOfSession: async (sessionId: string) => client.ttl(sessionTurnsKey(`${sessionId}:${tag}`)),
+    ttlOfEvents: async (owner: string) => client.ttl(ownerEventsKey(`${owner}:${tag}`)),
     indexedTurns: async (sessionId: string) =>
       client.zRange(sessionTurnsKey(`${sessionId}:${tag}`), 0, -1),
     // The tag is IN the session id, not appended by the store: `leafResultKey` is untagged, so this

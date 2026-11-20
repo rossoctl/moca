@@ -147,8 +147,12 @@ reconciled on the next poll instead of reported as failed; a connect-phase failu
 `mocactl watch` is `subagents` as a stream: it sweeps the same rows the same way and prints one
 line per state change, exiting 0 once every row it watches is finished — `done`, `failed`,
 `paused`, or `unknown` for one that will never produce a result. The first sweep reports every
-row, so watching a batch that is already over says so. It polls every 5 seconds and re-reads the
-ledger each time, so a `spawn --tag T` from another terminal joins a running `watch --tag T`:
+row, so watching a batch that is already over says so. It follows the owner-scoped event stream
+`GET /v1/events`, so a transition shows up within about a second, and `--since C` resumes after a
+cursor `C` (every `--json` line carries the one it came from). Behind the stream is a 60-second
+read of every unfinished row, which is the whole answer for a row with no turn, a control plane
+without the route, and an event the server lost. It re-reads the
+ledger each sweep, so a `spawn --tag T` from another terminal joins a running `watch --tag T`:
 spawn a few, watch, spawn more. One line per event is what a coding agent's background monitor
 wants (Claude Code's Monitor tool, for one) — with `--json` each line is its own JSON object, so
 nothing has to be parsed twice. Ctrl-C ends the watch; the subagents keep running.

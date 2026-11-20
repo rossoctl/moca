@@ -4,7 +4,12 @@ import { writeFileSync, mkdirSync, existsSync, openSync, closeSync } from 'node:
 import { join, resolve } from 'node:path';
 import { ApiError } from './api/errors.js';
 import { validWorkloadId, WorkloadsClient } from './api/workloads.js';
-import type { ControlPlaneApi, CreateSessionRequest, SessionToken } from './api/types.js';
+import type {
+  ControlPlaneApi,
+  CreateSessionRequest,
+  SessionToken,
+  TurnEvent,
+} from './api/types.js';
 import { describeError } from './core/messages.js';
 import { sanitizeRemote } from './core/sanitize.js';
 import {
@@ -17,7 +22,7 @@ import {
 import type { Io } from './headless.js';
 import type { Runtime } from './runtime.js';
 import { describeWorkloadError } from './workloads.js';
-import { AsyncTurnTransport } from './transport/async-turn.js';
+import { AsyncTurnTransport, viewFromTurnEvent } from './transport/async-turn.js';
 import {
   DEFAULT_UNKNOWN_GRACE_MS,
   LeafTransport,
@@ -582,6 +587,8 @@ export async function cmdSubagents(rt: Runtime, io: Io, opts: SubagentsOptions):
 export interface WatchOptions {
   tag?: string;
   json: boolean;
+  /** `--since`: resume the event stream after this cursor instead of starting from now. */
+  since?: string;
   signal?: AbortSignal;
   /** Test seams, as on `subagents`. */
   ledger?: Ledger;
@@ -590,14 +597,40 @@ export interface WatchOptions {
 }
 
 /**
- * shortcut: fixed interval, one read per non-final row per tick — `watch` is a background monitor,
- * not an interactive wait, so it polls slower than `get --wait`. Revisit when the owner-scoped
- * event stream (#392) lands and this can be a subscription instead.
+ * The safety-net sweep, 60 s (was 5 s, #381): the event stream reports a transition in milliseconds,
+ * so the sweep is no longer how `watch` learns anything promptly. It stays because it is the only
+ * thing that covers a SYNCHRONOUS row — a `spawn` without `--async` has no turn and therefore no
+ * events at all — a stream the deployment does not have, and a best-effort emit the server lost.
  */
-const WATCH_POLL_MS = 5_000;
+const WATCH_SWEEP_MS = 60_000;
 
 /** Behind a call so a second check further down the loop isn't narrowed away as unreachable. */
 const aborted = (signal?: AbortSignal): boolean => signal?.aborted === true;
+
+/**
+ * `p`, or `undefined` once `ms` has passed or the signal fired. The timer is cleared either way: a
+ * `watch` that ends on an event must not hold the process open for the rest of the sweep interval.
+ */
+async function within<T>(p: Promise<T>, ms: number, signal?: AbortSignal): Promise<T | undefined> {
+  // An ALREADY-aborted signal never fires `abort`, so without this the race would sit out the whole
+  // interval before anyone noticed the Ctrl-C.
+  if (aborted(signal)) return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      p,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), ms);
+        onAbort = () => resolve(undefined);
+        signal?.addEventListener('abort', onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (onAbort) signal?.removeEventListener('abort', onAbort);
+  }
+}
 
 /** Final for watching: nothing further is coming, so there is nothing left to report on this row. */
 function isFinalForWatch(state: HonestState): boolean {
@@ -623,9 +656,35 @@ export async function cmdWatch(rt: Runtime, io: Io, opts: WatchOptions): Promise
     io.err('no subagents' + (opts.tag ? ` with tag '${sanitizeRemote(opts.tag)}'` : ''));
     return 0;
   }
-  // What was last printed per session, so only changes produce a line. The first sweep therefore
-  // reports every row: watching a batch that is already over should say so, not print nothing.
+  // What was last printed per session, so only changes produce a line, from EITHER source: the
+  // stream and the sweep that follows it see the same transition, and that must be one line. The
+  // first sweep therefore reports every row: watching a batch that is already over should say so.
   const printed = new Map<string, string>();
+  const report = (record: LedgerRecord, view: StateView, cursor?: string): void => {
+    const line = view.state + ' ' + (view.detail ?? '');
+    if (printed.get(record.sessionId) === line) return;
+    printed.set(record.sessionId, line);
+    io.out(watchLine(record, view, rt.now(), opts.json, cursor));
+  };
+
+  // The stream is the primary source: one frame per transition, so a turn that starts and finishes
+  // between two sweeps still gets its `running` line. A deployment without the route, or any stream
+  // failure, drops `events` and `watch` behaves exactly as it did on the poll alone.
+  let cursor = opts.since;
+  // One opener for both the first stream and every reopen: a reopen is where a gap is LIKELIEST
+  // (the cursor has been sitting out sweeps, or a whole retention window), so the note must not be
+  // wired to the first open only.
+  const open = (): AsyncGenerator<TurnEvent> =>
+    rt.cp.streamEvents({
+      ...(cursor === undefined ? {} : { since: cursor }),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      onGap: (since) =>
+        io.err(
+          `missed events before cursor ${sanitizeRemote(since)}; state below is from a read\n`,
+        ),
+    });
+  let events: AsyncGenerator<TurnEvent> | undefined = open();
+  let pending: Promise<IteratorResult<TurnEvent>> | undefined;
   for (;;) {
     // Re-read each tick so a `spawn --tag T` from another terminal joins a running `watch --tag T`,
     // which is how a coding agent fans out: spawn some, watch, spawn more.
@@ -634,22 +693,70 @@ export async function cmdWatch(rt: Runtime, io: Io, opts: WatchOptions): Promise
     // A Ctrl-C lands in the in-flight read, which the sweep reports as `unknown` — final, so the
     // loop below would print it and exit 0. The signal, not the aborted read, is the answer.
     if (aborted(opts.signal)) return 130;
-    for (const { record, view } of views) {
-      const line = view.state + ' ' + (view.detail ?? '');
-      if (printed.get(record.sessionId) === line) continue;
-      printed.set(record.sessionId, line);
-      io.out(watchLine(record, view, rt.now(), opts.json));
-    }
+    for (const { record, view } of views) report(record, view);
     if (views.every(({ view }) => isFinalForWatch(view.state))) return 0;
-    await rt.sleep(WATCH_POLL_MS, opts.signal);
-    // `sleep` resolves on abort rather than rejecting, so without this the loop would go round once
-    // more and turn a Ctrl-C into a full sweep of failed reads.
-    if (aborted(opts.signal)) return 130;
+
+    // Then transitions as they arrive, until the sweep interval is up.
+    const byId = new Map(
+      records.filter((r) => r.turnId !== undefined).map((r) => [r.sessionId, r]),
+    );
+    const deadline = rt.now() + WATCH_SWEEP_MS;
+    while (events && rt.now() < deadline) {
+      pending ??= events.next();
+      let got: IteratorResult<TurnEvent> | undefined;
+      try {
+        got = await within(pending, deadline - rt.now(), opts.signal);
+      } catch {
+        // Any stream failure — an older control plane's 404, a dropped connection — is not fatal:
+        // the sweep below is a complete, if slower, answer.
+        events = undefined;
+        pending = undefined;
+        break;
+      }
+      if (aborted(opts.signal)) return 130;
+      if (got === undefined) break; // the interval elapsed; sweep
+      pending = undefined;
+      if (got.done) {
+        // The server caps a stream at an hour. Reopen from the last cursor on the next pass, which
+        // the sweep's own pacing rate-limits; until then the sweep carries it.
+        events = undefined;
+        break;
+      }
+      // Advanced for EVERY event, including the ones skipped below: this subject's other work
+      // shares the log, and a cursor that only moved over our own rows would make each reopen
+      // replay up to the log's whole length of foreign events.
+      cursor = got.value.cursor;
+      const row = byId.get(got.value.sessionId);
+      // An event for a session this `watch` does not hold, or for a different turn of a session it
+      // does (a follow-up turn on the same session), is not this row's transition.
+      if (!row || row.turnId !== got.value.turnId) continue;
+      const view = viewFromTurnEvent(got.value);
+      report(row, view, got.value.cursor);
+      // Persist it, so a later `subagents` starts from what the stream already said.
+      if (view.state !== row.lastKnownState || view.detail !== row.stateDetail) {
+        ledger.updateState(row.sessionId, view.state, { detail: view.detail, now: rt.now() });
+      }
+      // This may have been the last row: sweep now rather than sit out the interval.
+      if (isFinalForWatch(view.state)) break;
+    }
+    if (!events) {
+      await rt.sleep(WATCH_SWEEP_MS, opts.signal);
+      // `sleep` resolves on abort rather than rejecting, so without this the loop would go round once
+      // more and turn a Ctrl-C into a full sweep of failed reads.
+      if (aborted(opts.signal)) return 130;
+      events = open();
+    }
   }
 }
 
 /** One event: NDJSON under `--json` (same field names as `subagents --json`), else one text line. */
-function watchLine(record: LedgerRecord, view: StateView, at: number, json: boolean): string {
+function watchLine(
+  record: LedgerRecord,
+  view: StateView,
+  at: number,
+  json: boolean,
+  cursor?: string,
+): string {
   if (json) {
     return (
       JSON.stringify({
@@ -659,6 +766,9 @@ function watchLine(record: LedgerRecord, view: StateView, at: number, json: bool
         kind: record.envelope.kind,
         state: view.state,
         detail: view.detail ?? null,
+        // The event this line came from, for a caller that stores a cursor and resumes with
+        // `--since` (#392). Null on a line the safety-net sweep produced: a read has no cursor.
+        cursor: cursor ?? null,
         at,
       }) + '\n'
     );

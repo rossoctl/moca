@@ -210,6 +210,31 @@ describe('processOne', () => {
     expect(queue.acked).toEqual(['1-0']);
   });
 
+  // #392: the finalize dep is handed the leaf's reason and gate summary, because the owner's event
+  // stream is the only place a client reads them without a second request -- and the dep's own
+  // status argument cannot say why a turn failed.
+  it.each([
+    [
+      { status: 'failed', reason: 'workload_sandbox_unavailable' },
+      { reason: 'workload_sandbox_unavailable' },
+    ],
+    [
+      { status: 'paused', gateId: 1, gate: { summary: 'rm -rf /', proposed_action: 'refuse' } },
+      { gate: 'rm -rf /' },
+    ],
+    [{ status: 'done', verdict: {} }, undefined],
+  ] as const)('hands finalize the detail of a %o leaf', async (result, detail) => {
+    queue.next = entry();
+    const detailed: Array<unknown> = [];
+    await processOne(
+      deps({
+        runLeaf: async () => result as unknown as LeafResult,
+        finalize: async (_t, _s, d) => void detailed.push(d),
+      }),
+    );
+    expect(detailed).toEqual([detail]);
+  });
+
   it('writes the result before finalizing, so no terminal record lacks a result', async () => {
     queue.next = entry();
     const order: string[] = [];

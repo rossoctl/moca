@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TurnStore } from '../../src/turn-store.js';
-import type { TurnRecord } from '../../src/turn-record.js';
+import { compareCursor, type TurnRecord } from '../../src/turn-record.js';
 
 export type MakeTurnStore = () => Promise<{
   store: TurnStore;
@@ -17,6 +17,8 @@ export type MakeTurnStore = () => Promise<{
   ttlOf(turnId: string): Promise<number>;
   /** The same, for the session's turn index (§9.2). */
   ttlOfSession(sessionId: string): Promise<number>;
+  /** The same, for the owner's event stream (#392) -- a TTL no public method can observe. */
+  ttlOfEvents(owner: string): Promise<number>;
   /**
    * The members of that index. Read directly rather than inferred from `deleteSessionTurns`, because
    * the thing to assert about the trim is which ids it DROPPED -- and a dropped id is invisible to
@@ -137,6 +139,53 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       // claim set `running`, so refusing here would ack and drop every crash-reclaimed entry.
       expect(await store.markRunning('t-1', 2)).toBe('ok');
       expect((await store.get('t-1'))?.attempts).toBe(2);
+      await done();
+    });
+
+    it('emits one event per transition, owner-scoped', async () => {
+      const { store, now, done } = await make();
+      await store.create(rec());
+      expect(await store.markRunning('t-1', 1)).toBe('ok');
+      // A redelivery rewrites `running` and must NOT produce a second event (§5.4): the state did
+      // not change, so a client counting lines would see a transition that never happened.
+      expect(await store.markRunning('t-1', 2)).toBe('ok');
+      expect(await store.finalize('t-1', 'done', now, { reason: 'ok', gate: 'none' })).toBe('ok');
+
+      const events = await store.readEvents('github:1234', '0-0', 100);
+      expect(events.map((e) => e.state)).toEqual(['queued', 'running', 'done']);
+      expect(events[2]).toMatchObject({
+        sessionId: 's-1',
+        turnId: 't-1',
+        state: 'done',
+        reason: 'ok',
+        gate: 'none',
+      });
+      // Another subject sees nothing: the key is derived from the subject, so this is structural.
+      expect(await store.readEvents('github:9999', '0-0', 100)).toEqual([]);
+      await done();
+    });
+
+    it('reads from a cursor exclusively, so a resume repeats nothing', async () => {
+      const { store, now, done } = await make();
+      await store.create(rec());
+      await store.markRunning('t-1', 1);
+      const first = await store.readEvents('github:1234', '0-0', 100);
+      await store.finalize('t-1', 'done', now);
+      const rest = await store.readEvents('github:1234', first.at(-1)!.cursor!, 100);
+      expect(rest.map((e) => e.state)).toEqual(['done']);
+      expect(await store.lastEventId('github:1234')).toBe(rest[0]!.cursor);
+      expect(compareCursor(await store.firstEventId('github:1234'), rest[0]!.cursor!)).toBeLessThan(
+        0,
+      );
+      await done();
+    });
+
+    it('gives the event log the record retention', async () => {
+      const { store, resultTtlSeconds, ttlMarginSeconds, ttlOfEvents, done } = await make();
+      await store.create(rec());
+      expect(await ttlOfEvents('github:1234')).toBeGreaterThan(
+        resultTtlSeconds + ttlMarginSeconds - 60,
+      );
       await done();
     });
 

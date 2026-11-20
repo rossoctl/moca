@@ -337,6 +337,16 @@ export const ROUTES: readonly RouteSpec[] = [
     operationId: 'cancelTurn',
   },
   {
+    // #392: the owner-scoped event stream. NOT session-scoped -- it is keyed by the caller's own
+    // subject, so there is no path id to own and no filter to get wrong.
+    method: 'GET',
+    path: '/v1/events',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: HARNESS,
+    operationId: 'streamEvents',
+  },
+  {
     method: 'GET',
     path: '/v1/credentials',
     auth: 'api',

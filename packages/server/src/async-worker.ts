@@ -429,8 +429,10 @@ export function armAsyncLeafWorker(opts: {
     // dep that admits everything -- it is the owner read inside it, one HGET per claim, that we are
     // declining to pay for.
     ...(admitOwner ? { admitOwner } : {}),
-    finalize: async (turnId, status) => {
-      await turns.finalize(turnId, asyncFinalizeState(status), Date.now());
+    // `detail` is forwarded, not dropped: it is the leaf's reason or gate summary, and the owner's
+    // event stream (#392) is the only place a client reads it without a second request.
+    finalize: async (turnId, status, detail) => {
+      await turns.finalize(turnId, asyncFinalizeState(status), Date.now(), detail);
     },
     deadLetter: (turnId) =>
       deadLetterTurn(turnId, { turns, resultStore, ttlSeconds: RESULT_TTL_SECONDS }),

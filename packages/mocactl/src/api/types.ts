@@ -163,6 +163,24 @@ export interface TurnStatus {
   };
 }
 
+/**
+ * One turn state transition from `GET /v1/events` (#392). `cursor` is its own position in the
+ * stream: store it and pass it back as `since` to resume after it.
+ */
+export interface TurnEvent {
+  cursor: string;
+  /** Epoch ms the control plane recorded the transition. */
+  ts: number;
+  sessionId: string;
+  turnId: string;
+  state: AsyncTurnState;
+  attempts: number;
+  /** The terminal reason, when the result record had one. */
+  reason?: string;
+  /** The gate the turn stopped at, when it stopped at one. */
+  gate?: string;
+}
+
 export type CredentialConsumer = 'inference' | 'sandbox-egress' | 'control-plane';
 
 /** Where a credential goes on the wire; `sandbox-egress` may hold a list of 1-4. */
@@ -271,6 +289,12 @@ export interface ControlPlaneApi {
    * connection; this one stops an async turn through its record. Neither can do the other's job.
    */
   cancelTurn(sessionId: string, turnId: string): Promise<CancelledTurn>;
+  /** The caller's own turn transitions as they happen (#392); see the client for the frame rules. */
+  streamEvents(opts?: {
+    since?: string;
+    signal?: AbortSignal;
+    onGap?: (since: string) => void;
+  }): AsyncGenerator<TurnEvent>;
 }
 
 /** DELETE's 202 body (#391): what cancelling actually achieved, which the caller shows the user. */
