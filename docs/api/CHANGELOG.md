@@ -17,6 +17,20 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
+## 1.34.0
+
+A client is told about turn state changes instead of polling for them
+([#392](https://github.com/rossoctl/moca/issues/392)). Additive on the wire: one new route.
+
+- `GET /v1/events` streams the caller's own turn transitions as Server-Sent Events, oldest first,
+  resumable by the cursor each event carries (`?since=<cursor>`). Each `turn` frame's data is the
+  new `TurnEvent`: the session, the turn, the state, the attempt count, and the terminal reason or
+  the gate when there is one. Without `since` the stream starts from now.
+- Events are retained as long as a turn record (`MOCA_TURN_RESULT_TTL_SECONDS`) and bounded to the
+  newest 500 per subject. A client whose cursor fell out of that window is told so by a `gap` frame
+  before any transition, rather than silently resuming with a hole.
+- A stream is scoped to the token's subject, and the server ends it after an hour.
+
 ## 1.33.0
 
 A retire no longer strands a template's `default` tag on a retired build
