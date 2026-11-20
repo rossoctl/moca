@@ -413,6 +413,8 @@ export class OwnershipIndex {
     bytes?: number;
     /** The template a decision is about (template lifecycle spec §4). */
     templateId?: string;
+    /** The subject whose enrollment or admin role a decision changed (enrollment and roles spec §4). */
+    member?: string;
     /** The gating rule ids a policy refusal failed, comma-separated (spec §8.1). */
     rules?: string;
     decision: string;
@@ -446,6 +448,7 @@ export class OwnershipIndex {
           ...(entry.configRef ? { configRef: entry.configRef } : {}),
           ...(entry.bytes !== undefined ? { bytes: String(entry.bytes) } : {}),
           ...(entry.templateId ? { templateId: entry.templateId } : {}),
+          ...(entry.member ? { member: entry.member } : {}),
           ...(entry.rules ? { rules: entry.rules } : {}),
           ...(entry.reason ? { reason: entry.reason } : {}),
           ...(entry.model ? { model: entry.model } : {}),

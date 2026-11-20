@@ -798,3 +798,53 @@ describe('the wiring (main.ts)', () => {
     expect(templateCatalogFromEnv({} as NodeJS.ProcessEnv, config).members).toBeUndefined();
   });
 });
+
+describe('the audit log mirrors each change (#958)', () => {
+  /** What the change wrote to both audit sinks: the Redis stream and the stdout mirror. */
+  const audited = (d: ReturnType<typeof setup>) => ({
+    stream: (d.streams.get('sh:cp:audit') ?? []).map((r) => [r.decision, r.subject, r.member]),
+    log: d.logLines.map((l) => [l.decision, l.subject, l.member]),
+  });
+
+  it('writes one line per enroll, unenroll, grant and revoke, naming the actor and the member', async () => {
+    const d = setup();
+    const a = who(ENV_ADMIN);
+    await call(d, 'enrollSubject', a, { subject: CAROL }, { enrolled: true });
+    await call(d, 'unenrollSubject', a, { subject: CAROL });
+    await call(d, 'grantAdmin', a, { subject: DAVE }, { until: nowS() + 3600 });
+    await call(d, 'revokeAdmin', a, { subject: DAVE });
+    const want = [
+      ['subject_enrolled', ENV_ADMIN, CAROL],
+      ['subject_unenrolled', ENV_ADMIN, CAROL],
+      ['admin_granted', ENV_ADMIN, DAVE],
+      ['admin_revoked', ENV_ADMIN, DAVE],
+    ];
+    expect(audited(d)).toEqual({ stream: want, log: want });
+  });
+
+  it('writes no line for an unchanged answer', async () => {
+    const d = setup();
+    const a = who(ENV_ADMIN);
+    await call(d, 'enrollSubject', a, { subject: CAROL }, { enrolled: true });
+    await call(d, 'grantAdmin', a, { subject: DAVE }, {});
+    const before = audited(d);
+    // Each of these answers 200 with record null: nothing changed, so nothing is audited.
+    expect(
+      (await call(d, 'enrollSubject', a, { subject: CAROL }, { enrolled: true })).body,
+    ).toMatchObject({ record: null });
+    expect(
+      (await call(d, 'enrollSubject', a, { subject: ALLOWED }, { enrolled: true })).body,
+    ).toMatchObject({ record: null });
+    expect((await call(d, 'grantAdmin', a, { subject: DAVE }, {})).body).toMatchObject({
+      record: null,
+    });
+    expect((await call(d, 'revokeAdmin', a, { subject: CAROL })).body).toMatchObject({
+      record: null,
+    });
+    expect((await call(d, 'unenrollSubject', a, { subject: 'github:50' })).body).toMatchObject({
+      record: null,
+    });
+    expect(audited(d)).toEqual(before);
+    expect(before.stream).toHaveLength(2);
+  });
+});
