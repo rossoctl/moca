@@ -230,12 +230,11 @@ func cred(name, prefix string, hdrs ...string) credElem {
 // signs the upstream and is handed to the binary as MOCA_EGRESS_UPSTREAM_CA)
 // and a TLS upstream named up.test.
 type icWorld struct {
-	cp    *fakeCP
-	icCA  *testCA
-	upCA  *testCA
-	up    *httpUpstream
-	hp    string // up.test:<port>
-	extra *testCA
+	cp   *fakeCP
+	icCA *testCA
+	upCA *testCA
+	up   *httpUpstream
+	hp   string // up.test:<port>
 }
 
 // enableCredentials turns credential mode on in h's env: token, control-plane

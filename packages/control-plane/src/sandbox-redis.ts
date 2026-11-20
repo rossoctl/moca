@@ -45,7 +45,7 @@ export interface SandboxRedisLike {
   zRem(key: string, members: string[]): Promise<unknown>;
 }
 
-export const DEFAULT_SANDBOX_PREFIX = 'sbx:';
+const DEFAULT_SANDBOX_PREFIX = 'sbx:';
 
 // KEYS: live, owner, all, rec, name (a placeholder when unnamed).
 // ARGV: now, expiresAt, perSubject, total, retention, id, createdAt, hasName, nameGcAtMs,

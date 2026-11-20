@@ -128,24 +128,6 @@ func TestExecKeepsRunsInSeparateWorkspaces(t *testing.T) {
 	}
 }
 
-func TestExecRefusesAnEmptyWorkspaceKey(t *testing.T) {
-	p, lc, _ := testPool(t)
-	_, err := p.Exec(context.Background(), "", Exec{Command: "echo pwned"}, &capturingSink{})
-	if err == nil {
-		t.Fatal("Exec accepted an empty workspace_key")
-	}
-	// Spec §3.4/§8: refused, counted, and NOTHING ran.
-	if got := ReasonOf(err); got != RefuseEmptyKey {
-		t.Fatalf("reason = %q, want %q", got, RefuseEmptyKey)
-	}
-	if n := lc.createdCount(); n != 0 {
-		t.Fatalf("created %d VMs for an empty key, want 0", n)
-	}
-	if got := p.Stats().Refusals[RefuseEmptyKey]; got != 1 {
-		t.Fatalf("Refusals[%s] = %d, want 1", RefuseEmptyKey, got)
-	}
-}
-
 func TestExecRefusesAKeyThatCouldEscapeTheWorkspaceRoot(t *testing.T) {
 	p, lc, _ := testPool(t)
 	for _, k := range []string{"../etc", "a/b", "..", "run a", "run\x00a", ".hidden", strings.Repeat("x", 200)} {

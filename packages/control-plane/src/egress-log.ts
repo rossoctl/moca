@@ -20,7 +20,7 @@ import { canonicalJson } from './provenance.js';
  */
 
 /** The proxy's `Event` fields, by their JSON names (audit.go), and nothing else. */
-export const EVENT_STRING_FIELDS = [
+const EVENT_STRING_FIELDS = [
   'time',
   'via',
   'vm_id',
@@ -33,13 +33,7 @@ export const EVENT_STRING_FIELDS = [
   'credential',
   'decision',
 ] as const;
-export const EVENT_INT_FIELDS = [
-  'status',
-  'bytes_up',
-  'bytes_down',
-  'dropped',
-  'coalesced',
-] as const;
+const EVENT_INT_FIELDS = ['status', 'bytes_up', 'bytes_down', 'dropped', 'coalesced'] as const;
 export const EVENT_FIELDS: readonly string[] = [...EVENT_STRING_FIELDS, ...EVENT_INT_FIELDS];
 
 /**
@@ -67,7 +61,7 @@ export const EGRESS_LOG_BYTES = 4 * 1024 * 1024;
  */
 export const EGRESS_TOTAL_BYTES = 64 * 1024 * 1024;
 /** At most this many expired logs are given back by one append (the rest by the next ones). */
-export const EGRESS_REAP_MAX = 500;
+const EGRESS_REAP_MAX = 500;
 /** At most this many events in one host post (the host agent sends batches of up to 1000). */
 export const EGRESS_POST_MAX = 1000;
 /**

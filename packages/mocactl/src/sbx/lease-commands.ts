@@ -38,7 +38,7 @@ const ownEnd = (pending: LeaseEvent | undefined, reason: string): number | undef
   pending?.state === 'end' && pending.reason === reason ? pending.atUnixMs : undefined;
 
 /** A set_mode the worker did not get (spec §8.2): the mode is stored, and lands at the next command. */
-export const modeStoredText = (mode: SandboxModeName, epoch: number, code: string): string =>
+const modeStoredText = (mode: SandboxModeName, epoch: number, code: string): string =>
   `mode ${mode} stored (epoch ${epoch}); the worker could not be reached (${code}): it applies at the next command`;
 
 /** A connection that could not be opened (the token mint): its own exit, never the command's. */

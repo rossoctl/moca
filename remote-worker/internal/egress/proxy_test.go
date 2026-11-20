@@ -919,40 +919,35 @@ func TestLookupErrorRefuses503NoDial(t *testing.T) {
 	}
 }
 
-func TestLookupNoneTunnelsAsBefore(t *testing.T) {
-	up := newTCPUpstream(t, echo)
-	fi := &fakeInterceptor{}
-	h := credHarness(t, fmt.Sprintf("up.test:%d", up.port), &fakePolicy{}, fi)
-	c := dial(t, h.register("vm-1", "run-a"))
-	connect(t, c, fmt.Sprintf("up.test:%d", up.port))
-	c.Write([]byte("ping"))
-	buf := make([]byte, 4)
-	if _, err := io.ReadFull(c, buf); err != nil || string(buf) != "ping" {
-		t.Fatalf("echo %q, %v", buf, err)
-	}
-	c.Close()
-	h.sink.waitEvent(t, DecisionTunnel)
-	if fi.calls.Load() != 0 {
-		t.Fatal("interceptor called")
-	}
-}
-
-func TestLookupOtherPortTunnels(t *testing.T) {
-	up := newTCPUpstream(t, echo)
-	fi := &fakeInterceptor{}
-	fp := &fakePolicy{res: []Credential{{Name: "x", PathPrefix: "/", Port: up.port + 1}}}
-	h := credHarness(t, fmt.Sprintf("up.test:%d", up.port), fp, fi)
-	c := dial(t, h.register("vm-1", "run-a"))
-	connect(t, c, fmt.Sprintf("up.test:%d", up.port))
-	c.Write([]byte("ping"))
-	buf := make([]byte, 4)
-	if _, err := io.ReadFull(c, buf); err != nil || string(buf) != "ping" {
-		t.Fatalf("echo %q, %v", buf, err)
-	}
-	c.Close()
-	h.sink.waitEvent(t, DecisionTunnel)
-	if fi.calls.Load() != 0 {
-		t.Fatal("interceptor called for another port")
+// A lookup with no credential for the CONNECT port tunnels as before, without the
+// interceptor.
+func TestLookupWithoutACredentialForThePortTunnels(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		policy func(port int) *fakePolicy
+	}{
+		{"none", func(int) *fakePolicy { return &fakePolicy{} }},
+		{"other_port", func(port int) *fakePolicy {
+			return &fakePolicy{res: []Credential{{Name: "x", PathPrefix: "/", Port: port + 1}}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			up := newTCPUpstream(t, echo)
+			fi := &fakeInterceptor{}
+			h := credHarness(t, fmt.Sprintf("up.test:%d", up.port), tc.policy(up.port), fi)
+			c := dial(t, h.register("vm-1", "run-a"))
+			connect(t, c, fmt.Sprintf("up.test:%d", up.port))
+			c.Write([]byte("ping"))
+			buf := make([]byte, 4)
+			if _, err := io.ReadFull(c, buf); err != nil || string(buf) != "ping" {
+				t.Fatalf("echo %q, %v", buf, err)
+			}
+			c.Close()
+			h.sink.waitEvent(t, DecisionTunnel)
+			if fi.calls.Load() != 0 {
+				t.Fatal("interceptor called")
+			}
+		})
 	}
 }
 
@@ -1476,7 +1471,7 @@ func TestNewProxyValidatesConfig(t *testing.T) {
 	}
 	// Zero means the default, never "no bound": a caller who left the field
 	// alone must still get a connection bounded in time (#585).
-	if p.cfg.IdleTimeout != defaultIdleTimeout || p.cfg.ResponseHeaderTimeout != defaultResponseHeaderTimeout {
+	if p.cfg.IdleTimeout != defaultIdleTimeout || p.cfg.ResponseHeaderTimeout != p.cfg.IdleTimeout {
 		t.Fatalf("defaults = %v, %v", p.cfg.IdleTimeout, p.cfg.ResponseHeaderTimeout)
 	}
 	p.Close()

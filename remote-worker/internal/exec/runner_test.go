@@ -225,34 +225,47 @@ func TestTimingOffByDefault(t *testing.T) {
 }
 
 // A single frame must stay small (spec §8): output larger than ChunkSize
-// arrives as several chunks, and every one is at most ChunkSize.
+// arrives as several chunks, and every one is at most ChunkSize. streaming:false
+// means no incremental delivery, not "exactly one frame": buffered output at exit
+// still has to respect the cap.
 func TestChunkCapSplitsLargeOutput(t *testing.T) {
-	var sizes []int
-	sink := sinkFunc(func(_ pb.Stream, data []byte) error {
-		sizes = append(sizes, len(data))
-		return nil
-	})
-	want := 40 * 1024
-	code, err := wexec.BashRunner{}.Run(context.Background(), wexec.Spec{
-		ReqID:     3,
-		Command:   "head -c 40960 /dev/zero | tr '\\0' 'a'",
-		Streaming: true,
-	}, sink)
-	if err != nil || code != 0 {
-		t.Fatalf("got code=%d err=%v", code, err)
-	}
-	total := 0
-	for _, n := range sizes {
-		if n > wexec.ChunkSize {
-			t.Errorf("chunk of %d bytes exceeds cap %d", n, wexec.ChunkSize)
-		}
-		total += n
-	}
-	if total != want {
-		t.Errorf("total bytes = %d, want %d", total, want)
-	}
-	if len(sizes) < 2 {
-		t.Errorf("got %d chunk(s), want >=2 for %d bytes", len(sizes), want)
+	for _, tc := range []struct {
+		name      string
+		reqID     uint64
+		streaming bool
+	}{
+		{"streaming", 3, true},
+		{"non_streaming_at_exit", 32, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sizes []int
+			sink := sinkFunc(func(_ pb.Stream, data []byte) error {
+				sizes = append(sizes, len(data))
+				return nil
+			})
+			want := 40 * 1024
+			code, err := wexec.BashRunner{}.Run(context.Background(), wexec.Spec{
+				ReqID:     tc.reqID,
+				Command:   "head -c 40960 /dev/zero | tr '\\0' 'a'",
+				Streaming: tc.streaming,
+			}, sink)
+			if err != nil || code != 0 {
+				t.Fatalf("got code=%d err=%v", code, err)
+			}
+			total := 0
+			for _, n := range sizes {
+				if n > wexec.ChunkSize {
+					t.Errorf("chunk of %d bytes exceeds cap %d", n, wexec.ChunkSize)
+				}
+				total += n
+			}
+			if total != want {
+				t.Errorf("total bytes = %d, want %d", total, want)
+			}
+			if len(sizes) < 2 {
+				t.Errorf("got %d chunk(s), want >=2 for %d bytes", len(sizes), want)
+			}
+		})
 	}
 }
 
@@ -421,38 +434,6 @@ for i in range(10):
 	}
 }
 
-// streaming:false means no incremental delivery, not "exactly one frame":
-// buffered output at exit still has to respect the wire's ChunkSize cap.
-func TestNonStreamingChunksAtExit(t *testing.T) {
-	var sizes []int
-	sink := sinkFunc(func(_ pb.Stream, data []byte) error {
-		sizes = append(sizes, len(data))
-		return nil
-	})
-	want := 40 * 1024
-	code, err := wexec.BashRunner{}.Run(context.Background(), wexec.Spec{
-		ReqID:     32,
-		Command:   "head -c 40960 /dev/zero | tr '\\0' 'a'",
-		Streaming: false,
-	}, sink)
-	if err != nil || code != 0 {
-		t.Fatalf("got code=%d err=%v", code, err)
-	}
-	total := 0
-	for _, n := range sizes {
-		if n > wexec.ChunkSize {
-			t.Errorf("chunk of %d bytes exceeds cap %d", n, wexec.ChunkSize)
-		}
-		total += n
-	}
-	if total != want {
-		t.Errorf("total bytes = %d, want %d", total, want)
-	}
-	if len(sizes) < 2 {
-		t.Errorf("got %d chunk(s), want >=2 for %d bytes", len(sizes), want)
-	}
-}
-
 // A small non-streaming exec still yields exactly one Chunk per stream: the
 // slicing in emitBuffered must not fragment output that already fits.
 func TestNonStreamingSmallOutputIsOneChunkPerStream(t *testing.T) {
@@ -571,7 +552,7 @@ func TestNoStdinStillTerminates(t *testing.T) {
 
 // NOTE: the non-streaming coverage originally planned here (small output -> one
 // Chunk per stream; 40 KiB -> chunked at ChunkSize) already landed in Task 2's
-// fix round as TestNonStreamingChunksAtExit and
+// fix round as TestChunkCapSplitsLargeOutput/non_streaming_at_exit and
 // TestNonStreamingSmallOutputIsOneChunkPerStream. Do NOT re-add it here —
 // duplicate coverage of the same behavior is a review defect. This task adds the
 // stdin tests only.

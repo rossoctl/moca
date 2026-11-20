@@ -53,7 +53,7 @@ import {
 /** The template `up` and `create` use when none is given (spec §6.1). */
 export const DEFAULT_TEMPLATE = 'default';
 
-export const UNPULLED_TEXT = 'the sandbox has changes not yet pulled';
+const UNPULLED_TEXT = 'the sandbox has changes not yet pulled';
 
 /** What `up` says in Cortex mode, every time: the blocking needs Claude Code to go through Cortex. */
 export const CORTEX_NOTE =

@@ -28,7 +28,7 @@ import type { ExecFactory } from '../../src/sbx/exec.js';
 export const URL_ = 'https://sbx-api.example.invalid';
 export const SBX = 'sbx-0123456789abcdef0123456789';
 
-export type Req = { method: string; path: string; body: unknown; auth?: string };
+type Req = { method: string; path: string; body: unknown; auth?: string };
 export type Handler = (
   req: Req,
 ) => { status: number; body?: unknown; headers?: Record<string, string> } | Error;

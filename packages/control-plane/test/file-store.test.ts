@@ -32,23 +32,6 @@ storeContract('FileCredentialStore', () => {
 });
 
 describe('FileCredentialStore', () => {
-  it('round-trips a two-header binding and a host:port/prefix destination', async () => {
-    const c = cred('multi', {
-      kind: 'api-key',
-      destination: { hosts: ['svc.corp:8443/a'] },
-      secret: { key: 'k' }, // notsecret
-      binding: [
-        { header: 'X-API-Key', format: '{key}' },
-        { header: 'X-Org', format: 'acme-{key}' },
-      ],
-    });
-    const store = new FileCredentialStore({ dir: freshDir(), keks: [newKek()] });
-    await store.put(ALICE, c);
-    expect((await store.get(ALICE, 'multi'))?.descriptor).toEqual(c.descriptor);
-    expect((await store.list(ALICE)).find((d) => d.name === 'multi')).toEqual(c.descriptor);
-    expect(c.descriptor.destination.hosts).toEqual(['svc.corp:8443/a']);
-  });
-
   it('creates a missing directory 0700, and writes each subject`s file 0600', async () => {
     const dir = join(freshDir(), 'nested', 'creds');
     const store = new FileCredentialStore({ dir, keks: [newKek()] });

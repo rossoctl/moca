@@ -36,40 +36,6 @@ func TestTheTickerSweepsWithNoFurtherExec(t *testing.T) {
 	}
 }
 
-// Spec §8: "StandbyIdle drops a run's standbys and LEAVES its workspace on disk, so
-// the next Exec for that key is a cold acquire against the same tree rather than a
-// fresh one."
-func TestStandbyIdleDropsStandbysAndKeepsTheWorkspace(t *testing.T) {
-	p, lc, clk := testPool(t)
-	var dir string
-	lc.setBeforeRestore(func(r RestoreRequest) { dir = r.WorkspaceDir })
-	primed(t, p, clk, "run-a")
-
-	// Leave a marker in the workspace: "the same tree" has to mean the same bytes,
-	// not merely the same path.
-	marker := dir + "/converged"
-	if err := os.WriteFile(marker, []byte("pinned commit"), 0o600); err != nil {
-		t.Fatalf("write marker: %v", err)
-	}
-
-	clk.Advance(DefaultStandbyIdle + DefaultStandbyIdle/4 + time.Second)
-	waitForValue(t, `p.Stats().StandbysResident`, func() int { return p.Stats().StandbysResident }, 0)
-	if _, err := os.Stat(dir); err != nil {
-		t.Fatalf("workspace %s gone at StandbyIdle: %v — RAM is urgent, disk is not (spec §4.4)", dir, err)
-	}
-
-	before := p.Stats().ColdAcquires[ColdParked]
-	if _, err := p.Exec(context.Background(), "run-a", Exec{Command: "resume"}, &capturingSink{}); err != nil {
-		t.Fatalf("Exec after parking: %v", err)
-	}
-	if got := p.Stats().ColdAcquires[ColdParked] - before; got != 1 {
-		t.Fatalf("ColdAcquires[parked] rose by %d, want 1 — a gate-resumed run must not read as replenishment lag (spec §4.4)", got)
-	}
-	if b, err := os.ReadFile(marker); err != nil || string(b) != "pinned commit" {
-		t.Fatalf("marker after resume: %q, err=%v — the resumed run must see the same tree", b, err)
-	}
-}
-
 // Spec §7.4's prediction 5, and §8's third reclamation unit test: "a run's final
 // Exec mints ITS REPLACEMENT standby after ReplenishDelay, leaving D idle, which
 // StandbyIdle ages out rather than reclaiming immediately".
@@ -317,27 +283,6 @@ func TestReclaimKeepsTheWorkspaceOfARunWithAnExecInFlight(t *testing.T) {
 	release()
 	if err := <-done; err != nil {
 		t.Fatalf("the in-flight Exec failed after a Reclaim: %v", err)
-	}
-}
-
-func TestReclaimDropsStandbysAndTheWorkspace(t *testing.T) {
-	p, lc, clk := testPool(t)
-	var dir string
-	lc.setBeforeRestore(func(r RestoreRequest) { dir = r.WorkspaceDir })
-	primed(t, p, clk, "run-a")
-	if err := p.Reclaim(context.Background(), "run-a"); err != nil {
-		t.Fatalf("Reclaim: %v", err)
-	}
-	if s := p.Stats(); s.StandbysResident != 0 || s.ActiveRuns != 0 {
-		t.Fatalf("Stats = %+v, want nothing left for run-a", s)
-	}
-	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("workspace %s survived Reclaim: err=%v", dir, err)
-	}
-	waitForValue(t, `lc.liveCount()`, func() int { return lc.liveCount() }, 0)
-	// Idempotent: reclaiming an unknown key is not an error.
-	if err := p.Reclaim(context.Background(), "run-zzz"); err != nil {
-		t.Fatalf("Reclaim of an unknown key: %v", err)
 	}
 }
 

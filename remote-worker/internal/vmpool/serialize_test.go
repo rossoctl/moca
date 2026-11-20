@@ -17,19 +17,7 @@ func testSerializingPool(t *testing.T) (Pool, *fakeLauncher, *fakeClock) {
 	t.Helper()
 	lc := newFakeLauncher()
 	lc.setSerialize(true)
-	clk := newFakeClock()
-	cfg := Config{
-		VMM:               lc.Kind(),
-		SnapshotDir:       t.TempDir(),
-		WorkspaceRoot:     t.TempDir(),
-		MaxRuns:           16,
-		MaxCommittedBytes: 32 << 30,
-	}
-	p, err := New(cfg, lc, clk)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	t.Cleanup(func() { _ = p.Close() })
+	p, clk := testPoolWith(t, lc)
 	return p, lc, clk
 }
 

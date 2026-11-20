@@ -192,19 +192,3 @@ func (p *cgroupPool) retire(rel string) {
 		log.Printf("vmpool: cgroup pool: leaking lease cgroup %s, could not remove it: %v", rel, err)
 	}
 }
-
-func (p *cgroupPool) idle() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.free)
-}
-
-// mintedCount reports how many NAMES have been allocated, which after a failed mint exceeds the
-// number of cgroups that exist. That is deliberate: see issued.
-func (p *cgroupPool) mintedCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.issued
-}
-
-func (p *cgroupPool) leaks() int64 { return p.leaked.Load() }

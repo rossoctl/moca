@@ -6,7 +6,7 @@ import { cmdCredentialDelete, cmdCredentials } from '../headless.js';
 import { SBX_EXIT, failed, type SbxCtx } from './commands.js';
 import { PRESETS } from './presets.js';
 
-export interface PresetCredential {
+interface PresetCredential {
   /** '' for the first; appended as NAME-<suffix> otherwise. */
   suffix: string;
   /** A kind of the control plane's registry. */
@@ -61,7 +61,7 @@ export function expandPreset(
  * One failure of a credentials route, in `mocactl sbx`'s words. The unmounted route (egress off)
  * and a destination held elsewhere are the user's to act on (exit 2); the rest is `failed`'s.
  */
-export function credentialFailure(c: SbxCtx, err: unknown): number {
+function credentialFailure(c: SbxCtx, err: unknown): number {
   if (err instanceof ApiError && err.status === 404 && err.code === 'not_found') {
     c.io.err(`sbx: ${NOT_OFFERED}`);
     return SBX_EXIT.usage;

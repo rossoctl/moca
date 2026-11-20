@@ -238,10 +238,10 @@ function invalid(why: string): never {
 }
 
 /** The longest `endpoint` a credential may store (PR #540 review R3). */
-export const MAX_ENDPOINT_LENGTH = 2048;
+const MAX_ENDPOINT_LENGTH = 2048;
 
 /** The most destinations one `sandbox-egress` credential may hold. */
-export const MAX_EGRESS_DESTINATIONS = 16;
+const MAX_EGRESS_DESTINATIONS = 16;
 
 /** A host allow-list entry is a HOST, never a URL: `api.github.com`, not `https://api.github.com/x`. */
 function validateHost(h: unknown): string {

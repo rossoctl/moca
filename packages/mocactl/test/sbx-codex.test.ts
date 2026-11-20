@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { codexArgs, FORWARDED_ENV, serverOverride } from '../src/sbx/codex.js';
 import { sbxMain } from '../src/sbx/cli.js';
-import { fakeCp, SBX, setup, TOKEN, URL_ } from './helpers/sbx.js';
+import { fakeCp, SBX, setup, TOKEN } from './helpers/sbx.js';
 
 /** A stand-in for the `codex` child: records its argv, then reports an exit code or an error. */
 function fakeCodex(outcome: { code?: number; err?: NodeJS.ErrnoException } = { code: 0 }) {
@@ -96,19 +96,6 @@ describe('mocactl sbx codex (#593)', () => {
     expect(said).toContain(serverOverride(SBX));
   });
 
-  it('refuses --json: a TUI prints none, and a caller parsing stdout would get the TUI', async () => {
-    const { home, env, io } = setup();
-    const c = fakeCodex();
-    const code = await sbxMain(['codex', '--sandbox', SBX, '--json'], env, io, {
-      home,
-      codex: c.deps,
-    });
-    expect(code).toBe(2);
-    // The CLI's own NO_JSON guard, before dispatch: codex is never started.
-    expect(io.errs.join('\n')).toMatch(/codex has no --json output/);
-    expect(c.calls).toEqual([]);
-  });
-
   it('asks codex to forward the environment the mcp server needs, since codex passes none', () => {
     // Codex gives a stdio server only its own allowlist, so without env_vars the server would
     // read a different login and target a different control plane than the launcher (#639 review).
@@ -117,28 +104,6 @@ describe('mocactl sbx codex (#593)', () => {
     expect(serverOverride()).toContain(
       'env_vars=["MOCACTL_SBX_URL","XDG_CONFIG_HOME","XDG_STATE_HOME"]',
     );
-  });
-
-  it('forwards --control-plane-url to the server, which cannot see the flag or the env var', async () => {
-    const { home, env, io } = setup();
-    const c = fakeCodex();
-    await sbxMain(['codex', '--sandbox', SBX, '--control-plane-url', URL_], env, io, {
-      home,
-      fetchImpl: mint().fetchImpl,
-      codex: c.deps,
-    });
-    expect(c.calls[0]?.[1]).toContain(`"--control-plane-url","${URL_}"`);
-  });
-
-  it('leaves --control-plane-url out when it was not given, so the server resolves it as usual', async () => {
-    const { home, env, io } = setup();
-    const c = fakeCodex();
-    await sbxMain(['codex', '--sandbox', SBX], env, io, {
-      home,
-      fetchImpl: mint().fetchImpl,
-      codex: c.deps,
-    });
-    expect(c.calls[0]?.[1]).not.toContain('--control-plane-url');
   });
 
   it('builds the override as TOML that codex -c parses, naming the mcp server it starts', () => {

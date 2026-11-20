@@ -616,13 +616,6 @@ func trackedPIDs(t *testing.T, out string) []int {
 	return pids
 }
 
-// leaseSleeper is a tracked command whose process sleeps 300 s with marker in its argv,
-// built from a variable so the command text never carries the marker (as the level-1
-// gates do): only the process itself matches its bracketed pattern.
-func leaseSleeper(prefix, suffix string) string {
-	return `m=` + prefix + `; exec python3 -c 'import time; time.sleep(300)' "$m-` + suffix + `"`
-}
-
 // testLeaseExecKillsProcessesLevel2: at level 2, process_start processes are an Exec's only
 // survivors (spec §9). A tracked process, and a child it put in a session of its own, outlive
 // every later Exec, each in the tracked process's cgroup; everything an Exec started is gone

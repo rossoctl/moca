@@ -123,7 +123,7 @@ echo "== the crash-leak mitigation itself (spec §6's #1 practical failure)"
 check "KillMode=control-group is set" \
   "$([ "$(grep -cF 'KillMode=control-group' "$SERVICE")" -ge 1 ] && echo yes || echo no)" "yes"
 check "Slice=microvm-vms.slice is set" \
-  "$([ "$(grep -cF 'Slice=microvm-vms.slice' "$SERVICE")" -ge 1 ] && echo yes || echo no)" "yes"
+  "$([ "$(grep -cxF 'Slice=microvm-vms.slice' "$SERVICE")" -ge 1 ] && echo yes || echo no)" "yes"
 
 echo "== fail the unit at start, never fall back to the host (spec §6)"
 check "AssertPathExists=/dev/kvm is set" \
@@ -234,21 +234,11 @@ check "no pkill/pgrep -x cloud-hypervisor in the service unit" \
 check "no pkill/pgrep -x cloud-hypervisor in the slice unit" \
   "$(grep -cE 'p(kill|grep) .*-x cloud-hypervisor' "$SLICE")" "0"
 
-echo "== the slice and unit agree on the SAME slice name (hardware-corrections D1/D3)"
-# Compared as VALUES rather than by grepping both for one hardcoded literal: renaming the
-# slice in one place and not the other is the drift this is here to catch, and a test that
-# looks for 'microvm-vms.slice' in both would go green on a file where neither was renamed
-# and red on a correctly renamed pair.
-unit_slice="$(grep -oE '^Slice=.*' "$SERVICE" | head -n1 | cut -d= -f2-)"
-parent_cgroup="$(grep -oE '^Environment=SH_PARENT_CGROUP=.*' "$SERVICE" | head -n1 | sed 's/^Environment=SH_PARENT_CGROUP=//')"
-check "Slice= is set on the service" "$([ -n "$unit_slice" ] && echo yes || echo no)" "yes"
-check "Environment=SH_PARENT_CGROUP is set on the service" "$([ -n "$parent_cgroup" ] && echo yes || echo no)" "yes"
-check "SH_PARENT_CGROUP's last path segment IS the slice this service is placed in" \
-  "$(basename "$parent_cgroup")" "$unit_slice"
-# The corollary an operator has to know, and the reason H1 was possible: because the
+# The slice and unit agree on the SAME slice name (hardware-corrections D1/D3): Slice= and
+# SH_PARENT_CGROUP are both set and SH_PARENT_CGROUP's last segment is the slice. Because the
 # service is IN that slice, the worker's own cgroup is one of the directories the sweep
-# enumerates. That the sweep refuses it is asserted in Go, against these same files --
-# see cgroup_unitfile_test.go, cross-referenced in this file's header.
+# enumerates. Both, and that the sweep refuses that cgroup, are asserted in Go against this
+# same unit: cgroup_unitfile_test.go, cross-referenced in this file's header.
 
 echo "== moca-egress.service (P4.1) and the worker's wiring to it"
 EGRESS="$DIR/moca-egress.service"
