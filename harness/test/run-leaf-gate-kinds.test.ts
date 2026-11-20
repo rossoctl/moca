@@ -142,3 +142,65 @@ describe('a gated prompt leaf', () => {
     expect(read).not.toHaveBeenCalled();
   });
 });
+
+describe('a gated solve leaf', () => {
+  const solve = (sessionId: string, extra: Record<string, unknown> = {}) => {
+    sids.push(sessionId);
+    return {
+      sessionId,
+      kind: 'solve',
+      problemStatement: 'fix the bug',
+      repoUrl: 'https://example.invalid/r.git',
+      ref: 'main',
+      requireApproval: true,
+      ...extra,
+    } as never;
+  };
+
+  it('reports the gate its produce captured', async () => {
+    const produceSolve = vi.fn(async (_e, _c, capture, _d, _s, gate) => {
+      expect(gate).toEqual({ nextGateId: 0 });
+      capture.gate = { gateId: 0, summary: 's', proposed_action: 'p' };
+    });
+    const res = await runLeaf(solve('gate-kinds-solve-fresh'), CONFIG, { produceSolve } as never);
+    expect(res).toEqual({
+      status: 'paused',
+      gateId: 0,
+      gate: { summary: 's', proposed_action: 'p' },
+    });
+  });
+
+  it('parks a re-dispatch with no decision, without producing', async () => {
+    const sid = 'gate-kinds-solve-park';
+    await pendingGate(sid);
+    const produceSolve = vi.fn();
+    const res = await runLeaf(solve(sid), CONFIG, { produceSolve } as never);
+    expect(res).toMatchObject({ status: 'paused', gateId: 0 });
+    expect(produceSolve).not.toHaveBeenCalled();
+  });
+
+  it('hands the approve continuation to produce', async () => {
+    const sid = 'gate-kinds-solve-approve';
+    await pendingGate(sid);
+    const produceSolve = vi.fn(async (_e, _c, capture, _d, _s, gate) => {
+      expect(String(gate.continuation)).toContain('Human decision: APPROVED');
+      capture.patch = 'diff --git a/x b/x\n';
+    });
+    const res = await runLeaf(solve(sid, { decision: { gateId: 0, action: 'approve' } }), CONFIG, {
+      produceSolve,
+    } as never);
+    expect(res).toMatchObject({ status: 'solved' });
+    expect(await customTypes(sid)).toContain(GATE_DECISION_ENTRY_TYPE);
+  });
+
+  it('aborts without producing', async () => {
+    const sid = 'gate-kinds-solve-abort';
+    await pendingGate(sid);
+    const produceSolve = vi.fn();
+    const res = await runLeaf(solve(sid, { decision: { gateId: 0, action: 'abort' } }), CONFIG, {
+      produceSolve,
+    } as never);
+    expect(res).toEqual({ status: 'aborted' });
+    expect(produceSolve).not.toHaveBeenCalled();
+  });
+});

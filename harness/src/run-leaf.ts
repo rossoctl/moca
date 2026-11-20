@@ -334,7 +334,8 @@ export type SolveCapture = {
   patch?: string;
   baseline?: string;
   usage?: LeafUsage;
-} & BudgetCapture;
+} & BudgetCapture &
+  GateCapture;
 export type ProduceSolveDeps = {
   resolvePromotedConfig?: typeof resolvePromotedConfig;
   overlayConfig?: typeof overlayConfig;
@@ -346,6 +347,9 @@ export type ProduceSolve = (
   capture: SolveCapture,
   deps?: ProduceSolveDeps,
   signal?: AbortSignal,
+  /** The caller's gate plan (#393): the continuation to run instead of the problem statement, if
+   * any, and the id the next `request_approval` call takes. Absent ⇒ ungated, as before. */
+  gate?: { continuation?: string; nextGateId: number },
 ) => Promise<void>;
 
 /**
@@ -580,6 +584,9 @@ export async function runSolveLeaf(
   if (emptyRef) return emptyRef;
   const noWorkload = nonPromptWorkloadFailure(env);
   if (noWorkload) return noWorkload;
+  // BEFORE produce, which is what leases (design §1).
+  const plan = await planLeafGate(env, config);
+  if (plan.kind === 'result') return plan.result;
   const capture: SolveCapture = {};
   const produce = deps?.produceSolve ?? realProduceSolve;
   // Forward only the overlay-related slice of deps; undefined when none set so existing 3-arg
@@ -593,7 +600,10 @@ export async function runSolveLeaf(
         }
       : undefined;
   try {
-    await produce(env, config, capture, produceDeps, signal);
+    await produce(env, config, capture, produceDeps, signal, {
+      ...(plan.continuation ? { continuation: plan.continuation } : {}),
+      nextGateId: plan.nextGateId,
+    });
   } catch (err) {
     const noCapacity = noCapacityFailure(err);
     if (noCapacity) return noCapacity;
@@ -608,6 +618,16 @@ export async function runSolveLeaf(
   // returned as `solved` is a partial patch with nothing saying it was cut short.
   const stopped = stopFailure(signal, capture);
   if (stopped) return stopped;
+  // Ahead of the patch, for the reason the `stopped` check is: a parked leaf's worktree is a
+  // half-finished edit, and `solved` with a partial diff is the one answer nobody can act on.
+  if (capture.gate) {
+    return {
+      status: 'paused',
+      gateId: capture.gate.gateId,
+      gate: { summary: capture.gate.summary, proposed_action: capture.gate.proposed_action },
+    };
+  }
+  if (capture.aborted) return { status: 'aborted' };
   const patch = capture.patch ?? '';
   return {
     status: 'solved',
@@ -1044,7 +1064,7 @@ export function contextNote(path: string, mode: ContextMode, scratch: string): s
 // Real solve runner: lease a sandbox, converge the per-leaf worktree, run the agent with ONLY the
 // sandbox tools (no verdict/gate extensions), then capture the staged diff. Mirrors realProduceVerdict's
 // session/pool wiring. Exercised by the Kind smoke, not unit tests.
-export const realProduceSolve: ProduceSolve = async (env, config, capture, deps, signal) => {
+export const realProduceSolve: ProduceSolve = async (env, config, capture, deps, signal, gate) => {
   const cwd = config?.cwd ?? process.cwd();
   const { provider, modelId } = resolveModelSelection({
     model: env.model ?? config?.model,
@@ -1159,6 +1179,11 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps,
         // unreachable from here. The baseline is the spend already on the resumed branch, as
         // run-turn.ts computes it -- a retry must not fail on its predecessor's tokens.
         ...budgetVoters(sessionManager, config, capture),
+        // #393: a gated solve leaf. `nextGateId` comes from the caller's plan, which read the same
+        // durable entries this session was opened from.
+        ...(env.requireApproval && gate
+          ? [requestApprovalExtension(capture, sessionManager, gate.nextGateId)]
+          : []),
       ],
       ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
     });
@@ -1181,13 +1206,20 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps,
     if (signal) wireAbort(signal, session);
 
     try {
-      const prompt = swebench
+      const fresh = swebench
         ? buildSwebenchSolvePrompt(
             env.problemStatement!,
             workspaceRef,
             `${swebenchVenvDir(sid)}/bin/python`,
           )
         : buildSolvePrompt(env.problemStatement!, workspaceRef);
+      // A resume runs the continuation, not the problem statement again; a fresh gated run gets the
+      // steer toward request_approval appended (design §1).
+      const prompt = gate?.continuation
+        ? gate.continuation
+        : env.requireApproval
+          ? `${fresh}\n\n${gatePromptNote()}`
+          : fresh;
       await session.prompt(prompt);
       // A stopped leaf captures NOTHING, for the same reason the capacity check below runs before
       // the diff: the patch of a worktree cut off mid-edit is a partial answer that reads as a whole
