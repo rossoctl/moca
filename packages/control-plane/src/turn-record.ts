@@ -454,3 +454,39 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
     'body must be a verdict leaf (item), a prompt leaf (kind:prompt, prompt) or a solve leaf (kind:solve, problemStatement, repoUrl, ref)',
   );
 }
+
+export const GATE_FEEDBACK_BYTES = 4096;
+
+export interface GateDecisionSubmission {
+  gateId: number;
+  action: 'approve' | 'reject' | 'abort';
+  feedback?: string;
+}
+
+/**
+ * A human's answer to a pending gate (#393). The harness re-validates it (`gate.validateDecision`);
+ * this is the HTTP boundary's own check, so a malformed body is a 400 rather than a queued turn that
+ * parks again for the same reason.
+ */
+export function parseGateDecision(body: unknown): GateDecisionSubmission {
+  const b = asRecord(body);
+  if (typeof b.gateId !== 'number' || !Number.isInteger(b.gateId) || b.gateId < 0) {
+    throw new CpError('invalid_request', 'gateId must be a non-negative integer');
+  }
+  if (b.action !== 'approve' && b.action !== 'reject' && b.action !== 'abort') {
+    throw new CpError('invalid_request', 'action must be "approve", "reject" or "abort"');
+  }
+  if (b.feedback !== undefined && typeof b.feedback !== 'string') {
+    throw new CpError('invalid_request', 'feedback must be a string when present');
+  }
+  // Bounded because it reaches the model as part of the next turn's prompt: an unbounded field here
+  // is an unbounded prompt, billed to the owner, stored forever on the session's entry log.
+  if (typeof b.feedback === 'string' && Buffer.byteLength(b.feedback) > GATE_FEEDBACK_BYTES) {
+    throw new CpError('invalid_request', `feedback must be at most ${GATE_FEEDBACK_BYTES} bytes`);
+  }
+  return {
+    gateId: b.gateId,
+    action: b.action,
+    ...(b.feedback !== undefined ? { feedback: b.feedback } : {}),
+  };
+}

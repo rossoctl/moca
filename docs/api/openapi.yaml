@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.34.0
+  version: 1.35.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -310,6 +310,30 @@ components:
         attempts: { type: integer }
         reason: { type: string, description: the terminal reason, when there is one }
         gate: { type: string, description: the gate the turn is waiting on, when there is one }
+    GateDecision:
+      type: object
+      required: [gateId, action]
+      additionalProperties: false
+      properties:
+        gateId:
+          type: integer
+          minimum: 0
+          description: |
+            the gate being answered, as the paused turn's `result.gateId` reports it. Sent rather
+            than inferred so a decision cannot land on a gate the caller never saw: a mismatch is
+            `409 gate_not_pending`.
+        action:
+          type: string
+          enum: [approve, reject, abort]
+          description: |
+            `approve` lets the leaf carry out the action it proposed, `reject` returns the feedback
+            and lets it try something else, `abort` ends the leaf with `status: "aborted"`.
+        feedback:
+          type: string
+          maxLength: 4096
+          description: |
+            a note for the model, carried into the resumed turn's prompt. Bounded because it is
+            prompt text the owner is billed for and the session stores for good.
     TurnStatus:
       type: object
       required: [turnId, state, attempts]
@@ -2029,6 +2053,14 @@ paths:
                 problemStatement: { type: string, description: a SWE-bench style task }
                 repoUrl: { type: string }
                 ref: { type: string }
+                requireApproval:
+                  type: boolean
+                  description: |
+                    gate this turn on a human decision (#393). The leaf's first action is a
+                    `request_approval` call, after which the turn ends `paused` with a `gate` on its
+                    result; resolve it with `POST /v1/sessions/{id}/decision`, which resumes the work
+                    as a NEW turn linked by `resumeOf`. Applies to the `prompt` and `solve` kinds; a
+                    `converge` leaf carries the same request on `item.require_approval`.
                 idempotencyKey:
                   type: string
                   maxLength: 128
@@ -2089,6 +2121,56 @@ paths:
           description: |
             `workload_runs_unavailable` for a submission naming a `workloadId`, refused at submission
             so it stays synchronous rather than becoming a dead letter.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/sessions/{id}/decision:
+    post:
+      operationId: decideGate
+      summary: Resolve a pending human gate
+      description: |
+        Answer the gate the session's paused turn is waiting on (#393). The body is the DECISION
+        alone: the resumed turn's envelope -- prompt, model, credential name, sandbox tier, caps --
+        is copied from the paused record, so resolving a gate cannot change what the turn runs.
+
+        Answers `202` with a NEW turn id, linked to the paused one by `resumeOf`. A paused turn is
+        terminal and is never reopened, so the gate's answer is always a fresh turn; poll it with
+        `GET /v1/sessions/{id}/turns/{turnId}` as for any other. `approve` continues the work,
+        `reject` sends the feedback back and lets the model try again, `abort` ends the leaf.
+
+        Idempotent per gate: re-sending the same decision while its resume is still live answers
+        `202` with that same turn id. Everything else -- no paused turn, a `gateId` that is not the
+        pending one, a gate already answered by a human or by the deadline sweep -- is `409
+        gate_not_pending`, and the caller's move in all three cases is to re-read the turn.
+      security: [{ sessionToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/sessionId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GateDecision' }
+      responses:
+        '202':
+          description: accepted; the resume turn's id
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, turnId]
+                properties:
+                  sessionId: { type: string }
+                  turnId: { type: string }
+        '400':
+          description: '`invalid_json` or `invalid_request`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: |
+            `gate_not_pending`: no turn of this session is paused at a gate, the `gateId` is not the
+            pending one, or the gate has already been answered.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

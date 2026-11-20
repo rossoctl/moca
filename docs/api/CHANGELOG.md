@@ -8,6 +8,7 @@ that shipped it ("The data plane's twin … goes to"):
 
 | `harness-openapi.yaml` | Shipped with                   |
 | ---------------------- | ------------------------------ |
+| 1.8.0                  | [1.35.0](#1350)                |
 | 1.7.0                  | [1.31.0](#1310)                |
 | 1.6.0                  | [1.30.0](#1300)                |
 | 1.5.0                  | [1.28.0](#1280)                |
@@ -16,6 +17,27 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.2.0                  | [1.16.0](#1160)                |
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
+
+## 1.35.0
+
+A human gate works on any leaf kind, and an async one is resolved over HTTP
+([#393](https://github.com/rossoctl/moca/issues/393)). Additive on the wire: one new route and one
+new field. The data plane's twin goes to 1.8.0.
+
+- `requireApproval: true` on a `POST /v1/sessions/{id}/turns` submission of the `prompt` or `solve`
+  kind gates the turn on a human decision: the leaf's first action is a `request_approval` call, and
+  the turn ends `paused` with the gate on its result. Until now only a `converge` leaf could ask,
+  with `item.require_approval`, which is unchanged.
+- `POST /v1/sessions/{id}/decision` answers that gate with `{gateId, action, feedback?}` and `202`s
+  with a NEW turn id. A paused turn is terminal and is never reopened, so the resume is a fresh turn
+  carrying the paused one's envelope plus the decision, linked by `resumeOf`; everything it spends —
+  model, credential name, sandbox tier, caps — is copied from the paused record, so resolving a gate
+  cannot change what the turn runs.
+- Re-sending the same decision while its resume is still live answers `202` with that same turn id.
+  Otherwise `409 gate_not_pending`: no paused turn, a `gateId` that is not the pending one, or a
+  gate already answered. The caller's move in all three is to re-read the turn.
+- The data plane (1.8.0) documents `requireApproval` and `decision` on the `prompt` and `solve` run
+  envelopes, which is how a synchronous run asks for and resolves the same gate.
 
 ## 1.34.0
 

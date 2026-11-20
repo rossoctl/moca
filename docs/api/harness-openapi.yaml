@@ -15,7 +15,7 @@
 openapi: 3.1.0
 info:
   title: MOCA harness (data plane)
-  version: 1.7.0
+  version: 1.8.0
   description: |
     The agent execution tier: HTTP server and P6 workers that run turns and jobs against sandboxed
     workspaces. It is a separate deployable from the control plane, and a client that knows only
@@ -1025,6 +1025,14 @@ components:
             env_key:
               type: string
               description: swebench solve only — triggers the contained swebench-setup path.
+            requireApproval:
+              type: boolean
+              description: |
+                Gate the run on a human decision (#393): the leaf calls request_approval first and
+                ends paused with a gate. A converge leaf asks with item.require_approval instead.
+            decision:
+              type: object
+              description: Resume/approve only — answers a paused run's gate.
     PromptJob:
       allOf:
         - $ref: '#/components/schemas/RunOptions'
@@ -1042,6 +1050,14 @@ components:
               description: |
                 Give the run its own writable copy of the workload's context, discarded when the
                 run ends, instead of a read-only view. true needs workloadId; false is ignored.
+            requireApproval:
+              type: boolean
+              description: |
+                Gate the run on a human decision (#393): the leaf calls request_approval first and
+                ends paused with a gate. A converge leaf asks with item.require_approval instead.
+            decision:
+              type: object
+              description: Resume/approve only — answers a paused run's gate.
     LeafItem:
       type: object
       required: [item_id, file, pattern]

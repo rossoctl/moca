@@ -86,8 +86,10 @@ and the lookup takes `tenant` as a query parameter (unauthenticated callers only
 
 ## The human gate
 
-A verdict leaf whose `item.require_approval` is `true` is told to call `request_approval` once and stop.
-`submit_verdict` is withheld until a decision exists. The run then returns
+Any leaf kind can be gated (#393). A verdict leaf asks with `item.require_approval`; a prompt or
+solve leaf asks with `requireApproval: true` on its own envelope. The leaf is told to call
+`request_approval` once and stop; on a verdict leaf `submit_verdict` is withheld until a decision
+exists (the other two have nothing to withhold). The run then returns
 `{status: "paused", gateId, gate: {summary, proposed_action}}` (also stored, and shown by
 `/runs/status` in its reduced view). There is no `awaiting_approval` status in the current code.
 
@@ -111,8 +113,14 @@ To resolve it, re-POST the **same envelope** to `/v1/runs` with an inline decisi
   also leaves it paused; repeating an already-recorded decision appends nothing.
 - `abort` returns `{status: "aborted"}`. `approve` or `reject` continues the agent with a prompt that
   carries the decision.
-- There is no harness-side timeout while paused; the result record's TTL is the only bound.
-- Gates exist only on the verdict leaf, not on solve or prompt leaves and not on `/turn`.
+- There is no harness-side timeout while paused on this route; the result record's TTL is the only
+  bound.
+- A prompt or solve envelope takes the same `decision` field, and the decision replaces the leaf's
+  own prompt on the resumed run — the model already has that prompt in its session.
+- An ASYNC turn is not resolved by re-POSTing an envelope: the client holds no envelope. Answer it
+  with `POST /v1/sessions/{id}/decision` ({`gateId`, `action`, `feedback`}), which copies the paused
+  turn's envelope, appends the decision and 202s with a new turn id (`docs/api/openapi.yaml`).
+- `/turn` has no gate: the tool is registered only when its caller asks for one.
 
 ## Async and scheduled dispatch
 
