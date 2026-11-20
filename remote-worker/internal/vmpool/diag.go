@@ -35,7 +35,9 @@ func init() {
 // TestRunnerEmitsEveryPhase (via phaseFields -- a Contains would match across token
 // boundaries, since "resume_us=" is a substring of "vmresume_us="). The three sub-phase
 // VALUES are asserted too, because they come from ResumePhases() and a fake can return
-// fixed ones.
+// fixed ones. So is normalise_us, a lease start's ownership walk (Phases.Normalise), by
+// TestPhaseLineReportsNormaliseByValue: its own phase, after Resume and before Run, and
+// 0 on every Exec that started no lease or whose lease needed no walk.
 //
 // The other four -- acquire_us / resume_us / run_us / destroy_us -- are clock-derived, so
 // there is no fixture to compare them against. They are pinned anyway, and the fake clock
@@ -50,10 +52,10 @@ func logPhases(ph *Phases) {
 	if phaseLog == nil {
 		return
 	}
-	phaseLog("vmpool: exec phases acquire_us=%d resume_us=%d vmresume_us=%d vsockdial_us=%d mount_us=%d run_us=%d destroy_us=%d cold=%q",
+	phaseLog("vmpool: exec phases acquire_us=%d resume_us=%d vmresume_us=%d vsockdial_us=%d mount_us=%d normalise_us=%d run_us=%d destroy_us=%d cold=%q",
 		ph.Acquire.Microseconds(), ph.Resume.Microseconds(),
 		ph.VMResume.Microseconds(), ph.VsockDial.Microseconds(), ph.Mount.Microseconds(),
-		ph.Run.Microseconds(), ph.Destroy.Microseconds(), string(ph.Cold))
+		ph.Normalise.Microseconds(), ph.Run.Microseconds(), ph.Destroy.Microseconds(), string(ph.Cold))
 }
 
 // resumePhaser is the seam a VM implements to report Resume's internal decomposition.

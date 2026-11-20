@@ -123,6 +123,9 @@ func TestRunnerEmitsEveryPhase(t *testing.T) {
 		// rest: resume_us was the last opaque phase on the gate-held path, and a rename
 		// or a drop would make an aggregated run silently miss a term rather than fail.
 		"vmresume_us", "vsockdial_us", "mount_us",
+		// A lease start's normalise step (F5 of the E17b report): 0 on a per-Exec Exec,
+		// named all the same, so a reader never has to tell "absent" from "no walk".
+		"normalise_us",
 		"run_us", "destroy_us", "cold",
 	} {
 		if _, ok := fields[field]; !ok {
@@ -281,5 +284,40 @@ func TestPhaseLineReportsResumeSubPhasesByValue(t *testing.T) {
 			t.Errorf("%s = %q, want 0 -- a sub-phase value reached a clock-derived slot: %s",
 				key, fields[key], got)
 		}
+	}
+}
+
+// TestPhaseLineReportsNormaliseByValue pins normalise_us, a lease start's ownership walk
+// (lease.go normaliseLease). It was measured into Phases.Normalise but printed nowhere, so
+// E17b could only infer the walk as a difference of two other runs (its F5). The fake
+// clock does not advance on its own, so the normalise step advances it by a fixed 7 ms:
+// the first lease Exec's line must carry exactly that, and the lease's second Exec, which
+// starts no lease and so takes no walk, must read 0 rather than inherit it.
+func TestPhaseLineReportsNormaliseByValue(t *testing.T) {
+	lines := capturePhaseLog(t)
+
+	p, lc, clk := leasePool(t, nil)
+	lc.setNormaliseFn(func(Command) (Result, error) {
+		clk.Advance(7 * time.Millisecond)
+		return Result{}, nil
+	})
+	mustSetMode(t, p, "k", ModeLease, 1) // a key with no state: its first lease normalises (R7)
+	r := Runner{Pool: p}
+	runLease(t, r, leaseSpec(1, 1))
+	runLease(t, r, leaseSpec(2, 1))
+	if n := len(lc.normaliseCommands()); n != 1 {
+		t.Fatalf("normalise steps = %d, want 1: the lease's start", n)
+	}
+	if len(*lines) != 2 {
+		t.Fatalf("want one phase line per Exec, got %d: %v", len(*lines), *lines)
+	}
+	for i, want := range []string{"7000", "0"} {
+		if got := phaseFields(t, (*lines)[i])["normalise_us"]; got != want {
+			t.Errorf("Exec %d: normalise_us = %q, want %q: %s", i+1, got, want, (*lines)[i])
+		}
+	}
+	// The walk is not part of resume_us: the fake clock moved only inside the step.
+	if got := phaseFields(t, (*lines)[0])["resume_us"]; got != "0" {
+		t.Errorf("resume_us = %q, want 0 -- the walk was counted into the resume phase: %s", got, (*lines)[0])
 	}
 }
