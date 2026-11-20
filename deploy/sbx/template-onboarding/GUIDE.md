@@ -450,18 +450,19 @@ agent's work is right is **grading's** question, asked later and elsewhere. A ga
 does not try.
 
 The gate runs your image in an emulation of the guest: a read-only root file system, no network, root,
-an empty `/workspace` that it seeds from your work tree, and a clean environment (`env -i`, the guest's
-`PATH`, `HOME=/tmp/home`). In that guest it checks:
+an empty `/workspace` of the guest's size (2048 MiB) that it seeds from your work tree, your image's own
+`/var` made writable (as the guest's is), and a clean environment (`env -i`, the guest's `PATH`,
+`HOME=/tmp/home`). In that guest it checks:
 
-| Check           | Passes when                                                                                                           |
-| --------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `/etc/hosts`    | your image's own file resolves `localhost`. A guest boots with no runtime-written file, so an empty one fails         |
-| tools           | the guest agent's minimum (`bash ls cat base64 file`) and every tool your `tools` list names are present              |
-| no credentials  | no credential-shaped variable is in the guest's environment                                                           |
-| commits refused | git has no identity, so an agent cannot commit, and a clean tree after the seed if your work tree is a git repository |
-| the floor       | your test command's exit code, and its passed count (pytest's or unittest's summary), meet `floor`                    |
-| absent files    | with `absent_sha256`: no file in the image has one of those sha256s (only a count of matches is kept)                 |
-| the probe       | with `probe`: it runs on a fresh seed, and what it prints becomes your template's expectation                         |
+| Check           | Passes when                                                                                                            |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `/etc/hosts`    | your image's own file is exactly §4b.3's two-line `hosts` file (by sha256). A guest boots with no runtime-written file |
+| tools           | the guest agent's minimum (`bash ls cat base64 file`) and every tool your `tools` list names are present               |
+| no credentials  | no credential-shaped variable is in the guest's environment                                                            |
+| commits refused | git has no identity, so an agent cannot commit, and a clean tree after the seed if your work tree is a git repository  |
+| the floor       | your test command's exit code, and its passed count (pytest's or unittest's summary), meet `floor`                     |
+| absent files    | with `absent_sha256`: no file in the image has one of those sha256s (only a count of matches is kept)                  |
+| the probe       | with `probe`: it runs on a fresh seed, and what it prints becomes your template's expectation                          |
 
 #### 2. The input contract (`moca-gate-input/1`)
 

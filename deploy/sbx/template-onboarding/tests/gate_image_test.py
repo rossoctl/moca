@@ -36,6 +36,7 @@ NET = {**CONTRACT, "network_needed": True}
 
 def good_obs():
     return {"etc_hosts_exported_sha256": gg.HOSTS_SHA256,
+            "var": {"seeded": True, "image_files": 3, "guest_files": 3},
             "guest": {"id": "root 0", "missing_tools": [], "rootfs": "readonly", "credential_env_names": [],
                       "git_identity": "none"},
             "testbed": {"git_tree": "true", "commit_count": "1", "git_status_lines": "0", "agent_can_commit": "no"},
@@ -111,6 +112,15 @@ class Verdict(unittest.TestCase):
                 mutate(o)
                 self.assertTrue(any(says in p for p in gg.check(o, CONTRACT)))
 
+    def test_the_images_var_must_reach_the_guest_whole(self):
+        for var, says in [({"seeded": False, "image_files": 3, "guest_files": 0}, "could not be copied"),
+                          ({"seeded": True, "image_files": 3, "guest_files": 1}, "holds 1 files, the image's 3"),
+                          ({}, "could not be copied")]:
+            with self.subTest(var=var):
+                o = good_obs()
+                o["var"] = var
+                self.assertTrue(any(says in p for p in gg.check(o, CONTRACT)))
+
     def test_a_tree_that_is_not_git_is_not_held_to_a_clean_status(self):
         o = good_obs()
         o["testbed"].update(git_tree="no", git_status_lines="0")
@@ -162,6 +172,17 @@ class Guest(unittest.TestCase):
         cmd = gg.guest("pytest -q")
         self.assertTrue(cmd.startswith(f"env -i PATH={gg.GUEST_PATH} HOME={gg.GUEST_HOME} "))
         self.assertIn("cd /workspace && pytest -q", cmd)
+
+    def test_the_workspace_is_the_guests_size(self):
+        # The guest's /workspace drive is at most the golden snapshot's (deploy/sbx/setup.sh).
+        self.assertIn(f"{gg.WORKSPACE}:rw,exec,size=2048m", gg.EMULATION_FLAGS)
+        m = re.search(r"^SNAPSHOT_WORKSPACE_MB=(\d+)$", (TPL.parent / "setup.sh").read_text(), re.M)
+        self.assertEqual(int(m.group(1)), gg.WORKSPACE_MB)
+
+    def test_the_spec_quotes_its_seed(self):
+        s = gg.template_spec({**CONTRACT, "workdir": "/my app"}, rec(), "a")
+        self.assertEqual(s["seed"], "cp -a '/my app/.' /workspace/")
+        self.assertEqual(gg.template_spec(CONTRACT, rec(), "a")["seed"], "cp -a /app/. /workspace/")
 
     def test_the_emulation_is_offline_read_only_and_root(self):
         f = gg.EMULATION_FLAGS
@@ -394,14 +415,27 @@ FAKE_PODMAN = textwrap.dedent(r'''
             data = cfg["hosts"].encode()
             i = tarfile.TarInfo("etc/hosts"); i.size = len(data); t.addfile(i, io.BytesIO(data))
         sys.stdout.buffer.write(buf.getvalue()); sys.exit(0)
+    if a[0] == "cp" and a[-1] == "-":       # the image's /var, as a tar stream (var/ and its entries)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            d = tarfile.TarInfo("var"); d.type = tarfile.DIRTYPE; t.addfile(d)
+            for n in range(cfg.get("var_files", 2)):
+                data = b"x"
+                i = tarfile.TarInfo(f"var/lib/f{n}"); i.size = len(data); t.addfile(i, io.BytesIO(data))
+            ln = tarfile.TarInfo("var/run"); ln.type = tarfile.SYMTYPE; ln.linkname = "/run"; t.addfile(ln)
+        sys.stdout.buffer.write(buf.getvalue()); sys.exit(0)
     if a[0] in ("rm", "rmi", "cp"):
         sys.exit(0)
     if a[0] == "--version":
         out("podman version 5.0.0\n"); sys.exit(0)
     if a[0] == "run":
         out("ctr-guest\n"); sys.exit(0)
+    if a[0] == "exec" and "-i" in a:        # the /var copy into the guest: read it all
+        sys.stdin.buffer.read(); sys.exit(cfg.get("var_extract_rc", 0))
     if a[0] == "exec":
         cmd = a[-1]
+        if "find /var" in cmd:
+            out(str(cfg.get("guest_var_entries", cfg.get("var_files", 2) + 1)) + "\n"); sys.exit(0)
         answers = [("id -un", "root 0"), ("env | cut", "HOME\nPATH\nTERM"), ("command -v", ""),
                    ("touch /opt", "readonly"), ("rev-parse", "true"), ("rev-list", "1"),
                    ("status --porcelain", "0"), ("GIT_COMMITTER_IDENT", "no"), ("user.name", "none"),
@@ -425,10 +459,10 @@ class Cli(unittest.TestCase):
         self.env = {**os.environ, "PATH": f"{bin_}{os.pathsep}{os.environ['PATH']}", "FAKE_LOG": str(self.log)}
 
     def run_gate(self, contract, *, digest=DIGEST, hosts=gg.HOSTS, run="Ran 3 tests in 0.1s\n\nOK\n\n__RC__0",
-                 extra=(), had=False):
+                 extra=(), had=False, **var):
         cpath = self.tmp / "contract.json"
         cpath.write_text(json.dumps(contract))
-        env = {**self.env, "FAKE_CFG": json.dumps({"digest": digest, "hosts": hosts, "run": run, "had": had})}
+        env = {**self.env, "FAKE_CFG": json.dumps({"digest": digest, "hosts": hosts, "run": run, "had": had, **var})}
         return subprocess.run([sys.executable, str(TOOL), str(cpath), "--out", str(self.tmp / "gate.json"),
                                *extra], capture_output=True, text=True, env=env, timeout=120)
 
@@ -451,6 +485,9 @@ class Cli(unittest.TestCase):
         self.assertEqual((s["id"], s["probe_status"], s["probe"]["expect"]),
                          ("team-app", "emulation", [r"^Ran 3 tests?\b", r"^OK\b"]))
         calls = self.calls()
+        self.assertEqual(r["observed"]["var"], {"seeded": True, "image_files": 3, "guest_files": 3})
+        self.assertTrue(any(a[0] == "cp" and a[-1] == "-" and a[1].endswith(":/var") for a in calls))
+        self.assertTrue(any(a[0] == "exec" and "-i" in a and "tar" in a for a in calls))   # extracted in the guest
         pull = next(a for a in calls if a[0] == "pull")
         self.assertEqual(pull[pull.index("--platform") + 1], "linux/amd64")
         guest = next(a for a in calls if a[0] == "run")
@@ -471,6 +508,12 @@ class Cli(unittest.TestCase):
         r = json.loads((self.tmp / "gate.json").read_text())
         self.assertIs(r["gate"]["passed"], False)
         self.assertTrue(any("/etc/hosts" in x for x in r["problems"]))
+
+    def test_a_var_that_does_not_arrive_whole_fails_the_gate(self):
+        p = self.run_gate({**CONTRACT, "floor": {"rc": 0}}, guest_var_entries=1)
+        self.assertEqual(p.returncode, 1)
+        r = json.loads((self.tmp / "gate.json").read_text())
+        self.assertTrue(any("guest's /var holds 1 files, the image's 3" in x for x in r["problems"]))
 
     def test_a_pulled_digest_that_is_not_the_contracts_is_refused(self):
         p = self.run_gate(CONTRACT, digest="sha256:" + "b" * 64)

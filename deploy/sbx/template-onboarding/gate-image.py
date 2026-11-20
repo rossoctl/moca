@@ -88,9 +88,15 @@ PROBE_TIMEOUT_S = 900
 # The gate's envelope, and the one the written spec asks for (X15: the benchmark profiles' exact size).
 CPUS, MEMORY, GUEST_RAM_MB, VCPUS = "2", "4096m", 4096, 2
 
-# The guest, emulated in one container: a read-only root, no network, root, tmpfs /workspace /tmp /var.
+# The guest's /workspace is a disk image of at most the golden snapshot's workspace drive (deploy/sbx/setup.sh
+# SNAPSHOT_WORKSPACE_MB, SBX_WORKSPACE_IMAGE_MB's ceiling), so a work tree that does not fit there fails here too.
+WORKSPACE_MB = 2048
+# The guest, emulated in one container: a read-only root, no network, root, tmpfs /workspace /tmp /var. The
+# guest's /var is the image's own /var made writable (build-snapshot.sh's init: an overlay with a tmpfs on top,
+# or, without overlayfs, a copy into a tmpfs), so the tmpfs here is SEEDED with the image's /var (seed_var):
+# a plain tmpfs would hide what the image put there, such as a prebuilt TeX format under /var/lib/texmf.
 EMULATION_FLAGS = ("--read-only", "--network", "none", "--user", "0",
-                   "--tmpfs", f"{WORKSPACE}:rw,exec,size=16g", "--tmpfs", "/tmp:rw,exec,mode=1777",
+                   "--tmpfs", f"{WORKSPACE}:rw,exec,size={WORKSPACE_MB}m", "--tmpfs", "/tmp:rw,exec,mode=1777",
                    "--tmpfs", "/var:rw")
 
 # Public registries are KEPT in a record and a spec: the policy allows them per repository, and needs the
@@ -324,6 +330,12 @@ def check(observed: dict, c: dict) -> list[str]:
         p.append("the image's /etc/hosts does not resolve localhost as Moca's guest needs "
                  f"(want sha256 {HOSTS_SHA256[:12]}…; a microVM guest boots with no runtime-written file)")
     o = observed.get("guest", {})
+    v = observed.get("var", {})
+    if not v.get("seeded"):
+        p.append("the image's /var could not be copied into the guest's /var (a guest keeps the image's /var, "
+                 "made writable)")
+    elif v.get("guest_files") != v.get("image_files"):
+        p.append(f"the guest's /var holds {v.get('guest_files')} files, the image's {v.get('image_files')}")
     if o.get("id") != "root 0":
         p.append(f"guest commands ran as {o.get('id')!r}, want root 0 (the emulation is wrong)")
     if o.get("rootfs") != "readonly":
@@ -418,7 +430,7 @@ def template_spec(c: dict, rec: dict, template_id: str) -> dict:
         "guest_ram_mb": GUEST_RAM_MB, "vcpus": VCPUS, "guest_home": GUEST_HOME,
         # egress only for a contract whose tests need the network (general-self, the host's allowlist)
         "skip_git_identity_check": True, "guest_home_gitconfig": False, "egress": bool(c.get("network_needed")),
-        "seed": f"cp -a {c['workdir']}/. {WORKSPACE}/",
+        "seed": f"cp -a {shlex.quote(c['workdir'] + '/.')} {WORKSPACE}/",
         "description": f"{rec['image']['repository']} (gated by Moca's general gate)",
         "tools": list(c.get("tools", DEFAULT_TOOLS)),
         "etc_hosts_sha256": HOSTS_SHA256,
@@ -469,14 +481,31 @@ def pulled_digest(ref: str) -> str:
     return sh([*ENGINE, "image", "inspect", "--format", "{{.Digest}}", ref]).stdout.strip()
 
 
-def exported_hosts_sha256(ref: str) -> str:
-    cid = sh([*ENGINE, "create", "--platform", "linux/amd64", ref, "true"]).stdout.strip()
-    try:
-        data = subprocess.run(f"{shlex.quote(ENGINE[0])} export {shlex.quote(cid)} | tar -xO etc/hosts",
-                              shell=True, capture_output=True, timeout=1800).stdout
-    finally:
-        subprocess.run([*ENGINE, "rm", "-f", cid], capture_output=True)
+def exported_hosts_sha256(cid: str) -> str:
+    """The image's own /etc/hosts, from an export of a created (never started) container, as the rootfs
+    builder sees it."""
+    data = subprocess.run(f"{shlex.quote(ENGINE[0])} export {shlex.quote(cid)} | tar -xO etc/hosts",
+                          shell=True, capture_output=True, timeout=1800).stdout
     return hashlib.sha256(data).hexdigest()
+
+
+# Every entry under /var but its directories (files, symlinks such as /var/run, devices), counted the same way
+# on both sides: from the image's tar stream, and in the guest after the copy.
+VAR_ENTRIES = "find /var -xdev -mindepth 1 ! -type d 2>/dev/null | wc -l | tr -d ' '"
+
+
+def seed_var(cid: str, g: "Guest") -> dict:
+    """The image's /var into the guest's tmpfs /var, owners and modes kept (init's copy fallback): streamed
+    from the created container, extracted by root in the guest. Its file counts, image and guest, say it
+    arrived whole (entries but directories, VAR_ENTRIES)."""
+    e, q = shlex.quote(ENGINE[0]), shlex.quote
+    image = subprocess.run(f"{e} cp {q(cid)}:/var - | tar -tvf - 2>/dev/null | grep -vc '^d' || true", shell=True,
+                           capture_output=True, text=True, timeout=1800).stdout.strip()
+    p = subprocess.run(f"{e} cp {q(cid)}:/var - | {e} exec -i {q(g.cid)} tar -xf - -C /", shell=True,
+                       capture_output=True, text=True, timeout=1800)
+    guest_files = g.ex(VAR_ENTRIES, in_guest=False).stdout.strip()
+    return {"seeded": p.returncode == 0, "image_files": int(image or 0),
+            "guest_files": int(guest_files) if guest_files.isdigit() else None}
 
 
 class Guest:
@@ -515,27 +544,36 @@ class Guest:
 
 
 def observe(ref: str, c: dict) -> dict:
-    obs = {"etc_hosts_exported_sha256": exported_hosts_sha256(ref)}
-    g = Guest(ref)
+    cid = sh([*ENGINE, "create", "--platform", "linux/amd64", ref, "true"]).stdout.strip()
     try:
-        seed = g.ex(seed_cmd(c), in_guest=False, timeout=1800)
-        if seed.returncode != 0:
-            die(f"the seed failed ({seed.stderr.strip()[-300:]}): is workdir right?", 1)
-        raw = {k: g.ex(cmd).stdout for k, cmd in probe_cmds(c).items()}
-        obs["guest"] = parse(raw)
-        obs["testbed"] = parse_testbed(raw)
-        t0 = time.monotonic()
-        obs["run"] = g.run_rc(c["test_cmd"], TEST_TIMEOUT_S)
-        obs["run"]["ms"] = round((time.monotonic() - t0) * 1000)
-        if c.get("absent_sha256"):
-            g.put("\n".join(sorted(c["absent_sha256"])) + "\n", "/tmp/.gate-absent")
-            obs["absence"] = parse_scan(g.ex(scan_cmd("/tmp/.gate-absent"), in_guest=False, timeout=3600).stdout)
-        if c.get("probe"):
-            g.ex(f"rm -rf {WORKSPACE}/* {WORKSPACE}/.[!.]* 2>/dev/null; true", in_guest=False)
-            g.ex(seed_cmd(c), in_guest=False, timeout=1800)      # a fresh seed, as a new sandbox has
-            obs["probe"] = g.run_rc(c["probe"]["cmd"], PROBE_TIMEOUT_S)
+        obs = {"etc_hosts_exported_sha256": exported_hosts_sha256(cid)}
+        g = Guest(ref)
+        try:
+            obs["var"] = seed_var(cid, g)
+            return _observe_in(g, c, obs)
+        finally:
+            g.close()
     finally:
-        g.close()
+        subprocess.run([*ENGINE, "rm", "-f", cid], capture_output=True)
+
+
+def _observe_in(g: "Guest", c: dict, obs: dict) -> dict:
+    seed = g.ex(seed_cmd(c), in_guest=False, timeout=1800)
+    if seed.returncode != 0:
+        die(f"the seed failed ({seed.stderr.strip()[-300:]}): is workdir right?", 1)
+    raw = {k: g.ex(cmd).stdout for k, cmd in probe_cmds(c).items()}
+    obs["guest"] = parse(raw)
+    obs["testbed"] = parse_testbed(raw)
+    t0 = time.monotonic()
+    obs["run"] = g.run_rc(c["test_cmd"], TEST_TIMEOUT_S)
+    obs["run"]["ms"] = round((time.monotonic() - t0) * 1000)
+    if c.get("absent_sha256"):
+        g.put("\n".join(sorted(c["absent_sha256"])) + "\n", "/tmp/.gate-absent")
+        obs["absence"] = parse_scan(g.ex(scan_cmd("/tmp/.gate-absent"), in_guest=False, timeout=3600).stdout)
+    if c.get("probe"):
+        g.ex(f"rm -rf {WORKSPACE}/* {WORKSPACE}/.[!.]* 2>/dev/null; true", in_guest=False)
+        g.ex(seed_cmd(c), in_guest=False, timeout=1800)      # a fresh seed, as a new sandbox has
+        obs["probe"] = g.run_rc(c["probe"]["cmd"], PROBE_TIMEOUT_S)
     return obs
 
 
