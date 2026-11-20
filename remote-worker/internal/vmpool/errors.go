@@ -93,6 +93,11 @@ const (
 	// RefuseProcessesNotEnabled is a tracked-process kind at a served mode below
 	// lease+processes (spec §7): processes_not_enabled on the wire.
 	RefuseProcessesNotEnabled RefusalReason = "processes-not-enabled"
+	// RefuseReleased is an Exec for a workspace_key the relay released (#338): the
+	// session or sandbox that owned it has ended, so a turn still running must not
+	// re-create an empty workspace. released: <detail> on the wire. Bounded: see
+	// Config.WorkspaceIdle and pool.released.
+	RefuseReleased RefusalReason = "released"
 )
 
 // RefusalError carries a reason to microvm-worker, which counts it and returns an

@@ -48,6 +48,11 @@ func (p *pool) scheduleReplenishLocked(rp *runPool) {
 	if rp.lease != nil {
 		return
 	}
+	// A run a Release met busy (release.go) is over: its standbys were dropped, and none
+	// is restored for it.
+	if rp.releaseOnIdle {
+		return
+	}
 	// Refill toward D, counting what is already Ready or on its way.
 	if len(rp.ready)+rp.warming >= p.cfg.StandbyDepth {
 		return
@@ -75,7 +80,9 @@ func (p *pool) scheduleReplenishLocked(rp *runPool) {
 func (p *pool) replenishOne(key string) {
 	p.mu.Lock()
 	rp := p.runs[key]
-	if rp == nil || p.closed || rp.lease != nil {
+	// releaseOnIdle: a timer armed before a Release, or already waiting on p.mu when it
+	// landed, restores nothing for the released key.
+	if rp == nil || p.closed || rp.lease != nil || rp.releaseOnIdle {
 		p.mu.Unlock()
 		return
 	}
@@ -117,10 +124,16 @@ func (p *pool) replenishOne(key string) {
 	switch {
 	case err != nil:
 		rp.backoff = nextBackoff(rp.backoff)
-		p.scheduleReplenishLocked(rp)
+		p.scheduleReplenishLocked(rp) // a no-op for a released run
+		release := rp.releaseOnIdle
 		p.mu.Unlock()
 		p.counters.replenishFailed()
 		log.Printf("vmpool: replenish %q: %v", key, err)
+		if release {
+			// A Release landed during this warm (kept_busy): the run is freed now if nothing
+			// else uses it, as on the success branch below, not at the next sweep.
+			p.releaseIfPending(key)
+		}
 		return
 	case p.closed:
 		p.mu.Unlock()
@@ -132,6 +145,17 @@ func (p *pool) replenishOne(key string) {
 			p.counters.destroyFailed()
 			log.Printf("vmpool: destroy replenished VM for %q on a closed pool: %v", key, err)
 		}
+		return
+	case rp.releaseOnIdle:
+		// A Release landed while this warm was in flight (the warming made the run busy, so
+		// it was kept_busy): the VM is not a standby for a run that is over, and the run is
+		// freed now if nothing else uses it.
+		p.mu.Unlock()
+		if err := vm.Destroy(); err != nil {
+			p.counters.destroyFailed()
+			log.Printf("vmpool: destroy replenished VM for released %q: %v", key, err)
+		}
+		p.releaseIfPending(key)
 		return
 	case rp.lease != nil:
 		// A lease started while this warm was in flight: no standby beside it.

@@ -33,6 +33,7 @@ message WorkerFrame {
     ExecError error     = 5;   // exec/channel failure
     LeaseEvent         lease        = 6;   // a lease state change, unsolicited
     LeaseControlResult lease_result = 7;   // the answer to a LeaseControlFrame, by ctl_id
+    ReleaseResult      release_result = 8; // the answer to a ReleaseFrame, by ctl_id
   }
 }
 
@@ -43,6 +44,7 @@ message ServerFrame {
     Abort abort = 2;           // cancel an in-flight exec
     LeaseControlFrame   lease_control = 3;   // status | reset | set_mode; answered by lease_result
     LeaseKeepaliveFrame keepalive     = 4;   // keepalive-loss heartbeat for a live lease; never resets idle; no answer
+    ReleaseFrame        release       = 5;   // the workspace's session or sandbox has ended; answered by release_result
   }
 }
 
@@ -265,3 +267,51 @@ message LeaseControlRequest {
 message LeaseControlResponse   { LeaseStatus status = 1; }
 message LeaseKeepaliveRequest  { string sandbox_id = 1; }
 message LeaseKeepaliveResponse {}
+
+// ---- release (#338) ----
+
+// relay → worker: the session or sandbox that owns workspace_key has ended, so the worker
+// may free the key's standbys and workspace now instead of at its idle reclaim. ADDITIVE: a
+// worker that predates it ignores an unknown ServerFrame, and a relay that never sends it
+// leaves idle reclaim as the only release. A worker that serves it advertises
+// "sbx:release-v1" in Hello.capabilities. ctl_id correlates the ReleaseResult.
+//
+// A release never cuts an Exec: with one in flight the worker keeps the workspace and frees
+// it when that Exec ends. Either way the key is then refused for new Execs (a turn still
+// running after its session ended must not re-create an empty workspace), with the
+// ExecError "released: <detail>", for a bounded time (the worker's WorkspaceIdle).
+//
+// SENDER CONTRACT. Send it only at the owner's terminal end: a sandbox's deletion or
+// expiry, or a session's deletion. The harness uses the session id as workspace_key
+// (harness/src/select-sandbox.ts), so a release sent while a session can still resume
+// locks that session out of its workspace for WorkspaceIdle.
+message ReleaseFrame {
+  uint64 ctl_id        = 1;
+  string workspace_key = 2;
+}
+
+// What a release did.
+enum ReleaseOutcome {
+  RELEASE_OUTCOME_UNSPECIFIED = 0;
+  // The standbys and the workspace are freed.
+  RELEASE_OUTCOME_RELEASED    = 1;
+  // An Exec (or a live lease) was using the workspace: the standbys are freed, the workspace
+  // is kept and is freed when it is no longer in use.
+  RELEASE_OUTCOME_KEPT_BUSY   = 2;
+  // The worker holds no workspace for the key (never used here, or already reclaimed). The
+  // key is refused for new Execs all the same.
+  RELEASE_OUTCOME_UNKNOWN_KEY = 3;
+}
+
+// worker → relay: the answer to a ReleaseFrame. An empty error means outcome holds;
+// otherwise outcome is UNSPECIFIED and error is one of these wire strings:
+//   "release_unsupported: <detail>"   the worker's runner has no Release; don't retry
+//   "busy: <detail>"                  too many releases in flight on the worker; retry later
+//   "invalid-workspace-key: <detail>" or "empty-workspace-key: <detail>": the key is refused; don't retry
+//   any other string                  the worker failed (shutting down, a filesystem error); retry,
+//                                     and idle reclaim stays the backstop
+message ReleaseResult {
+  uint64         ctl_id  = 1;
+  ReleaseOutcome outcome = 2;
+  string         error   = 3;
+}

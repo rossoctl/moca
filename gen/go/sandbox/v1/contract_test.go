@@ -274,3 +274,41 @@ func TestLeaseStatusProcessFieldNumbers(t *testing.T) {
 		Stopped:   []*TrackedProcess{{Id: "p2", Name: "old", Pid: 8, State: "exited", Code: 0}},
 	}, &LeaseStatus{})
 }
+
+// Release (#338), additive: ServerFrame.release is field 5 and WorkerFrame.release_result
+// field 8, so a worker or relay that predates them sees an unknown oneof member and drops it.
+func TestReleaseMessagesRoundTrip(t *testing.T) {
+	roundTrip(t, &ReleaseFrame{CtlId: 9, WorkspaceKey: "leaf-1"}, &ReleaseFrame{})
+	roundTrip(t, &ReleaseResult{CtlId: 9, Outcome: ReleaseOutcome_RELEASE_OUTCOME_KEPT_BUSY}, &ReleaseResult{})
+	roundTrip(t, &ReleaseResult{CtlId: 9, Error: "release_unsupported: no"}, &ReleaseResult{})
+	roundTrip(t, &ServerFrame{Msg: &ServerFrame_Release{Release: &ReleaseFrame{CtlId: 1, WorkspaceKey: "k"}}},
+		&ServerFrame{})
+	roundTrip(t, &WorkerFrame{Msg: &WorkerFrame_ReleaseResult{ReleaseResult: &ReleaseResult{CtlId: 1}}},
+		&WorkerFrame{})
+}
+
+func TestReleaseOutcomeValues(t *testing.T) {
+	for want, o := range map[int32]ReleaseOutcome{
+		0: ReleaseOutcome_RELEASE_OUTCOME_UNSPECIFIED,
+		1: ReleaseOutcome_RELEASE_OUTCOME_RELEASED,
+		2: ReleaseOutcome_RELEASE_OUTCOME_KEPT_BUSY,
+		3: ReleaseOutcome_RELEASE_OUTCOME_UNKNOWN_KEY,
+	} {
+		if int32(o) != want {
+			t.Fatalf("%v = %d, want %d", o, int32(o), want)
+		}
+	}
+}
+
+// The tags: ServerFrame.release is field 5 (bytes, 0x2a), WorkerFrame.release_result field 8
+// (bytes, 0x42).
+func TestReleaseFieldNumbers(t *testing.T) {
+	sb, err := proto.Marshal(&ServerFrame{Msg: &ServerFrame_Release{Release: &ReleaseFrame{}}})
+	if err != nil || len(sb) == 0 || sb[0] != 0x2a {
+		t.Fatalf("ServerFrame.release = % x (%v), want tag 0x2a", sb, err)
+	}
+	wb, err := proto.Marshal(&WorkerFrame{Msg: &WorkerFrame_ReleaseResult{ReleaseResult: &ReleaseResult{}}})
+	if err != nil || len(wb) == 0 || wb[0] != 0x42 {
+		t.Fatalf("WorkerFrame.release_result = % x (%v), want tag 0x42", wb, err)
+	}
+}

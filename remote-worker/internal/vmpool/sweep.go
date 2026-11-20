@@ -35,6 +35,7 @@ func (p *pool) sweepOnce(now time.Time) reclaimBatch {
 	defer p.mu.Unlock()
 
 	var b reclaimBatch
+	p.pruneReleasedLocked(now)
 	budget := p.cfg.MaxReclaimsPerScan
 	for key, rp := range p.runs {
 		if budget <= 0 {
@@ -47,12 +48,15 @@ func (p *pool) sweepOnce(now time.Time) reclaimBatch {
 			continue
 		}
 		idle := rp.idleFor(now)
+		// A run a Release met busy (release.go) is reclaimed as soon as it is not: its
+		// owner has ended, so neither idle threshold applies.
+		release := rp.releaseOnIdle
 		// "no Exec for this long" (Config.StandbyIdle's doc comment) means the
 		// threshold itself qualifies: idle >= StandbyIdle, not idle > StandbyIdle. A
 		// tick can land exactly on the boundary (idle == StandbyIdle to the
 		// millisecond), and a strict ">" would silently defer that run to the next
 		// tick — TestASweepDestroysAtMostMaxReclaimsPerScan pins this.
-		if idle < p.cfg.StandbyIdle {
+		if idle < p.cfg.StandbyIdle && !release {
 			continue
 		}
 
@@ -70,11 +74,11 @@ func (p *pool) sweepOnce(now time.Time) reclaimBatch {
 		}
 		rp.pending = nil
 
-		if idle >= p.cfg.WorkspaceIdle {
-			// RunParked -> RunReclaiming -> RunAbsent. Safe to fire, and spec §4.4 is
-			// what makes it safe: the workspace is a per-dispatch derivation — a
-			// detached worktree at a pinned commit, with continuity living in the Redis
-			// session log — so early reclamation costs a re-converge, never data.
+		if idle >= p.cfg.WorkspaceIdle || release {
+			// RunParked -> RunReclaiming -> RunAbsent. It costs the workspace's data
+			// (#338): a released run's owner has ended, and an idle one has had no Exec
+			// for WorkspaceIdle, which is the operator's bound on how long a session may
+			// wait; the harness reports the reset to a session that comes back.
 			//
 			// The tree is detached HERE, under the lock, in the same critical section
 			// that drops the map entry — so the key and its directory become
@@ -91,7 +95,7 @@ func (p *pool) sweepOnce(now time.Time) reclaimBatch {
 			if tomb != "" {
 				b.dirs = append(b.dirs, tomb)
 			}
-			delete(p.runs, key)
+			p.dropRunLocked(key, rp)
 			// The key's lease state is retired with its workspace, in the same critical
 			// section: the mode and epoch stay, root_wrote is set for the new tree, and an
 			// unacknowledged event stays (retireLeaseState). Only on a lease-enabled pool: a

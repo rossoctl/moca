@@ -22,9 +22,12 @@ type Stats struct {
 	// difference, CommittedBytes - StandbyCommittedBytes, each at full PerVMBytes.
 	StandbyCommittedBytes int64
 
-	WarmAcquires      uint64
-	ColdAcquires      map[ColdCause]uint64
-	Refusals          map[RefusalReason]uint64
+	WarmAcquires uint64
+	ColdAcquires map[ColdCause]uint64
+	Refusals     map[RefusalReason]uint64
+	// Releases counts the relay's Release calls by outcome (#338): released, kept_busy,
+	// unknown_key. A refused one (an invalid key, a closed pool) is not counted here.
+	Releases          map[ReleaseOutcome]uint64
 	Replenishments    uint64
 	ReplenishFailures uint64
 	DestroyFailures   uint64
@@ -89,10 +92,12 @@ type counters struct {
 	timeoutsClamped   uint64
 	budgetEvictions   uint64
 	leaseEnds         map[LeaseEndReason]uint64
+	releases          map[ReleaseOutcome]uint64
 }
 
 func newCounters() *counters {
-	return &counters{cold: map[ColdCause]uint64{}, refusals: map[RefusalReason]uint64{}, leaseEnds: map[LeaseEndReason]uint64{}}
+	return &counters{cold: map[ColdCause]uint64{}, refusals: map[RefusalReason]uint64{}, leaseEnds: map[LeaseEndReason]uint64{},
+		releases: map[ReleaseOutcome]uint64{}}
 }
 
 func (c *counters) warmAcquire() { c.mu.Lock(); c.warm++; c.mu.Unlock() }
@@ -100,6 +105,8 @@ func (c *counters) warmAcquire() { c.mu.Lock(); c.warm++; c.mu.Unlock() }
 func (c *counters) coldAcquire(cause ColdCause) { c.mu.Lock(); c.cold[cause]++; c.mu.Unlock() }
 
 func (c *counters) refuse(r RefusalReason) { c.mu.Lock(); c.refusals[r]++; c.mu.Unlock() }
+
+func (c *counters) released(o ReleaseOutcome) { c.mu.Lock(); c.releases[o]++; c.mu.Unlock() }
 
 func (c *counters) replenished() { c.mu.Lock(); c.replenishments++; c.mu.Unlock() }
 
@@ -136,6 +143,10 @@ func (c *counters) snapshot(into *Stats) {
 	into.Refusals = make(map[RefusalReason]uint64, len(c.refusals))
 	for k, v := range c.refusals {
 		into.Refusals[k] = v
+	}
+	into.Releases = make(map[ReleaseOutcome]uint64, len(c.releases))
+	for k, v := range c.releases {
+		into.Releases[k] = v
 	}
 	into.LeaseEnds = make(map[LeaseEndReason]uint64, len(c.leaseEnds))
 	for k, v := range c.leaseEnds {

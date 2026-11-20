@@ -82,12 +82,13 @@ func capabilities() []string {
 	return out
 }
 
-// helloCapabilities is this worker's Hello.capabilities: the PATH probe, plus the one
-// behaviour the harness keys on, the per-session workspace directory
-// (wexec.WorkspaceCapability). Never the reserved sbx:lease-processes-v1 (ruling P5-R37):
-// the container tier has no lease mode and refuses every process kind.
+// helloCapabilities is this worker's Hello.capabilities: the PATH probe, plus the
+// behaviours the harness and relay key on, the per-session workspace directory
+// (wexec.WorkspaceCapability) and the Release frame (wexec.ReleaseCapability, #338). Never
+// the reserved sbx:lease-processes-v1 (ruling P5-R37): the container tier has no lease mode
+// and refuses every process kind.
 func helloCapabilities() []string {
-	return append(capabilities(), wexec.WorkspaceCapability)
+	return append(capabilities(), wexec.WorkspaceCapability, wexec.ReleaseCapability)
 }
 
 // workspaceRunner builds the per-key workspace layer over BashRunner (#408).

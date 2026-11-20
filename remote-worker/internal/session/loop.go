@@ -128,6 +128,8 @@ type Session struct {
 	leaseStatusSlots chan struct{}
 	leaseMu          sync.Mutex
 	leaseByKey       map[string]int
+	// releaseSlots holds one token per Release call running (releaseCap, release.go).
+	releaseSlots chan struct{}
 
 	// Counters for Stats (#705), across every connection.
 	queueFullRefusals atomic.Uint64
@@ -206,6 +208,7 @@ func New(cfg Config, r wexec.Runner) *Session {
 		leaseSlots:       make(chan struct{}, leaseControlCap),
 		leaseStatusSlots: make(chan struct{}, leaseStatusCap),
 		leaseByKey:       map[string]int{},
+		releaseSlots:     make(chan struct{}, releaseCap),
 	}
 }
 
@@ -673,6 +676,11 @@ func (s *Session) recvLoop(ctx context.Context, c *conn) error {
 		case *pb.ServerFrame_Keepalive:
 			// Inline: LeaseController.LeaseKeepalive must not block.
 			s.leaseKeepalive(m.Keepalive)
+		case *pb.ServerFrame_Release:
+			// Off this loop, like LeaseControl: the release removes a workspace tree.
+			if err := s.release(ctx, c, m.Release); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -1074,6 +1082,8 @@ func frameRef(f *pb.WorkerFrame) string {
 		return fmt.Sprintf("req_id %d", m.Lease.GetReqId())
 	case *pb.WorkerFrame_LeaseResult:
 		return fmt.Sprintf("ctl_id %d", m.LeaseResult.GetCtlId())
+	case *pb.WorkerFrame_ReleaseResult:
+		return fmt.Sprintf("ctl_id %d", m.ReleaseResult.GetCtlId())
 	default:
 		return "req_id 0"
 	}
