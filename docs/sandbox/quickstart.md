@@ -115,6 +115,10 @@ What `up` does:
 - Each clone and each git worktree gets its own sandbox. Two worktrees of one repository do not
   share one.
 
+`up` checks your repository before it creates anything. A check that fails stops `up` with no
+sandbox created, so you correct the cause and run `up` again. The two checks below stop `up` most
+often in a repository that is already in use.
+
 ### If `up` stops at a large file
 
 `up` pushes no file over 12 MiB, and no tree over 256 MiB. A file over the limit stops `up`, and
@@ -137,6 +141,44 @@ To exclude the file for everybody, add the same line to `.gitignore`.
 Both files work for an untracked file. A **tracked** file is pushed even when a rule ignores it,
 so first run `git rm --cached <file>`. For a tree over 256 MiB, `--max-push` raises the limit. No
 flag raises the 12 MiB limit for one file.
+
+### If `up` stops at your Claude Code permissions
+
+`up` denies the local built-in tools (`Bash`, `Read`, `Edit`, `Write`, and 13 more) in
+`.claude/settings.json`, so that the agent can use only the sandbox's tools. A repository that
+**allows** one of those tools contradicts the deny, and `up` stops:
+
+```
+sbx: .claude/settings.json: permissions.allow lists local built-in tools (Bash(git status:*), …),
+which would act on this machine; edit it by hand, or run mocactl sbx up --no-agent-config
+```
+
+This check protects you. In Claude Code an allow rule beats a deny rule, so the listed commands
+would run **on your laptop** while you expect the sandbox to run them.
+
+Move the rules to `.claude/settings.local.json`, which `up` does not write and does not check:
+
+```bash
+# Add the rules to .claude/settings.local.json, remove them from .claude/settings.json.
+echo .claude/settings.local.json >> .gitignore
+mocactl sbx up
+```
+
+Add the file to `.gitignore` in the same step, or git reports it as a new file.
+
+**This passes the check, and the allow rules still apply.** Claude Code merges
+`settings.local.json` over `settings.json`, and an allow rule still beats a deny rule, so those
+commands can still run on your laptop. `up` does not report it, because it reads
+`permissions.allow` only in `settings.json`. For a sandbox you can depend on, delete the rules
+instead, or move the file aside while you use the sandbox:
+
+```bash
+mv .claude/settings.local.json .claude/settings.local.json.off
+```
+
+Do not use `--no-agent-config` to get past this check. It writes **no** agent configuration, so
+Claude Code gets no sandbox MCP server, keeps its local tools, and runs every command on your
+laptop. It is for a setup you configure by hand.
 
 ## 4. Run your agent
 
