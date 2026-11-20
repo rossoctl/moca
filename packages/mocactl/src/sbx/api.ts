@@ -115,7 +115,7 @@ export interface SbxEgressPage {
 }
 
 /** The log's summary (openapi EgressSummary): per destination host, completeness and digest. */
-export interface SbxEgressSummary {
+interface SbxEgressSummary {
   byHost: Record<
     string,
     { count: number; decisions: Record<string, number>; bytesUp: number; bytesDown: number }
@@ -184,7 +184,7 @@ export interface SbxLease {
 }
 
 /** One build a retire answered for (openapi RetiredBuild, template lifecycle spec §5.1). */
-export interface SbxRetiredBuild {
+interface SbxRetiredBuild {
   /** The build's handle. */
   build: string;
   /** Null for a build retired before it registered. */
@@ -274,7 +274,7 @@ export interface SbxTemplateCreate {
   visibility?: string;
 }
 
-export type SbxLimitUse = { limit: number; used: number };
+type SbxLimitUse = { limit: number; used: number };
 
 /** `GET /v1/quota`: the caller's template quotas and use, and on the sandbox profile its live-sandbox cap. */
 export interface SbxQuotaView {
@@ -289,7 +289,7 @@ export interface SbxQuotaView {
 }
 
 /** A policy profile (openapi Policy.profiles). */
-export interface SbxProfile {
+interface SbxProfile {
   requires: string[];
   envelope: {
     maxGuestMb: number;

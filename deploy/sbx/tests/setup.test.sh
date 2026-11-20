@@ -165,6 +165,19 @@ state_hash() { cat "$MOCK_STATE"/secret-*.json | jq -S .data | { sha256sum 2>/de
 K="$MOCK_STATE/applied-kustomization.yaml"
 # The generated overlay as the cluster would get it: the real kustomize over the copied tree.
 render() { "$REAL_KUBECTL" kustomize "$GEN" >"$TMP/render.yaml" 2>"$TMP/render.err" || { cat "$TMP/render.err" >&2; fail 'the generated overlay does not render'; }; }
+# refuse_each RESET PREFIX CASE...: for each 'BAD => WANT' case, eval RESET, then run setup with
+# PREFIX and BAD: it must fail with /WANT/ before applying, patching or deleting anything.
+refuse_each() {
+  local reset="$1" prefix="$2" r bad want
+  shift 2
+  for r in "$@"; do
+    bad="${r%% => *}" want="${r#* => }"
+    eval "$reset"
+    ! run_setup eval "$prefix$bad" || fail "accepted: $bad"
+    grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
+    ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
+  done
+}
 # The settings-hash annotation on one Deployment's pod template, from the rendered overlay.
 pod_hash() {
   awk -v n="$1" '/^---$/ { d = 0; hit = 0 } /^kind: Deployment$/ { d = 1 } d && $1 == "name:" && $2 == n { hit = 1 }
@@ -263,13 +276,7 @@ refusals=(
   'export SBX_API_CA_FILE=$TMP/nonexistent.crt => SBX_API_CA_FILE must name a readable PEM certificate'
   'export SBX_API_CA_FILE=$TMP/templates.json => SBX_API_CA_FILE must name a readable PEM certificate'
 )
-for r in "${refusals[@]}"; do
-  bad="${r%% => *}" want="${r#* => }"
-  : >"$MOCK_LOG"
-  ! run_setup eval "$bad" || fail "accepted: $bad"
-  grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
-  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
-done
+refuse_each ': >"$MOCK_LOG"' '' "${refusals[@]}"
 pass 'refuses missing or malformed inputs before applying anything, each saying why'
 
 # #907: the workspace-size cap in setup.sh and install-host.sh is the golden snapshot's workspace drive,
@@ -1386,13 +1393,7 @@ egress_refusals=(
   'export SBX_EGRESS_CREDENTIAL_TTL_SECONDS=301 => SBX_EGRESS_CREDENTIAL_TTL_SECONDS must be'
   'export SBX_EGRESS_CREDENTIAL_TTL_SECONDS=1m => SBX_EGRESS_CREDENTIAL_TTL_SECONDS must be'
 )
-for r in "${egress_refusals[@]}"; do
-  bad="${r%% => *}" want="${r#* => }"
-  reset_state
-  ! run_setup eval "export SBX_EGRESS_CREDENTIALS=1; $bad" || fail "accepted: $bad"
-  grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
-  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
-done
+refuse_each reset_state 'export SBX_EGRESS_CREDENTIALS=1; ' "${egress_refusals[@]}"
 # A worker in SBX_WORKERS with no template is not an egress worker (the control plane refuses it at boot):
 # the default kvm host leaves it out, and naming it in SBX_EGRESS_HOSTS is refused before anything is applied.
 reset_state
@@ -1468,17 +1469,11 @@ run_setup true || fail 'store off again failed'
 ! grep -qE 'delete.*(pvc|persistentvolumeclaim).*moca-sbx-templates' "$MOCK_LOG" || fail 'turning the store off deleted its PVC'
 pass 'turning the store off drops the component and leaves its PVC'
 
-for r in 'export SBX_TEMPLATE_STORE=2 => SBX_TEMPLATE_STORE must be unset, 0 or 1' \
+refuse_each reset_state '' 'export SBX_TEMPLATE_STORE=2 => SBX_TEMPLATE_STORE must be unset, 0 or 1' \
   'export SBX_TEMPLATE_STORE=yes => SBX_TEMPLATE_STORE must be unset, 0 or 1' \
   'export SBX_TEMPLATE_HOSTS=a => SBX_TEMPLATE_HOSTS needs SBX_TEMPLATE_STORE=1' \
   "export SBX_TEMPLATE_STORE=1 SBX_TEMPLATE_HOSTS='A' => template host id .A. must match" \
-  "export SBX_TEMPLATE_STORE=1 SBX_TEMPLATE_HOSTS='a a' => listed twice"; do
-  bad="${r%% => *}" want="${r#* => }"
-  reset_state
-  ! run_setup eval "$bad" || fail "accepted: $bad"
-  grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
-  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
-done
+  "export SBX_TEMPLATE_STORE=1 SBX_TEMPLATE_HOSTS='a a' => listed twice"
 pass 'refuses a bad store switch, hosts without the store, a bad or repeated host id, before anything is applied'
 
 # 16. SBX_PROFILE=combined (combined control plane design §3.6): the ocp-combined overlay, the
@@ -1548,13 +1543,7 @@ refusals=(
   "export SBX_PROFILE=combined SBX_MOCA_HOST=moca.apps.example.invalid SBX_SANDBOX_IMAGE=\$RW => SBX_IMAGE must be pinned by digest"
   "export SBX_PROFILE=combined SBX_MOCA_HOST=moca.apps.example.invalid SBX_SANDBOX_IMAGE=\$RW SBX_IMAGE=\$MI SBX_SANDBOX_REPLICAS=10 => SBX_SANDBOX_REPLICAS must be 0-9"
 )
-for r in "${refusals[@]}"; do
-  bad="${r%% => *}" want="${r#* => }"
-  reset_state
-  ! run_setup eval "$bad" || fail "accepted: $bad"
-  grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
-  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
-done
+refuse_each reset_state '' "${refusals[@]}"
 pass 'refuses a bad profile, a missing or clashing SBX_MOCA_HOST, egress, no store and a bad replica count with combined'
 
 # 17. SBX_PROFILE=combined refuses an SBX0 namespace (its moca-mu1, or its sbx-api Route) before

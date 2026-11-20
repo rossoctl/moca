@@ -253,26 +253,31 @@ describe('mocactl sbx proc logs and stop (P5-R6, P5-R31)', () => {
     expect(await w.run(['proc', 'logs', 'web', '--tail', '50', SBX])).toBe(0);
     expect(w.calls).toEqual([{ op: 'logs', args: { name: 'web', tail: 50 }, signal: true }]);
     expect(w.out()).toBe('listening on 8080\n');
-    for (const bad of ['0', '-1', '2.5', 'lots']) {
-      expect(await w.run(['proc', 'logs', 'web', `--tail=${bad}`, SBX])).toBe(2);
-      expect(w.err()).toContain('--tail must be a whole number of lines, from 1 to 4294967295');
-    }
-    expect(w.calls).toHaveLength(1);
+    expect(await w.run(['proc', 'logs', 'web', '--tail=4294967295', SBX])).toBe(0);
+    expect(w.calls[1]).toEqual({
+      op: 'logs',
+      args: { name: 'web', tail: 4294967295 },
+      signal: true,
+    });
   });
 
   // PR #814 review: --tail is a uint32 on the wire; above 2^32-1 it would wrap (4294967296 sent
   // as 0, the guest's default), so it is a usage error.
-  it('--tail above 4294967295 is a usage error, nothing sent', async () => {
+  it('--tail that is not a whole number from 1 to 4294967295 is a usage error, nothing sent', async () => {
     const w = world();
-    for (const bad of ['4294967296', '4294967297', '99999999999999999999']) {
+    for (const bad of [
+      '0',
+      '-1',
+      '2.5',
+      'lots',
+      '4294967296',
+      '4294967297',
+      '99999999999999999999',
+    ]) {
       expect(await w.run(['proc', 'logs', 'web', `--tail=${bad}`, SBX])).toBe(2);
       expect(w.err()).toContain('--tail must be a whole number of lines, from 1 to 4294967295');
     }
     expect(w.calls).toHaveLength(0);
-    expect(await w.run(['proc', 'logs', 'web', '--tail=4294967295', SBX])).toBe(0);
-    expect(w.calls).toEqual([
-      { op: 'logs', args: { name: 'web', tail: 4294967295 }, signal: true },
-    ]);
   });
 
   // PR #814 review: logs replays, later and out of band, output of a process the agent started;

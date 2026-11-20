@@ -43,15 +43,6 @@ func cachedMemAvailable() (int64, error) {
 	return memCacheVal, memCacheErr
 }
 
-// invalidateMemAvailableCache drops the cached MemAvailable so the next
-// cachedMemAvailable re-reads the seam. Test-only: production has no reason to
-// force a read that is at most memAvailableTTL away anyway.
-func invalidateMemAvailableCache() {
-	memCacheMu.Lock()
-	defer memCacheMu.Unlock()
-	memCacheAt = time.Time{}
-}
-
 // readHostMemAvailable reads MemAvailable out of /proc/meminfo, in bytes.
 //
 // MemAvailable rather than MemFree is the whole choice: MemFree excludes page

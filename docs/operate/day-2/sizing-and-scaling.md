@@ -40,7 +40,15 @@ advice in the deploy README and not tested. If `SH_WORKERS` were unset, W would 
   queue unrun, counted as `async_deferred_subject`, so an owner whose fan-out is running cannot also fill the worker
   with interactive turns. It does **not** pace an async-only drain: a worker runs one queued leaf at a time, so async
   work alone never reaches the cap, and the queue is one FIFO stream — one owner's deep backlog still delays another
-  owner's async turn, which needs a cluster-wide per-owner count and is open on #391.
+  owner's async turn.
+- **...across workers, too, if you set it:** `MOCA_ASYNC_RUNNING_PER_OWNER` caps how many async leaves one owner may
+  have running in the whole deployment (#391). This is the one that bounds an async-only drain, because the count is in
+  Redis rather than in a worker's memory. **Unset by default**, and off: a cap that appeared on upgrade would start
+  pacing a single-owner deployment's own fan-out, which is the common case. Set the **same value on every worker** —
+  each enforces it independently, so differing values leave the effective bound to whichever claimed first. An entry
+  over the cap takes the same hand-back path as above (`async_deferred_subject`), so it waits out the 90 s reclaim
+  window; size the cap for that latency, not just for the share. Per-owner streams would remove the hand-back
+  altogether, and are still open.
 - **More sandboxes:** set `SH_SANDBOX_COUNT` for `setup.sh` (default 2, sticky). Each pod's sandbox id is its pod
   name. Each sandbox accepts up to `KAGENTI_SANDBOX_CAP` concurrent leases (the manifest sets 4; the code default is
   20), so container capacity is roughly sandboxes x 4 concurrent turns. A pool with no free slot returns 503

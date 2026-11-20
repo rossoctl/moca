@@ -67,7 +67,7 @@ const SHORT_TOKEN_S = 300;
  * `iat` and `exp` from a JWT's payload, read WITHOUT verifying it: only to learn the token's
  * lifetime (the relay verifies it). Undefined for anything that is not a readable JWT.
  */
-export function jwtTimes(token: string): { iat: number; exp: number } | undefined {
+function jwtTimes(token: string): { iat: number; exp: number } | undefined {
   const payload = token.split('.')[1];
   if (!payload) return undefined;
   try {
@@ -100,7 +100,7 @@ export function jwtMode(token: string): SandboxModeName {
 }
 
 /** What the connection needs of a minted token: `lifetimeS` is `exp − iat`, 0 if unreadable. */
-export function grantOf(t: SbxToken): SandboxTokenGrant {
+function grantOf(t: SbxToken): SandboxTokenGrant {
   const times = jwtTimes(t.token);
   const lifetimeS = times && times.exp > times.iat ? times.exp - times.iat : 0;
   return {
@@ -294,7 +294,7 @@ export async function openExec(
 }
 
 /** `sbx run`'s exit for a sandbox failure: neither the command's code nor its timeout. */
-export const EXIT_SANDBOX_FAILED = 125;
+const EXIT_SANDBOX_FAILED = 125;
 /** `sbx run`'s exit for a command that timed out or was killed (spec §6.1). */
 export const EXIT_KILLED = 124;
 /**

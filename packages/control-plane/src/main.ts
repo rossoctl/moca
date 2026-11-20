@@ -399,18 +399,36 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
  */
 function combinedProfileConfig(env: NodeJS.ProcessEnv, harness: CpConfig): CpConfig {
   const sandbox = sandboxConfigFromEnv(env, { kekIsShared: true });
+  // The members routes are served on this profile too, so the installer's bearer is read as on
+  // the sandbox profile (#938).
+  const installerToken = installerTokenFromEnv(env);
   return {
     ...harness,
     routeProfile: 'combined',
     sandbox,
     sessionTemplates: sandbox.templates,
-    // Distinct from the exchange token, the janitor's and every egress host's bearer.
+    installerToken,
+    // Distinct from the exchange token, the janitor's, the installer's and every egress host's bearer.
     templateHosts: templateHostsFromEnv(env, [
       ...(harness.exchangeToken ? [harness.exchangeToken] : []),
       ...(sandbox.janitorToken ? [sandbox.janitorToken] : []),
+      ...(installerToken ? [installerToken] : []),
       ...(sandbox.egress?.hosts.map((h) => h.token) ?? []),
     ]),
   };
+}
+
+/**
+ * The installer's static bearer (SH_INSTALLER_TOKEN), read on the sandbox and combined profiles:
+ * optional, but a configured one under 32 characters refuses the boot, exactly as the janitor's
+ * does (it travels in an HTTP header).
+ */
+function installerTokenFromEnv(env: NodeJS.ProcessEnv): string | undefined {
+  const installerToken = env.SH_INSTALLER_TOKEN || undefined;
+  if (installerToken !== undefined && installerToken.length < 32) {
+    throw new Error('SH_INSTALLER_TOKEN must be at least 32 characters');
+  }
+  return installerToken;
 }
 
 /**
@@ -451,12 +469,7 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
     );
   }
   const sandbox = sandboxConfigFromEnv(env);
-  // The installer's static bearer (SH_INSTALLER_TOKEN): optional, but a configured one under 32
-  // characters refuses the boot, exactly as the janitor's does (it travels in an HTTP header).
-  const installerToken = env.SH_INSTALLER_TOKEN || undefined;
-  if (installerToken !== undefined && installerToken.length < 32) {
-    throw new Error('SH_INSTALLER_TOKEN must be at least 32 characters');
-  }
+  const installerToken = installerTokenFromEnv(env);
   const config: CpConfig = {
     routeProfile: 'sandbox',
     sandbox,

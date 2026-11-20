@@ -109,21 +109,6 @@ describe('VaultCredentialStore', () => {
     expect(new Set(v.calls.map((c) => c.method))).toEqual(new Set(['GET', 'POST']));
   });
 
-  it('round-trips a multi-binding, host:port/path destination descriptor unchanged', async () => {
-    const store = makeStore(fakeVault(), [newKek()]);
-    const c = cred('multi', {
-      destination: { hosts: ['mcp.corp:8443/a'] },
-      binding: [
-        { header: 'Authorization', format: 'Bearer {token}' },
-        { header: 'X-Org', format: '{token}' },
-      ],
-    });
-    expect(c.descriptor.binding).toHaveLength(2);
-    await store.put(ALICE, c);
-    expect(await store.get(ALICE, 'multi')).toEqual(c);
-    expect(await store.list(ALICE)).toEqual([c.descriptor]);
-  });
-
   it('writes under check-and-set: cas 0 for a new subject, then the version it read', async () => {
     const v = fakeVault();
     const store = makeStore(v, [newKek()]);

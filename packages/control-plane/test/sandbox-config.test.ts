@@ -59,6 +59,16 @@ describe('the combined profile config (combined control plane spec §3.5)', () =
     expect(c.sandbox?.templates.map((t) => t.id)).toEqual(['default', 'node22']);
   });
 
+  it('reads the installer bearer, as the sandbox profile does (#938)', () => {
+    expect(configFromEnv(cenv()).installerToken).toBeUndefined();
+    expect(configFromEnv(cenv({ SH_INSTALLER_TOKEN: 'i'.repeat(32) })).installerToken).toBe(
+      'i'.repeat(32),
+    ); // notsecret
+    expect(messageOf(() => configFromEnv(cenv({ SH_INSTALLER_TOKEN: 'short' })))).toContain(
+      'SH_INSTALLER_TOKEN must be at least 32 characters',
+    );
+  });
+
   it("refuses to boot without either profile's required settings, naming the missing one", () => {
     for (const name of [
       'SH_CREDENTIAL_KEK',

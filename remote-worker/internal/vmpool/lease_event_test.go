@@ -47,10 +47,14 @@ func captureLog(t *testing.T) *lockedBuffer {
 }
 
 // leasePoolOn is leasePool over a given WorkspaceRoot and clock: a second process
-// over the same host disk.
-func leasePoolOn(t *testing.T, root string, clk *fakeClock) (*pool, *leaseLauncher) {
+// over the same host disk. features are the snapshot's manifest features, lease-v1
+// alone when none are given.
+func leasePoolOn(t *testing.T, root string, clk *fakeClock, features ...string) (*pool, *leaseLauncher) {
 	t.Helper()
 	plentyOfHostMemory(t) // no memory reclaim on the host's own MemAvailable (lease_reclaim_test.go)
+	if len(features) == 0 {
+		features = []string{FeatureLeaseV1}
+	}
 	lc := newLeaseLauncher()
 	p, err := New(Config{
 		VMM:               lc.Kind(),
@@ -58,7 +62,7 @@ func leasePoolOn(t *testing.T, root string, clk *fakeClock) (*pool, *leaseLaunch
 		WorkspaceRoot:     root,
 		MaxRuns:           16,
 		MaxCommittedBytes: 32 << 30,
-		ManifestFeatures:  []string{FeatureLeaseV1},
+		ManifestFeatures:  features,
 	}, lc, clk)
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -122,7 +122,7 @@ func forgedSessionHeaderIgnored(ctx context.Context, t Target) error {
 		defer gb.close()
 		r, err := gb.get(upURL(up.port(), "/b"),
 			"X-Moca-Session: sid-a", "X-Moca-Sid: sid-a", "X-Moca-Vm-Id: vm-a", "X-Moca-Sub: alice",
-			"Proxy-Authorization: Basic YWxpY2U6c2VjcmV0")
+			"Proxy-Authorization: forged")
 		if err != nil {
 			return err
 		}
@@ -754,7 +754,7 @@ func plainHTTPStripsProxyAndMocaHeaders(ctx context.Context, t Target) error {
 		}
 		defer g.close()
 		r, err := g.get(upURL(up.port(), "/hdr"),
-			"Proxy-Authorization: Basic YWxpY2U6c2VjcmV0",
+			"Proxy-Authorization: forged",
 			"Proxy-Connection: keep-alive",
 			"Connection: keep-alive, X-Named-Hop",
 			"X-Named-Hop: 1",
@@ -810,7 +810,7 @@ func plainHTTPStripsProxyAndMocaHeaders(ctx context.Context, t Target) error {
 // pinned against: RedactPath returning the request URI (path and query).
 func auditQueryRemoved(ctx context.Context, t Target) error {
 	var up *httpUpstream
-	const secret, pass = "s3cr3t-token-value", "s3cr3t-password"
+	const inQuery, inUserinfo = "sentinel-query-value", "sentinel-userinfo-value"
 	return run(ctx, t, func(h *harness) (err error) {
 		if up, err = h.httpUp(); err != nil {
 			return err
@@ -825,7 +825,7 @@ func auditQueryRemoved(ctx context.Context, t Target) error {
 		if err != nil {
 			return err
 		}
-		u := fmt.Sprintf("http://user:%s@%s:%d/a/b%%20c?token=%s&x=1", pass, upName, up.port(), secret)
+		u := fmt.Sprintf("http://user:%s@%s:%d/a/b%%20c?token=%s&x=1", inUserinfo, upName, up.port(), inQuery)
 		r, err := g.get(u)
 		g.close()
 		if err != nil {
@@ -838,7 +838,7 @@ func auditQueryRemoved(ctx context.Context, t Target) error {
 		if err != nil {
 			return err
 		}
-		r, err = g.get("http://off.test/refused?token=" + secret)
+		r, err = g.get("http://off.test/refused?token=" + inQuery)
 		g.close()
 		if err != nil {
 			return err
@@ -857,12 +857,12 @@ func auditQueryRemoved(ctx context.Context, t Target) error {
 		}
 		for _, m := range h.seen {
 			j, _ := json.Marshal(m)
-			if s := string(j); strings.Contains(s, secret) || strings.Contains(s, pass) || strings.Contains(s, "token=") {
+			if s := string(j); strings.Contains(s, inQuery) || strings.Contains(s, inUserinfo) || strings.Contains(s, "token=") {
 				return fmt.Errorf("audit event carries the query or userinfo: %s", s)
 			}
 		}
 		reqs := up.requests()
-		if len(reqs) != 1 || reqs[0].rawQuery != "token="+secret+"&x=1" {
+		if len(reqs) != 1 || reqs[0].rawQuery != "token="+inQuery+"&x=1" {
 			return fmt.Errorf("upstream requests %+v, want one with the query intact", reqs)
 		}
 		return nil
@@ -1033,6 +1033,14 @@ func noSubject(m map[string]any) bool {
 	return !ok || v == ""
 }
 
+// mayHaveSubject reports whether an event may carry sub: a credential_injected
+// event, or upstream_unreachable after injection (it names the credential).
+func mayHaveSubject(m map[string]any) bool {
+	c, _ := m["credential"].(string)
+	d := m["decision"]
+	return c != "" && (d == "credential_injected" || d == "upstream_unreachable")
+}
+
 // ---- interception cases (SBX0.2b spec section 10.2) ----
 //
 // Each runs with credential mode on: a fake control plane, an interception CA
@@ -1154,6 +1162,55 @@ func credentialInjectedPlaceholderOverwritten(ctx context.Context, t Target) err
 		}
 		if txt := h.seenText(); strings.Contains(txt, "real-token-1") {
 			return fmt.Errorf("a credential value reached the audit stream")
+		}
+		return nil
+	})
+}
+
+// upstreamDroppedAfterInjection502: an upstream that reads an injected request
+// and closes without answering is refused 502 upstream_unreachable. Its event
+// keeps credential and sub, since the token may have been sent, and is not
+// counted as a credential_injected event.
+//
+// pinned against: clearing Credential and Sub on the refusal after injection
+// (the audit lost who the sent token belonged to).
+func upstreamDroppedAfterInjection502(ctx context.Context, t Target) error {
+	var w *icWorld
+	return run(ctx, t, func(h *harness) (err error) {
+		w, err = h.interceptWorld()
+		if err == nil {
+			w.give("sid-a", 60, cred("gh", "/", "Authorization: Bearer real-token-1"))
+		}
+		return err
+	}, func(h *harness) error {
+		v, err := h.register("vm-a", "sid-a")
+		if err != nil {
+			return err
+		}
+		g, err := h.tlsGuest(v, w.hp, trusting(w.icCA.pool))
+		if err != nil {
+			return err
+		}
+		defer g.close()
+		r, err := g.req(http.MethodGet, "/drop", w.hp)
+		if err != nil {
+			return err
+		}
+		if err := wantRefusal(r, 502, "upstream_unreachable", upName); err != nil {
+			return err
+		}
+		if err := wantAuth(w.up, "/drop", "Bearer real-token-1"); err != nil {
+			return err
+		}
+		if _, err := h.wait(event{"decision": "upstream_unreachable", "credential": "gh", "sub": "user-sid-a",
+			"status": 502, "vm_id": "vm-a", "sid": "sid-a", "host": upName}); err != nil {
+			return err
+		}
+		if err := h.settle(); err != nil {
+			return err
+		}
+		if n := h.count(event{"decision": "credential_injected"}); n != 0 {
+			return fmt.Errorf("%d credential_injected events for a request that got no answer, want 0", n)
 		}
 		return nil
 	})

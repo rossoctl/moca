@@ -30,6 +30,7 @@ const {
   ASYNC_DEPTH_INTERVAL_MS,
   reconnecting,
   createAsyncTally,
+  ownerAdmission,
 } = await import('../src/async-worker.js');
 
 import { SubjectCounter } from '../src/subject-quota.js';
@@ -109,6 +110,52 @@ describe('asyncFinalizeState', () => {
   );
   it('maps aborted to cancelled: it stopped because something asked it to', () => {
     expect(asyncFinalizeState('aborted')).toBe('cancelled');
+  });
+});
+
+describe('ownerAdmission', () => {
+  const OWNER = 'github:1234';
+  /** Only the three methods the hook calls; `reserve` stands in for the Lua script's answer. */
+  const turns = (reserve: () => Promise<number>) => ({
+    owner: async () => OWNER,
+    reserveRunningSlot: vi.fn(reserve),
+    releaseRunningSlot: vi.fn(async () => {}),
+  });
+
+  it('gives the per-worker slot back when the cluster-wide reserve throws (#391)', async () => {
+    const subjects = new SubjectCounter();
+    const admit = ownerAdmission({
+      turns: turns(async () => {
+        throw new Error('redis is not answering');
+      }),
+      subjects,
+      subjectCap: 2,
+      runningCap: 1,
+    })!;
+    await expect(admit('t-1')).rejects.toThrow('redis is not answering');
+    // The drain loop catches this and logs a failed claim, so nothing else would ever give the slot
+    // back: it would be burned on this owner for the life of the process -- and the counter is
+    // shared with sync `/turn`, so enough blips would refuse their interactive turns too.
+    expect(subjects.inFlight(OWNER)).toBe(0);
+  });
+
+  it('holds one per-worker slot per admitted delivery, and none when the cap refuses it', async () => {
+    const subjects = new SubjectCounter();
+    const t = turns(async () => 2);
+    const admit = ownerAdmission({ turns: t, subjects, subjectCap: 2, runningCap: 1 })!;
+    // Over the cluster-wide cap. The script already removed this turn's member, so the hook must
+    // NOT release it a second time -- that would free the slot of whichever delivery is running.
+    expect(await admit('t-1')).toBeNull();
+    expect(subjects.inFlight(OWNER)).toBe(0);
+    expect(t.releaseRunningSlot).not.toHaveBeenCalled();
+
+    const under = turns(async () => 1);
+    const ok = ownerAdmission({ turns: under, subjects, subjectCap: 2, runningCap: 1 })!;
+    const release = await ok('t-2');
+    expect(subjects.inFlight(OWNER)).toBe(1);
+    await release!();
+    expect(subjects.size).toBe(0);
+    expect(under.releaseRunningSlot).toHaveBeenCalledWith(OWNER, 't-2');
   });
 });
 

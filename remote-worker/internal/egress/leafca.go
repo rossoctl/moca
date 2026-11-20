@@ -156,10 +156,3 @@ func (ca *LeafCA) Leaf(host string) (*tls.Certificate, error) {
 	ca.cache[host] = &leafEntry{cert: c, notAfter: notAfter, refreshAt: refreshAt}
 	return c, nil
 }
-
-// cached reports how many hosts have a leaf in the cache (tests).
-func (ca *LeafCA) cached() int {
-	ca.mu.Lock()
-	defer ca.mu.Unlock()
-	return len(ca.cache)
-}

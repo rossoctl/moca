@@ -164,11 +164,11 @@ has 'exec last hour: 20 calls, p50 10 ms, p95 19 ms, errors 0%'
 pass 'cluster: p50 and p95 are nearest-rank'
 
 # 3. What it cannot reach is reported, and the run still exits 0.
-for word in exec logs configmap; do
+for word in logs configmap; do
   MOCK_FAIL=$word bash "$STATUS" --env-file "$TMP/sbx.env" >"$TMP/out" 2>&1 || fail "MOCK_FAIL=$word: exited $?"
   grep -q ': unavailable' "$TMP/out" || fail "MOCK_FAIL=$word: nothing reported as unavailable"
 done
-MOCK_FAIL="exec" bash "$STATUS" --env-file "$TMP/sbx.env" >"$TMP/out" 2>&1
+MOCK_FAIL="exec" bash "$STATUS" --env-file "$TMP/sbx.env" >"$TMP/out" 2>&1 || fail "MOCK_FAIL=exec: exited $?"
 has 'workers attached: unavailable (kubectl exec redis-cli failed)'
 has 'sandboxes live: unavailable (kubectl exec redis-cli failed)'
 # redis-cli can print an error on stdout and still exit 0: it is not a worker list.

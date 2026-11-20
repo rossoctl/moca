@@ -55,7 +55,8 @@ spec:
         - name: credential-store
           persistentVolumeClaim: { claimName: moca-credentials }
         # Every credential BOTH profiles need, each a file in /run/credentials: the harness's KEK and
-        # exchange token, SBX0's janitor token, the host agents' tokens, and egress (optional). The
+        # exchange token, SBX0's janitor and installer tokens, the OIDC client secret (optional), the host
+        # agents' tokens, and egress (optional). The
         # template-store component REPLACES this projected volume's source list with SBX0's alone,
         # so this patch, applied after it, restates the whole combined list.
         - name: credentials
@@ -69,6 +70,16 @@ spec:
                     - { key: SH_CREDENTIAL_KEK, path: SH_CREDENTIAL_KEK }
                     - { key: SH_EXCHANGE_TOKEN, path: SH_EXCHANGE_TOKEN }
                     - { key: SH_JANITOR_TOKEN, path: SH_JANITOR_TOKEN }
+                    # The operator's static bearer for the members routes (setup.sh keeps it on both
+                    # profiles), as in ocp-sbx.
+                    - { key: SH_INSTALLER_TOKEN, path: SH_INSTALLER_TOKEN }
+              # The OIDC client secret (SBX_IDENTITY_PROVIDER=oidc), optional as in ocp-sbx: a GitHub
+              # deployment has no moca-oidc Secret and renders exactly as before.
+              - secret:
+                  name: moca-oidc
+                  optional: true
+                  items:
+                    - { key: SH_OIDC_CLIENT_SECRET, path: SH_OIDC_CLIENT_SECRET }
               - secret: { name: sbx-egress, optional: true }
               - secret: { name: sbx-template-hosts }
               - secret:

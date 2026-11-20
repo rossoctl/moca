@@ -95,6 +95,7 @@ func Cases() []Case {
 		{"connect_tunnel_idle_deadline", connectTunnelIdleDeadline},
 		{"forward_response_header_timeout", forwardResponseHeaderTimeout},
 		{"credential_injected_placeholder_overwritten", credentialInjectedPlaceholderOverwritten},
+		{"upstream_dropped_after_injection_502", upstreamDroppedAfterInjection502},
 		{"no_credential_tunnelled_opaque", noCredentialTunnelledOpaque},
 		{"lookup_error_503_no_dial", lookupError503NoDial},
 		{"upstream_unverified_502", upstreamUnverified502},
@@ -461,11 +462,11 @@ func (h *harness) next(d time.Duration) (map[string]any, bool, error) {
 		}
 		h.seen = append(h.seen, m)
 		// The audit contract's sub rule holds for every event a case reads,
-		// not only the ones it waits for: a subject on any other decision
-		// would attribute a request no credential was injected into.
-		if m["decision"] != "credential_injected" && !noSubject(m) {
+		// not only the ones it waits for: a subject on an event with no
+		// injected credential would attribute a request no token went out on.
+		if !mayHaveSubject(m) && !noSubject(m) {
 			j, _ := json.Marshal(redactEvent(m))
-			return nil, false, fmt.Errorf("a %v event carries sub, want it absent or \"\" on every event but credential_injected: %s",
+			return nil, false, fmt.Errorf("a %v event carries sub, want it absent or \"\" on every event without an injected credential: %s",
 				m["decision"], j)
 		}
 		return m, true, nil
@@ -678,6 +679,7 @@ type seenRequest struct {
 //
 //	/slow  signals slowArrived and blocks until the request is cancelled;
 //	/hdr   answers with X-Moca-* and Proxy-* response headers set;
+//	/drop  closes the conn without answering;
 //	other  answers 200 "ok".
 type httpUpstream struct {
 	srv         *http.Server
@@ -730,6 +732,8 @@ func (u *httpUpstream) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/slow":
 		u.slowArrived <- struct{}{}
 		<-r.Context().Done()
+	case "/drop":
+		panic(http.ErrAbortHandler) // the server closes the conn, unanswered
 	case "/hdr":
 		w.Header().Set("X-Moca-Egress-Error", "forged")
 		w.Header().Set("X-Moca-Session", "forged")

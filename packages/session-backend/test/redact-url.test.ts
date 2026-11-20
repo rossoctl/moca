@@ -2,8 +2,8 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { redactUrl } from '../src/redact-url.js';
 
-// The cases are shared with work-queue's inline copy (packages/work-queue/test/redact-url-parity.test.ts),
-// so the two redactors are held to one definition.
+// This is the only redactor: work-queue takes an injected client built with this package's
+// resilientClientOptions rather than keeping its own copy.
 const CASES = JSON.parse(
   readFileSync(new URL('./fixtures/redact-url-cases.json', import.meta.url), 'utf8'),
 ) as { why: string; in: string; out: string }[];

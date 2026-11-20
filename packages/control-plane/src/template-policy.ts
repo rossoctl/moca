@@ -119,7 +119,7 @@ export const QUOTA_KEYS = ['templates', 'buildsQueued', 'active', 'owned'] as co
 export const DEFAULT_OWNED = 200;
 
 /** The `owned` quota in force: the policy's, else DEFAULT_OWNED. */
-export const ownedLimit = (q: Quota): number => q.owned ?? DEFAULT_OWNED;
+const ownedLimit = (q: Quota): number => q.owned ?? DEFAULT_OWNED;
 
 export const DEFAULT_POLICY: Policy = {
   schema: POLICY_SCHEMA,
@@ -181,7 +181,7 @@ export const DEFAULT_GATE_RECORD_SCHEMA = 'moca-gate-record/1';
  * other schema (the curated family records) predates the field, and their gates ran offline: absent
  * is offline.
  */
-export function gateFloorCheckedOffline(
+function gateFloorCheckedOffline(
   gate: Record<string, unknown>,
   gateRecordSchema: string = DEFAULT_GATE_RECORD_SCHEMA,
 ): boolean {
@@ -216,7 +216,7 @@ function splitHost(name: string): [string | undefined, string[]] {
 }
 
 /** Whether `image` is a well-formed reference pinned by digest (M1); see DOMAIN_RE above. */
-export function isPinnedImage(image: string): boolean {
+function isPinnedImage(image: string): boolean {
   const at = image.indexOf('@');
   if (at < 0 || !DIGEST_RE.test(image.slice(at + 1))) return false;
   const name = image.slice(0, at);

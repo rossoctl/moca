@@ -1789,27 +1789,6 @@ describe('retire (§5.1)', () => {
     expect(await refusal(() => retireBuild(d, 't1', hash('9')))).toBe('template_not_found');
   });
 
-  it('never retires a build an active session is pinned to; deleting the session frees it', async () => {
-    const d = await setup();
-    attachedNow = ['sbx_t1'];
-    await registered(d, 't1', hash('1'), 'sbx_t1');
-    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
-    await activate(d, 't1');
-    await seedCredential(d);
-    const s = (
-      await HANDLERS.createSession!(
-        ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
-        d,
-      )
-    ).body as Body;
-    expect(s.sessionId).toEqual(expect.any(String));
-    expect(await refusal(() => retire(d, 't1'))).toBe('build_in_use');
-    expect(await refusal(() => retireBuild(d, 't1', hash('1')))).toBe('build_in_use');
-    expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
-    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: s.sessionId } }), d);
-    expect((await retire(d, 't1')).status).toBe(200);
-  });
-
   it("prunes a pinned session that ended without the cascade's removal; an active one still blocks", async () => {
     const d = await setup();
     attachedNow = ['sbx_t1'];
@@ -2076,33 +2055,6 @@ describe('retire (§5.1)', () => {
     expect(q.active.used).toBe(0);
   });
 
-  it('a retire waits for an activation taking its lease, then drops that lease', async () => {
-    const d = await setup();
-    attachedNow = [];
-    await registered(d, 't1', hash('1'), 'sbx_t1');
-    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
-    // A retire arrives while the activation is between its checks and its lease write (its
-    // `activate` record is written first). Under the lock the retire waits for the lease, then
-    // drops it; without it, the retire would finish first and the lease land on a retired build.
-    const prov = d.provenance!;
-    const append = prov.append.bind(prov);
-    let retiring: Promise<unknown> | null = null;
-    prov.append = async (input) => {
-      const rec = await append(input);
-      if (input.kind === 'activate' && !retiring) {
-        retiring = retire(d, 't1');
-        await Promise.race([retiring, new Promise((r) => setTimeout(r, 200))]);
-      }
-      return rec;
-    };
-    expect((await activate(d, 't1')).status).toBe(200);
-    await retiring;
-    expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
-      status: 'retired',
-      leases: [],
-    });
-  });
-
   it("refuses another subject and a bad reason; an admin may retire anyone's", async () => {
     const d = await setup();
     attachedNow = [];
@@ -2273,57 +2225,75 @@ describe('reject after the fact (§5.2)', () => {
     expect((await reject(d, 't1', hash('1'), { reason: 'broken' })).status).toBe(200);
   });
 
-  it('never rejects a build an active session is pinned to (409 build_in_use)', async () => {
-    const d = await setup();
-    attachedNow = ['sbx_t1'];
-    await registered(d, 't1', hash('1'), 'sbx_t1');
-    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
-    await activate(d, 't1');
-    await seedCredential(d);
-    const s = (
-      await HANDLERS.createSession!(
-        ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
-        d,
-      )
-    ).body as Body;
-    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: 'broken' }))).toBe(
-      'build_in_use',
-    );
-    expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
-    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: s.sessionId } }), d);
-    expect((await reject(d, 't1', hash('1'), { reason: 'broken' })).status).toBe(200);
-  });
-
-  it('a reject waits for an activation taking its lease, then drops that lease', async () => {
-    const d = await setup();
-    attachedNow = [];
-    await registered(d, 't1', hash('1'), 'sbx_t1');
-    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
-    // A reject arrives while the activation is between its checks and its lease write: under the
-    // activation lock it waits for the lease, then drops it.
-    const prov = d.provenance!;
-    const append = prov.append.bind(prov);
-    let rejecting: Promise<unknown> | null = null;
-    prov.append = async (input) => {
-      const rec = await append(input);
-      if (input.kind === 'activate' && !rejecting) {
-        rejecting = reject(d, 't1', hash('1'), { reason: 'broken' });
-        await Promise.race([rejecting, new Promise((r) => setTimeout(r, 200))]);
-      }
-      return rec;
-    };
-    expect((await activate(d, 't1')).status).toBe(200);
-    await rejecting;
-    expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
-      status: 'rejected',
-      leases: [],
-    });
-    expect((await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body).toMatchObject({
-      active: { used: 0 },
-    });
-  });
-
   for (const how of ['reject', 'retire'] as const) {
+    // A reject ends t1's one build; a retire, the whole template (and, through retireTemplateBuild,
+    // the one build).
+    const ends = (d: TestDeps): (() => Promise<{ status: number }>)[] =>
+      how === 'reject'
+        ? [() => reject(d, 't1', hash('1'), { reason: 'broken' })]
+        : [
+            () =>
+              HANDLERS.retireTemplate!(
+                ctx({ principal: alice, params: { id: 't1' }, body: {} }),
+                d,
+              ),
+            () =>
+              HANDLERS.retireTemplateBuild!(
+                ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+                d,
+              ),
+          ];
+
+    it(`never ${how}s a build an active session is pinned to (409 build_in_use); deleting the session frees it`, async () => {
+      const d = await setup();
+      attachedNow = ['sbx_t1'];
+      await registered(d, 't1', hash('1'), 'sbx_t1');
+      await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+      await activate(d, 't1');
+      await seedCredential(d);
+      const s = (
+        await HANDLERS.createSession!(
+          ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
+          d,
+        )
+      ).body as Body;
+      expect(s.sessionId).toEqual(expect.any(String));
+      for (const end of ends(d)) expect(await refusal(end)).toBe('build_in_use');
+      expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
+      await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: s.sessionId } }), d);
+      expect((await ends(d)[0]!()).status).toBe(200);
+    });
+
+    it(`a ${how} waits for an activation taking its lease, then drops that lease`, async () => {
+      const d = await setup();
+      attachedNow = [];
+      await registered(d, 't1', hash('1'), 'sbx_t1');
+      await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+      // The end arrives while the activation is between its checks and its lease write (its
+      // `activate` record is written first). Under the activation lock it waits for the lease, then
+      // drops it; without the lock, it would finish first and the lease land on an ended build.
+      const prov = d.provenance!;
+      const append = prov.append.bind(prov);
+      let ending: Promise<unknown> | null = null;
+      prov.append = async (input) => {
+        const rec = await append(input);
+        if (input.kind === 'activate' && !ending) {
+          ending = ends(d)[0]!();
+          await Promise.race([ending, new Promise((r) => setTimeout(r, 200))]);
+        }
+        return rec;
+      };
+      expect((await activate(d, 't1')).status).toBe(200);
+      await ending;
+      expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
+        status: how === 'reject' ? 'rejected' : 'retired',
+        leases: [],
+      });
+      expect((await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body).toMatchObject({
+        active: { used: 0 },
+      });
+    });
+
     it(`a ${how} judges live use on the template as it is under its locks, not as first read`, async () => {
       const d = await setup();
       attachedNow = ['sbx_t1'];

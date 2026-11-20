@@ -1,5 +1,6 @@
 # shellcheck shell=bash
-# deploy/sbx/lib.sh -- shared by deploy/sbx/setup.sh and deploy/sbx/status.sh, which source it.
+# deploy/sbx/lib.sh -- shared by deploy/sbx/setup.sh, deploy/sbx/status.sh and
+# deploy/sbx/template-onboarding/template-register.sh, which source it.
 # Not executable on its own. The caller defines die() (its own message prefix) and USAGE (its one
 # usage line) before calling parse_args.
 

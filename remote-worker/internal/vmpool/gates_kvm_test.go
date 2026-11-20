@@ -572,6 +572,10 @@ func TestGateReclaimThenRedispatch(t *testing.T) {
 	if out.out() != "redispatched" {
 		t.Fatalf("post-Reclaim Exec output = %q, want %q (fake launcher echoes Command verbatim)", out.out(), "redispatched")
 	}
+	// Idempotent: reclaiming an unknown key is not an error.
+	if err := p.Reclaim(context.Background(), "run-zzz"); err != nil {
+		t.Fatalf("Reclaim of an unknown key: %v", err)
+	}
 }
 
 // Spec §8: "A VM's date +%s is within a second of the host's — catches §5.3's wall-clock

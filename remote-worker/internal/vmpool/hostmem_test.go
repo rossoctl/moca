@@ -7,7 +7,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// invalidateMemAvailableCache drops the cached MemAvailable so the next
+// cachedMemAvailable re-reads the seam. Production
+// never forces a read that is at most memAvailableTTL away anyway.
+func invalidateMemAvailableCache() {
+	memCacheMu.Lock()
+	defer memCacheMu.Unlock()
+	memCacheAt = time.Time{}
+}
 
 func TestReadMemAvailableFrom(t *testing.T) {
 	const meminfo = "MemTotal:       16303428 kB\n" +

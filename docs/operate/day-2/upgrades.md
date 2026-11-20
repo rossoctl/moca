@@ -131,6 +131,13 @@ rule 5).
   the combined profile the exchange token and the credential KEK), so deleting a key and re-running `setup.sh`
   rotates it and rolls the pods that read it. The first `setup.sh` run after the upgrade rolls the control plane
   once (and, on the combined profile, the supervisor), even with no other change.
+- **On the combined profile, the installer token becomes live
+  ([#938](https://github.com/rossoctl/moca/issues/938)).** `deploy/sbx/setup.sh` already generates `SH_INSTALLER_TOKEN`
+  into `moca-mu1` on both profiles; from this upgrade the combined control plane mounts and reads it, so a combined
+  deployment that ran that `setup.sh` gains a working members-API bearer (the `/v1/subjects*` routes, as a settings
+  admin). It can grant the admin role (`PUT /v1/subjects/{subject}/roles/admin`), so it reaches admin powers in one
+  indirect step through that subject's own login: treat it as admin-equivalent. If the generated token may have been shared, rotate it (delete the key and re-run `setup.sh`) before
+  upgrading; the mount needs the key present, so leave one in place.
 - **A turn is told when its session's workspace was reset
   ([#338](https://github.com/rossoctl/moca/issues/338)).** The harness keeps a `.moca-session` marker in each
   session's workspace and checks it at every turn's start: one extra Exec per turn, about 2 ms on the container
