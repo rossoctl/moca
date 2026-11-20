@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moca: the harness and the sandbox · moca</title>
+<meta name="description" content="Interactive walkthrough of moca: the harness runs the agent, the sandbox service runs its commands, and both share one relay, one kind of sandbox worker and one control plane.">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Layout: one step-through stage up top, quiet reference cards below.
+     Blue = request / data, teal = control / config, amber = lifecycle, red = end, green = result. */
+  :root{
+    --bg:#f4f6f8; --fg:#1b2530; --muted:#5b6a79; --line:#dbe2e9; --panel:#ffffff;
+    --accent:#0f766e; --accent-soft:rgba(15,118,110,.08);
+    --c-bg:#f4f6f8; --c-panel:#ffffff; --c-fg:#1b2530; --c-muted:#5b6a79; --c-line:#c9d3dd;
+    --c-async:#b45309; --c-sync:#1d4ed8; --c-danger:#b91c1c; --c-ok:#15803d; --c-accent:#0f766e;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0c1219; --fg:#e6edf3; --muted:#8fa0af; --line:#20303f; --panel:#121b26;
+      --accent:#3fc1b0; --accent-soft:rgba(63,193,176,.10);
+      --c-bg:#0c1219; --c-panel:#121b26; --c-fg:#e6edf3; --c-muted:#8fa0af; --c-line:#2a3b4d;
+      --c-async:#f59e0b; --c-sync:#6ea8ff; --c-danger:#f87171; --c-ok:#4ade80; --c-accent:#3fc1b0;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1219; --fg:#e6edf3; --muted:#8fa0af; --line:#20303f; --panel:#121b26;
+    --accent:#3fc1b0; --accent-soft:rgba(63,193,176,.10);
+    --c-bg:#0c1219; --c-panel:#121b26; --c-fg:#e6edf3; --c-muted:#8fa0af; --c-line:#2a3b4d;
+    --c-async:#f59e0b; --c-sync:#6ea8ff; --c-danger:#f87171; --c-ok:#4ade80; --c-accent:#3fc1b0;
+    color-scheme: dark;
+  }
+  html{background:var(--bg)}
+  body{
+    background:var(--bg); color:var(--fg);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",sans-serif;
+    margin:0; padding-left:max(16px,env(safe-area-inset-left,0px)); padding-right:max(16px,env(safe-area-inset-right,0px));
+  }
+  .mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace}
+  .muted{color:var(--muted)}
+  .accent{color:var(--accent)}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px}
+  .chip{border:1px solid var(--line); border-radius:6px; padding:2px 8px; font-size:11px; color:var(--muted)}
+  .eyebrow{font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); font-weight:600}
+  .btn{
+    border:1px solid var(--line); background:var(--panel); color:var(--fg);
+    border-radius:8px; padding:8px 16px; font-size:14px; font-weight:500; cursor:pointer;
+  }
+  .btn:hover:not(:disabled){border-color:var(--accent); color:var(--accent)}
+  .btn:disabled{opacity:.4; cursor:default}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  .btn.primary:hover{opacity:.9; color:#fff}
+  .btn:focus-visible,.dot:focus-visible,.tabbtn:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  .dot{width:10px; height:10px; border-radius:50%; border:1.5px solid var(--muted); background:transparent; cursor:pointer; padding:0}
+  .dot.on{background:var(--accent); border-color:var(--accent)}
+  .tabbtn{padding:8px 14px; font-size:13px; font-weight:500; background:var(--panel); color:var(--muted); border:0; cursor:pointer}
+  .tabbtn.on{background:var(--accent); color:#fff}
+  .legend-sw{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:-1px}
+  canvas{display:block; width:100%}
+  a{color:var(--accent)}
+  .stepnum{font-variant-numeric:tabular-nums}
+  #stepWire{border-left:3px solid var(--accent)}
+  #stepWire > div{padding:1px 0}
+  .ref h3{font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); font-weight:600}
+</style>
+</head>
+<body>
+<noscript><p style="margin:16px;color:#b42318">This page needs JavaScript: the steps are built by script.</p></noscript>
+<div class="max-w-5xl mx-auto px-0 pb-16">
+
+  <header class="pt-10 pb-6">
+    <p class="eyebrow">moca · harness + sandbox · v0.11.0</p>
+    <h1 class="text-3xl sm:text-4xl font-bold mt-2 tracking-tight">Moca: the harness and the sandbox</h1>
+    <p class="muted mt-3 max-w-2xl leading-relaxed">moca runs AI coding agents safely and at scale. It has two
+      capabilities. The harness runs the agent itself, in long-lived sessions on a warm worker pool. The sandbox
+      service runs the agent's commands while the agent stays on your laptop. Both use the same relay, the same
+      sandbox workers and one control plane. Press Next for one step. Press Prev to go back one step. The wire box
+      below the stage shows the messages of the current step. The messages stay until you move on. Use the tabs to
+      change the flow.</p>
+    <p class="muted" style="margin-top:10px;font-size:13px"><a href="https://www.rossoctl.dev/moca/" target="_blank" rel="noopener">&lsaquo; moca docs</a> · written pages: <a href="https://www.rossoctl.dev/moca/harness/concepts/brain-and-hands" target="_blank" rel="noopener">Brain and hands</a>, <a href="https://www.rossoctl.dev/moca/harness/concepts/sessions-and-turns" target="_blank" rel="noopener">Sessions and turns</a>, <a href="https://www.rossoctl.dev/moca/harness/concepts/sandboxes-and-tiers" target="_blank" rel="noopener">Sandboxes and tiers</a></p>
+  </header>
+
+  <section class="card overflow-hidden">
+    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 px-4 pt-3 pb-2 border-b" style="border-color:var(--line)">
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-sync)"></span>request / data</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-accent)"></span>control / token</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-async)"></span>lifecycle / lease</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-danger)"></span>end</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-ok)"></span>result</span>
+    </div>
+    <div class="px-2 pt-2"><canvas id="stage" aria-label="Step-through diagram of moca: the agent or client, the supervisor, the warm workers, Redis, the control plane, the relay, the sandbox, a microVM and the workspace."></canvas></div>
+    <div class="px-5 pb-5">
+      <div class="flex flex-wrap items-center gap-3 pt-2">
+        <div class="flex rounded-lg overflow-hidden border" style="border-color:var(--line)">
+          <button id="tabHarness" class="tabbtn on">A harness turn</button>
+          <button id="tabSandbox" class="tabbtn">The sandbox service</button>
+          <button id="tabShared" class="tabbtn">One control plane</button>
+        </div>
+        <button id="prev" class="btn" aria-label="Previous step">&#8249; Prev</button>
+        <button id="next" class="btn primary">Next &#8250;</button>
+        <button id="play" class="btn" aria-label="Play all steps">&#9654; Play</button>
+        <div id="dots" class="flex items-center gap-2 ml-1" role="tablist" aria-label="Steps"></div>
+        <span id="stepNum" class="ml-auto mono text-sm muted stepnum"></span>
+      </div>
+      <div class="mt-4 pt-4 border-t" style="border-color:var(--line)">
+        <h2 id="stepTitle" class="text-lg font-semibold"></h2>
+        <div id="stepWire" class="mono text-[12.5px] leading-relaxed mt-3 pl-3 py-1 card"></div>
+        <p id="stepBody" class="muted mt-3 text-[15px] leading-relaxed max-w-3xl"></p>
+        <div id="stepChips" class="flex flex-wrap gap-2 mt-3"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mt-12">
+    <p class="eyebrow">The decision</p>
+    <blockquote class="mt-3 text-xl sm:text-2xl font-medium leading-snug max-w-3xl border-l-4 pl-5" style="border-color:var(--accent)">
+      Keep the agent's commands away from the agent's process. The two capabilities differ only in where the agent
+      runs. The harness keeps the agent in a warm worker. The sandbox service keeps it on your laptop.
+    </blockquote>
+    <p class="muted mt-3 max-w-3xl text-[15px] leading-relaxed">This is the positioning on the
+      <a href="https://www.rossoctl.dev/moca/" target="_blank" rel="noopener">moca overview</a>. Use one capability
+      alone, or both together on one control plane with the <span class="mono text-[13px]">combined</span> profile.</p>
+  </section>
+
+  <section class="mt-12 grid gap-4 sm:grid-cols-2 ref">
+    <div class="card p-5">
+      <h3>Which one do I want?</h3>
+      <ul class="mt-3 space-y-2 text-[14px] leading-relaxed">
+        <li><strong>Sandbox service:</strong> a coding agent on your laptop edits and tests code without running anything on the laptop; get a reviewable patch back.</li>
+        <li><strong>Harness:</strong> run many agent sessions on a few warm processes, resumable after a restart; dispatch units of work over HTTP.</li>
+        <li><strong>Both:</strong> with <span class="mono text-[12.5px]">SH_ROUTE_PROFILE=combined</span>, one deployment serves sessions and sandboxes from one template store.</li>
+      </ul>
+    </div>
+    <div class="card p-5">
+      <h3>What the harness keeps</h3>
+      <dl class="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[13px]">
+        <dt class="muted">session</dt><dd>append-only log in Redis, resumable by <span class="mono text-[12.5px]">sessionId</span></dd>
+        <dt class="muted">turn</dt><dd>one exchange; <span class="mono text-[12.5px]">POST /v1/turn</span> (alias <span class="mono text-[12.5px]">/turn</span>)</dd>
+        <dt class="muted">lease</dt><dd>short-lived Redis entry, heartbeat, 60 s expiry</dd>
+        <dt class="muted">affinity</dt><dd>a session stays on its sandbox, so the workspace is still there</dd>
+        <dt class="muted">worker</dt><dd>one process serves many sessions, up to <span class="mono text-[12.5px]">SH_TURNS_PER_WORKER</span></dd>
+      </dl>
+    </div>
+    <div class="card p-5">
+      <h3>The shared parts</h3>
+      <ul class="mt-3 space-y-2 text-[14px] leading-relaxed">
+        <li>One relay. Sandbox workers dial <em>out</em> and hold an <span class="mono text-[12.5px]">Attach</span> stream, so no sandbox needs an inbound route.</li>
+        <li>Two tiers for both capabilities: a container, or a fresh Firecracker microVM per <span class="mono text-[12.5px]">Exec</span>.</li>
+        <li>One control plane. <span class="mono text-[12.5px]">SH_ROUTE_PROFILE</span> picks <span class="mono text-[12.5px]">harness</span>, <span class="mono text-[12.5px]">sandbox</span> or <span class="mono text-[12.5px]">combined</span>.</li>
+      </ul>
+    </div>
+    <div class="card p-5">
+      <h3>Two different sandboxes</h3>
+      <p class="mt-3 text-[14px] leading-relaxed">A harness session runs its tools in the harness's own sandbox.
+        A sandbox-service workspace is a separate thing. <span class="mono text-[12.5px]">mocactl sbx</span> commands
+        neither see nor manage a harness session's sandbox.</p>
+      <p class="muted mt-3 text-[12.5px] leading-relaxed">Not a fit today: a sandbox service on your laptop (it needs
+        OpenShift and a KVM host), scheduled dispatch (no P6 design yet, #536), and a hosted service (moca is
+        self-hosted only).</p>
+    </div>
+  </section>
+
+  <footer class="mt-10 text-[11.5px] leading-relaxed muted">
+    Sources: <a href="https://github.com/rossoctl/moca/blob/main/docs/harness/concepts/brain-and-hands.md" target="_blank" rel="noopener">Brain and hands</a>,
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/harness/concepts/sessions-and-turns.md" target="_blank" rel="noopener">Sessions and turns</a>,
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/harness/concepts/sandboxes-and-tiers.md" target="_blank" rel="noopener">Sandboxes and tiers</a>,
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/api/client-guide.md" target="_blank" rel="noopener">Build a client</a>,
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/adrs/0034-vm-process-manager-socket-handoff.md" target="_blank" rel="noopener">ADR-0034</a>,
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/adrs/0035-per-exec-microvm-warm-standby.md" target="_blank" rel="noopener">ADR-0035</a>.
+    <span>status: built (v0.11.0), Preview.</span>
+    The animation is illustrative: step numbers are not wire message ids. Tailwind CSS loads from
+    <span class="mono">cdn.tailwindcss.com</span>; everything else is in this file.
+  </footer>
+</div>
+
+<script>
+(function(){
+"use strict";
+var $ = function(s){ return document.querySelector(s); };
+var canvas = $('#stage');
+var ctx = canvas.getContext('2d');
+
+var LW = 1000, LH = 640;
+var viewScale = 1;
+
+/* ---------- geometry ---------- */
+var G = {
+  agent:  {x:16,  y:44,  w:180, h:104},
+  mcp:    {x:16,  y:176, w:180, h:104},
+  client: {x:16,  y:308, w:180, h:104},
+  cp:     {x:212, y:44,  w:180, h:104},
+  pool:   {x:212, y:176, w:180, h:104},
+  sup:    {x:212, y:308, w:180, h:104},
+  redis:  {x:408, y:44,  w:176, h:104},
+  relay:  {x:408, y:176, w:176, h:104},
+  sbx:    {x:600, y:176, w:196, h:120},
+  vm:     {x:600, y:320, w:196, h:120},
+  ws:     {x:600, y:464, w:196, h:70}
+};
+var LAPTOP  = {x:4,   y:28,  w:192, h:396, label:'your laptop'};
+var SERVICE = {x:200, y:28,  w:392, h:396, label:'moca service', note:'k8s · VM · Compose'};
+var HOST    = {x:592, y:160, w:214, h:390, label:'sandbox host', note:'dials out · no inbound route'};
+
+/* ---------- theme colors ---------- */
+var C = {};
+function readColors(){
+  var cs = getComputedStyle(document.documentElement);
+  ['bg','panel','fg','muted','line','async','sync','danger','ok','accent'].forEach(function(k){
+    C[k] = cs.getPropertyValue('--c-' + k).trim();
+  });
+}
+readColors();
+var themeMq = matchMedia('(prefers-color-scheme: dark)');
+if (themeMq.addEventListener) themeMq.addEventListener('change', readColors);
+else if (themeMq.addListener) themeMq.addListener(readColors);
+var rmMq = matchMedia('(prefers-reduced-motion: reduce)');
+function reduced(){ return rmMq.matches; }
+
+/* ---------- sizing ---------- */
+function resize(){
+  var w = canvas.parentElement.clientWidth - 16 || canvas.clientWidth;
+  var dpr = window.devicePixelRatio || 1;
+  var cssH = w * LH / LW;
+  canvas.style.height = cssH + 'px';
+  canvas.width  = Math.max(1, Math.round(w * dpr));
+  canvas.height = Math.max(1, Math.round(cssH * dpr));
+  viewScale = canvas.width / LW;
+}
+window.addEventListener('resize', resize);
+
+/* ---------- helpers ---------- */
+function clamp01(v){ return v < 0 ? 0 : v > 1 ? 1 : v; }
+function ease(t){ return t < .5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2; }
+function seg(t, a, b){ return clamp01((t - a) / (b - a)); }
+function rr(x, y, w, h, r){
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function pathLen(p){
+  var L = 0;
+  for (var i = 1; i < p.length; i++) L += Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
+  return L;
+}
+function pointAt(p, d){
+  var acc = 0;
+  for (var i = 1; i < p.length; i++){
+    var sl = Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
+    if (d <= acc + sl){
+      var u = (d - acc) / sl;
+      return [ p[i-1][0] + (p[i][0]-p[i-1][0])*u, p[i-1][1] + (p[i][1]-p[i-1][1])*u ];
+    }
+    acc += sl;
+  }
+  return p[p.length-1];
+}
+function rev(p){ return p.slice().reverse(); }
+function strokePath(p){
+  ctx.beginPath();
+  ctx.moveTo(p[0][0], p[0][1]);
+  for (var i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+  ctx.stroke();
+}
+
+/* ---------- wire paths ---------- */
+var P = {
+  'agent-mcp':   [[106,148],[106,176]],
+  'mcp-cp':      [[196,228],[204,228],[204,148]],
+  'mcp-relay':   [[196,250],[202,250],[202,296],[396,296],[396,262],[408,262]],
+  'client-sup':  [[196,360],[212,360]],
+  'sup-pool':    [[302,308],[302,280]],
+  'pool-redis':  [[392,200],[400,200],[400,120],[404,120],[404,96],[408,96]],
+  'pool-relay':  [[392,228],[408,228]],
+  'relay-sbx':   [[584,228],[600,228]],
+  'sbx-vm':      [[698,296],[698,320]],
+  'vm-ws':       [[698,440],[698,464]],
+  'cp-redis':    [[392,96],[408,96]]
+};
+
+/* ---------- packet ---------- */
+function packet(p, t, label, color){
+  var u = ease(clamp01(t));
+  if (u <= 0) return;
+  var pos = pointAt(p, u * pathLen(p));
+  ctx.font = '500 11px "IBM Plex Mono", monospace';
+  var w = ctx.measureText(label).width + 16, h = 20;
+  rr(pos[0] - w/2, pos[1] - h/2, w, h, 5);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.fillText(label, pos[0] - w/2 + 8, pos[1] + 3.5);
+}
+function packetSeg(key, t, a, b, label, color){
+  var u = seg(t, a, b);
+  if (u > 0) packet(P[key], u, label, color);
+}
+function tiny(text, x, y, align){
+  ctx.font = '400 10px "IBM Plex Mono", monospace';
+  ctx.fillStyle = C.muted;
+  ctx.textAlign = align || 'left';
+  ctx.fillText(text, x, y);
+  ctx.textAlign = 'left';
+}
+function chip(text, x, y, w, color){
+  rr(x, y, w, 22, 5);
+  ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.fillStyle = color; ctx.font = '500 10px "IBM Plex Mono", monospace';
+  ctx.fillText(text, x + 8, y + 15);
+}
+
+/* ---------- scene ---------- */
+var scene;
+function freshScene(){
+  return {
+    profile: 'combined',
+    session: 'none',       /* none | open */
+    lease: 'none',         /* none | held */
+    handoff: false,
+    workerBusy: false,
+    token: 'none',         /* none | session | sandbox */
+    sandbox: 'none',       /* none | container | vm */
+    vm: 'none',            /* none | running | gone */
+    exec: null,
+    phase: null,           /* null | model | stream | done */
+    route: 'all'
+  };
+}
+
+/* ---------- node drawing ---------- */
+var active = 'harness';
+function isDim(k){ return TABS[active].dim.indexOf(k) >= 0; }
+function node(k, fn){
+  ctx.globalAlpha = isDim(k) ? .32 : 1;
+  fn();
+  ctx.globalAlpha = 1;
+}
+function drawBox(g, title, sub){
+  rr(g.x, g.y, g.w, g.h, 10);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.4; ctx.stroke();
+  ctx.fillStyle = C.fg; ctx.font = '600 13px "IBM Plex Sans", sans-serif';
+  ctx.fillText(title, g.x + 14, g.y + 24);
+  if (sub){
+    ctx.fillStyle = C.muted; ctx.font = '400 10px "IBM Plex Mono", monospace';
+    ctx.fillText(sub, g.x + 14, g.y + 42);
+  }
+}
+function drawGroup(g){
+  ctx.setLineDash([5,5]);
+  rr(g.x, g.y, g.w, g.h, 12);
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.font = '600 9.5px "IBM Plex Mono", monospace';
+  ctx.fillStyle = C.muted;
+  ctx.fillText(g.label.toUpperCase(), g.x + 12, g.y + 16);
+  if (g.note){
+    ctx.font = '400 9px "IBM Plex Mono", monospace';
+    ctx.fillText(g.note, g.x + 12, g.y + g.h - 8);
+  }
+}
+function drawAgent(){
+  node('agent', function(){
+    drawBox(G.agent, 'Coding agent', null);
+    tiny('Claude Code · OpenCode · Codex', G.agent.x + 14, G.agent.y + 62);
+    tiny('runs on your laptop', G.agent.x + 14, G.agent.y + 80);
+  });
+}
+function drawMcp(){
+  node('mcp', function(){
+    drawBox(G.mcp, 'mocactl sbx mcp', null);
+    tiny('MCP server · stdio', G.mcp.x + 14, G.mcp.y + 62);
+    if (scene.token === 'sandbox') chip('sandbox token', G.mcp.x + 14, G.mcp.y + 68, 96, C.accent);
+    else tiny('one tool call → one Exec', G.mcp.x + 14, G.mcp.y + 80);
+  });
+}
+function drawClient(){
+  node('client', function(){
+    drawBox(G.client, 'Client / orchestrator', null);
+    tiny('mocactl · HTTP client', G.client.x + 14, G.client.y + 62);
+    if (scene.token === 'session') chip('session token', G.client.x + 14, G.client.y + 68, 96, C.accent);
+    else tiny('POST /v1/turn · /v1/runs', G.client.x + 14, G.client.y + 80);
+  });
+}
+function drawCp(){
+  node('cp', function(){
+    drawBox(G.cp, 'Control plane', null);
+    tiny('tokens · ownership · templates', G.cp.x + 14, G.cp.y + 62);
+    chip('SH_ROUTE_PROFILE=' + scene.profile, G.cp.x + 14, G.cp.y + 68, 160, C.accent);
+  });
+}
+function drawPool(){
+  node('pool', function(){
+    drawBox(G.pool, 'Warm workers', null);
+    tiny('Pi agent loop · many sessions', G.pool.x + 14, G.pool.y + 62);
+    var x = G.pool.x + 14;
+    if (scene.session === 'open'){ chip('session ✓', x, G.pool.y + 68, 72, C.ok); x += 78; }
+    if (scene.workerBusy) chip('turn · busy', x, G.pool.y + 68, 80, C.async);
+  });
+}
+function drawSup(){
+  node('sup', function(){
+    drawBox(G.sup, 'Supervisor', null);
+    tiny('L4 listener · admission', G.sup.x + 14, G.sup.y + 62);
+    if (scene.handoff) chip('fd handed off', G.sup.x + 14, G.sup.y + 68, 96, C.accent);
+    else tiny('never touches a response byte', G.sup.x + 14, G.sup.y + 80);
+  });
+}
+function drawRedis(){
+  node('redis', function(){
+    drawBox(G.redis, 'Redis', null);
+    tiny('sessions · leases · presence', G.redis.x + 14, G.redis.y + 62);
+    var x = G.redis.x + 14;
+    if (scene.session === 'open'){ chip('session:<sid>', x, G.redis.y + 68, 100, C.ok); x += 106; }
+    if (scene.lease === 'held') chip('lease', x, G.redis.y + 68, 46, C.async);
+  });
+}
+function drawRelay(){
+  node('relay', function(){
+    drawBox(G.relay, 'Relay', null);
+    tiny('routes one Exec · shared', G.relay.x + 14, G.relay.y + 62);
+    chip('SandboxExec ↔ Attach', G.relay.x + 14, G.relay.y + 68, 140, C.accent);
+  });
+}
+function drawSbx(){
+  node('sbx', function(){
+    var title = active === 'sandbox' ? 'Sandbox worker' : 'Sandbox';
+    drawBox(G.sbx, title, null);
+    tiny('container · remote-worker', G.sbx.x + 14, G.sbx.y + 62);
+    tiny('dials out to the relay', G.sbx.x + 14, G.sbx.y + 80);
+    if (scene.sandbox !== 'none') chip(scene.sandbox === 'vm' ? 'microVM tier' : 'container tier', G.sbx.x + 14, G.sbx.y + 88, 100, C.async);
+  });
+}
+function drawVm(){
+  node('vm', function(){
+    var g = G.vm;
+    if (scene.vm === 'none'){
+      ctx.globalAlpha *= .55;
+      rr(g.x, g.y, g.w, g.h, 10);
+      ctx.fillStyle = C.panel; ctx.fill();
+      ctx.setLineDash([5,5]);
+      ctx.strokeStyle = C.line; ctx.lineWidth = 1.4; ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = C.muted; ctx.font = '500 12px "IBM Plex Mono", monospace';
+      ctx.fillText('no microVM', g.x + 14, g.y + 26);
+      ctx.font = '400 10px "IBM Plex Mono", monospace';
+      ctx.fillText('the microVM tier starts one per Exec', g.x + 14, g.y + 46);
+      return;
+    }
+    if (scene.vm === 'gone'){
+      ctx.globalAlpha = .85;
+      rr(g.x, g.y, g.w, g.h, 10);
+      ctx.fillStyle = C.panel; ctx.fill();
+      ctx.setLineDash([5,5]);
+      ctx.strokeStyle = C.danger; ctx.lineWidth = 1.4; ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = C.danger; ctx.font = '500 12px "IBM Plex Mono", monospace';
+      ctx.fillText('microVM destroyed', g.x + 14, g.y + 26);
+      return;
+    }
+    rr(g.x, g.y, g.w, g.h, 10);
+    ctx.fillStyle = C.panel; ctx.fill();
+    ctx.strokeStyle = C.async; ctx.lineWidth = 1.4; ctx.stroke();
+    ctx.fillStyle = C.fg; ctx.font = '600 13px "IBM Plex Sans", sans-serif';
+    ctx.fillText('microVM · Firecracker', g.x + 14, g.y + 26);
+    tiny('guest agent · no NIC', g.x + 14, g.y + 46);
+    if (scene.exec) chip(scene.exec.cmd, g.x + 14, g.y + 62, 168, C.sync);
+  });
+}
+function drawWs(){
+  node('ws', function(){
+    var live = scene.sandbox !== 'none';
+    rr(G.ws.x, G.ws.y, G.ws.w, G.ws.h, 10);
+    ctx.fillStyle = C.panel; ctx.fill();
+    ctx.strokeStyle = live ? C.ok : C.line; ctx.lineWidth = 1.4; ctx.stroke();
+    ctx.fillStyle = C.fg; ctx.font = '600 12px "IBM Plex Sans", sans-serif';
+    ctx.fillText('Workspace', G.ws.x + 14, G.ws.y + 24);
+    ctx.fillStyle = C.muted; ctx.font = '400 10px "IBM Plex Mono", monospace';
+    ctx.fillText('/workspace · per-session directory', G.ws.x + 14, G.ws.y + 44);
+  });
+}
+
+/* ---------- overlay effects ---------- */
+function boxFlash(b, t, color){
+  var a = Math.sin(clamp01(t) * Math.PI) * .3;
+  if (a <= 0) return;
+  rr(b.x, b.y, b.w, b.h, 10);
+  ctx.fillStyle = color; ctx.globalAlpha = a; ctx.fill(); ctx.globalAlpha = 1;
+}
+function vmFlash(t){
+  var a = Math.sin(clamp01(t) * Math.PI) * .18;
+  if (a <= 0) return;
+  rr(G.vm.x, G.vm.y, G.vm.w, G.vm.h, 10);
+  ctx.fillStyle = C.danger; ctx.globalAlpha = a; ctx.fill(); ctx.globalAlpha = 1;
+}
+function monoText(text, x, y, color, align){
+  ctx.font = '500 10px "IBM Plex Mono", monospace';
+  ctx.fillStyle = color || C.muted;
+  ctx.textAlign = align || 'left';
+  ctx.fillText(text, x, y);
+  ctx.textAlign = 'left';
+}
+
+/* =====================================================================
+   TAB 1 — a harness turn
+   ===================================================================== */
+var H_STEPS = [
+{
+  title: 'The parts',
+  body: 'The client sends work to the harness. The supervisor accepts connections. The warm workers run the agent. Redis holds the sessions. The relay carries tool calls. The sandbox runs the tools. The brain and the hands are separate processes, usually on separate machines. The agent never runs a tool in its own process.',
+  wire: ['client → supervisor → warm worker → relay → sandbox', 'Redis holds the session, not the worker'],
+  chips: ['P6 runtime', 'brain = worker', 'hands = sandbox'],
+  dur: 3800,
+  commit: function(){},
+  overlay: function(t){}
+},
+{
+  title: 'The client sends a turn',
+  body: 'The client sends one turn. The request carries a session token. It names a session. The session id is optional for a new session. The client asks for a stream. The supervisor receives the connection, not the control plane.',
+  wire: ['client → supervisor: POST /v1/turn (alias /turn) {sessionId, prompt}',
+         'Authorization: Bearer <session token> · Accept: text/event-stream'],
+  chips: ['one turn = one exchange', 'the same sessionId resumes', 'streaming is opt-in'],
+  dur: 4200,
+  commit: function(){ scene.token = 'session'; },
+  overlay: function(t){ packetSeg('client-sup', t, .1, .85, 'POST /v1/turn', C.sync); }
+},
+{
+  title: 'The supervisor accepts the socket',
+  body: 'The supervisor listens on an L4 port. It accepts the connection. It reads only the HTTP head. It admits the connection against the per-connection cap. It never reads the body. It never writes a response byte.',
+  wire: ['supervisor: accept() → parse HTTP head → admit'],
+  chips: ['L4 listener', 'no bytes on the hot path', 'admission happens here'],
+  dur: 3600,
+  commit: function(){},
+  overlay: function(t){ boxFlash(G.sup, seg(t, .1, .7), C.accent); }
+},
+{
+  title: 'The supervisor hands off the socket',
+  body: 'The supervisor duplicates the OS file descriptor. It sends the descriptor to the chosen worker over IPC. Routing is least-in-flight under the per-worker cap. The supervisor holds nothing after the hand-off. The worker writes every response byte.',
+  wire: ['supervisor → worker: socket hand-off (duplicated fd)',
+         'SH_TURNS_PER_WORKER caps concurrent turns per worker'],
+  chips: ['ADR-0034', 'connection-scoped routing', 'the supervisor holds nothing'],
+  dur: 4400,
+  commit: function(){ scene.handoff = true; scene.workerBusy = true; },
+  overlay: function(t){
+    packetSeg('sup-pool', t, .1, .55, 'fd', C.accent);
+    monoText('SCM_RIGHTS-style fd', G.sup.x + 6, G.sup.y + 100, C.accent);
+  }
+},
+{
+  title: 'The worker opens the session',
+  body: 'The worker reads the sessionId from the request. It opens the session log in Redis. The log is a stream plus a sequence counter. It reads from the last compaction checkpoint. Any worker can pick up the session. The process holds nothing a restart can lose.',
+  wire: ['worker → Redis: XRANGE session:<sid> (from the checkpoint) · session:<sid>:seq'],
+  chips: ['append-only log', 'resume by sessionId', 'E2: ~6 entries, ~900 bytes'],
+  dur: 4200,
+  commit: function(){ scene.session = 'open'; },
+  overlay: function(t){
+    packetSeg('pool-redis', t, .1, .4, 'open log', C.ok);
+    packetSeg('pool-redis', t, .45, .5, 'hit', C.ok);
+  }
+},
+{
+  title: 'The worker leases a sandbox',
+  body: 'The worker takes a lease in Redis before it runs tools. The lease names a sandbox tier and the session. A heartbeat renews it while the turn runs. It expires after 60 seconds if the worker dies. A saturated sandbox answers 503 sandbox_unavailable.',
+  wire: ['worker → Redis: lease {sandbox, session, tier} · heartbeat',
+         'saturated → 503 sandbox_unavailable + Retry-After'],
+  chips: ['the tier is fixed at creation', 'affinity keeps the workspace', 'expires in 60 s if the holder dies'],
+  dur: 4200,
+  commit: function(){ scene.lease = 'held'; scene.sandbox = 'container'; },
+  overlay: function(t){
+    packetSeg('pool-redis', t, .1, .35, 'lease', C.async);
+    packetSeg('pool-relay', t, .45, .75, 'pick sandbox', C.async);
+    boxFlash(G.sbx, seg(t, .55, .85), C.async);
+  }
+},
+{
+  title: 'The worker sends Exec to the relay',
+  body: 'The worker sends one Exec for the tool call. The Exec carries the command, a timeout and the workspace key. The workspace key is the session id. The relay forwards it down the sandbox Attach stream. The sandbox dialed out, so it needs no inbound route.',
+  wire: ['worker → relay: SandboxExec.Exec {command, timeout_s, workspace_key:<sid>}',
+         'relay → sandbox: ExecFrame over Attach'],
+  chips: ['gRPC', 'the sandbox dials out', 'no kubeconfig, no model key'],
+  dur: 4400,
+  commit: function(){ scene.exec = {cmd:'bash -c "npm test"'}; },
+  overlay: function(t){
+    packetSeg('pool-relay', t, .05, .35, 'Exec', C.sync);
+    packetSeg('relay-sbx', t, .4, .75, 'ExecFrame', C.sync);
+  }
+},
+{
+  title: 'The sandbox runs the tools',
+  body: 'The sandbox runs the command. On the container tier it runs in a remote-worker container. On the microVM tier it runs in a fresh Firecracker VM. Each session has its own directory under the workspace root. Output streams back in chunks.',
+  wire: ['sandbox: bash -c "npm test" · cwd <root>/<sessionId>',
+         'sandbox → relay → worker: ExecEvent chunk / end'],
+  chips: ['container or microVM tier', 'a per-session workspace', '8 MiB output cap'],
+  dur: 4400,
+  commit: function(){ scene.vm = 'running'; scene.sandbox = 'vm'; },
+  overlay: function(t){
+    boxFlash(G.sbx, seg(t, .05, .3), C.async);
+    packetSeg('sbx-vm', t, .2, .45, 'run', C.sync);
+    packetSeg('relay-sbx', t, .55, .72, 'chunk', C.ok);
+    packetSeg('pool-relay', t, .74, .9, 'chunk', C.ok);
+  }
+},
+{
+  title: 'The worker calls the model',
+  body: 'The worker runs the Pi agent loop. It sends the tool output to the model. It gets the next tool call. The model credential belongs to the turn. It never reaches the sandbox. The loop repeats until the agent has no more tool calls.',
+  wire: ['worker → model: turn messages + tool output', 'model → worker: next tool call or final reply'],
+  chips: ['the model credential stays in the worker', 'Pi loop', 'no tools run in-process'],
+  dur: 4000,
+  commit: function(){ scene.phase = 'model'; },
+  overlay: function(t){
+    monoText('model call · credential for this turn', G.pool.x + 6, G.pool.y + 100, C.accent);
+    boxFlash(G.pool, seg(t, .15, .8), C.accent);
+  }
+},
+{
+  title: 'The worker streams the reply',
+  body: 'The worker writes to the socket the supervisor handed it. The reply is one JSON body, or SSE frames when the client asked for them. It appends the turn to the Redis log. The log is flushed at the end of the turn.',
+  wire: ['worker → client: 200 JSON · or SSE: event: <type> · data: <frame JSON>',
+         'worker → Redis: append the turn'],
+  chips: ['SSE opt-in', 'the session survives a worker restart'],
+  dur: 4400,
+  commit: function(){ scene.phase = 'stream'; },
+  overlay: function(t){
+    packetSeg('client-sup', t, .1, .55, 'SSE frame', C.ok);
+    packetSeg('pool-redis', t, .55, .85, 'append', C.ok);
+  }
+},
+{
+  title: 'The turn ends',
+  body: 'The turn ends. The worker releases the lease. It closes the socket. The worker stays warm for the next connection. The session stays in Redis. A later turn with the same sessionId resumes it on any worker.',
+  wire: ['worker: release lease · close socket', 'session:<sid> stays in Redis'],
+  chips: ['the worker returns to the pool', 'resume by sessionId', 'the workspace stays until reclaimed'],
+  dur: 4200,
+  commit: function(){ scene.lease = 'none'; scene.phase = 'done'; scene.handoff = false; scene.workerBusy = false; },
+  overlay: function(t){
+    packetSeg('pool-redis', t, .1, .3, 'release', C.async);
+    packetSeg('client-sup', t, .55, .8, 'close', C.muted);
+  }
+}
+];
+
+/* =====================================================================
+   TAB 2 — the sandbox service
+   ===================================================================== */
+var S_STEPS = [
+{
+  title: 'The parts',
+  body: 'The agent runs on your laptop. The MCP server runs beside it, over stdio. mocactl talks to the control plane. The relay carries Exec calls. The sandbox worker runs microVMs on a KVM host. The harness parts are idle here. The same service can serve both capabilities.',
+  wire: ['agent → MCP server → relay → sandbox worker → microVM'],
+  chips: ['the agent stays on the laptop', 'commands run on the service'],
+  dur: 3600,
+  commit: function(){},
+  overlay: function(t){}
+},
+{
+  title: 'The agent calls a tool',
+  body: 'The agent calls a tool over stdio. The MCP server receives one tool call. The tool is bash. The command runs later on the service. Nothing runs on the laptop.',
+  wire: ['agent → MCP server: bash {command:"npm test"}'],
+  chips: ['stdio', 'one tool call = one Exec'],
+  dur: 3600,
+  commit: function(){},
+  overlay: function(t){ packetSeg('agent-mcp', t, .1, .8, 'bash', C.sync); }
+},
+{
+  title: 'mocactl mints a sandbox token',
+  body: 'mocactl sends a mint request to the control plane. The control plane signs a short-lived sandbox token. The token names one sandbox, one worker and one workspace key. The relay checks it with a public key. It reads no Redis record to authorize the call.',
+  wire: ['mocactl → control plane: POST /v1/sandboxes/{id}/token {activity:true}',
+         'claims: sbx · wrk · wsk · exp ≤ 15 min'],
+  chips: ['EdDSA', 'owner only', 'no Redis read at the relay'],
+  dur: 4200,
+  commit: function(){ scene.token = 'sandbox'; scene.sandbox = 'container'; },
+  overlay: function(t){
+    packetSeg('mcp-cp', t, .05, .4, 'POST …/token', C.accent);
+    packetSeg('mcp-cp', t, .45, .5, 'token', C.accent);
+  }
+},
+{
+  title: 'The Exec reaches the relay',
+  body: 'The MCP server sends one Exec to the relay. The Exec carries the command, a timeout and the workspace key. The token travels as gRPC metadata. The relay verifies it and routes by sandbox and worker. The sandbox worker dialed out, so it has no inbound route.',
+  wire: ['MCP server → relay: SandboxExec.Exec {command, workspace_key} + sandbox token',
+         'relay → sandbox worker: ExecFrame over Attach'],
+  chips: ['gRPC', 'one call stands alone', 'the worker dials out'],
+  dur: 4400,
+  commit: function(){},
+  overlay: function(t){
+    packetSeg('mcp-relay', t, .05, .4, 'Exec · token', C.sync);
+    packetSeg('relay-sbx', t, .45, .75, 'ExecFrame', C.sync);
+  }
+},
+{
+  title: 'The worker starts a fresh VM',
+  body: 'The worker takes a standby VM or boots one from the template snapshot. The guest agent is PID 1. The guest runs the command in /workspace as uid sbx. The VM has no network device. Nothing the command starts survives the Exec.',
+  wire: ['guest: bash -c "npm test" · cwd /workspace · uid sbx',
+         'worker → caller: ExecEvent chunk / end'],
+  chips: ['one fresh VM per Exec', 'files under /workspace persist', 'no secrets in the guest'],
+  dur: 4600,
+  commit: function(){ scene.vm = 'running'; scene.sandbox = 'vm'; scene.exec = {cmd:'bash -c "npm test"'}; },
+  overlay: function(t){
+    packetSeg('sbx-vm', t, .1, .45, 'start VM', C.async);
+    packetSeg('relay-sbx', t, .55, .72, 'chunk', C.ok);
+    packetSeg('mcp-relay', t, .74, .9, 'chunk', C.ok);
+  }
+},
+{
+  title: 'The command ends and the patch comes home',
+  body: 'The command exits. The worker sends the end frame with the exit code. The worker destroys the VM. The workspace persists on a disk image. mocactl pulls a git diff and applies it on your laptop. That patch is the result of the work.',
+  wire: ['worker → caller: ExecEvent end {exit_code, truncated}',
+         'mocactl sbx pull --apply → patch applied on the laptop'],
+  chips: ['the VM is destroyed', 'the workspace persists', 'your edits as a patch'],
+  dur: 4600,
+  commit: function(){ scene.vm = 'gone'; scene.exec = null; },
+  overlay: function(t){
+    packetSeg('relay-sbx', t, .1, .3, 'end', C.ok);
+    packetSeg('mcp-relay', t, .3, .5, 'end', C.ok);
+    vmFlash(seg(t, .5, .7));
+    packetSeg('agent-mcp', t, .8, .95, 'patch', C.ok);
+  }
+}
+];
+
+/* =====================================================================
+   TAB 3 — one control plane
+   ===================================================================== */
+var C_STEPS = [
+{
+  title: 'Two capabilities, one runtime',
+  body: 'Both capabilities run agent work in a sandbox. They differ in where the agent runs. The harness runs the agent in a warm worker. The sandbox service runs the agent on your laptop. The relay, the sandbox workers and the tiers are the same.',
+  wire: ['harness: warm worker runs the agent · sandbox runs its tools',
+         'sandbox service: the laptop runs the agent · the service runs its commands'],
+  chips: ['harness = moca runs the agent', 'sandbox service = your laptop runs the agent'],
+  dur: 4000,
+  commit: function(){},
+  overlay: function(t){
+    boxFlash(G.pool, seg(t, .1, .4), C.accent);
+    boxFlash(G.agent, seg(t, .55, .9), C.accent);
+  }
+},
+{
+  title: 'One relay, one kind of sandbox worker',
+  body: 'Both capabilities use the same relay and the same sandbox workers. A worker dials out to the relay and holds an Attach stream open. An Exec never needs an inbound route. Both tiers are shared: a container, and a fresh microVM per Exec.',
+  wire: ['worker: SandboxExec.Exec → relay → Attach → sandbox'],
+  chips: ['shared transport', 'shared tiers', 'outbound only'],
+  dur: 4000,
+  commit: function(){ scene.sandbox = 'vm'; },
+  overlay: function(t){
+    packetSeg('pool-relay', t, .05, .3, 'Exec', C.sync);
+    packetSeg('relay-sbx', t, .3, .55, 'Exec', C.sync);
+    packetSeg('mcp-relay', t, .6, .8, 'Exec', C.sync);
+    boxFlash(G.relay, seg(t, .2, .8), C.accent);
+  }
+},
+{
+  title: 'Three route profiles',
+  body: 'One control-plane component serves both. SH_ROUTE_PROFILE picks the routes. harness serves the turn routes. sandbox serves the sandbox routes. combined serves both from one template store. A route outside the profile is not served.',
+  wire: ['SH_ROUTE_PROFILE = harness | sandbox | combined',
+         'sandbox only: /v1/sandboxes · /v1/sandboxes/{id}/token · /v1/janitor/sandboxes'],
+  chips: ['one deployment, three profiles', 'combined: sessions + sandboxes'],
+  dur: 4400,
+  commit: function(){ scene.profile = 'combined'; },
+  overlay: function(t){
+    boxFlash(G.cp, seg(t, .1, .8), C.accent);
+    monoText('harness routes', G.cp.x + 6, G.cp.y + 100, C.sync);
+    monoText('sandbox routes', G.cp.x + G.cp.w - 6, G.cp.y + 100, C.async, 'right');
+  }
+},
+{
+  title: 'Two different sandboxes',
+  body: 'The word sandbox names two things. A harness session runs its tools in the harness own sandbox. A sandbox-service workspace is separate. mocactl sbx neither sees nor manages a harness session sandbox. The glossary defines both.',
+  wire: ['mocactl sbx → sandbox-service sandbox only', 'harness turn → harness session sandbox only'],
+  chips: ['two sandboxes, no overlap', 'the glossary defines both'],
+  dur: 4000,
+  commit: function(){},
+  overlay: function(t){
+    boxFlash(G.sbx, seg(t, .1, .45), C.async);
+    monoText('not reachable by mocactl sbx', G.sbx.x + 6, G.sbx.y + 112, C.danger);
+    boxFlash(G.ws, seg(t, .55, .9), C.ok);
+  }
+}
+];
+
+/* ---------- tabs ---------- */
+var TABS = {
+  harness: {
+    label: 'A harness turn', btn: 'tabHarness', profile: 'harness',
+    dim: ['agent','mcp'],
+    edges: ['client-sup','sup-pool','pool-redis','pool-relay','relay-sbx','sbx-vm','vm-ws','cp-redis'],
+    steps: H_STEPS
+  },
+  sandbox: {
+    label: 'The sandbox service', btn: 'tabSandbox', profile: 'sandbox',
+    dim: ['client','sup','pool','redis'],
+    edges: ['agent-mcp','mcp-cp','mcp-relay','relay-sbx','sbx-vm','vm-ws'],
+    steps: S_STEPS
+  },
+  shared: {
+    label: 'One control plane', btn: 'tabShared', profile: 'combined',
+    dim: [],
+    edges: ['agent-mcp','mcp-cp','mcp-relay','client-sup','sup-pool','pool-redis','pool-relay','relay-sbx','sbx-vm','vm-ws','cp-redis'],
+    steps: C_STEPS
+  }
+};
+function steps(){ return TABS[active].steps; }
+var EDGE_LABELS = {
+  'agent-mcp':  ['stdio', 113, 166, 'center'],
+  'mcp-cp':     ['REST /v1', 250, 220, 'center'],
+  'mcp-relay':  ['gRPC + token', 300, 310, 'center'],
+  'client-sup': ['HTTP', 204, 352, 'center'],
+  'sup-pool':   ['fd', 310, 298, 'center'],
+  'pool-redis': ['session · lease', 430, 66, 'center'],
+  'pool-relay': ['SandboxExec', 400, 220, 'center'],
+  'relay-sbx':  ['Attach', 592, 220, 'center'],
+  'sbx-vm':     ['run Exec', 706, 314, 'left'],
+  'vm-ws':      ['disk image', 706, 458, 'left'],
+  'cp-redis':   ['records', 400, 88, 'center']
+};
+
+/* ---------- engine ---------- */
+var cur = 0, startT = 0, committed = false, playing = false, holdUntil = 0;
+
+function gotoStep(k){
+  var st = steps();
+  k = Math.max(0, Math.min(st.length - 1, k));
+  scene = freshScene();
+  scene.profile = TABS[active].profile;
+  for (var i = 0; i < k; i++){
+    if (st[i].setup) st[i].setup();
+    st[i].commit();
+  }
+  if (st[k].setup) st[k].setup();
+  cur = k; committed = false;
+  startT = reduced() ? -1e9 : performance.now();
+  holdUntil = 0;
+  renderPanel();
+}
+function renderPanel(){
+  var st = steps()[cur];
+  $('#stepNum').textContent = (cur + 1) + ' / ' + steps().length;
+  $('#stepTitle').textContent = st.title;
+  var wire = $('#stepWire');
+  wire.innerHTML = '';
+  st.wire.forEach(function(m){
+    var el = document.createElement('div');
+    el.textContent = m;
+    wire.appendChild(el);
+  });
+  $('#stepBody').textContent = st.body;
+  var chips = $('#stepChips');
+  chips.innerHTML = '';
+  st.chips.forEach(function(c){
+    var el = document.createElement('span');
+    el.className = 'chip mono';
+    el.textContent = c;
+    chips.appendChild(el);
+  });
+  var dots = $('#dots');
+  dots.innerHTML = '';
+  steps().forEach(function(s, i){
+    var d = document.createElement('button');
+    d.className = 'dot' + (i === cur ? ' on' : '');
+    d.setAttribute('aria-label', 'Step ' + (i + 1) + ': ' + s.title);
+    d.addEventListener('click', function(){ gotoStep(i); });
+    dots.appendChild(d);
+  });
+  $('#prev').disabled = cur === 0;
+  $('#next').disabled = cur === steps().length - 1;
+  ['harness','sandbox','shared'].forEach(function(k){
+    $('#' + TABS[k].btn).className = 'tabbtn' + (k === active ? ' on' : '');
+  });
+}
+function setPlaying(on){
+  playing = on;
+  $('#play').innerHTML = on ? '&#9632; Pause' : '&#9654; Play';
+  if (on && committed) holdUntil = performance.now() + 600;
+}
+function draw(t){
+  ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, LW, LH);
+
+  drawGroup(LAPTOP);
+  drawGroup(SERVICE);
+  drawGroup(HOST);
+
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.2;
+  TABS[active].edges.forEach(function(k){ strokePath(P[k]); });
+  TABS[active].edges.forEach(function(k){
+    var L = EDGE_LABELS[k];
+    if (L) tiny(L[0], L[1], L[2], L[3]);
+  });
+
+  drawAgent();
+  drawMcp();
+  drawClient();
+  drawCp();
+  drawPool();
+  drawSup();
+  drawRedis();
+  drawRelay();
+  drawSbx();
+  drawVm();
+  drawWs();
+
+  steps()[cur].overlay(committed ? 1 : t);
+}
+function tick(now){
+  var st = steps()[cur];
+  var t = clamp01((now - startT) / st.dur);
+  if (t >= 1 && !committed){
+    st.commit();
+    committed = true;
+    holdUntil = now + 1700;
+  }
+  if (playing && committed && now >= holdUntil){
+    if (cur < steps().length - 1) gotoStep(cur + 1);
+    else setPlaying(false);
+  }
+  draw(t);
+  requestAnimationFrame(tick);
+}
+
+$('#next').addEventListener('click', function(){ gotoStep(cur + 1); });
+$('#prev').addEventListener('click', function(){ gotoStep(cur - 1); });
+$('#play').addEventListener('click', function(){ setPlaying(!playing); });
+['harness','sandbox','shared'].forEach(function(k){
+  $('#' + TABS[k].btn).addEventListener('click', function(){
+    if (active !== k){ active = k; gotoStep(0); }
+  });
+});
+document.addEventListener('keydown', function(e){
+  if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  if (e.key === 'ArrowRight'){ gotoStep(cur + 1); }
+  else if (e.key === 'ArrowLeft'){ gotoStep(cur - 1); }
+});
+
+resize();
+gotoStep(0);
+requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

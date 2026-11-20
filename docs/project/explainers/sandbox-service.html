@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The moca sandbox service · moca</title>
+<meta name="description" content="Interactive walkthrough of the moca sandbox service: the agent stays on your laptop, and every command runs in a fresh, isolated microVM on a shared service.">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  /* Layout: one step-through stage up top, quiet reference cards below.
+     Blue = Exec data, teal = control / token, amber = sandbox lifecycle, red = VM end, green = result. */
+  :root{
+    --bg:#f4f6f8; --fg:#1b2530; --muted:#5b6a79; --line:#dbe2e9; --panel:#ffffff;
+    --accent:#0f766e; --accent-soft:rgba(15,118,110,.08);
+    --c-bg:#f4f6f8; --c-panel:#ffffff; --c-fg:#1b2530; --c-muted:#5b6a79; --c-line:#c9d3dd;
+    --c-async:#b45309; --c-sync:#1d4ed8; --c-danger:#b91c1c; --c-ok:#15803d; --c-accent:#0f766e;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --bg:#0c1219; --fg:#e6edf3; --muted:#8fa0af; --line:#20303f; --panel:#121b26;
+      --accent:#3fc1b0; --accent-soft:rgba(63,193,176,.10);
+      --c-bg:#0c1219; --c-panel:#121b26; --c-fg:#e6edf3; --c-muted:#8fa0af; --c-line:#2a3b4d;
+      --c-async:#f59e0b; --c-sync:#6ea8ff; --c-danger:#f87171; --c-ok:#4ade80; --c-accent:#3fc1b0;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"]{
+    --bg:#0c1219; --fg:#e6edf3; --muted:#8fa0af; --line:#20303f; --panel:#121b26;
+    --accent:#3fc1b0; --accent-soft:rgba(63,193,176,.10);
+    --c-bg:#0c1219; --c-panel:#121b26; --c-fg:#e6edf3; --c-muted:#8fa0af; --c-line:#2a3b4d;
+    --c-async:#f59e0b; --c-sync:#6ea8ff; --c-danger:#f87171; --c-ok:#4ade80; --c-accent:#3fc1b0;
+    color-scheme: dark;
+  }
+  html{background:var(--bg)}
+  body{
+    background:var(--bg); color:var(--fg);
+    font-family:"IBM Plex Sans",-apple-system,"Segoe UI",sans-serif;
+    margin:0; padding-left:max(16px,env(safe-area-inset-left,0px)); padding-right:max(16px,env(safe-area-inset-right,0px));
+  }
+  .mono{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace}
+  .muted{color:var(--muted)}
+  .accent{color:var(--accent)}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px}
+  .chip{border:1px solid var(--line); border-radius:6px; padding:2px 8px; font-size:11px; color:var(--muted)}
+  .eyebrow{font-size:11px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent); font-weight:600}
+  .btn{
+    border:1px solid var(--line); background:var(--panel); color:var(--fg);
+    border-radius:8px; padding:8px 16px; font-size:14px; font-weight:500; cursor:pointer;
+  }
+  .btn:hover:not(:disabled){border-color:var(--accent); color:var(--accent)}
+  .btn:disabled{opacity:.4; cursor:default}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  .btn.primary:hover{opacity:.9; color:#fff}
+  .btn:focus-visible,.dot:focus-visible,.tabbtn:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  .dot{width:10px; height:10px; border-radius:50%; border:1.5px solid var(--muted); background:transparent; cursor:pointer; padding:0}
+  .dot.on{background:var(--accent); border-color:var(--accent)}
+  .tabbtn{padding:8px 14px; font-size:13px; font-weight:500; background:var(--panel); color:var(--muted); border:0; cursor:pointer}
+  .tabbtn.on{background:var(--accent); color:#fff}
+  .legend-sw{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:6px; vertical-align:-1px}
+  canvas{display:block; width:100%}
+  a{color:var(--accent)}
+  .stepnum{font-variant-numeric:tabular-nums}
+  #stepWire{border-left:3px solid var(--accent)}
+  #stepWire > div{padding:1px 0}
+  .ref h3{font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); font-weight:600}
+</style>
+</head>
+<body>
+<noscript><p style="margin:16px;color:#b42318">This page needs JavaScript: the steps are built by script.</p></noscript>
+<div class="max-w-5xl mx-auto px-0 pb-16">
+
+  <header class="pt-10 pb-6">
+    <p class="eyebrow">moca · sandbox service · v0.11.0</p>
+    <h1 class="text-3xl sm:text-4xl font-bold mt-2 tracking-tight">The moca sandbox service</h1>
+    <p class="muted mt-3 max-w-2xl leading-relaxed">Your coding agent stays on your laptop. Every command it runs
+      goes to a fresh, isolated microVM on a shared service. The agent keeps your files, your credentials and your
+      editor. The service keeps the command away from all three. Step through one command, from the tool call to
+      the patch you apply. Press Next for one step. Press Prev to go back one step. The wire box below the stage
+      shows the messages of the current step. The messages stay until you move on.</p>
+    <p class="muted" style="margin-top:10px;font-size:13px"><a href="https://www.rossoctl.dev/moca/" target="_blank" rel="noopener">&lsaquo; moca docs</a> · written pages: <a href="https://www.rossoctl.dev/moca/sandbox/concepts/isolation" target="_blank" rel="noopener">Isolation and data handling</a>, <a href="https://www.rossoctl.dev/moca/sandbox/how-to/direct-api" target="_blank" rel="noopener">Call the sandbox API</a></p>
+  </header>
+
+  <section class="card overflow-hidden">
+    <div class="flex flex-wrap items-center gap-x-5 gap-y-2 px-4 pt-3 pb-2 border-b" style="border-color:var(--line)">
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-sync)"></span>Exec data</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-accent)"></span>control / token</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-async)"></span>sandbox lifecycle</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-danger)"></span>VM end</span>
+      <span class="text-xs mono muted"><span class="legend-sw" style="background:var(--c-ok)"></span>result / workspace</span>
+    </div>
+    <div class="px-2 pt-2"><canvas id="stage" aria-label="Step-through diagram of the moca sandbox service: the coding agent on a laptop, the MCP server, the control plane, Redis, the relay, a sandbox worker and a microVM on a KVM host."></canvas></div>
+    <div class="px-5 pb-5">
+      <div class="flex flex-wrap items-center gap-3 pt-2">
+        <button id="prev" class="btn" aria-label="Previous step">&#8249; Prev</button>
+        <button id="next" class="btn primary">Next &#8250;</button>
+        <button id="play" class="btn" aria-label="Play all steps">&#9654; Play</button>
+        <div id="dots" class="flex items-center gap-2 ml-1" role="tablist" aria-label="Steps"></div>
+        <span id="stepNum" class="ml-auto mono text-sm muted stepnum"></span>
+      </div>
+      <div class="mt-4 pt-4 border-t" style="border-color:var(--line)">
+        <h2 id="stepTitle" class="text-lg font-semibold"></h2>
+        <div id="stepWire" class="mono text-[12.5px] leading-relaxed mt-3 pl-3 py-1 card"></div>
+        <p id="stepBody" class="muted mt-3 text-[15px] leading-relaxed max-w-3xl"></p>
+        <div id="stepChips" class="flex flex-wrap gap-2 mt-3"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mt-12">
+    <p class="eyebrow">The decision</p>
+    <blockquote class="mt-3 text-xl sm:text-2xl font-medium leading-snug max-w-3xl border-l-4 pl-5" style="border-color:var(--accent)">
+      The agent stays where the credentials and the editor are. The command runs where the service can isolate it.
+      One <span class="mono text-base sm:text-lg">Exec</span> gets one fresh microVM. Files under
+      <span class="mono text-base sm:text-lg">/workspace</span> persist. Nothing else does.
+    </blockquote>
+    <p class="muted mt-3 max-w-3xl text-[15px] leading-relaxed">This is the positioning on the
+      <a href="https://www.rossoctl.dev/moca/" target="_blank" rel="noopener">moca overview</a>: one of two
+      capabilities, usable alone or beside the harness. The harness runs the agent itself. The sandbox service
+      runs the agent's commands. This page follows the second one.</p>
+  </section>
+
+  <section class="mt-12 grid gap-4 sm:grid-cols-2 ref">
+    <div class="card p-5">
+      <h3>What one Exec guarantees</h3>
+      <ul class="mt-3 space-y-2 text-[14px] leading-relaxed">
+        <li><span class="mono text-[12.5px]">bash -c &lt;command&gt;</span> with <span class="mono text-[12.5px]">/workspace</span> as the working directory.</li>
+        <li>One fresh Firecracker VM, by default one per Exec (ADR-0035).</li>
+        <li>Files under <span class="mono text-[12.5px]">/workspace</span> persist for the sandbox's lifetime.</li>
+        <li>No process survives the Exec. No file outside <span class="mono text-[12.5px]">/workspace</span> survives it.</li>
+        <li>Output is capped at 8 MiB. The end frame reports truncation.</li>
+      </ul>
+    </div>
+    <div class="card p-5">
+      <h3>The sandbox token</h3>
+      <dl class="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1.5 text-[13px]">
+        <dt class="muted">typ</dt><dd class="mono">moca-sandbox+jwt</dd>
+        <dt class="muted">alg</dt><dd class="mono">EdDSA</dd>
+        <dt class="muted">aud</dt><dd class="mono">moca-sandbox</dd>
+        <dt class="muted">sbx</dt><dd class="mono">one sandbox id</dd>
+        <dt class="muted">wrk</dt><dd class="mono">one worker</dd>
+        <dt class="muted">wsk</dt><dd class="mono">one workspace key</dd>
+        <dt class="muted">exp</dt><dd class="mono">≤ 15 min, ≤ the sandbox expiry</dd>
+      </dl>
+      <p class="muted mt-3 text-[12.5px] leading-relaxed">The control plane mints it for the owner. The relay
+        checks it with a public key. The relay reads no Redis record to authorize a call.</p>
+    </div>
+    <div class="card p-5">
+      <h3>What the guest cannot reach</h3>
+      <ul class="mt-3 space-y-2 text-[14px] leading-relaxed">
+        <li>No network device. A template with egress reaches only allowlisted hosts, through the host's proxy.</li>
+        <li>No secrets. No credentials, no tokens, none of your laptop's files except the ones you pushed.</li>
+        <li>No shared user with another sandbox: each sandbox is its own VM.</li>
+        <li>Any other destination answers <span class="mono text-[12.5px]">403 destination_denied</span>.</li>
+      </ul>
+    </div>
+    <div class="card p-5">
+      <h3>Why it is built this way</h3>
+      <ul class="mt-3 space-y-2 text-[14px] leading-relaxed">
+        <li>Sandbox workers dial <em>out</em> to the relay, so a sandbox needs no inbound route.</li>
+        <li>That lets a KVM host sit outside the cluster, behind NAT or on another network.</li>
+        <li>One deploy serves many developers and many agents from one template store.</li>
+        <li>The relay is a single replica. A restart drops attached streams; recovery is a retry.</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer class="mt-10 text-[11.5px] leading-relaxed muted">
+    Sources: <a href="https://github.com/rossoctl/moca/blob/main/docs/sandbox/concepts/isolation.md" target="_blank" rel="noopener">Isolation and data handling</a>,
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/sandbox/how-to/direct-api.md" target="_blank" rel="noopener">Call the sandbox API</a>,
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/api/client-guide.md" target="_blank" rel="noopener">Build a client</a>,
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/adrs/0024-sandbox-transport-remote-exec.md" target="_blank" rel="noopener">ADR-0024</a>,
+    <a href="https://github.com/rossoctl/moca/blob/main/docs/adrs/0035-per-exec-microvm-warm-standby.md" target="_blank" rel="noopener">ADR-0035</a>.
+    <span>status: built (v0.11.0), Preview.</span>
+    The animation is illustrative: step numbers are not wire message ids. Tailwind CSS loads from
+    <span class="mono">cdn.tailwindcss.com</span>; everything else is in this file.
+  </footer>
+</div>
+
+<script>
+(function(){
+"use strict";
+var $ = function(s){ return document.querySelector(s); };
+var canvas = $('#stage');
+var ctx = canvas.getContext('2d');
+
+var LW = 1000, LH = 640;
+var viewScale = 1;
+
+/* ---------- geometry ---------- */
+var G = {
+  agent:  {x:20,  y:56,  w:206, h:92},
+  mcp:    {x:20,  y:190, w:206, h:92},
+  cp:     {x:276, y:56,  w:186, h:104},
+  redis:  {x:500, y:56,  w:128, h:104},
+  relay:  {x:276, y:250, w:186, h:110},
+  worker: {x:692, y:230, w:268, h:120},
+  vm:     {x:692, y:390, w:268, h:120},
+  ws:     {x:692, y:534, w:268, h:70}
+};
+var CLUSTER = {x:256, y:32,  w:396, h:352, label:'shared service', note:'control plane + relay'};
+var HOST    = {x:676, y:196, w:300, h:422, label:'KVM host', note:'sandboxes dial out · no inbound route'};
+
+/* ---------- theme colors (canvas reads the CSS tokens) ---------- */
+var C = {};
+function readColors(){
+  var cs = getComputedStyle(document.documentElement);
+  ['bg','panel','fg','muted','line','async','sync','danger','ok','accent'].forEach(function(k){
+    C[k] = cs.getPropertyValue('--c-' + k).trim();
+  });
+}
+readColors();
+var themeMq = matchMedia('(prefers-color-scheme: dark)');
+if (themeMq.addEventListener) themeMq.addEventListener('change', readColors);
+else if (themeMq.addListener) themeMq.addListener(readColors);
+var rmMq = matchMedia('(prefers-reduced-motion: reduce)');
+function reduced(){ return rmMq.matches; }
+
+/* ---------- sizing ---------- */
+function resize(){
+  var w = canvas.parentElement.clientWidth - 16 || canvas.clientWidth;
+  var dpr = window.devicePixelRatio || 1;
+  var cssH = w * LH / LW;
+  canvas.style.height = cssH + 'px';
+  canvas.width  = Math.max(1, Math.round(w * dpr));
+  canvas.height = Math.max(1, Math.round(cssH * dpr));
+  viewScale = canvas.width / LW;
+}
+window.addEventListener('resize', resize);
+
+/* ---------- small helpers ---------- */
+function clamp01(v){ return v < 0 ? 0 : v > 1 ? 1 : v; }
+function ease(t){ return t < .5 ? 2*t*t : 1 - Math.pow(-2*t + 2, 2) / 2; }
+function seg(t, a, b){ return clamp01((t - a) / (b - a)); }
+function rr(x, y, w, h, r){
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function pathLen(p){
+  var L = 0;
+  for (var i = 1; i < p.length; i++) L += Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
+  return L;
+}
+function pointAt(p, d){
+  var acc = 0;
+  for (var i = 1; i < p.length; i++){
+    var sl = Math.hypot(p[i][0]-p[i-1][0], p[i][1]-p[i-1][1]);
+    if (d <= acc + sl){
+      var u = (d - acc) / sl;
+      return [ p[i-1][0] + (p[i][0]-p[i-1][0])*u, p[i-1][1] + (p[i][1]-p[i-1][1])*u ];
+    }
+    acc += sl;
+  }
+  return p[p.length-1];
+}
+function rev(p){ return p.slice().reverse(); }
+function strokePath(p){
+  ctx.beginPath();
+  ctx.moveTo(p[0][0], p[0][1]);
+  for (var i = 1; i < p.length; i++) ctx.lineTo(p[i][0], p[i][1]);
+  ctx.stroke();
+}
+
+/* ---------- wire paths ---------- */
+var P_STDIO   = [[123,148],[123,190]];                                    /* agent -> MCP server */
+var P_MCPCP   = [[226,214],[252,214],[252,160],[276,160]];                /* MCP -> control plane */
+var P_CPMCP   = rev(P_MCPCP);                                            /* control plane -> MCP */
+var P_CPREDIS = [[462,108],[500,108]];                                   /* control plane -> Redis */
+var P_MCPREL  = [[226,262],[250,262],[250,305],[276,305]];               /* MCP -> relay */
+var P_RELWRK  = [[462,305],[560,305],[560,290],[692,290]];               /* relay -> worker */
+var P_WRKREL  = rev(P_RELWRK);                                           /* worker -> relay */
+var P_WRKVM   = [[826,350],[826,390]];                                   /* worker -> VM */
+var P_VMWS    = [[826,510],[826,534]];                                   /* VM -> workspace */
+
+/* ---------- moving packet ---------- */
+function packet(p, t, label, color){
+  var u = ease(clamp01(t));
+  if (u <= 0) return;
+  var pos = pointAt(p, u * pathLen(p));
+  ctx.font = '500 11px "IBM Plex Mono", monospace';
+  var w = ctx.measureText(label).width + 16, h = 20;
+  rr(pos[0] - w/2, pos[1] - h/2, w, h, 5);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.fillText(label, pos[0] - w/2 + 8, pos[1] + 3.5);
+}
+function packetSeg(p, t, a, b, label, color){
+  var u = seg(t, a, b);
+  if (u > 0) packet(p, u, label, color);
+}
+function tiny(text, x, y, align){
+  ctx.font = '400 10px "IBM Plex Mono", monospace';
+  ctx.fillStyle = C.muted;
+  ctx.textAlign = align || 'left';
+  ctx.fillText(text, x, y);
+  ctx.textAlign = 'left';
+}
+function chip(text, x, y, w, color){
+  rr(x, y, w, 22, 5);
+  ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.fillStyle = color; ctx.font = '500 10px "IBM Plex Mono", monospace';
+  ctx.fillText(text, x + 8, y + 15);
+}
+
+/* ---------- scene state ---------- */
+var scene;
+function freshScene(){
+  return {
+    sandbox: null,          /* {id, template} once created */
+    token: 'none',          /* none | valid | bad */
+    vm: 'none',             /* none | booting | running | gone */
+    exec: null,             /* {n, cmd, phase} */
+    ws: 'none',             /* none | live | image */
+    standbys: 3,
+    notice: null
+  };
+}
+
+/* ---------- static drawing ---------- */
+function drawBox(g, title, sub){
+  rr(g.x, g.y, g.w, g.h, 10);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.4; ctx.stroke();
+  ctx.fillStyle = C.fg; ctx.font = '600 13px "IBM Plex Sans", sans-serif';
+  ctx.fillText(title, g.x + 16, g.y + 24);
+  if (sub){
+    ctx.fillStyle = C.muted; ctx.font = '400 10px "IBM Plex Mono", monospace';
+    ctx.fillText(sub, g.x + 16, g.y + 42);
+  }
+}
+function drawGroup(g){
+  ctx.setLineDash([5,5]);
+  rr(g.x, g.y, g.w, g.h, 12);
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.font = '600 9.5px "IBM Plex Mono", monospace';
+  ctx.fillStyle = C.muted;
+  ctx.fillText(g.label.toUpperCase(), g.x + 12, g.y + 16);
+  if (g.note){
+    ctx.font = '400 9px "IBM Plex Mono", monospace';
+    ctx.fillText(g.note, g.x + 12, g.y + g.h - 8);
+  }
+}
+function drawAgent(){
+  drawBox(G.agent, 'Coding agent', null);
+  tiny('Claude Code · OpenCode · Codex', G.agent.x + 16, G.agent.y + 60);
+  tiny('runs on your laptop', G.agent.x + 16, G.agent.y + 76);
+}
+function drawMcp(){
+  drawBox(G.mcp, 'mocactl sbx mcp', null);
+  tiny('MCP server · stdio', G.mcp.x + 16, G.mcp.y + 58);
+  if (scene.token !== 'none'){
+    var col = scene.token === 'valid' ? C.accent : C.danger;
+    chip(scene.token === 'valid' ? 'token ✓' : 'token ✗', G.mcp.x + 16, G.mcp.y + 66, 78, col);
+  } else {
+    tiny('one tool call → one Exec', G.mcp.x + 16, G.mcp.y + 76);
+  }
+}
+function drawControl(){
+  drawBox(G.cp, 'Control plane', null);
+  tiny('sandbox route profile', G.cp.x + 16, G.cp.y + 56);
+  tiny('mints tokens · keeps records', G.cp.x + 16, G.cp.y + 72);
+  if (scene.sandbox){
+    chip(scene.sandbox.id, G.cp.x + 16, G.cp.y + 78, 150, C.accent);
+  }
+}
+function drawRedis(){
+  drawBox(G.redis, 'Redis', null);
+  tiny('records', G.redis.x + 14, G.redis.y + 60);
+  tiny('presence', G.redis.x + 14, G.redis.y + 76);
+  if (scene.sandbox){
+    ctx.fillStyle = C.ok;
+    ctx.beginPath(); ctx.arc(G.redis.x + 120, G.redis.y + 68, 4, 0, Math.PI*2); ctx.fill();
+  }
+}
+function drawRelay(){
+  drawBox(G.relay, 'Relay', null);
+  tiny('SandboxExec · Attach', G.relay.x + 16, G.relay.y + 60);
+  tiny('checks the token locally', G.relay.x + 16, G.relay.y + 76);
+  if (scene.token === 'bad'){
+    chip('PERMISSION_DENIED', G.relay.x + 16, G.relay.y + 84, 132, C.danger);
+  }
+}
+function drawWorker(){
+  drawBox(G.worker, 'Sandbox worker', null);
+  tiny('remote-worker · microvm-worker', G.worker.x + 16, G.worker.y + 60);
+  tiny('dials out to the relay', G.worker.x + 16, G.worker.y + 76);
+  chip('standby · ' + scene.standbys, G.worker.x + 16, G.worker.y + 84, 96, C.line);
+  if (scene.vm === 'running' || scene.vm === 'booting'){
+    chip('serving ' + (scene.sandbox ? scene.sandbox.id : 'sbx'), G.worker.x + 122, G.worker.y + 84, 130, C.async);
+  }
+}
+function drawVm(){
+  var g = G.vm;
+  if (scene.vm === 'none'){
+    ctx.globalAlpha = .55;
+    rr(g.x, g.y, g.w, g.h, 10);
+    ctx.fillStyle = C.panel; ctx.fill();
+    ctx.setLineDash([5,5]);
+    ctx.strokeStyle = C.line; ctx.lineWidth = 1.4; ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = C.muted; ctx.font = '500 12px "IBM Plex Mono", monospace';
+    ctx.fillText('no VM', g.x + 16, g.y + 26);
+    ctx.font = '400 10px "IBM Plex Mono", monospace';
+    ctx.fillText('the Exec takes a standby', g.x + 16, g.y + 46);
+    ctx.globalAlpha = 1;
+    return;
+  }
+  if (scene.vm === 'gone'){
+    ctx.globalAlpha = .85;
+    rr(g.x, g.y, g.w, g.h, 10);
+    ctx.fillStyle = C.panel; ctx.fill();
+    ctx.setLineDash([5,5]);
+    ctx.strokeStyle = C.danger; ctx.lineWidth = 1.4; ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = C.danger; ctx.font = '500 12px "IBM Plex Mono", monospace';
+    ctx.fillText('VM destroyed', g.x + 16, g.y + 26);
+    ctx.fillStyle = C.muted; ctx.font = '400 10px "IBM Plex Mono", monospace';
+    ctx.fillText('nothing the command started keeps running', g.x + 16, g.y + 48);
+    ctx.fillText('the workspace disk image stays', g.x + 16, g.y + 64);
+    ctx.globalAlpha = 1;
+    return;
+  }
+  rr(g.x, g.y, g.w, g.h, 10);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = scene.vm === 'running' ? C.async : C.line; ctx.lineWidth = 1.4; ctx.stroke();
+  ctx.fillStyle = C.fg; ctx.font = '600 13px "IBM Plex Sans", sans-serif';
+  ctx.fillText('microVM · Firecracker', g.x + 16, g.y + 26);
+  tiny('guest agent · PID 1 · no NIC', g.x + 16, g.y + 46);
+  if (scene.vm === 'booting'){
+    chip('booting from template', g.x + 16, g.y + 62, 150, C.async);
+    return;
+  }
+  if (scene.exec){
+    chip('bash -c ' + scene.exec.cmd, g.x + 16, g.y + 62, 216, C.sync);
+    tiny('cwd /workspace · uid sbx', g.x + 16, g.y + 102);
+  }
+}
+function drawWs(){
+  var g = G.ws;
+  var live = scene.ws !== 'none';
+  rr(g.x, g.y, g.w, g.h, 10);
+  ctx.fillStyle = C.panel; ctx.fill();
+  ctx.strokeStyle = live ? C.ok : C.line; ctx.lineWidth = 1.4; ctx.stroke();
+  ctx.fillStyle = C.fg; ctx.font = '600 13px "IBM Plex Sans", sans-serif';
+  ctx.fillText('Workspace', g.x + 16, g.y + 24);
+  ctx.fillStyle = C.muted; ctx.font = '400 10px "IBM Plex Mono", monospace';
+  ctx.fillText('/workspace · disk image on the host', g.x + 16, g.y + 44);
+}
+function drawNotice(){
+  var n = scene.notice;
+  if (!n) return;
+  rr(G.ws.x + 16, G.ws.y + 50, 200, 14, 4);
+  ctx.fillStyle = n.tone === 'ok' ? C.ok : C.danger;
+  ctx.font = '500 9.5px "IBM Plex Mono", monospace';
+  ctx.fillText(n.text, G.ws.x + 16, G.ws.y + 62);
+}
+
+/* ---------- overlay effects ---------- */
+function boxFlash(b, t, color){
+  var a = Math.sin(clamp01(t) * Math.PI) * .3;
+  if (a <= 0) return;
+  rr(b.x, b.y, b.w, b.h, 10);
+  ctx.fillStyle = color; ctx.globalAlpha = a; ctx.fill(); ctx.globalAlpha = 1;
+}
+function vmFlash(t){
+  var a = Math.sin(clamp01(t) * Math.PI) * .18;
+  if (a <= 0) return;
+  rr(G.vm.x, G.vm.y, G.vm.w, G.vm.h, 10);
+  ctx.fillStyle = C.danger; ctx.globalAlpha = a; ctx.fill(); ctx.globalAlpha = 1;
+}
+function monoText(text, x, y, color, align){
+  ctx.font = '500 10px "IBM Plex Mono", monospace';
+  ctx.fillStyle = color || C.muted;
+  ctx.textAlign = align || 'left';
+  ctx.fillText(text, x, y);
+  ctx.textAlign = 'left';
+}
+
+/* ---------- the steps ---------- */
+var STEPS = [
+{
+  title: 'The parts',
+  body: 'The agent runs on your laptop. The MCP server runs beside it, over stdio. mocactl is the owner CLI. The control plane holds the sandbox record. The relay carries Exec calls. The sandbox worker runs microVMs on a KVM host. The workspace sits on the host disk. The service is shared. You deploy it once. Your laptop needs only mocactl and the service URL.',
+  wire: ['service: https://<api host>', 'one KVM host serves many developers'],
+  chips: ['agent on the laptop', 'commands on the service', 'driven by mocactl sbx'],
+  dur: 3600,
+  commit: function(){},
+  overlay: function(t){}
+},
+{
+  title: 'You open a sandbox',
+  body: 'mocactl sends a create to the control plane. The call carries the user API token. The body names a template. The control plane records the sandbox and the worker that serves its template. It writes the record in Redis. It returns the sandbox id and the expiry.',
+  wire: ['mocactl → control plane: POST /v1/sandboxes {template:"py312"}',
+         'control plane → mocactl: 201 {id:"sbx-0f3a…c9", expiresAt:…}'],
+  chips: ['the template fixes the image', 'the record lives in Redis', 'owner only'],
+  dur: 4200,
+  commit: function(){ scene.sandbox = {id:'sbx-0f3a…c9', template:'py312'}; },
+  overlay: function(t){
+    packetSeg(P_MCPCP, t, 0, .45, 'POST /v1/sandboxes', C.accent);
+    packetSeg(P_CPMCP, t, .5, .9, '201 · sbx-0f3a', C.accent);
+    packetSeg(P_CPREDIS, t, .3, .7, 'record', C.accent);
+  }
+},
+{
+  title: 'The agent calls a tool',
+  body: 'The agent stays on the laptop. It calls a tool over stdio. The MCP server receives one tool call. The tool is bash. The command runs later on the service. Nothing runs on the laptop. Your files and your credentials stay here.',
+  wire: ['agent → MCP server: bash {command:"npm test"}'],
+  chips: ['stdio', 'one tool call = one Exec', 'nothing runs locally'],
+  dur: 3600,
+  commit: function(){},
+  overlay: function(t){
+    packetSeg(P_STDIO, t, .1, .8, 'bash', C.sync);
+  }
+},
+{
+  title: 'mocactl mints a sandbox token',
+  body: 'The MCP server asks mocactl for a token. mocactl holds the user API token. It sends a mint request to the control plane. The control plane signs a short-lived sandbox token. The token names one sandbox, one worker and one workspace key. The relay can check it without Redis.',
+  wire: ['mocactl → control plane: POST /v1/sandboxes/{id}/token {activity:true}',
+         'control plane → mocactl: 200 {token:"eyJ…", expiresAt:…}',
+         'claims: typ=moca-sandbox+jwt · sbx · wrk · wsk · exp ≤ 15 min'],
+  chips: ['EdDSA', 'the owner mints it', 'the relay holds public keys only'],
+  dur: 4400,
+  commit: function(){ scene.token = 'valid'; },
+  overlay: function(t){
+    packetSeg(P_MCPCP, t, 0, .35, 'POST …/token', C.accent);
+    packetSeg(P_CPMCP, t, .4, .75, 'sandbox token', C.accent);
+    boxFlash(G.mcp, seg(t, .78, 1), C.accent);
+  }
+},
+{
+  title: 'The Exec goes to the relay',
+  body: 'The MCP server dials the relay. It sends one Exec. The Exec carries the command, a timeout and the workspace key. The sandbox token travels as gRPC metadata. The call streams its events back.',
+  wire: ['MCP server → relay: SandboxExec.Exec {req_id, command:"npm test", timeout_s, workspace_key}',
+         'metadata: authorization: Bearer <sandbox token>'],
+  chips: ['gRPC', 'one call stands alone', 'no session'],
+  dur: 4000,
+  commit: function(){},
+  overlay: function(t){
+    packetSeg(P_MCPREL, t, .1, .85, 'Exec · token', C.sync);
+  }
+},
+{
+  title: 'The relay checks and routes',
+  body: 'The relay verifies the token signature. It reads the sandbox id and the worker name. It routes the Exec to that worker. It reads no Redis record to authorize the call. A bad or expired token gets PERMISSION_DENIED.',
+  wire: ['relay: verify signature → route by sbx / wrk',
+         'relay → caller: PERMISSION_DENIED on a bad token'],
+  chips: ['no Redis read', 'fail closed', 'one relay replica'],
+  dur: 3600,
+  commit: function(){},
+  overlay: function(t){
+    boxFlash(G.relay, seg(t, .1, .6), C.accent);
+    monoText('sbx-0f3a → worker', G.relay.x + 8, G.relay.y + 104, C.accent);
+  }
+},
+{
+  title: 'The relay forwards down the Attach stream',
+  body: 'The worker dialed out when it started. It holds one Attach stream open to the relay. The relay writes the Exec down that stream. The worker needs no inbound port. It needs no kubeconfig. It needs no model key.',
+  wire: ['relay → worker: ExecFrame {req_id, command, …} over Attach'],
+  chips: ['outbound only', 'works behind NAT', 'the sandbox has no route in'],
+  dur: 4000,
+  commit: function(){},
+  overlay: function(t){
+    packetSeg(P_RELWRK, t, .1, .8, 'ExecFrame', C.sync);
+  }
+},
+{
+  title: 'The worker starts a fresh microVM',
+  body: 'The worker takes a warm standby VM. If none is warm, it boots one from the template snapshot. The guest agent is PID 1. The VM serves this Exec only. It holds no secrets. It holds none of your laptop files.',
+  wire: ['worker: standby VM → guest agent (PID 1) · template py312'],
+  chips: ['per-Exec is the default', 'ADR-0035', 'no secrets in the guest'],
+  dur: 4200,
+  commit: function(){ scene.vm = 'booting'; },
+  overlay: function(t){
+    packetSeg(P_WRKVM, t, .1, .5, 'start VM', C.async);
+    var u = seg(t, .5, .9);
+    if (u > 0 && u < 1){
+      chip('standby → guest', G.vm.x + 16, G.vm.y + 30, 130, C.async);
+    }
+  }
+},
+{
+  title: 'The command runs in /workspace',
+  body: 'The guest runs bash -c with the command. The working directory is /workspace. The command runs as uid sbx. The VM has no network device. A template with egress reaches only allowlisted hosts. Output streams back in chunks.',
+  wire: ['guest: bash -c "npm test" · cwd /workspace · uid sbx',
+         'worker → relay → caller: ExecEvent chunk {data, stream}',
+         'no NIC · egress only through the host proxy allowlist'],
+  chips: ['files under /workspace persist', 'nothing else survives', 'output capped at 8 MiB'],
+  dur: 4600,
+  commit: function(){
+    scene.vm = 'running'; scene.ws = 'live';
+    scene.exec = {n:1, cmd:'npm test', phase:'run'};
+  },
+  overlay: function(t){
+    boxFlash(G.vm, seg(t, .05, .35), C.async);
+    packetSeg(P_VMWS, t, .15, .45, 'write', C.ok);
+    packetSeg(P_WRKREL, t, .5, .72, 'chunk', C.sync);
+    packetSeg(P_MCPREL, t, .74, .92, 'chunk', C.sync);
+    if (seg(t, .3, 1) > 0) monoText('… 12 tests passed …', G.vm.x + 16, G.vm.y + 112, C.ok);
+  }
+},
+{
+  title: 'The Exec ends. The VM is destroyed.',
+  body: 'The command exits. The worker sends the end frame with the exit code and the truncation flag. The worker destroys the VM. Nothing the command started keeps running. The workspace stays on a disk image.',
+  wire: ['worker → caller: ExecEvent end {exit_code:0, truncated:false}',
+         'worker: destroy VM · keep the /workspace disk image'],
+  chips: ['no process survives', 'the workspace persists', 'truncation in the end frame'],
+  dur: 4600,
+  commit: function(){ scene.vm = 'gone'; scene.exec = null; scene.ws = 'image'; scene.standbys = scene.standbys + 1; },
+  overlay: function(t){
+    packetSeg(P_WRKREL, t, .1, .3, 'end · 0', C.ok);
+    packetSeg(P_MCPREL, t, .3, .5, 'end', C.ok);
+    vmFlash(seg(t, .5, .72));
+    boxFlash(G.ws, seg(t, .6, .9), C.ok);
+  }
+},
+{
+  title: 'You take the patch home',
+  body: 'You ask for the changes. mocactl sends one Exec: a git diff against the baseline. The diff comes back as output. mocactl applies it to your laptop. The service keeps the workspace until it expires. sbx rm deletes it.',
+  wire: ['mocactl → relay: Exec {command:"git diff <baseline>"}',
+         'mocactl sbx pull --apply → patch applied on the laptop'],
+  chips: ['your edits, as a patch', 'the workspace expires', 'sbx rm deletes it'],
+  dur: 4400,
+  commit: function(){ scene.notice = {text:'patch applied · npm test passed', tone:'ok'}; },
+  overlay: function(t){
+    packetSeg(P_MCPREL, t, .05, .25, 'git diff', C.sync);
+    packetSeg(P_RELWRK, t, .27, .42, 'git diff', C.sync);
+    packetSeg(P_WRKREL, t, .55, .7, 'diff', C.ok);
+    packetSeg(P_MCPREL, t, .72, .86, 'diff', C.ok);
+    packetSeg(P_STDIO, t, .88, .98, 'patch', C.ok);
+  }
+}
+];
+
+/* ---------- engine ---------- */
+var cur = 0, startT = 0, committed = false, playing = false, holdUntil = 0;
+
+function gotoStep(k){
+  var st = STEPS;
+  k = Math.max(0, Math.min(st.length - 1, k));
+  scene = freshScene();
+  for (var i = 0; i < k; i++){
+    if (st[i].setup) st[i].setup();
+    st[i].commit();
+  }
+  if (st[k].setup) st[k].setup();
+  cur = k; committed = false;
+  startT = reduced() ? -1e9 : performance.now();
+  holdUntil = 0;
+  renderPanel();
+}
+function renderPanel(){
+  var st = STEPS[cur];
+  $('#stepNum').textContent = (cur + 1) + ' / ' + STEPS.length;
+  $('#stepTitle').textContent = st.title;
+  var wire = $('#stepWire');
+  wire.innerHTML = '';
+  st.wire.forEach(function(m){
+    var el = document.createElement('div');
+    el.textContent = m;
+    wire.appendChild(el);
+  });
+  $('#stepBody').textContent = st.body;
+  var chips = $('#stepChips');
+  chips.innerHTML = '';
+  st.chips.forEach(function(c){
+    var el = document.createElement('span');
+    el.className = 'chip mono';
+    el.textContent = c;
+    chips.appendChild(el);
+  });
+  var dots = $('#dots');
+  dots.innerHTML = '';
+  STEPS.forEach(function(s, i){
+    var d = document.createElement('button');
+    d.className = 'dot' + (i === cur ? ' on' : '');
+    d.setAttribute('aria-label', 'Step ' + (i + 1) + ': ' + s.title);
+    d.addEventListener('click', function(){ gotoStep(i); });
+    dots.appendChild(d);
+  });
+  $('#prev').disabled = cur === 0;
+  $('#next').disabled = cur === STEPS.length - 1;
+}
+function setPlaying(on){
+  playing = on;
+  $('#play').innerHTML = on ? '&#9632; Pause' : '&#9654; Play';
+  if (on && committed) holdUntil = performance.now() + 600;
+}
+function draw(t){
+  ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, LW, LH);
+
+  drawGroup(CLUSTER);
+  drawGroup(HOST);
+
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1.2;
+  strokePath(P_STDIO); strokePath(P_MCPCP); strokePath(P_CPREDIS);
+  strokePath(P_MCPREL); strokePath(P_RELWRK); strokePath(P_WRKVM); strokePath(P_VMWS);
+  tiny('stdio', 130, 170, 'center');
+  tiny('HTTP /v1', 240, 206, 'center');
+  tiny('gRPC + token', 356, 296, 'center');
+  tiny('Attach · dials out', 560, 282, 'center');
+  tiny('run Exec', 836, 372);
+  tiny('disk image', 836, 526);
+
+  drawAgent();
+  drawMcp();
+  drawControl();
+  drawRedis();
+  drawRelay();
+  drawWorker();
+  drawVm();
+  drawWs();
+  drawNotice();
+
+  /* keep the step's final frame on stage until the next step starts */
+  STEPS[cur].overlay(committed ? 1 : t);
+}
+function tick(now){
+  var st = STEPS[cur];
+  var t = clamp01((now - startT) / st.dur);
+  if (t >= 1 && !committed){
+    st.commit();
+    committed = true;
+    holdUntil = now + 1700;
+  }
+  if (playing && committed && now >= holdUntil){
+    if (cur < STEPS.length - 1) gotoStep(cur + 1);
+    else setPlaying(false);
+  }
+  draw(t);
+  requestAnimationFrame(tick);
+}
+
+$('#next').addEventListener('click', function(){ gotoStep(cur + 1); });
+$('#prev').addEventListener('click', function(){ gotoStep(cur - 1); });
+$('#play').addEventListener('click', function(){ setPlaying(!playing); });
+document.addEventListener('keydown', function(e){
+  if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  if (e.key === 'ArrowRight'){ gotoStep(cur + 1); }
+  else if (e.key === 'ArrowLeft'){ gotoStep(cur - 1); }
+});
+
+resize();
+gotoStep(0);
+requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>
