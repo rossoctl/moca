@@ -10,31 +10,48 @@ capability: sandbox
 
 # Sandbox service quickstart
 
-In this quickstart, a coding agent on your laptop fixes something in one of your repositories.
-Every command it runs goes to the moca sandbox service, each one in a fresh VM. At the end you
-apply its work to your laptop as a patch.
+In this quickstart, a coding agent on your laptop corrects a fault in one of your repositories.
+The agent sends every command to the moca sandbox service, which runs each command in a new VM.
+At the end, you apply the agent's work to your laptop as a patch.
 
-> **Preview.** The sandbox service is not yet declared Stable. Interfaces and limits may change.
+> **Preview.** The sandbox service is implemented but not yet declared Stable; interfaces and
+> limits may change.
 
 ## What happens to your files
 
-- `mocactl sbx up` copies your working tree into the sandbox's `/workspace` and writes your agents'
-  configuration.
+- `mocactl sbx up` copies your working tree into the sandbox's `/workspace`. It also writes your
+  agents' configuration.
 - The agent reads, edits and tests the copy in `/workspace`.
-- Your laptop's source files are untouched until you run `mocactl sbx pull --apply`.
-- Nothing syncs on its own. `mocactl sbx push` sends edits you make later.
+- The source files on your laptop do not change until you run `mocactl sbx pull --apply`.
+- The service does not copy files automatically. To send later edits, run `mocactl sbx push`.
 
 ## Before you start
 
 You need:
 
 - **Node.js 22 or later** and `git`.
-- A **sandbox service deployment** and its URL, `https://<api host>`. Moca is self-hosted:
+- A **sandbox service deployment** and its API host. Moca is self-hosted:
   [deploy one](../operate/sandbox-service/install.md), or ask whoever runs yours.
-- A GitHub account that whoever runs the deployment has **added to its access list**. If yours isn't
-  on it yet, step 2 shows the ID to send them.
+- A GitHub account that whoever runs the deployment has **added to its access list**. If your
+  account is not on the list, step 2 shows the ID to send them.
 - Claude Code or OpenCode. (Codex and IBM Bob work too. See
   [the user guide](how-to/connect-agents.md#codex-cli).)
+
+## Set your variables
+
+This page uses two values that you supply. Set them in the shell you use for the steps below. You
+can then copy each later command without an edit.
+
+```bash
+# The API host of your sandbox service deployment, without the scheme.
+export API_HOST=sbx.example.com
+
+# The repository you want the agent to work in.
+export REPO_DIR=~/src/my-repo
+```
+
+Open a new shell, and set the two variables again. To keep them, add the two lines to your shell's
+startup file (`~/.bashrc` or `~/.zshrc`).
 
 ## 1. Install mocactl
 
@@ -43,15 +60,17 @@ curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-
 mocactl --version     # v0.7.0 or later
 ```
 
-The installer puts `mocactl` in `~/.local/bin`. If that directory isn't on your `PATH`, it prints the
-line to add. You can ignore its closing hint about `SH_CONTROL_PLANE_URL`: that's for the harness.
+The installer puts `mocactl` in `~/.local/bin`. If that directory is not on your `PATH`, the
+installer prints the line to add. Ignore the closing hint about `SH_CONTROL_PLANE_URL`, which
+applies to the harness.
 
 ## 2. Log in
 
-Logging in uses GitHub's device flow. The URL is remembered, so this is the only time you pass it:
+Log in with GitHub's device flow. Mocactl remembers the URL, so this is the only step that uses
+`$API_HOST`:
 
 ```bash
-mocactl sbx login --control-plane-url https://<api host>
+mocactl sbx login --control-plane-url https://$API_HOST
 ```
 
 ```
@@ -59,15 +78,15 @@ Open https://github.com/login/device and enter the code ABCD-1234 (valid for 15 
 logged in to the sandbox service as <your GitHub login>
 ```
 
-If you see `this account (github:<id>) is not enrolled in the sandbox service`, your
-account isn't on the deployment's access list yet. Send that `github:<id>` (your numeric GitHub
-user ID) to whoever runs the deployment, so they can add you. The operator calls this list the
+The message `this account (github:<id>) is not enrolled in the sandbox service` shows that your
+account is not on the deployment's access list. Send the `github:<id>` from the message to whoever
+runs the deployment. The `<id>` is your numeric GitHub user ID. The operator calls this list the
 _allowed subjects_.
 
 ## 3. Bring your repository up
 
 ```bash
-cd <your repository>
+cd $REPO_DIR
 mocactl sbx up
 ```
 
@@ -81,35 +100,45 @@ configured Claude Code, OpenCode and IBM Bob: .mcp.json, .claude/settings.json, 
 
 What `up` does:
 
-- It creates the sandbox from the `default` template. `mocactl sbx templates` lists the others, and
-  `--template <id>` picks one.
-- It pushes your working tree, except files that may hold secrets (`.env*`, `*.pem`, `*.key`,
-  `id_*`).
-- It writes the agent configuration and records the binding in `.sbx/sandbox.json`.
-- You can run `up` again at any time. It reuses this repository's sandbox while that sandbox is live.
+- It creates the sandbox from the `default` template. To list the other templates, run
+  `mocactl sbx templates`. To select one, add `--template <id>`.
+- It pushes your working tree. It does not push files that can hold secrets (`.env*`, `*.pem`,
+  `*.key`, `id_*`).
+- It writes the agent configuration. It also records the binding in `.sbx/sandbox.json`.
+- You can run `up` again at any time. It uses this repository's sandbox again while that sandbox
+  is live.
 
 ## 4. Run your agent
 
 Start Claude Code or OpenCode in the **repository root**:
 
 ```bash
+cd $REPO_DIR
 claude        # or: opencode
 ```
 
-Claude Code asks once whether to use the project's `sandbox` MCP server. Choose **"Use this MCP
-server"**: the highlighted default declines, and the agent is left with no tools. Then ask for
-work as usual, for example "the tests fail, fix them".
+Claude Code asks one time whether to use the project's `sandbox` MCP server. Select **"Use this MCP
+server"**. The highlighted default refuses the server, and the agent then has no tools.
 
-The agent's tools are now the sandbox's: `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls` and
-`sandbox_info`. Its local tools are denied.
+Then ask for work as usual, for example "the tests fail, fix them".
 
-`mocactl sbx claude` is an alternative. It starts Claude Code with the sandbox server for that
-one run, so you skip the MCP question.
+The agent now uses the sandbox's tools: `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls` and
+`sandbox_info`. The service denies the agent's local tools.
+
+`mocactl sbx claude` is an alternative. It starts Claude Code with the sandbox server for one run,
+and does not ask the MCP question.
 
 ## 5. Take the work back
 
+First, show the patch:
+
 ```bash
-mocactl sbx pull            # look at the patch first, if you like
+mocactl sbx pull
+```
+
+Then apply it:
+
+```bash
 mocactl sbx pull --apply
 ```
 
@@ -117,35 +146,46 @@ mocactl sbx pull --apply
 applied the sandbox's changes to 3 files (2814 bytes of patch)
 ```
 
-The patch goes into your working tree, not your index. Review it with `git diff`, then commit as
-usual. `pull --apply` refuses a patch that touches agent configuration or hooks (`.mcp.json`,
-`.claude/`, `.husky/`, `.envrc`, and similar), and applies nothing in that case. See
+`pull --apply` writes the patch to your working tree, not to your index. To examine the patch, run
+`git diff`. Then commit as usual.
+
+`pull --apply` refuses a patch that changes agent configuration or hooks (`.mcp.json`, `.claude/`,
+`.husky/`, `.envrc`, and similar). It then applies no part of the patch. See
 [Take the work back](how-to/push-and-pull.md).
 
 ## 6. Check, and clean up
 
+First, check the setup. `doctor` tests your login, the sandbox, the agent configuration, command
+execution, and changes you did not pull:
+
 ```bash
-mocactl sbx doctor    # login, sandbox, agent config, exec, unpulled changes
-mocactl sbx rm        # delete the sandbox and the configuration `up` added
+mocactl sbx doctor
 ```
 
-`rm` refuses to delete a sandbox that holds work you haven't pulled. If you don't remove it, a
-sandbox ends after 7 days without use by default, and its files go with it.
+Then delete the sandbox and the configuration that `up` added:
+
+```bash
+mocactl sbx rm
+```
+
+`rm` refuses to delete a sandbox that holds work you did not pull. If you keep the sandbox, it ends
+after 7 days without use by default. The service then deletes its files.
 
 ## What you just did
 
-- Your agent ran on your laptop, but none of its commands did.
-- No process survives a call.
-- The VM has no network device. It reaches only the hosts the deployment allowlists, through a proxy on
-  the host.
+- Your agent ran on your laptop. Its commands ran in the sandbox.
+- No process continues after a call.
+- The VM has no network device. It reaches only the hosts that the deployment allowlists, through a
+  proxy on the host.
 - The VM holds no secrets.
 
-Why this design is safer: [Isolation and data handling](concepts/isolation.md).
+To read why this design is safer, see [Isolation and data handling](concepts/isolation.md).
 
 ## Next
 
 - **Do more:** [Use Codex](how-to/connect-agents.md#codex-cli) or [IBM Bob](how-to/connect-agents.md#ibm-bob),
   [Use egress credentials](how-to/egress-credentials.md),
-  [Keep a guest between commands (lease mode)](how-to/lease-mode.md).
+  [Keep a guest between commands (lease mode)](how-to/lease-mode.md). To set the control plane for
+  one shell instead of logging in again, use `MOCACTL_SBX_URL`.
 - **Understand:** [Limits](concepts/limits.md).
 - **Look up:** [`mocactl sbx` reference](reference/cli-sbx.md).
