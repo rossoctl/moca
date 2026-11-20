@@ -64,6 +64,7 @@ import type { GateCapture } from './request-approval-tool.js';
 import {
   computeGateState,
   decideSeed,
+  gateShortCircuit,
   validateDecision,
   type Decision,
   GATE_DECISION_ENTRY_TYPE,
@@ -1172,6 +1173,24 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
     }
   }
 
+  // Gate front-end, part 1 (#393 §1): the answers that need no prompt, so a parked or aborted leaf
+  // leases no sandbox and converges no worktree. Beside the verdict fast-path above, which skips the
+  // lease for the same reason. The seed half stays below the converge -- it needs workspaceRef.
+  const gateState = computeGateState(prior.map((p) => p.entry));
+  const dv = env.decision ? validateDecision(env.decision) : null;
+  const decision = dv && dv.ok ? dv.value : null;
+  const short = gateShortCircuit(gateState, decision);
+  if (short) {
+    if (short.kind === 'paused') {
+      capture.gate = short.gate;
+    } else {
+      if (short.record) sessionManager.appendCustomEntry(GATE_DECISION_ENTRY_TYPE, short.record);
+      capture.aborted = true;
+    }
+    await backend.flush();
+    return;
+  }
+
   // --- P2: choose a sandbox pod (pool lease) before building the prompt/session. Placed after the
   // verdict fast-path so a recovered verdict does not lease a pod. Returns null ⇒ no sandbox
   // configured (local tools). Throws SandboxPoolSaturatedError when a configured pool is full.
@@ -1219,22 +1238,12 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
       }, verdictTimings.heartbeatMs);
     }
 
-    // Gate front-end (design §3): decide whether to pause, abort, or seed a prompt.
-    const gateState = computeGateState(prior.map((p) => p.entry));
-    const dv = env.decision ? validateDecision(env.decision) : null;
-    const decision = dv && dv.ok ? dv.value : null;
+    // Gate front-end, part 2: only the seed is left. `gateShortCircuit` above already returned for
+    // `paused` and `abort`, so this call can produce nothing else -- the throw is a tripwire on that
+    // invariant, not a path a caller can reach.
     const seed = decideSeed(gateState, decision, buildLeafPrompt(item, workspaceRef));
-
-    if (seed.kind === 'abort') {
-      if (seed.record) sessionManager.appendCustomEntry(GATE_DECISION_ENTRY_TYPE, seed.record);
-      capture.aborted = true;
-      await backend.flush();
-      return;
-    }
-    if (seed.kind === 'paused') {
-      capture.gate = seed.gate;
-      await backend.flush();
-      return;
+    if (seed.kind !== 'seed') {
+      throw new Error(`unreachable: gate short-circuit missed '${seed.kind}'`);
     }
     if (seed.record) sessionManager.appendCustomEntry(GATE_DECISION_ENTRY_TYPE, seed.record);
 
