@@ -391,6 +391,15 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
     ...(workloadId !== undefined ? { workloadId } : {}),
   };
 
+  // #393: a gate on a prompt or solve turn. The converge kind has carried this on
+  // `item.require_approval` since ADR-0016 and keeps it, so this is read only for the other two.
+  if (b.requireApproval !== undefined && typeof b.requireApproval !== 'boolean') {
+    throw new CpError('invalid_request', 'requireApproval must be a boolean');
+  }
+  // `true` only: an absent flag and `false` mean the same thing, and storing both would put two
+  // spellings of "no gate" on the wire (the same rule the `converge` normalisation below follows).
+  const gated = b.requireApproval === true ? { requireApproval: true as const } : {};
+
   const item = asRecord(b.item);
   // `converge` is the explicit wire spelling of the default kind (spec §10 parity table: "Leaf
   // kinds accepted async (prompt/converge/solve) -- All three kept"); runLeaf treats an absent
@@ -407,7 +416,7 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
     return { kind: 'verdict', envelope: { item: b.item }, ...common };
   }
   if (b.kind === 'prompt' && str(b.prompt)) {
-    return { kind: 'prompt', envelope: { kind: 'prompt', prompt: b.prompt }, ...common };
+    return { kind: 'prompt', envelope: { kind: 'prompt', prompt: b.prompt, ...gated }, ...common };
   }
   if (b.kind === 'solve' && str(b.problemStatement) && str(b.repoUrl) && str(b.ref)) {
     return {
@@ -417,6 +426,7 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
         problemStatement: b.problemStatement,
         repoUrl: b.repoUrl,
         ref: b.ref,
+        ...gated,
       },
       ...common,
     };

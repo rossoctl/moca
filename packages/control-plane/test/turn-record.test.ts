@@ -130,6 +130,56 @@ describe('parseTurnSubmission (spec §4.1)', () => {
     expect(p.envelope).toMatchObject({ repoUrl: 'https://example.invalid/r.git', ref: 'main' });
   });
 
+  it('carries requireApproval onto a prompt envelope', () => {
+    const p = parseTurnSubmission({
+      async: true,
+      kind: 'prompt',
+      prompt: 'hi',
+      requireApproval: true,
+    });
+    expect(p.envelope).toEqual({ kind: 'prompt', prompt: 'hi', requireApproval: true });
+  });
+
+  it('carries requireApproval onto a solve envelope', () => {
+    const p = parseTurnSubmission({
+      async: true,
+      kind: 'solve',
+      problemStatement: 'fix it',
+      repoUrl: 'https://example.invalid/r.git',
+      ref: 'main',
+      requireApproval: true,
+    });
+    expect(p.envelope).toMatchObject({ requireApproval: true });
+  });
+
+  it('omits the flag rather than storing false', () => {
+    // One representation per meaning, as the `converge` kind normalisation does.
+    const p = parseTurnSubmission({
+      async: true,
+      kind: 'prompt',
+      prompt: 'hi',
+      requireApproval: false,
+    });
+    expect(p.envelope).toEqual({ kind: 'prompt', prompt: 'hi' });
+  });
+
+  it('refuses a non-boolean requireApproval', () => {
+    expect(
+      codeOf(() =>
+        parseTurnSubmission({ async: true, kind: 'prompt', prompt: 'hi', requireApproval: 'yes' }),
+      ),
+    ).toBe('invalid_request');
+  });
+
+  it('ignores it on a converge leaf, which has item.require_approval', () => {
+    const p = parseTurnSubmission({
+      async: true,
+      item: { ...item, require_approval: true },
+      requireApproval: true,
+    });
+    expect(p.envelope).toEqual({ item: { ...item, require_approval: true } });
+  });
+
   it('refuses a body that is not one of the three kinds', () => {
     expect(codeOf(() => parseTurnSubmission({ async: true }))).toBe('envelope_invalid');
     expect(codeOf(() => parseTurnSubmission({ kind: 'prompt', async: true }))).toBe(

@@ -28,6 +28,14 @@ describe('isRunEnvelope accepts a prompt envelope', () => {
   // Issue #222 (1): an empty configRef is a WELL-FORMED envelope making an unsatisfiable request.
   // It is rejected separately, with its own error code, so the operator is not sent looking for a
   // malformed body — and so `isRunEnvelope` keeps meaning exactly "shaped like a run".
+  // #393: the sync run path needs no parse change for a gate -- the body IS the envelope, and
+  // `requireApproval` reaches runLeaf through it. Asserted because that is the one place the flag
+  // could be silently dropped by a stricter envelope check later.
+  it('passes requireApproval through untouched', () => {
+    expect(
+      isRunEnvelope({ sessionId: 's', kind: 'prompt', prompt: 'x', requireApproval: true }),
+    ).toBe(true);
+  });
   it('is not the place an empty configRef is caught', () => {
     expect(isRunEnvelope({ sessionId: 's', kind: 'prompt', prompt: 'x', configRef: '' })).toBe(
       true,
