@@ -202,6 +202,94 @@ export const ownerTurnsKey = (subject: string): string =>
  */
 export const ownerRunningTurnsKey = (subject: string): string =>
   `sh:cp:owner:${subjectHash(subject)}:running`;
+
+/**
+ * One owner's turn state changes, as a Redis STREAM (#392). A stream and not a zset because the
+ * entry id IS the cursor a client resumes from: the server mints no sequence of its own, nothing has
+ * to be deduplicated by score, and `XADD MAXLEN ~` bounds the log on the same write that appends to
+ * it.
+ *
+ * Owner-scoped the way the two keys above are -- derived from the subject, so one subject's stream
+ * cannot name another's events and there is no filter for a handler to get wrong (the two-subject
+ * test in turn-store-contract.ts asserts the consequence, not the derivation).
+ */
+export const ownerEventsKey = (subject: string): string =>
+  `sh:cp:owner:${subjectHash(subject)}:events`;
+
+/**
+ * Entries kept per owner, trimmed with `~` so Redis drops whole nodes and the number is a floor
+ * rather than a promise. 500 is several days of an unattended fan-out's transitions (three per turn,
+ * and `MOCA_ASYNC_QUEUED_PER_OWNER` is 50), and a client that falls further behind than the log is
+ * TOLD so -- `GET /v1/events` answers a `gap` frame -- rather than handed a history with a silent
+ * hole in it.
+ */
+export const EVENTS_MAXLEN = 500;
+
+/** A stream entry id, `<ms>-<seq>`. Checked at the route, so `compareCursor` never parses junk. */
+export const CURSOR_RE = /^[0-9]+-[0-9]+$/;
+
+/**
+ * One state transition, as a client reads it. `reason` and `gate` are carried so the stream is
+ * self-sufficient: a notifier (#394) and `mocactl watch` can both render a finished turn without a
+ * second request per event.
+ */
+export interface TurnEvent {
+  /** The stream entry id, i.e. the cursor to resume AFTER. Absent on an event being written. */
+  cursor?: string;
+  ts: number;
+  sessionId: string;
+  turnId: string;
+  state: TurnState;
+  attempts: number;
+  reason?: string;
+  gate?: string;
+}
+
+/**
+ * Stream fields are flat strings. An absent field beats an empty one, so a decode cannot invent a
+ * reason the leaf never gave.
+ */
+export function encodeTurnEvent(e: TurnEvent): Record<string, string> {
+  return {
+    ts: String(e.ts),
+    sessionId: e.sessionId,
+    turnId: e.turnId,
+    state: e.state,
+    attempts: String(e.attempts),
+    ...(e.reason ? { reason: e.reason } : {}),
+    ...(e.gate ? { gate: e.gate } : {}),
+  };
+}
+
+export function decodeTurnEvent(cursor: string, f: Record<string, string>): TurnEvent {
+  return {
+    cursor,
+    ts: Number(f.ts ?? 0),
+    sessionId: f.sessionId ?? '',
+    turnId: f.turnId ?? '',
+    // An unrecognised state reads as `queued`, exactly as `TurnStore.get` does: a client must never
+    // be handed a state outside the union the contract publishes.
+    state: (TURN_STATES as readonly string[]).includes(f.state ?? '')
+      ? (f.state as TurnState)
+      : 'queued',
+    attempts: Number(f.attempts ?? 0),
+    ...(f.reason ? { reason: f.reason } : {}),
+    ...(f.gate ? { gate: f.gate } : {}),
+  };
+}
+
+/**
+ * Order two cursors. A lexical compare is wrong -- '100-0' sorts before '99-0' as text -- and the
+ * one question asked of this is whether a client's `since` predates the oldest entry still in the
+ * stream, i.e. whether retention cut history out from under it. Both arguments have passed
+ * `CURSOR_RE`, so there is nothing to validate here.
+ */
+export function compareCursor(a: string, b: string): number {
+  const [ams, aseq] = a.split('-').map(Number) as [number, number];
+  const [bms, bseq] = b.split('-').map(Number) as [number, number];
+  return ams - bms || aseq - bseq;
+}
+
 /**
  * One SESSION's turns, open and finished alike, scored by `createdAt` (async fan-out spec §9.2).
  *

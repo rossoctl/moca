@@ -51,6 +51,30 @@ export interface CpRedisLike {
     options?: { TRIM: { strategy: 'MAXLEN'; strategyModifier: '~'; threshold: number } },
   ): Promise<unknown>;
   /**
+   * A stream's entries in id order. `start`/`end` are `'-'`/`'+'` or an entry id, EXCLUSIVE with a
+   * leading `(` -- which is how the owner event stream (#392) resumes: a client's cursor names the
+   * last event it printed, so an inclusive read would print that one again on every reconnect.
+   * Exclusive ranges need Redis 6.2; every deploy target runs valkey 9 (deploy/compose,
+   * deploy/k8s/base/redis.yaml).
+   */
+  xRange(
+    key: string,
+    start: string,
+    end: string,
+    options?: { COUNT?: number },
+  ): Promise<{ id: string; message: Record<string, string> }[]>;
+  /**
+   * The same, newest first -- note the argument order is (key, END, START), as XREVRANGE and
+   * node-redis both take it. Used with `COUNT: 1` for one question only: where does this stream end
+   * right now, so a client that asked for no cursor starts from here rather than from a week ago.
+   */
+  xRevRange(
+    key: string,
+    end: string,
+    start: string,
+    options?: { COUNT?: number },
+  ): Promise<{ id: string; message: Record<string, string> }[]>;
+  /**
    * The score of one member, or null when it is gone. `listByOwner` needs it to page from the zset's
    * own position rather than from a surviving record -- see the comment there for why.
    */

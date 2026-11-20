@@ -2,14 +2,19 @@ import type { CpRedisLike } from './ownership.js';
 import { CpError } from './errors.js';
 import { sanitizeLimits } from './models.js';
 import {
+  decodeTurnEvent,
+  encodeTurnEvent,
+  EVENTS_MAXLEN,
   idempotencyKeyKey,
   isTerminalState,
+  ownerEventsKey,
   ownerRunningTurnsKey,
   ownerTurnsKey,
   sessionTurnsKey,
   turnKey,
   TURN_STATES,
   type TurnCaps,
+  type TurnEvent,
   type TurnRecord,
   type TurnState,
 } from './turn-record.js';
@@ -36,6 +41,13 @@ export interface TurnStoreOptions {
  * that is the only shape EVAL's argument list has. A missing record (no `state` field) returns 0:
  * nothing is created here, and a record that expired mid-turn must not be resurrected without its
  * owner, caps or envelope.
+ *
+ * A WINNER answers `{previousState, owner, sessionId}` rather than 1. The previous state is what
+ * makes "one event per transition" (#392) decidable at the only place every transition passes: a
+ * redelivery rewrites `running` over `running` and must emit nothing, and nothing outside this
+ * script can tell the two apart. The owner and session come back on the same round trip because the
+ * event stream's key is derived from the owner, and `markRunning` is handed a turn id alone -- a
+ * second HGETALL there would be an extra round trip on the claim hot path, per claimed turn.
  */
 export const CAS_STATE_LUA = `
 local s = redis.call('HGET', KEYS[1], 'state')
@@ -47,7 +59,8 @@ if not ok then return 0 end
 local fields = {}
 for i = n + 2, #ARGV do fields[#fields + 1] = ARGV[i] end
 redis.call('HSET', KEYS[1], unpack(fields))
-return 1
+local meta = redis.call('HMGET', KEYS[1], 'owner', 'sessionId')
+return {s, meta[1] or '', meta[2] or ''}
 `;
 
 /**
@@ -229,6 +242,15 @@ export class TurnStore {
     await this.guard(() =>
       this.redis.zRemRangeByScore(this.sessionKey(rec.sessionId), '-inf', cutoff),
     );
+    // The turn's first transition: it exists and it is queued (#392). After every index write, so a
+    // client woken by this event finds the record and the quota already consistent with it.
+    await this.emit(rec.owner, {
+      ts: rec.createdAt,
+      sessionId: rec.sessionId,
+      turnId: rec.turnId,
+      state: rec.state,
+      attempts: rec.attempts,
+    });
   }
 
   async get(turnId: string): Promise<TurnRecord | null> {
@@ -430,10 +452,33 @@ export class TurnStore {
       state: 'running',
       attempts: String(attempts),
     });
-    return won ? 'ok' : 'refused';
+    if (!won) return 'refused';
+    // Only a REAL queued → running is a transition. A redelivery re-writes `running` and must emit
+    // nothing, or `watch --json` would print a line for a state change that did not happen -- which
+    // is exactly the acceptance criterion "exactly one line per transition".
+    if (won.prev !== 'running') {
+      await this.emit(won.owner, {
+        // `Date.now()` and not an injected clock: this timestamp is descriptive only -- no retention
+        // or ordering decision reads it, the cursor does -- and a `now` parameter would change the
+        // worker's call site in turn-claim.ts for nothing.
+        ts: Date.now(),
+        sessionId: won.sessionId,
+        turnId,
+        state: 'running',
+        attempts,
+      });
+    }
+    return 'ok';
   }
 
-  async finalize(turnId: string, state: TurnState, now: number): Promise<'ok' | 'refused'> {
+  async finalize(
+    turnId: string,
+    state: TurnState,
+    now: number,
+    /** The leaf's own reason and gate, carried onto the event so a client needs no follow-up read
+     *  (#392). Absent where the caller has no result in hand (the reaper's `lost`). */
+    detail?: { reason?: string; gate?: string },
+  ): Promise<'ok' | 'refused'> {
     if (!isTerminalState(state)) {
       throw new CpError('internal_error', `finalize needs a terminal state, got '${state}'`);
     }
@@ -441,7 +486,7 @@ export class TurnStore {
     // state it reports is not trusted, because the CAS inside `toTerminal` re-checks it.
     const rec = await this.get(turnId);
     if (!rec) return 'refused';
-    return this.toTerminal(rec, state, now, OPEN_STATES);
+    return this.toTerminal(rec, state, now, OPEN_STATES, detail);
   }
 
   /**
@@ -473,7 +518,9 @@ export class TurnStore {
       if (!rec) return 'conflict';
       if (rec.state === 'running') {
         // Already requested: idempotent, so a caller retrying a DELETE sees the same answer rather
-        // than a 409 for a cancel that is in flight.
+        // than a 409 for a cancel that is in flight. Emits NO event (#392): the record stays
+        // `running`, so this is not a state transition, and the `cancelled` that follows when the
+        // worker stops is emitted by `toTerminal`.
         if (await this.cas(this.key(turnId), ['running'], { cancelRequested: '1' }))
           return 'cancelling';
         continue;
@@ -506,19 +553,83 @@ export class TurnStore {
     return (await this.guard(() => this.redis.hGet(this.key(turnId), 'owner'))) ?? '';
   }
 
-  /** One CAS attempt, with the transport mapped to 503 like every other call here. */
+  /**
+   * One CAS attempt, with the transport mapped to 503 like every other call here. A winner answers
+   * what it REPLACED, for the caller's event emit (#392); a loser answers null.
+   */
   private async cas(
     key: string,
     allowed: readonly TurnState[],
     fields: Record<string, string>,
-  ): Promise<boolean> {
+  ): Promise<{ prev: TurnState; owner: string; sessionId: string } | null> {
     const won = await this.guard(() =>
       this.redis.eval(CAS_STATE_LUA, {
         keys: [key],
         arguments: [String(allowed.length), ...allowed, ...Object.entries(fields).flat()],
       }),
     );
-    return Number(won ?? 0) === 1;
+    // A loser is the number 0; a winner is the three-element table above.
+    if (!Array.isArray(won)) return null;
+    const [prev, owner, sessionId] = won as string[];
+    return { prev: prev as TurnState, owner: owner ?? '', sessionId: sessionId ?? '' };
+  }
+
+  /**
+   * Append one transition to the owner's event stream (#392), best-effort and AFTER the state is
+   * durable. Deliberately not inside the CAS's Lua: the stream's key is a sha256 of the subject
+   * taken in TypeScript, so making it atomic would mean storing that derived key on every record
+   * just to pass it as KEYS[2].
+   *
+   * shortcut: a process death between the CAS and this XADD loses the event, and a thrown XADD is
+   * swallowed -- a finished turn must not become a refused transition because its notification
+   * failed. Every client therefore keeps a slow re-read (mocactl's `watch` sweeps every 60 s);
+   * upgrade to the KEYS[2] form if a client ever wants to drop that.
+   */
+  private async emit(owner: string, e: TurnEvent): Promise<void> {
+    // A record with no owner is a partial write (`get`'s rule); there is no stream to key.
+    if (!owner) return;
+    const key = ownerEventsKey(this.tag(owner));
+    try {
+      await this.redis.xAdd(key, '*', encodeTurnEvent(e), {
+        TRIM: { strategy: 'MAXLEN', strategyModifier: '~', threshold: EVENTS_MAXLEN },
+      });
+      // #390's retention, derived rather than restated: the log outlives the records it describes by
+      // exactly the margin they outlive their results by. Re-armed on every append, so an active
+      // owner's cursor never expires under them.
+      await this.redis.expire(key, this.ttlSeconds());
+    } catch {
+      // Best effort, by the shortcut above.
+    }
+  }
+
+  /** The owner's events AFTER `since` (exclusive), oldest first. `'0-0'` reads from the start. */
+  async readEvents(owner: string, since: string, count: number): Promise<TurnEvent[]> {
+    const rows = await this.guard(() =>
+      this.redis.xRange(ownerEventsKey(this.tag(owner)), `(${since}`, '+', { COUNT: count }),
+    );
+    return rows.map((r) => decodeTurnEvent(r.id, r.message));
+  }
+
+  /**
+   * Where the stream ends now, or `'0-0'` when the owner has none: the cursor a client that asked
+   * for no history starts from.
+   */
+  async lastEventId(owner: string): Promise<string> {
+    const rows = await this.guard(() =>
+      this.redis.xRevRange(ownerEventsKey(this.tag(owner)), '+', '-', { COUNT: 1 }),
+    );
+    return rows[0]?.id ?? '0-0';
+  }
+
+  /**
+   * The oldest event still kept, or `''` when the owner has none -- what a `since` older than the
+   * retention window is compared against (the route's `gap` frame).
+   */
+  async firstEventId(owner: string): Promise<string> {
+    const rows = await this.guard(() =>
+      this.redis.xRange(ownerEventsKey(this.tag(owner)), '-', '+', { COUNT: 1 }),
+    );
+    return rows[0]?.id ?? '';
   }
 
   /**
@@ -541,6 +652,7 @@ export class TurnStore {
     state: TurnState,
     now: number,
     allowed: readonly TurnState[],
+    detail?: { reason?: string; gate?: string },
   ): Promise<'ok' | 'refused'> {
     // The CAS is the gate for everything below it. A loser does nothing at all -- in particular it
     // does not release the idempotency key or re-arm the TTL, both of which belong to the writer
@@ -570,6 +682,15 @@ export class TurnStore {
       );
       await this.guard(() => this.redis.expire(this.sessionKey(rec.sessionId), this.ttlSeconds()));
     }
+    await this.emit(rec.owner, {
+      ts: now,
+      sessionId: rec.sessionId,
+      turnId: rec.turnId,
+      state,
+      attempts: rec.attempts,
+      ...(detail?.reason ? { reason: detail.reason } : {}),
+      ...(detail?.gate ? { gate: detail.gate } : {}),
+    });
     return 'ok';
   }
 }
