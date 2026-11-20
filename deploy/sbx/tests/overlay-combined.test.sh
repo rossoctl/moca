@@ -49,6 +49,26 @@ items="$(obj Deployment moca-control-plane | jq -r '.spec.template.spec.volumes[
 for k in SH_CREDENTIAL_KEK SH_EXCHANGE_TOKEN SH_JANITOR_TOKEN SH_SESSION_TOKEN_PRIVATE_KEY; do
   [[ " $items" == *" $k "* ]] || fail "the control plane does not mount $k"
 done
+[[ " $items" == *" SH_INSTALLER_TOKEN "* ]] || fail 'the control plane does not mount SH_INSTALLER_TOKEN (the members API bearer setup.sh generates on both profiles)'
+oidc="$(obj Deployment moca-control-plane | jq -r '.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[] | select(.secret.name == "moca-oidc") | "\(.secret.optional)/\([(.secret.items // [])[] | .key] | join(","))"')"
+[[ "$oidc" == true/SH_OIDC_CLIENT_SECRET ]] || fail "the control plane has no optional moca-oidc source (SH_OIDC_CLIENT_SECRET), got '$oidc'"
+# The two profiles' control planes carry the same credential sources the sandbox side reads: the
+# combined list restates the template-store component's, so a source added to ocp-sbx must be
+# added here too (#938: the installer token and moca-oidc were missed).
+sbx_src() { # sbx_src JSON -> the credentials volume's secret sources, one "name/optional/key,..." per line
+  jq -r '.[] | select(.kind == "Deployment" and .metadata.name == "moca-control-plane") | .spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[] | select(.secret) | "\(.secret.name)/\(.secret.optional // false)/\([(.secret.items // [])[] | .key] | join(","))"' "$1" | sort
+}
+kubectl kustomize "$ROOT/deploy/k8s/overlays/ocp-sbx" >"$TMPD/sbx.yaml"
+KUBECONFIG=/dev/null kubectl label --local -f "$TMPD/sbx.yaml" sbx-render- -o json | jq -s . >"$TMPD/sbx.json"
+while IFS=/ read -r name opt keys; do
+  line="$(sbx_src "$JSON" | awk -F/ -v n="$name" '$1 == n')"
+  [[ -n "$line" ]] || fail "ocp-sbx's control plane mounts Secret $name but the combined one does not"
+  IFS=, read -ra want <<<"$keys"
+  for k in ${want[@]+"${want[@]}"}; do
+    [[ ",${line##*/}," == *",$k,"* ]] || fail "ocp-sbx mounts $name/$k but the combined control plane does not"
+  done
+  [[ "$(cut -d/ -f2 <<<"$line")" == "$opt" ]] || fail "Secret $name is optional=$opt on ocp-sbx but not on combined"
+done < <(sbx_src "$TMPD/sbx.json")
 [[ "$(env_of Deployment moca-control-plane control-plane SH_CREDENTIAL_STORE)" == file ]] || fail 'the harness credential store is not the file store'
 [[ "$(q '[.[] | select(.kind == "Role" or .kind == "RoleBinding")] | length')" == 0 ]] || fail 'a Role over the namespace is rendered'
 [[ "$(obj Deployment moca-control-plane | jq -r '.spec.template.spec.automountServiceAccountToken')" == false ]] || fail 'the control plane mounts a service account token'
