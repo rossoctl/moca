@@ -208,6 +208,7 @@ HANDLE_RE='^b-[0-9a-f]{26}$'
 WORKER_RE='^[A-Za-z_][A-Za-z0-9_]*$'
 TEMPLATE_ID_RE='^[a-z0-9][a-z0-9-]{0,30}$'
 DIGEST_RE='^sha256:[0-9a-f]{64}$'
+PLAIN_PATH_RE='^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$' # install-host.sh's, for SBX_UNIT_DIR (it reads the same drop-in)
 
 say() { printf '%s\n' "$*"; }
 refuse() { echo "sbx-host-agent: $*" >&2; exit 2; }
@@ -224,6 +225,8 @@ check_settings() {
   for t in jq curl df mktemp base64 sha256sum systemctl flock; do command -v "$t" >/dev/null || refuse "needs $t on PATH"; done
   SBX_SRV="${SBX_SRV-/srv/sbx}" SBX_ENV_DIR="${SBX_ENV_DIR-/etc/sbx}" SBX_UNIT_DIR="${SBX_UNIT_DIR-/etc/systemd/system}"
   [[ "$SBX_SRV" =~ ^(/[A-Za-z0-9_][A-Za-z0-9._-]*)+$ ]] || refuse "SBX_SRV='$SBX_SRV' must be an absolute path other than /"
+  # A relative or padded unit dir would read as "credentials off" and build a snapshot without the CA.
+  [[ "$SBX_UNIT_DIR" =~ $PLAIN_PATH_RE ]] || refuse "SBX_UNIT_DIR='$SBX_UNIT_DIR' must be a plain absolute path"
   [[ "${SBX_API_URL:-}" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]] || refuse 'SBX_API_URL must be https://<api host>'
   [[ "${SBX_HOST_ID:-}" =~ $HOST_ID_RE ]] || refuse "SBX_HOST_ID must match $HOST_ID_RE"
   : "${SBX_HOST_TOKEN_FILE:=$SBX_ENV_DIR/host-agent.token}"
