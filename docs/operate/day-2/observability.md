@@ -68,10 +68,12 @@ the audit decision `refresh_reuse_detected`.
 ## The audit stream
 
 The control plane appends to the Redis stream `sh:cp:audit` (trimmed to about 1,000,000 entries) with fields `ts`,
-`subject`, `decision`, and optionally `sessionId`, `credential` (a name, never a value), `configRef`, `bytes`, `reason` and
+`subject`, `decision`, and optionally `sessionId`, `credential` (a name, never a value), `configRef`, `bytes`, `reason`,
+`member` (the subject an enrollment or admin-role change is about; `subject` is the admin who made it) and
 `family` (written by every refresh-token decision). Decisions: `credential_issued`, `operator_fallback_used`, `session_created`, `session_deleted`,
 `session_deleted_in_flight`, `credential_written`, `credential_deleted`, `config_bundle_uploaded`,
-`config_bundle_unchanged`, `config_bundle_refused`, `config_bundle_deleted`, and the refresh-token decisions
+`config_bundle_unchanged`, `config_bundle_refused`, `config_bundle_deleted`, the membership decisions
+`subject_enrolled`, `subject_unenrolled`, `admin_granted`, `admin_revoked`, and the refresh-token decisions
 `refresh_issued`, `refresh_rotated`, `refresh_refused`, `refresh_reuse_detected`, `refresh_revoked` (`reason`
 `logout`, `logout_all`, or `not_enrolled`: a sandbox-profile refresh by a subject no longer in `SH_ALLOWED_SUBJECTS`,
 whose family the control plane revokes so the client's last token is later refused as `revoked`, not as reuse). Anonymous

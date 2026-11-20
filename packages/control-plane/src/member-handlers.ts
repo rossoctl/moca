@@ -1,5 +1,11 @@
 import { CpError } from './errors.js';
-import { asRecord, isAdmin, requireEnrolledPrincipal, seconds } from './handler-util.js';
+import {
+  asRecord,
+  auditBestEffort,
+  isAdmin,
+  requireEnrolledPrincipal,
+  seconds,
+} from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import { MEMBER_SUBJECT_FORMS, MEMBER_SUBJECT_RE } from './identity.js';
 import { ADMIN, MAX_GRANT_SECONDS, type MembersStore } from './members.js';
@@ -46,6 +52,21 @@ function subjectParam(ctx: RequestCtx): string {
   return s;
 }
 
+/**
+ * Mirror a change of enrollment or role to the audit log, as the credential routes do. The members
+ * provenance stream already holds the record; the audit line makes it visible beside every other
+ * admin write. Called only on a change: an unchanged answer (record null) writes nothing.
+ */
+async function auditMember(
+  deps: CpDeps,
+  route: string,
+  actor: string,
+  member: string,
+  decision: string,
+): Promise<void> {
+  await auditBestEffort(deps, route, `member=${member}`, { subject: actor, member, decision });
+}
+
 const blank = (subject: string, by: string, nowS: number) => ({
   subject,
   enrolled: false,
@@ -79,6 +100,7 @@ export const MEMBER_HANDLERS: Record<string, Handler> = {
       m.by = p.sub;
       return { kind: 'member', subject: p.sub, body: { subject, enrolled: true, before: false } };
     });
+    if (record) await auditMember(deps, 'enrollSubject', p.sub, subject, 'subject_enrolled');
     return {
       status: 200,
       body: { ...(await members.view(subject, seconds(deps))), record },
@@ -112,6 +134,7 @@ export const MEMBER_HANDLERS: Record<string, Handler> = {
       m.by = p.sub;
       return { kind: 'member', subject: p.sub, body: { subject, enrolled: false, before: true } };
     });
+    if (record) await auditMember(deps, 'unenrollSubject', p.sub, subject, 'subject_unenrolled');
     return {
       status: 200,
       body: { ...(await members.view(subject, seconds(deps))), record },
@@ -168,6 +191,7 @@ export const MEMBER_HANDLERS: Record<string, Handler> = {
         },
       };
     });
+    if (record) await auditMember(deps, 'grantAdmin', p.sub, subject, 'admin_granted');
     return {
       status: 200,
       body: { ...(await members.view(subject, seconds(deps))), record },
@@ -202,6 +226,7 @@ export const MEMBER_HANDLERS: Record<string, Handler> = {
         body: { subject, role: ADMIN, state: 'revoked', before: live ? 'granted' : 'expired' },
       };
     });
+    if (record) await auditMember(deps, 'revokeAdmin', p.sub, subject, 'admin_revoked');
     return {
       status: 200,
       body: { ...(await members.view(subject, seconds(deps))), record },
