@@ -1,15 +1,10 @@
 package main
 
-// limitKeys lists every key gatherLimits guarantees to report. Spec §7.5: "an absent
-// key reads as 'not checked', a present 'unavailable' reads as 'checked, not
-// applicable'" — so every platform reports every key, even where the answer is fixed
-// at "unavailable".
-var limitKeys = []string{"RLIMIT_MEMLOCK", "RLIMIT_NOFILE", "vm.max_map_count", "pid_max", "TasksMax"}
-
 // gatherLimits READS (never raises — vmpool.RaiseMemlockLimit owns raising, at pool
 // construction on the production path) the kernel ceilings spec §7.5 lists as the ones
 // that "fail at 500 VMs after working at 20, indistinguishably from a real ceiling"
-// unless recorded per run.
+// unless recorded per run. Every platform reports every key, as "unavailable" where
+// it does not apply: spec §7.5 reads an absent key as "not checked".
 //
 // Split two ways, each with its own reason:
 //   - rlimitMemlock/rlimitNofile: unix (limits_unix.go, via golang.org/x/sys/unix — see

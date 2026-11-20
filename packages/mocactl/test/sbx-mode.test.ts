@@ -212,7 +212,7 @@ describe('mocactl sbx create --mode (lease-mode spec §8.1, §8.2)', () => {
     expect(w.createBody()).toEqual({ template: 'default', mode: 'lease', idleTimeoutS: 900 });
   });
 
-  it('--idle-timeout must be a whole number of seconds, and only applies to create', async () => {
+  it('--idle-timeout must be a whole number of seconds, and only applies to create and mode', async () => {
     for (const bad of ['0', '-5', '1.5', 'soon', '']) {
       const w = world();
       expect(await w.run(['create', '--mode', 'lease', '--idle-timeout', bad])).toBe(2);
@@ -221,7 +221,7 @@ describe('mocactl sbx create --mode (lease-mode spec §8.1, §8.2)', () => {
     }
     const w = world();
     expect(await w.run(['ls', '--idle-timeout', '900'])).toBe(2);
-    expect(w.err()).toContain('--idle-timeout only applies to create');
+    expect(w.err()).toContain('--idle-timeout only applies to create and mode');
   });
 
   it('--mode bogus is a usage error (exit 2)', async () => {

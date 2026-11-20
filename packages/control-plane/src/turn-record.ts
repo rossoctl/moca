@@ -185,6 +185,23 @@ export const isMintedTurnId = (turnId: string): boolean => MINTED_TURN_ID_RE.tes
  */
 export const ownerTurnsKey = (subject: string): string =>
   `sh:cp:owner:${subjectHash(subject)}:turns`;
+
+/**
+ * One owner's turns a worker is RUNNING RIGHT NOW, scored by the moment that delivery was admitted
+ * (#391). The cluster-wide half of per-owner fairness: `SubjectCounter` is a Map in one worker
+ * process, so it cannot bound an owner who is occupying every worker's drain at once.
+ *
+ * Separate from the open set above rather than derived from it, because that set counts `queued` as
+ * well as `running` and the two caps mean different things -- `MOCA_ASYNC_QUEUED_PER_OWNER` bounds
+ * what an owner may WAIT with, this bounds what they may EXECUTE with.
+ *
+ * A member is one DELIVERY's claim, not the turn's life: the worker adds it when it admits the entry
+ * and removes it on every way out of `processOne`, redelivery and loss included. So a turn whose
+ * record still says `running` because the worker holding it died holds no slot here once the entry
+ * is reclaimed, and the count needs no staleness horizon to self-heal.
+ */
+export const ownerRunningTurnsKey = (subject: string): string =>
+  `sh:cp:owner:${subjectHash(subject)}:running`;
 /**
  * One SESSION's turns, open and finished alike, scored by `createdAt` (async fan-out spec §9.2).
  *

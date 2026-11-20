@@ -927,7 +927,10 @@ nopat_sees_kept_logs
 credfail 'got .200., not 401\|got .200. from api.github.com/user' MOCK_PLACEHOLDER_OK=1
 credfail 'after the delete and 65 s the sandbox got' MOCK_CRED_STALE=1
 credfail 'sbx credentials add .* --preset github' MOCK_FAIL=add
-pass 'a wrong owner, a placeholder that works, a revocation that does not take, a failed add: each `not ok 7`, and the trap deletes the credential, the branch and the sandbox'
+# The trap deletes only what `credentials list` shows, so a failed add reports no delete failure.
+! grep -q 'could not delete credential' "$TMP/out" ||
+  fail 'a failed add left the trap reporting a delete failure for a credential that was never stored'
+pass 'a wrong owner, a placeholder that works, a revocation that does not take, a failed add (with no spurious delete failure): each `not ok 7`, and the trap deletes the credential, the branch and the sandbox'
 
 # --- #653: three step-7 cleanup gaps -------------------------------------------------------------
 # These pin the cases the old cleanup could not tell apart: an ambiguous branch-delete code, a
@@ -974,21 +977,8 @@ pass 'a 404 from a repository the PAT cannot reach is not read as a deleted bran
 
 # 2. A failed add left a recorded name the trap then tried to delete, so a run whose add failed
 # printed a cleanup failure for a credential that was never stored, and exited on that instead of
-# on the add. The record must stay (an add whose answer is lost really did store it) and the trap
-# must delete only what `credentials list` shows.
-reset_state
-rc=0
-credrun MOCK_FAIL=add >"$TMP/out" 2>&1 || rc=$?
-[[ "$rc" == 1 ]] || fail "a failed add: exit $rc, not 1"
-! grep -q 'could not delete credential' "$TMP/out" ||
-  fail 'a failed add left the trap reporting a delete failure for a credential that was never stored'
-grep -q "^not ok 7 - .*sbx credentials add .* --preset github" "$TMP/out" ||
-  fail 'the failed add is not what the run reported'
-nopat
-pass 'a failed add is not followed by a spurious delete failure for a credential that was never stored'
-
-# The record-first contract still holds: an add whose answer is lost did store the credential, and
-# the trap must still find it in `credentials list` and delete it.
+# on the add (asserted with the credfail cases above). The record must stay: an add whose answer is
+# lost did store the credential, and the trap must still find it in `credentials list` and delete it.
 reset_state
 rc=0
 credrun MOCK_CRED_ADD_LOST=1 >"$TMP/out" 2>&1 || rc=$?

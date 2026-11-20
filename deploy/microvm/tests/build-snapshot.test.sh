@@ -539,8 +539,6 @@ check "exactly one 'trap ... EXIT' statement exists in the whole script" \
   "$(grep -cE '^[[:space:]]*trap ' "$SCRIPT")" "1"
 check "the one remaining trap is 'trap cleanup_on_exit EXIT'" \
   "$([ "$(grep -v '^[[:space:]]*#' "$SCRIPT" | grep -cF 'trap cleanup_on_exit EXIT')" -eq 1 ] && echo yes || echo no)" "yes"
-check "cleanup_on_exit function is defined" \
-  "$([ "$(grep -c '^cleanup_on_exit()' "$SCRIPT")" -ge 1 ] && echo yes || echo no)" "yes"
 check "no LIVE 'local fc_pid' declaration remains anywhere in the script" \
   "$(grep -v '^[[:space:]]*#' "$SCRIPT" | grep -cE '\blocal fc_pid\b')" "0"
 check "no LIVE 'local ch_pid' declaration remains anywhere in the script" \

@@ -120,7 +120,7 @@ export const MARK_END = '<!-- sbx:end -->';
  * heading. Claude Code does not load this CLAUDE.md (the `Read` deny covers it), so what steers it
  * is the server's instructions; the block is the same text, for people and for OpenCode (#568).
  */
-export const GH_TOKEN_STEERING =
+const GH_TOKEN_STEERING =
   "GH_TOKEN in the sandbox is a placeholder that the host replaces with the user's token; never set, print or ask for a token.";
 /**
  * The block body for a sandbox in `mode` (ruling P4-R11): a lease sandbox's agent is told what a
@@ -138,8 +138,8 @@ const ALL_RULES = [...new Set(MODES.map(rulesFor))];
 
 /** The server name in every file: Claude Code's tools are then `mcp__sandbox__*`. */
 export const SERVER = 'sandbox';
-export const CLAUDE_SERVER = Object.freeze({ command: 'mocactl', args: ['sbx', 'mcp'] });
-export const OPENCODE_SERVER = Object.freeze({
+const CLAUDE_SERVER = Object.freeze({ command: 'mocactl', args: ['sbx', 'mcp'] });
+const OPENCODE_SERVER = Object.freeze({
   type: 'local',
   command: ['mocactl', 'sbx', 'mcp'],
   enabled: true,
@@ -154,7 +154,7 @@ export const CLAUDE_ALLOW = 'mcp__sandbox__*';
  * `permissions.deny` — `--allowed-tools` only waives confirmation, so Bob's local tools stay
  * available and nothing here can take them away (#593's lesson, applied).
  */
-export const BOB_SERVER = Object.freeze({ command: 'mocactl', args: ['sbx', 'mcp'] });
+const BOB_SERVER = Object.freeze({ command: 'mocactl', args: ['sbx', 'mcp'] });
 
 const MCP_JSON = '.mcp.json';
 const SETTINGS = '.claude/settings.json';
@@ -746,7 +746,7 @@ const globMatch = (pattern: string, name: string) =>
  * In document order, each key once. Unknown value shapes count as re-enabling: erring wide only
  * stops `up` and names the key.
  */
-export function opencodeReenables(data: Json | undefined): string[] {
+function opencodeReenables(data: Json | undefined): string[] {
   const out: string[] = [];
   const add = (k: string) => {
     if (!out.includes(k)) out.push(k);

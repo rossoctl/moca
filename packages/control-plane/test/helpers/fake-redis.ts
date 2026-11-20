@@ -1,7 +1,7 @@
 import type { BundleRedisLike } from '@moca/config-bundle';
 import type { BundleBudgetRedisLike } from '../../src/bundle-budget.js';
 import type { CpRedisLike } from '../../src/ownership.js';
-import { CAS_STATE_LUA } from '../../src/turn-store.js';
+import { CAS_STATE_LUA, RESERVE_RUNNING_LUA } from '../../src/turn-store.js';
 import type { ResultRedisLike } from '../../src/turn-result.js';
 
 /**
@@ -128,9 +128,19 @@ export function fakeRedis() {
     },
     // Dispatch on the script's IDENTITY, not on its text: this fake interprets no Lua, and
     // `CpRedisLike.eval` is documented to carry only this package's own exported constants, so an
-    // unrecognised one is a programming error rather than something to guess at. The body mirrors
-    // CAS_STATE_LUA exactly -- ARGV is [allowedCount, ...allowedStates, ...field, value].
+    // unrecognised one is a programming error rather than something to guess at. Each body mirrors
+    // its script exactly -- CAS_STATE_LUA's ARGV is [allowedCount, ...allowedStates, ...field,
+    // value], RESERVE_RUNNING_LUA's is [score, member, cap].
     async eval(script, { keys, arguments: argv }) {
+      if (script === RESERVE_RUNNING_LUA) {
+        ops.push(`eval reserve-running ${keys[0]}`);
+        const key = keys[0]!;
+        const z = (zsets.get(key) ?? []).filter((m) => m.value !== argv[1]);
+        zsets.set(key, [...z, { score: Number(argv[0]), value: argv[1]! }]);
+        const n = z.length + 1;
+        if (n > Number(argv[2])) zsets.set(key, z);
+        return n;
+      }
       if (script !== CAS_STATE_LUA) throw new Error(`this fake does not know this script`);
       ops.push(`eval cas ${keys[0]}`);
       const n = Number(argv[0]);

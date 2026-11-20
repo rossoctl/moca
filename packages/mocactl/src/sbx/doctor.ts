@@ -200,7 +200,7 @@ function claudeVersionCheck(version: string | undefined): DoctorCheck | undefine
  * script, installed and loaded (sbx-up-cortex spec §4). Whether Claude Code reaches the model
  * through Cortex is not checked: agentop has no machine-readable answer to that.
  */
-export async function cortexCheck(agentop: AgentopExec = runAgentop): Promise<DoctorCheck> {
+async function cortexCheck(agentop: AgentopExec = runAgentop): Promise<DoctorCheck> {
   const name = 'cortex';
   const bad = await agentopProblem(agentop);
   if (bad) return { name, ok: false, detail: bad, fix: CORTEX_INSTALL };

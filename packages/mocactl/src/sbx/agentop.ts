@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 export const MOCA_SANDBOX = 'moca-sandbox';
 
 /** The first Cortex release whose agentop has `script install` (rossoctl/cortex#1507). */
-export const AGENTOP_MIN_VERSION = '0.9.3';
+const AGENTOP_MIN_VERSION = '0.9.3';
 
 /** What to run to get Cortex, said whenever agentop is missing or too old. */
 export const CORTEX_INSTALL = 'curl -fsSL https://www.rossoctl.dev/cortex/install.sh | sh';

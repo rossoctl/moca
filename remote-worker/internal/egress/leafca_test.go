@@ -16,6 +16,13 @@ import (
 	"time"
 )
 
+// cached reports how many hosts have a leaf in the cache.
+func (ca *LeafCA) cached() int {
+	ca.mu.Lock()
+	defer ca.mu.Unlock()
+	return len(ca.cache)
+}
+
 // testCA is a throwaway CA for tests.
 type testCA struct {
 	cert    *x509.Certificate

@@ -65,7 +65,7 @@ export function codexArgs(rest: readonly string[], id?: string, url?: string): s
 }
 
 /** What `cmdCodex` needs of a child process: its exit code, or why it could not start. */
-export interface CodexChild {
+interface CodexChild {
   on(event: 'exit', cb: (code: number | null) => void): unknown;
   on(event: 'error', cb: (err: NodeJS.ErrnoException) => void): unknown;
 }

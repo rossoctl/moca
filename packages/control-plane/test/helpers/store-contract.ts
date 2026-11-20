@@ -32,8 +32,11 @@ export const newKek = (): Buffer => randomBytes(KEK_BYTES); // notsecret -- gene
 export interface ContractBackend {
   storeWith: (keks: Buffer[]) => CredentialStore;
   raw: () => string;
-  /** Rewrite `subject`'s stored document in place, as another writer (a newer replica) would. */
-  plant: (subject: string, edit: (doc: Record<string, any>) => Record<string, any>) => void;
+  /**
+   * Rewrite `subject`'s stored document in place, as another writer (a newer replica) would. Absent
+   * for a store with no subject document (K8sSecretStore); the test that needs it is skipped.
+   */
+  plant?: (subject: string, edit: (doc: Record<string, any>) => Record<string, any>) => void;
 }
 
 export function storeContract(label: string, backend: () => ContractBackend): void {
@@ -50,6 +53,25 @@ export function storeContract(label: string, backend: () => ContractBackend): vo
       expect(await store.get(ALICE, 'github-work')).toEqual(cred('github-work'));
       expect(await store.get(ALICE, 'github')).toBeNull();
       expect(await store.get(ALICE, 'github-work-2')).toBeNull();
+      expect(await store.get(BOB, 'github-work')).toBeNull();
+    });
+
+    it('round-trips a two-header binding and a host:port/prefix destination', async () => {
+      const { store } = make([newKek()]);
+      const c = cred('multi', {
+        kind: 'api-key',
+        destination: { hosts: ['svc.corp:8443/a'] },
+        secret: { key: 'k' }, // notsecret
+        binding: [
+          { header: 'X-API-Key', format: '{key}' },
+          { header: 'X-Org', format: 'acme-{key}' },
+        ],
+      });
+      expect(c.descriptor.binding).toHaveLength(2);
+      expect(c.descriptor.destination.hosts).toEqual(['svc.corp:8443/a']);
+      await store.put(ALICE, c);
+      expect(await store.get(ALICE, 'multi')).toEqual(c);
+      expect(await store.list(ALICE)).toEqual([c.descriptor]);
     });
 
     it('treats Object.prototype names as absent, not as inherited members', async () => {
@@ -84,6 +106,7 @@ export function storeContract(label: string, backend: () => ContractBackend): vo
       expect(raw()).toContain('github-work');
       expect(raw()).toContain('api.github.com');
       expect(raw()).not.toContain('ghp-fake');
+      expect(raw()).toContain('v1.'); // the envelope version prefix
       // Nor the login: every object is named by the subject HASH.
       expect(raw()).not.toContain(ALICE);
     });
@@ -125,8 +148,9 @@ export function storeContract(label: string, backend: () => ContractBackend): vo
       expect(raw()).not.toContain('"drop"');
     });
 
-    it('a write keeps what it cannot read: unreadable rows, unknown fields, other versions` data', async () => {
+    it('a write keeps what it cannot read: unreadable rows, unknown fields, other versions` data', async (ctx) => {
       const { store, plant, raw } = make([newKek()]);
+      if (!plant) return ctx.skip();
       await store.put(ALICE, cred('known'));
       // What a NEWER replica might have written: a row in a shape this version cannot parse, an
       // extra descriptor field on a row it can, and a top-level field it has never heard of.
@@ -177,6 +201,8 @@ export function storeContract(label: string, backend: () => ContractBackend): vo
         warns.length = 0;
         expect(await make([newer]).store.get(ALICE, 'github-work')).not.toBeNull();
         expect(warns).toEqual([]);
+        // And the retired key alone no longer opens it: the rotation actually moved.
+        await expect(make([oldKek]).store.get(ALICE, 'github-work')).rejects.toThrow(/decrypt/);
       });
     });
 

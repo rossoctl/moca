@@ -47,6 +47,59 @@ function fakeClaude(outcome: { code?: number; err?: NodeJS.ErrnoException } = { 
 const mint = () =>
   fakeCp({ [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }) });
 
+/** What `sbx claude` and `sbx codex` share: each launches a TUI that starts `mocactl sbx mcp`. */
+describe.each([
+  {
+    agent: 'claude',
+    fake: () => {
+      const c = fakeClaude();
+      return { calls: c.calls, deps: { claude: c.deps } };
+    },
+  },
+  {
+    agent: 'codex',
+    fake: () => {
+      const c = fakeClaude();
+      return { calls: c.calls, deps: { codex: { spawnCodex: c.deps.spawnClaude } } };
+    },
+  },
+])('mocactl sbx $agent', ({ agent, fake }) => {
+  it('refuses --json: a TUI prints none, and a caller parsing stdout would get the TUI', async () => {
+    const { home, env, io } = setup();
+    const c = fake();
+    const code = await sbxMain([agent, '--sandbox', SBX, '--json'], env, io, {
+      home,
+      ...c.deps,
+    });
+    expect(code).toBe(2);
+    // The CLI's own NO_JSON guard, before dispatch: the agent is never started.
+    expect(io.errs.join('\n')).toContain(`${agent} has no --json output`);
+    expect(c.calls).toEqual([]);
+  });
+
+  it('forwards --control-plane-url to the server, which cannot see the flag or the env var', async () => {
+    const { home, env, io } = setup();
+    const c = fake();
+    await sbxMain([agent, '--sandbox', SBX, '--control-plane-url', URL_], env, io, {
+      home,
+      fetchImpl: mint().fetchImpl,
+      ...c.deps,
+    });
+    expect(c.calls[0]?.[1]).toContain(`"--control-plane-url","${URL_}"`);
+  });
+
+  it('leaves --control-plane-url out when it was not given, so the server resolves it as usual', async () => {
+    const { home, env, io } = setup();
+    const c = fake();
+    await sbxMain([agent, '--sandbox', SBX], env, io, {
+      home,
+      fetchImpl: mint().fetchImpl,
+      ...c.deps,
+    });
+    expect(c.calls[0]?.[1]).not.toContain('--control-plane-url');
+  });
+});
+
 describe('mocactl sbx claude (#577)', () => {
   it('registers the sandbox MCP server with --mcp-config, strictly, and writes no config', async () => {
     const { home, env, io } = setup();
@@ -116,41 +169,6 @@ describe('mocactl sbx claude (#577)', () => {
     // by hand would hand the agent the laptop again (#702).
     expect(said).toContain(serverConfig(SBX));
     expect(said).toContain(`--disallowed-tools ${CLAUDE_DENY.join(',')} --strict-mcp-config`);
-  });
-
-  it('refuses --json: a TUI prints none, and a caller parsing stdout would get the TUI', async () => {
-    const { home, env, io } = setup();
-    const c = fakeClaude();
-    const code = await sbxMain(['claude', '--sandbox', SBX, '--json'], env, io, {
-      home,
-      claude: c.deps,
-    });
-    expect(code).toBe(2);
-    // The CLI's own NO_JSON guard, before dispatch: claude is never started.
-    expect(io.errs.join('\n')).toMatch(/claude has no --json output/);
-    expect(c.calls).toEqual([]);
-  });
-
-  it('forwards --control-plane-url to the server, which cannot see the flag', async () => {
-    const { home, env, io } = setup();
-    const c = fakeClaude();
-    await sbxMain(['claude', '--sandbox', SBX, '--control-plane-url', URL_], env, io, {
-      home,
-      fetchImpl: mint().fetchImpl,
-      claude: c.deps,
-    });
-    expect(c.calls[0]?.[1]).toContain(`"--control-plane-url","${URL_}"`);
-  });
-
-  it('leaves --control-plane-url out when it was not given, so the server resolves it as usual', async () => {
-    const { home, env, io } = setup();
-    const c = fakeClaude();
-    await sbxMain(['claude', '--sandbox', SBX], env, io, {
-      home,
-      fetchImpl: mint().fetchImpl,
-      claude: c.deps,
-    });
-    expect(c.calls[0]?.[1]).not.toContain('--control-plane-url');
   });
 
   it('builds the config as the JSON --mcp-config takes, naming the mcp server it starts', () => {

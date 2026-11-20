@@ -21,7 +21,7 @@ const HOST_ID_RE = /^[a-z0-9][a-z0-9-]{0,30}$/;
 const TOKEN_RE = /^[0-9a-f]{64}$/;
 
 /** 'kvm-1' -> 'SH_HOST_TOKEN_KVM_1'. */
-export function hostTokenEnvName(id: string): string {
+function hostTokenEnvName(id: string): string {
   return `SH_HOST_TOKEN_${id.toUpperCase().replace(/-/g, '_')}`;
 }
 

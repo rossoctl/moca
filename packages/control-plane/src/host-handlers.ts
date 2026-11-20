@@ -310,7 +310,7 @@ export const heldFresh = (deps: CpDeps, buildId: string): boolean =>
  * heldFresh, leaving one host out: at registration, the host reporting `built` is expected to
  * hold the snapshot it has just built (its inventory may list it before the report arrives).
  */
-export const heldFreshElsewhere = (deps: CpDeps, buildId: string, host: string): boolean =>
+const heldFreshElsewhere = (deps: CpDeps, buildId: string, host: string): boolean =>
   freshHosts(deps).some(([id, h]) => id !== host && h.holds[buildId] !== undefined);
 
 function catalogOf(deps: CpDeps) {
@@ -350,7 +350,7 @@ export function parseHostStart(l: Record<string, unknown>): HostStart | undefine
 const GRACE_MAX = 86_400;
 
 /** The inventory limits' idleGraceSeconds (§6.5): a whole number 0..GRACE_MAX, else none. */
-export function parseIdleGrace(l: Record<string, unknown>): number | undefined {
+function parseIdleGrace(l: Record<string, unknown>): number | undefined {
   const g = nonNeg(l.idleGraceSeconds);
   return g !== undefined && g <= GRACE_MAX ? g : undefined;
 }

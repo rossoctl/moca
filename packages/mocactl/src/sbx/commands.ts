@@ -65,8 +65,6 @@ export interface SbxCtx {
   explicitUrl?: string;
 }
 
-export type { RefreshFailure };
-
 /**
  * The not-enrolled refusal: the control plane's own message, which names the caller's subject
  * (`github:<id>`, what the operator adds), then what to do about it.
@@ -107,7 +105,7 @@ const OWN_404 = new Set(['sandbox_not_found', 'template_not_found']);
  * the control plane will not take any more is exit 3 -- unless the refresh behind the client's
  * retry failed for another reason, which is then the cause reported (`refreshFailure`).
  */
-export function fail(
+function fail(
   io: Io,
   err: unknown,
   opts: { refreshFailure?: RefreshFailure; url?: string | undefined } = {},
@@ -388,7 +386,7 @@ export async function cmdTransferTemplate(c: SbxCtx, id: string, owner: string):
 }
 
 /** How long `sbx create` and `sbx up` wait for a template to become active (§6.4) before giving up. */
-export const ACTIVATION_WAIT_MS = 10 * 60_000;
+const ACTIVATION_WAIT_MS = 10 * 60_000;
 
 /**
  * Creates a sandbox, waiting while its template activates (template lifecycle spec §6.4): a
@@ -671,7 +669,7 @@ export async function cmdEgress(
  * How long `rm` waits on `sandbox_deleted`: the worker may block the op up to its grace limit
  * (30 min), but it finishes the op once started, so `rm` stops waiting and deletes.
  */
-export const RM_LEASE_WAIT_MS = 15_000;
+const RM_LEASE_WAIT_MS = 15_000;
 
 /**
  * `LeaseControl sandbox_deleted` for a lease sandbox, before its DELETE (spec §4.1): best-effort,
@@ -823,7 +821,7 @@ function writeCa(dir: string, name: string, pem: string): string {
  * The command a client runs for a token. A URL from a flag or MOCACTL_SBX_URL is named in it,
  * quoted, so the command works in a shell that has neither; one from config.json is left out.
  */
-export function tokenCmd(explicitUrl: string | undefined, id: string): string {
+function tokenCmd(explicitUrl: string | undefined, id: string): string {
   return explicitUrl
     ? `mocactl sbx token --control-plane-url ${q(explicitUrl)} ${id}`
     : `mocactl sbx token ${id}`;
@@ -879,7 +877,7 @@ function jwtIssuer(token: string): string | undefined {
  * is refused here, before the read and the write. A token whose `iss` cannot be read (not a JWT) is
  * left to the control plane to judge. Returns the refusal line.
  */
-export async function loginMismatch(c: SbxCtx): Promise<string | undefined> {
+async function loginMismatch(c: SbxCtx): Promise<string | undefined> {
   const auth = c.rt.auth;
   if (!auth) return undefined;
   if (!sameControlPlane(auth.controlPlaneUrl, c.url))

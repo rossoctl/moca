@@ -253,42 +253,30 @@ func TestBothDockerfilesCreateWorkspaceIdentically(t *testing.T) {
 }
 
 // A vendored binary is only safe if the build fails closed on a bad download, so the digest and the
-// verification step must both survive edits to these files.
-func TestVendoredRipgrepIsPinnedAndChecksummed(t *testing.T) {
-	for name, body := range dockerfiles(t) {
-		body := code(body)
-		for _, want := range []string{
-			"ARG RG_VERSION=",             // pinned release, not "latest"
-			"ARG RG_SHA256_X86_64=",       // both arches carry a digest
-			"ARG RG_SHA256_AARCH64=",      //
-			"sha256sum -c /tmp/rg.sha256", // and the digest is actually enforced
-		} {
-			if !strings.Contains(body, want) {
-				t.Errorf("%s: vendored ripgrep is missing %q. Without it the build would accept "+
-					"whatever bytes the network returned for a binary that then executes "+
-					"model-authored commands.", name, want)
+// verification step must both survive edits to these files. ripgrep executes model-authored
+// commands; gh does so with the user's GitHub PAT's identity (the sbx credentials feature).
+func TestVendoredBinariesArePinnedAndChecksummed(t *testing.T) {
+	for _, tc := range []struct {
+		tool, arg, sha, risk string
+	}{
+		{"ripgrep", "RG", "rg", "a binary that then executes model-authored commands"},
+		{"gh", "GH", "gh", "a binary that runs as the sandbox's user against their GitHub account"},
+	} {
+		t.Run(tc.tool, func(t *testing.T) {
+			for name, body := range dockerfiles(t) {
+				body := code(body)
+				for _, want := range []string{
+					"ARG " + tc.arg + "_VERSION=",             // pinned release, not "latest"
+					"ARG " + tc.arg + "_SHA256_X86_64=",       // both arches carry a digest
+					"ARG " + tc.arg + "_SHA256_AARCH64=",      //
+					"sha256sum -c /tmp/" + tc.sha + ".sha256", // and the digest is actually enforced
+				} {
+					if !strings.Contains(body, want) {
+						t.Errorf("%s: vendored %s is missing %q. Without it the build would accept "+
+							"whatever bytes the network returned for %s.", name, tc.tool, want, tc.risk)
+					}
+				}
 			}
-		}
-	}
-}
-
-// Same contract as TestVendoredRipgrepIsPinnedAndChecksummed for the vendored gh: the sbx
-// credentials feature hands `gh` the user's GitHub PAT's identity, so a tampered download would
-// be executing model-authored commands AS the user.
-func TestVendoredGhIsPinnedAndChecksummed(t *testing.T) {
-	for name, body := range dockerfiles(t) {
-		body := code(body)
-		for _, want := range []string{
-			"ARG GH_VERSION=",
-			"ARG GH_SHA256_X86_64=",
-			"ARG GH_SHA256_AARCH64=",
-			"sha256sum -c /tmp/gh.sha256",
-		} {
-			if !strings.Contains(body, want) {
-				t.Errorf("%s: vendored gh is missing %q. Without it the build would accept "+
-					"whatever bytes the network returned for a binary that runs as the sandbox's "+
-					"user against their GitHub account.", name, want)
-			}
-		}
+		})
 	}
 }

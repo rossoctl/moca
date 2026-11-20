@@ -36,7 +36,7 @@ import { SseParser } from '../api/sse-parser.js';
  */
 
 /** The refresh token's prefix (control-plane refresh-store.ts REFRESH_TOKEN_PREFIX). */
-export const REFRESH_TOKEN_PREFIX = 'mrt_';
+const REFRESH_TOKEN_PREFIX = 'mrt_';
 const JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/;
 /** Fields whose value is a secret, whatever it looks like. */
 const SECRET_FIELDS = new Set([
@@ -166,7 +166,7 @@ const errorName = (err: unknown) =>
   (err as Error | undefined)?.name;
 
 /** One endpoint a record spans: its name on the line and its base URL (never written). */
-export interface RecordEndpoint {
+interface RecordEndpoint {
   endpoint: string;
   url: string | undefined;
 }

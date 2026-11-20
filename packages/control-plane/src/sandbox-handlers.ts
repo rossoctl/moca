@@ -576,10 +576,7 @@ function catalog(deps: CpDeps): TemplateCatalog {
  * or not the record was trusted at create (`selfAttestProfile`; `selfAttested` implies it).
  * Recomputed on every read, never stored, so an admin's promotion or removal needs no rewrite.
  */
-export function attestationOf(
-  b: TemplateBuild,
-  trusted: ReadonlySet<string>,
-): 'deployment' | 'self' {
+function attestationOf(b: TemplateBuild, trusted: ReadonlySet<string>): 'deployment' | 'self' {
   const g = b.request?.gateRecordSha256;
   const onSelfProfile = b.selfAttestProfile === true || b.selfAttested === true;
   return onSelfProfile && g !== undefined && !trusted.has(g) ? 'self' : 'deployment';
@@ -590,7 +587,7 @@ export function attestationOf(
  * builds is self-attested now, whatever is stored, so a record whose trust an admin removed narrows
  * its templates on the next read. Otherwise the stored visibility.
  */
-export function effectiveVisibility(
+function effectiveVisibility(
   d: TemplateDoc,
   trusted: ReadonlySet<string>,
 ): 'private' | 'deployment' {
@@ -624,15 +621,20 @@ async function visibleTemplate(deps: CpDeps, p: TokenClaims, id: string): Promis
 /**
  * What readiness is derived from (§3.3): attached workers, and, where this control plane holds
  * sandbox records (the sandbox profile), the live sandboxes per worker and the latest creation
- * on each. The harness profile's sessions name a template, not a worker, so there `inUse` and
- * `lastUsed` are null (not zero): unknown, until use records exist (spec §7.1 `use`).
+ * on each build. The harness profile's sessions name a template, not a worker, so there `inUse`
+ * and `lastUsed` are null (not zero): unknown, until use records exist (spec §7.1 `use`).
  */
 interface ReadinessFacts {
   /** worker sandbox id -> its advertised capacity; present = attached to the relay. */
   attached: Map<string, number> | null;
   inUse: Map<string, number> | null;
-  /** worker -> epoch seconds of the newest sandbox created on it, retained records included. */
-  lastUsed: Map<string, number> | null;
+  /**
+   * The newest sandbox creation, retained records included, in epoch seconds: per build id
+   * (`byBuild`), and per worker (`byWorker`) for the records from before tracing, which carry no
+   * buildId. A build's worker id is shared by every build of its template from one image, so a
+   * per-worker time would report another build's use.
+   */
+  lastUsed: { byBuild: Map<string, number>; byWorker: Map<string, number> } | null;
   /** Where wanted builds are placed (§6.2), when any host agent has reported; else null. */
   placement: Placement | null;
   /**
@@ -707,13 +709,26 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
     };
   }
   const inUse = new Map<string, number>();
-  const lastUsed = new Map<string, number>();
+  const lastUsed = { byBuild: new Map<string, number>(), byWorker: new Map<string, number>() };
   const now = seconds(deps);
   for (const r of await deps.sandboxes.listAll(now)) {
     if (isLive(r, now)) inUse.set(r.worker, (inUse.get(r.worker) ?? 0) + 1);
-    lastUsed.set(r.worker, Math.max(lastUsed.get(r.worker) ?? 0, r.createdAt));
+    const [m, k] = r.buildId ? [lastUsed.byBuild, r.buildId] : [lastUsed.byWorker, r.worker];
+    m.set(k, Math.max(m.get(k) ?? 0, r.createdAt));
   }
   return { attached, inUse, lastUsed, placement, queue, hosts, holders, shared, nowS, trusted };
+}
+
+/**
+ * A build's newest sandbox creation: its own records (by build id), or, for records from before
+ * tracing that carry no build id, its worker's, whichever is later; null when neither has one.
+ */
+function lastUsedAt(
+  b: TemplateBuild,
+  lu: { byBuild: Map<string, number>; byWorker: Map<string, number> },
+): number | null {
+  const t = Math.max(lu.byBuild.get(b.buildId) ?? 0, lu.byWorker.get(b.worker) ?? 0);
+  return t > 0 ? t : null;
 }
 
 /**
@@ -765,7 +780,7 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
     // A retired build whose snapshot or worker a build neither retired nor rejected shares: its
     // worker is kept for that build. False for every other build.
     shared,
-    lastUsedAt: f.lastUsed === null ? null : (f.lastUsed.get(b.worker) ?? null),
+    lastUsedAt: f.lastUsed === null ? null : lastUsedAt(b, f.lastUsed),
     // The hosts whose last inventory holds this build's snapshot (§6.1), a host silent past
     // HOST_STALE_S too: ids only, no paths, so a client sees which hosts still hold a retired
     // build. Null without host agents.
@@ -2136,7 +2151,7 @@ async function rejectTemplateBuild(ctx: RequestCtx, deps: CpDeps) {
 }
 
 /** How long a client waits before retrying a create on a template still activating (§6.4). */
-export const FIRST_USE_RETRY_S = 30;
+const FIRST_USE_RETRY_S = 30;
 
 /**
  * Activation on first use (§6.4): on a deployment with host agents, a sandbox is created only on

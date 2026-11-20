@@ -35,6 +35,32 @@ export function turnsPerSubjectCap(env: NodeJS.ProcessEnv): number | undefined {
 }
 
 /**
+ * How many async leaves one owner may have RUNNING across the whole deployment (#391), or
+ * `undefined` for no cluster-wide cap. The pair of the control plane's
+ * `MOCA_ASYNC_QUEUED_PER_OWNER`: that one bounds what an owner may wait with, this one what they may
+ * execute with.
+ *
+ * **No derived default, and off when unset**, unlike `turnsPerSubjectCap` above. Two reasons, both
+ * about what a default would do to a working deployment:
+ *
+ * - The value is DEPLOYMENT-wide and every worker must agree on it, so it cannot be derived from
+ *   this process's own `SH_TURNS_PER_WORKER` -- two differently-sized workers would enforce two
+ *   different cluster caps and the effective bound would be whichever claimed first.
+ * - A cap that appeared on upgrade would start pacing a single-owner deployment's own fan-out, which
+ *   is the common case here: one user's `mocactl spawn` x20 is not an abuse to contain. Deferring it
+ *   costs each paced entry up to `minIdleMs` (90 s) for no benefit at all.
+ *
+ * A malformed or non-positive value reads as unset, for `turnsPerSubjectCap`'s reason: `0` honoured
+ * would defer every async turn in the deployment forever, and the knob is read once at boot where
+ * nothing would report the refusal.
+ */
+export function runningPerOwnerCap(env: NodeJS.ProcessEnv): number | undefined {
+  const raw = env.MOCA_ASYNC_RUNNING_PER_OWNER?.trim();
+  const parsed = raw ? Number(raw) : NaN;
+  return Number.isInteger(parsed) && parsed >= 1 ? parsed : undefined;
+}
+
+/**
  * In-flight turns, by subject. Entries are deleted at zero so the map tracks subjects with live
  * turns, not every subject ever seen.
  */
