@@ -117,6 +117,16 @@ describe('continuationPrompt', () => {
     expect(p).toContain('fix the query');
     expect(p.toLowerCase()).toContain('revise');
   });
+  it('names no submit_verdict for a leaf that has no such tool (#393 §1)', () => {
+    // A prompt or solve leaf registers request_approval alone, so the verdict wording would tell
+    // the model to call a tool that is not in its stack.
+    for (const action of ['approve', 'reject'] as const) {
+      const p = continuationPrompt(action, 'f', false);
+      expect(p).not.toContain('submit_verdict');
+      expect(p).toContain('f');
+    }
+    expect(continuationPrompt('reject', 'f', false)).toContain('request_approval');
+  });
 });
 
 import { decideSeed, gateShortCircuit, type Decision } from '../src/gate';
@@ -179,6 +189,19 @@ describe('decideSeed', () => {
     if (r.kind === 'seed') {
       expect(r.prompt).toContain('APPROVED');
       expect(r.record).toBeNull();
+    }
+  });
+  it('passes verdictTool through to both continuations', () => {
+    const pending = decideSeed(
+      state([reqEntry(0)]),
+      { gateId: 0, action: 'approve' },
+      FRESH,
+      false,
+    );
+    const rederived = decideSeed(state([reqEntry(0), decEntry(0, 'approve')]), null, FRESH, false);
+    for (const r of [pending, rederived]) {
+      expect(r.kind).toBe('seed');
+      if (r.kind === 'seed') expect(r.prompt).not.toContain('submit_verdict');
     }
   });
   it('already-aborted session (no pending, last decision abort) → terminal abort, record null', () => {

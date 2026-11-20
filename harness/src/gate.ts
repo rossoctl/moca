@@ -103,16 +103,30 @@ export function computeGateState(entries: unknown[]): GateState {
   };
 }
 
-export function continuationPrompt(action: 'approve' | 'reject', feedback?: string): string {
+/**
+ * The prompt a resumed leaf runs instead of its own.
+ *
+ * `verdictTool` is false for the prompt and solve kinds (#393 §1): they register
+ * `request_approval` alone, so naming `submit_verdict` tells them to call a tool they do not have.
+ */
+export function continuationPrompt(
+  action: 'approve' | 'reject',
+  feedback?: string,
+  verdictTool = true,
+): string {
   if (action === 'approve') {
     return [
       `Human decision: APPROVED.${feedback ? ` ${feedback}` : ''}`,
-      `Proceed with the proposed action. When finished, call submit_verdict exactly once, then stop.`,
+      verdictTool
+        ? `Proceed with the proposed action. When finished, call submit_verdict exactly once, then stop.`
+        : `Proceed with the proposed action, then stop.`,
     ].join('\n');
   }
   return [
     `Human decision: REJECTED. ${feedback ?? 'No feedback provided.'}`,
-    `Revise accordingly. You may call request_approval again when ready, or call submit_verdict when done.`,
+    verdictTool
+      ? `Revise accordingly. You may call request_approval again when ready, or call submit_verdict when done.`
+      : `Revise accordingly. You may call request_approval again when ready, then stop.`,
   ].join('\n');
 }
 
@@ -179,6 +193,8 @@ export function decideSeed(
   state: GateState,
   decision: Decision | null,
   freshPrompt: string,
+  /** False for a leaf with no `submit_verdict` tool; see `continuationPrompt`. */
+  verdictTool = true,
 ): SeedDecision {
   const short = gateShortCircuit(state, decision);
   if (short) return short;
@@ -189,7 +205,7 @@ export function decideSeed(
   if (pendingGate && decision && decision.action !== 'abort') {
     return {
       kind: 'seed',
-      prompt: continuationPrompt(decision.action, decision.feedback),
+      prompt: continuationPrompt(decision.action, decision.feedback, verdictTool),
       record: decisionRecord(state, decision),
     };
   }
@@ -199,7 +215,7 @@ export function decideSeed(
   // for an abort, but that is not a narrowing the compiler can see.
   const prompt =
     lastDecision && lastDecision.action !== 'abort'
-      ? continuationPrompt(lastDecision.action, lastDecision.feedback)
+      ? continuationPrompt(lastDecision.action, lastDecision.feedback, verdictTool)
       : freshPrompt;
   return { kind: 'seed', prompt, record: null };
 }

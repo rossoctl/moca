@@ -698,12 +698,19 @@ async function planLeafGate(
   }
   // '' is the sentinel for "the caller builds its own fresh prompt": every kind's fresh prompt is
   // different (and the prompt leaf's needs a sandbox path), so only the CONTINUATION comes from here.
-  const seed = decideSeed(state, decision, '');
+  // `false`: neither kind registers submit_verdict, so a continuation naming it would steer the
+  // model at a tool it does not have.
+  const seed = decideSeed(state, decision, '', false);
   if (seed.kind !== 'seed') throw new Error('unreachable: gateShortCircuit missed a short circuit');
   if (seed.record) await appendGateDecision(env, config, seed.record);
   return {
     kind: 'run',
-    ...(seed.prompt ? { continuation: seed.prompt } : {}),
+    // Only an invocation CARRYING a decision runs a continuation. Without the `decision` guard, a
+    // session that answered an earlier gate re-derives that decision's continuation for every later
+    // turn -- so a FRESH gated prompt or solve would run "Human decision: APPROVED..." instead of
+    // its own prompt plus the steer, never call request_approval, and bypass its gate silently.
+    // Unlike the verdict kind, these two get a new prompt per turn; replaying is only ever a resume.
+    ...(decision && seed.prompt ? { continuation: seed.prompt } : {}),
     nextGateId: state.nextGateId,
   };
 }

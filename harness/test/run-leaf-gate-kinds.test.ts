@@ -37,8 +37,11 @@ beforeEach(() => {
   read = spyRead();
 });
 
-/** Seed a session whose newest gate request is unanswered, the way request_approval leaves it. */
-async function pendingGate(sid: string): Promise<void> {
+/**
+ * Seed a session whose newest gate request is unanswered, the way request_approval leaves it --
+ * or, with `decided`, one whose gate 0 was already answered and is therefore history.
+ */
+async function pendingGate(sid: string, decided?: 'approve' | 'reject'): Promise<void> {
   sids.push(sid);
   const backend = new BufferedRedisBackend(store);
   const sm = SessionManager.create(process.cwd(), undefined, { id: sid }, backend);
@@ -47,6 +50,7 @@ async function pendingGate(sid: string): Promise<void> {
     summary: 'found it',
     proposed_action: 'write the file',
   });
+  if (decided) sm.appendCustomEntry(GATE_DECISION_ENTRY_TYPE, { gateId: 0, action: decided });
   await backend.flush();
 }
 
@@ -101,6 +105,9 @@ describe('a gated prompt leaf', () => {
     const executeTurn = vi.fn(async (input: Record<string, unknown>) => {
       expect(String(input.prompt)).toContain('Human decision: APPROVED');
       expect(String(input.prompt)).not.toContain('do the thing');
+      // A prompt leaf registers request_approval alone: a continuation naming submit_verdict
+      // would steer the model at a tool that is not in its stack.
+      expect(String(input.prompt)).not.toContain('submit_verdict');
       return { response: 'done', stopReason: 'end_turn' };
     });
     const res = await runLeaf(
@@ -129,6 +136,28 @@ describe('a gated prompt leaf', () => {
     expect(executeTurn).not.toHaveBeenCalled();
     expect(selectPoolSandbox).not.toHaveBeenCalled();
     expect(await customTypes(sid)).toContain(GATE_DECISION_ENTRY_TYPE);
+  });
+
+  it('opens a NEW gate for a fresh turn after an earlier decision (#393 §1)', async () => {
+    // The regression the continuation guard exists for: a session that answered gate 0 must not
+    // have that decision's continuation replayed as the prompt of every later turn. Replaying it
+    // would run "Human decision: APPROVED" instead of this turn's own task, skip
+    // request_approval, and so bypass the gate this submission explicitly asked for.
+    const sid = 'gate-kinds-fresh-after-decision';
+    await pendingGate(sid, 'approve');
+    const executeTurn = vi.fn(async (input: Record<string, unknown>) => {
+      expect((input.gate as { nextGateId: number }).nextGateId).toBe(1);
+      expect(String(input.prompt)).toContain('do the thing');
+      expect(String(input.prompt)).toContain(gatePromptNote());
+      expect(String(input.prompt)).not.toContain('APPROVED');
+      return { response: 'ok', stopReason: 'end_turn' };
+    });
+    const res = await runLeaf(env(sid, { requireApproval: true }), CONFIG, {
+      executeTurn,
+    } as never);
+    // Paused only if the model actually called the tool; this fake does not, so the turn responds.
+    expect(res).toMatchObject({ status: 'responded', text: 'ok' });
+    expect(executeTurn).toHaveBeenCalledTimes(1);
   });
 
   it('wires no gate and reads no session state when requireApproval is absent', async () => {
