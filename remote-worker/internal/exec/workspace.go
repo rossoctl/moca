@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -364,6 +365,37 @@ func (w *WorkspaceRunner) Sweep() []Reclaimed {
 		}
 	}
 	return reclaimed
+}
+
+// SweepTombstonesAtStart removes what a previous process detached and never finished
+// deleting: every <Root>/.reclaiming-* entry (#338's restart leak). It is called once,
+// before anything is served, so none of them is this process's. It removes only
+// tombstones, never an unknown directory: Root is also the shared workspace (an empty-key
+// session's `git clone foo` sits beside the keys' directories), so a name alone cannot
+// tell a key's workspace from a shared one's content, and adopting it could delete a
+// session's files (see WorkspaceRunner). A tombstone that is a symlink is unlinked, never
+// followed. It returns how many it removed.
+func (w *WorkspaceRunner) SweepTombstonesAtStart() int {
+	ents, err := os.ReadDir(w.Root)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("worker: startup sweep: read %s: %v", w.Root, err)
+		}
+		return 0
+	}
+	n := 0
+	for _, e := range ents {
+		if !strings.HasPrefix(e.Name(), workspaceTombstonePrefix) {
+			continue
+		}
+		tomb := filepath.Join(w.Root, e.Name())
+		if err := os.RemoveAll(tomb); err != nil {
+			log.Printf("worker: startup sweep: remove %s: %v", tomb, err)
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // SweepEvery runs Sweep every interval until ctx ends.

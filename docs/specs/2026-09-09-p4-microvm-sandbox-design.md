@@ -506,6 +506,13 @@ condition being partly met already.
 > when it ends), and the key is then refused for new Execs (`released: …`) for `WorkspaceIdle`, so a turn
 > still running after its session ended cannot re-create an empty workspace. Who sends it (the relay, on a
 > sandbox's or session's end) is #338's follow-up work.
+>
+> **Update (#338, a restarted worker).** A restarted worker's runs map starts empty, so the idle sweep
+> never reached what the previous process left. `New` now sweeps `WorkspaceRoot` once before serving:
+> every `.reclaiming-*` tombstone, and every key-named directory no run owns whose newest mtime (the
+> directory's or its `workspace.img`'s) is older than `WorkspaceIdle`, renamed and then removed off the
+> lock as the idle sweep does (a symlink as the link itself). The container tier removes tombstones only:
+> its root doubles as the shared workspace, so it cannot adopt an unknown directory by name.
 
 ### 4.5 The repo cache the per-run workspace would defeat — an owed decision
 

@@ -155,6 +155,55 @@ func TestReleaseOfASymlinkedWorkspaceLeavesItsTarget(t *testing.T) {
 	}
 }
 
+// #338: at startup the container worker removes a previous process's tombstones, and
+// never an unknown directory: Root is also the shared workspace, so a name alone cannot
+// tell a key's workspace from shared content. A tombstone that is a symlink is unlinked,
+// and its target survives.
+func TestStartupSweepRemovesTombstonesOnly(t *testing.T) {
+	root := t.TempDir()
+	tomb := filepath.Join(root, ".reclaiming-"+"sess-a-1-1")
+	if err := os.MkdirAll(filepath.Join(tomb, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	keep := filepath.Join(target, "repo-file")
+	if err := os.WriteFile(keep, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkTomb := filepath.Join(root, ".reclaiming-"+"sess-l-2-2")
+	if err := os.Symlink(target, linkTomb); err != nil {
+		t.Fatal(err)
+	}
+	unknown := filepath.Join(root, "sess-unknown")
+	shared := filepath.Join(root, "cloned-repo")
+	for _, d := range []string{unknown, shared} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-48 * time.Hour)
+		if err := os.Chtimes(d, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := &wexec.WorkspaceRunner{Root: root, Idle: time.Minute}
+	if n := w.SweepTombstonesAtStart(); n != 2 {
+		t.Fatalf("removed %d, want 2 tombstones", n)
+	}
+	for _, p := range []string{tomb, linkTomb} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("tombstone %s is still there: %v", p, err)
+		}
+	}
+	for _, p := range []string{unknown, shared} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("an unknown directory was removed: %s: %v", p, err)
+		}
+	}
+	if b, err := os.ReadFile(keep); err != nil || string(b) != "keep me" {
+		t.Fatalf("the symlinked tombstone's target lost %s: %q, %v", keep, b, err)
+	}
+}
+
 // A Release whose rename fails (here: Root not writable) answers an error, not RELEASED,
 // since the directory is still there; the key is refused all the same, and stays tracked,
 // so a later Release (or the sweep) finishes the job. vmpool's Release answers the same.
