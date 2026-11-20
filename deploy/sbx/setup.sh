@@ -81,10 +81,10 @@
 #                           StatefulSet's volumeClaimTemplates outright, a PVC's
 #                           storageClassName once set -- the API allows only nil to set), so a run
 #                           whose knob disagrees with what is live (a different class, or a class
-#                           an earlier knob run applied while the knob is now unset: the apply
-#                           would DROP it -- the StatefulSet's server-side apply the field its
-#                           manager owns, a claim's client-side apply by its three-way merge;
-#                           a class the cluster's default StorageClass filled in is kept) is refused before
+#                           an earlier knob run applied while the knob is now unset: apply_stack's
+#                           client-side apply of the overlay would DROP it by its three-way merge,
+#                           from the StatefulSet's volumeClaimTemplates or from a claim; a class the
+#                           cluster's default StorageClass filled in is kept) is refused before
 #                           anything is applied (check_storage_class, on the StatefulSet and on
 #                           every claim this run renders). To move a deployment onto the knob,
 #                           keep SBX_STORAGE_CLASS at the live class; to change an existing one,
@@ -704,8 +704,8 @@ rendered_pvc_claims() {
 # applied. A fresh namespace (no StatefulSet) and an already-matching class pass. The component
 # PVCs fail the same way one object later in the stream: PVC.spec.storageClassName is immutable
 # once set (the API allows only nil -> set), so each claim this run renders is preflighted alike
-# (check_claim_class) -- a differing class, or a run that drops the field its field manager owns,
-# is refused before anything is applied.
+# (check_claim_class) -- a differing class, or a run whose apply would drop a class an earlier run
+# applied, is refused before anything is applied.
 check_storage_class() {
   local json claim
   # Captured first (errexit), as in check_redis_image: a failing get must not read as "no StatefulSet".
@@ -728,18 +728,20 @@ check_sts_class() {
       die "StatefulSet redis in $NS already exists with volumeClaimTemplates its API refuses to change in place (live class: '${live:-unset}'), so SBX_STORAGE_CLASS=$SBX_STORAGE_CLASS cannot be applied: keep SBX_STORAGE_CLASS=$live for this deployment (its claim keeps the class it was created with), or, to change it, kubectl -n $NS delete sts redis --cascade=orphan (the pod and the data-redis-0 claim survive; a re-run's StatefulSet adopts both, and the claim keeps its class) and re-run"
   else
     # Reverse (review round 2): a live class can only have come from an earlier knob run
-    # (base/redis.yaml sets none), and the apply is server-side with one field manager: a run
-    # without the knob DROPS the storageClassName that manager owns, which changes
-    # volumeClaimTemplates -- the same Forbidden, partway through the object stream. Refused.
+    # (base/redis.yaml sets none, and admission does not fill volumeClaimTemplates), and
+    # apply_stack applies the overlay, the StatefulSet with it, client-side: its three-way merge
+    # DROPS the storageClassName the last applied configuration had and this one lacks, which
+    # changes volumeClaimTemplates -- the same Forbidden, partway through the object stream. Refused.
     [[ -z "$live" ]] ||
-      die "StatefulSet redis in $NS carries storageClassName '$live' an earlier SBX_STORAGE_CLASS run set, and this run has SBX_STORAGE_CLASS unset: the apply would remove the field (server-side apply drops what its field manager no longer owns), which changes volumeClaimTemplates and is Forbidden. Set SBX_STORAGE_CLASS=$live (the claim keeps that class either way)"
+      die "StatefulSet redis in $NS carries storageClassName '$live' an earlier SBX_STORAGE_CLASS run set, and this run has SBX_STORAGE_CLASS unset: the apply would remove the field (the client-side apply's three-way merge drops what the last applied configuration had and this one lacks), which changes volumeClaimTemplates and is Forbidden. Set SBX_STORAGE_CLASS=$live (the claim keeps that class either way)"
   fi
 }
 
 # The claim half (review round 3): PVC.spec.storageClassName is immutable once set (the API allows
-# only nil -> set), and apply_manifest applies with the same field manager as the redis patch, so a
-# run whose knob disagrees with a live claim this run renders is the same Forbidden one object later
-# in the stream -- redis applies, then the claim fails, partway through. A claim with NO class
+# only nil -> set), and apply_stack applies the claims in the same client-side apply of the overlay
+# as the StatefulSet, so a run whose knob disagrees with a live claim this run renders is the same
+# Forbidden one object later in the stream -- redis applies, then the claim fails, partway through.
+# A claim with NO class
 # passes in both directions: nil -> set is the one transition the API allows, and a knob-unset run
 # writes nothing. A knob-unset run is refused only when an earlier SBX_STORAGE_CLASS run applied the
 # live class, since only then does the apply drop it (#935). The claims come from the overlay,
