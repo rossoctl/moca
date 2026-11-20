@@ -626,17 +626,22 @@ grep -q '"started":4' "$TMP/out" || fail 'the summary does not count four starts
 [[ "$(stat -c %a "$TMP/srv/start-times" 2>/dev/null || stat -f %Lp "$TMP/srv/start-times")" == 600 ]] || fail 'start-times is not 0600'
 [[ "$(wc -l <"$TMP/srv/start-times" | tr -d ' ')" == 4 ]] || fail 'start-times does not hold the four starts'
 # Three still starting (s1-s3, from `starting`), s4 attached 40 s after its start: one slot, s5 starts.
+# The agent measures startSeconds against its own clock, so the value is 40 plus however long this
+# test took between stamping s4 and the agent's read: bounded by the wall time around the run, not a
+# fixed window (a fixed 40-42 failed on a loaded machine).
 T40=$(($(date +%s) - 40))
 awk -v t="$T40" 'BEGIN { FS = OFS = "\t" } $1 == "sbx_s4" { $3 = t } { print }' "$TMP/srv/start-times" >"$TMP/st" && cat "$TMP/st" >"$TMP/srv/start-times"
 wanted '["sha256:s1","sha256:s2","sha256:s3","sha256:s5","sha256:s6"]'
 st_run || fail 'the three-starting run failed'
+T_MAX=$(($(date +%s) - T40))
 [[ "$(started)" == 's5 ' ]] || fail "three starting, started: $(started)"
 grep -q '"startQueued":1}' "$TMP/out" || fail 'the summary does not count the one queued'
-grep -q '"agent":"attached","worker":"sbx_s4","startSeconds":4[0-2]}' "$TMP/out" || fail 'the done start is not said'
-# The next inventory reports the measured start time (s4's 40 s) beside the limit.
+S4=$(sed -n 's/.*"agent":"attached","worker":"sbx_s4","startSeconds":\([0-9][0-9]*\)}.*/\1/p' "$TMP/out" | head -1)
+[[ -n "$S4" ]] && ((S4 >= 40 && S4 <= T_MAX)) || fail "the done start is not said, or not 40-$T_MAX s: '${S4:-none}'"
+# The next inventory reports the measured start time (s4's) beside the limit.
 st_run || fail 'the run after a done start failed'
-jq -e '.limits.startConcurrency == 4 and (.limits.startSeconds | . >= 40 and . <= 42)' "$INV" >/dev/null ||
-  fail "startSeconds after a done start: $(jq -c .limits "$INV")"
+jq -e --argjson s "$S4" '.limits.startConcurrency == 4 and .limits.startSeconds == $s' "$INV" >/dev/null ||
+  fail "startSeconds after a done start (want $S4): $(jq -c .limits "$INV")"
 [[ "$(stat -c %a "$TMP/srv/start-seconds" 2>/dev/null || stat -f %Lp "$TMP/srv/start-seconds")" == 600 ]] || fail 'start-seconds is not 0600'
 # A set limit is reported as set.
 rm -f "$TMP/state/active-"* "$TMP/srv/start-times"
