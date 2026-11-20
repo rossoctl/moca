@@ -62,7 +62,7 @@ logged in to the sandbox service as <your GitHub login>
 If you see `this account (github:<id>) is not enrolled in the sandbox service`, your
 account isn't on the deployment's access list yet. Send that `github:<id>` (your numeric GitHub
 user ID) to whoever runs the deployment, so they can add you. The operator calls this list the
-*allowed subjects*.
+_allowed subjects_.
 
 ## 3. Bring your repository up
 
