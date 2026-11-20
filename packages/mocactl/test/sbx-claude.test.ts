@@ -1,12 +1,15 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CLAUDE_DENY } from '../src/sbx/agent-config.js';
 import { claudeArgs, serverConfig } from '../src/sbx/claude.js';
 import { sbxMain } from '../src/sbx/cli.js';
 import { cleanupTmp, fakeCp, repo, SBX, setup, tmp, TOKEN, URL_ } from './helpers/sbx.js';
 
-afterEach(cleanupTmp);
+afterEach(() => {
+  cleanupTmp();
+  vi.unstubAllEnvs();
+});
 
 /** The deny `sbx claude` passes: up's list, as one value of the variadic flag (#702). */
 const DENY = ['--disallowed-tools', CLAUDE_DENY.join(',')];
@@ -23,11 +26,14 @@ function cortexRepo(root: string): void {
 /** A stand-in for the `claude` child: records its argv, then reports an exit code or an error. */
 function fakeClaude(outcome: { code?: number; err?: NodeJS.ErrnoException } = { code: 0 }) {
   const calls: string[][] = [];
+  const envs: (NodeJS.ProcessEnv | undefined)[] = [];
   return {
     calls,
+    envs,
     deps: {
-      spawnClaude: (args: string[]) => {
+      spawnClaude: (args: string[], env?: NodeJS.ProcessEnv) => {
         calls.push(args);
+        envs.push(env);
         const handlers: Record<string, (x: never) => void> = {};
         queueMicrotask(() => {
           if (outcome.err) handlers.error?.(outcome.err as never);
@@ -169,6 +175,20 @@ describe('mocactl sbx claude (#577)', () => {
     // by hand would hand the agent the laptop again (#702).
     expect(said).toContain(serverConfig(SBX));
     expect(said).toContain(`--disallowed-tools ${CLAUDE_DENY.join(',')} --strict-mcp-config`);
+    expect(said).toContain('run it yourself with: CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude ');
+  });
+
+  it("turns auto-memory off for the run, over the caller's own value", async () => {
+    vi.stubEnv('CLAUDE_CODE_DISABLE_AUTO_MEMORY', '0');
+    const { home, env, io } = setup();
+    const c = fakeClaude();
+    await sbxMain(['claude', '--sandbox', SBX], env, io, {
+      home,
+      fetchImpl: mint().fetchImpl,
+      cwd: tmp('sbx-not-a-repo-'),
+      claude: c.deps,
+    });
+    expect(c.envs[0]?.CLAUDE_CODE_DISABLE_AUTO_MEMORY).toBe('1');
   });
 
   it('builds the config as the JSON --mcp-config takes, naming the mcp server it starts', () => {

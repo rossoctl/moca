@@ -196,6 +196,26 @@ function claudeVersionCheck(version: string | undefined): DoctorCheck | undefine
 }
 
 /**
+ * A shell `CLAUDE_CODE_DISABLE_AUTO_MEMORY` that turns auto-memory back on over the settings'
+ * `autoMemoryEnabled: false` (Claude Code reads 0, false, no and off, case-insensitive): a failing
+ * check; undefined otherwise.
+ */
+export function autoMemoryEnvCheck(env: NodeJS.ProcessEnv = process.env): DoctorCheck | undefined {
+  const v = env.CLAUDE_CODE_DISABLE_AUTO_MEMORY;
+  if (v === undefined || !['0', 'false', 'no', 'off'].includes(v.trim().toLowerCase())) {
+    return undefined;
+  }
+  return {
+    name: 'auto-memory',
+    ok: false,
+    detail:
+      `CLAUDE_CODE_DISABLE_AUTO_MEMORY=${v} overrides autoMemoryEnabled: false, so a plain claude ` +
+      "loads this machine's auto-memory into the sandboxed session",
+    fix: 'unset CLAUDE_CODE_DISABLE_AUTO_MEMORY, or start Claude Code with mocactl sbx claude',
+  };
+}
+
+/**
  * In Cortex mode, the check that something keeps the agent off local tools: Cortex's moca-sandbox
  * script, installed and loaded (sbx-up-cortex spec §4). Whether Claude Code reaches the model
  * through Cortex is not checked: agentop has no machine-readable answer to that.
@@ -408,6 +428,8 @@ export async function runDoctor(
     if (cortexMode(root)) out.push(await cortexCheck(agentop));
     const old = claudeVersionCheck(await claudeVersion());
     if (old) out.push(old);
+    const mem = autoMemoryEnvCheck();
+    if (mem) out.push(mem);
   }
   if (id && live) out.push(...(await execChecks(c, id, factory)));
   if (id) out.push(recorderCheck(c, id));
