@@ -24,7 +24,7 @@ provenance is persistent, verifiable offline, and hosted in the **control plane*
 
 A rule's evidence is kept in one of four records (see [Records](#records-and-what-each-holds)):
 
-- **G**: the image's gate record, written by the image builder (a per-family schema, such as `example-builder/moca-microvm/1`, or the general gate's, which `SH_GATE_RECORD_SCHEMA` names: default `moca-gate-record/1`);
+- **G**: the image's gate record, written by the image builder (a per-family schema, such as `example-builder/moca-microvm/1`, or the general gate's, which `SH_GATE_RECORD_SCHEMA` names: default `moca-gate-record/1`, the schema Moca's own `gate-image.py` writes);
 - **R**: `/etc/moca-rootfs-source` in the rootfs;
 - **S**: the snapshot's `manifest.json`;
 - **T**: the template record, `moca-sbx-template/1`.
@@ -106,7 +106,7 @@ nothing, so its record has no base digest and no recipe. A template built from s
 
 ### 2.3 Self-attested gate records, and repositories per registry (Moca)
 
-A subject may submit its own gate record (made with the image builder's general gate) on a profile
+A subject may submit its own gate record (made with Moca's general gate, `gate-image.py`) on a profile
 with `selfAttest`. It counts only for that subject's own templates, which stay private and are shown
 as self-attested until an admin adds the record's sha256 to `trustedGateRecords`; a build made on a
 `selfAttest` profile while its record was trusted reads as self-attested again (and its template as

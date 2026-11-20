@@ -437,8 +437,9 @@ The fix is a small layer on top of your image: a localhost `/etc/hosts`, the gue
 
 ### 4b.5 Path B: your own gate record (`general-self`, `benchmark-self`)
 
-A gate record is the image builder's file that says your image's environment works. Sections
-4b.5.1-4 describe the image builder's gate tool; 4b.5.5-6 are Moca's side.
+A gate record is the file that says your image's environment works. You make it yourself with Moca's
+general gate, [`gate-image.py`](gate-image.py) in this folder (4b.5.1-4); 4b.5.5-6 are the control
+plane's side.
 
 #### 1. What a gate checks: the environment, not the answer
 
@@ -462,13 +463,13 @@ an empty `/workspace` that it seeds from your work tree, and a clean environment
 | absent files    | with `absent_sha256`: no file in the image has one of those sha256s (only a count of matches is kept)                 |
 | the probe       | with `probe`: it runs on a fresh seed, and what it prints becomes your template's expectation                         |
 
-#### 2. The input contract (`example-builder/gate-input/1`)
+#### 2. The input contract (`moca-gate-input/1`)
 
 You describe your image in a small JSON file:
 
 | Field            | Required | Meaning                                                                                                                            |
 | ---------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `schema`         | yes      | the builder's input schema, here `example-builder/gate-input/1`                                                                    |
+| `schema`         | yes      | `moca-gate-input/1`                                                                                                                |
 | `image`          | yes      | your image, pinned: `repository@sha256:<64 hex>`. A public registry is written with its host (`docker.io/library/python@sha256:…`) |
 | `workdir`        | yes      | your work tree, an absolute path. The gate copies it into the guest's empty `/workspace`, where the test runs                      |
 | `test_cmd`       | yes      | a bash command, run in the work tree                                                                                               |
@@ -483,13 +484,12 @@ Any other field is refused, and so is `network_needed` with any value but `true`
 #### 3. Running the gate, and the record it writes
 
 ```bash
-python scripts/gate-image.py contract.json --out gate.json \
+python3 deploy/sbx/template-onboarding/gate-image.py contract.json --out gate.json \
     --template-id my-app --spec-out spec.json
 ```
 
-> **Where the tool is.** `gate-image.py` is the image builder's, and it is not part of Moca yet. Ask
-> your Moca admin for a copy, or have the image builder gate your image. Everything below is what it
-> does, so you can prepare your image and contract now.
+It needs Python 3 and podman (or `--engine docker`), and nothing of Moca's beyond the file. A repository
+that names no registry host is pulled from `--registry HOST`, which the record never names.
 
 It pulls your image by digest (linux/amd64, as Moca's guests run), and refuses if the digest it got is
 not the contract's. It writes the record whether or not the gate passed, prints the record's sha256,
@@ -497,9 +497,16 @@ and exits 0 only on a pass. On a pass, `--template-id` also writes a template sp
 self-attested profiles. Its probe expectation is built from what your probe printed (colour codes
 stripped), never from a count.
 
-The record is what you send as `gateRecord` with your create (§4b.5.5). The control plane reads
-general-gate records of the schema `SH_GATE_RECORD_SCHEMA` names (default `moca-gate-record/1`), and
-these fields:
+The record is what you send as `gateRecord` with your create (§4b.5.5). Its schema is
+`moca-gate-record/1`, the one the control plane holds strictly by default (`SH_GATE_RECORD_SCHEMA`, a
+setting a deployment changes only to take another builder's general-gate records). A deployment whose
+setting names another builder's schema takes these records as they are: a record of any other schema
+passes X1.offline unless it says `floor_checked_offline: false`, and this one always says it, so a
+`network_needed` record is still refused on `benchmark` and `benchmark-self`. To hold them strictly, so
+that a record without the field is refused too, unset the setting (back to the default), a control-plane
+configuration change. The record's bytes are what the control plane hashes, so send `gate.json`
+unchanged. They are defined as Python's `json.dumps(record, indent=2, sort_keys=True)` plus one newline
+(non-ASCII escaped, `","` at a line's end and `": "`). It reads these fields:
 
 | Field                                                              | Moca's rule                                                                                                                                                                                      |
 | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -550,7 +557,7 @@ The contract, with your layered image's digest in `image`:
 
 ```json
 {
-  "schema": "example-builder/gate-input/1",
+  "schema": "moca-gate-input/1",
   "image": "<your registry>/django-moca-min@sha256:<the digest of your layered image>",
   "workdir": "/testbed",
   "test_cmd": "source /opt/miniconda3/bin/activate && conda activate testbed && export LANG=en_US.UTF-8 LANGUAGE=en_US:en LC_ALL=en_US.UTF-8 && ./tests/runtests.py --verbosity 2 --settings=test_sqlite --parallel 1 basic",
