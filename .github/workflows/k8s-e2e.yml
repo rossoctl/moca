@@ -6,7 +6,7 @@ name: k8s-e2e
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release-*']
   pull_request:
     paths:
       - 'deploy/k8s/**'
