@@ -30,6 +30,8 @@ At the end, you apply the agent's work to your laptop as a patch.
 You need:
 
 - **Node.js 22 or later** and `git`.
+- **A git repository to work on.** This is your own project. Mocactl is a client, so you do not
+  need a clone of moca. `up`, `push` and `pull` run in a git repository, and fail outside one.
 - A **sandbox service deployment** and its API host. Moca is self-hosted:
   [deploy one](../operate/sandbox-service/install.md), or ask whoever runs yours.
 - A GitHub account that whoever runs the deployment has **added to its access list**. If your
@@ -46,8 +48,9 @@ can then copy each later command without an edit.
 # The API host of your sandbox service deployment, without the scheme.
 export API_HOST=sbx.example.com
 
-# The repository you want the agent to work in.
-export REPO_DIR=~/src/my-repo
+# The git repository you want the agent to work on. This is your own project,
+# not a clone of moca. Use the repository root.
+export REPO_DIR=~/src/my-project
 ```
 
 Open a new shell, and set the two variables again. To keep them, add the two lines to your shell's
@@ -85,6 +88,8 @@ _allowed subjects_.
 
 ## 3. Bring your repository up
 
+Go to the root of your repository, then create its sandbox:
+
 ```bash
 cd $REPO_DIR
 mocactl sbx up
@@ -107,6 +112,8 @@ What `up` does:
 - It writes the agent configuration. It also records the binding in `.sbx/sandbox.json`.
 - You can run `up` again at any time. It uses this repository's sandbox again while that sandbox
   is live.
+- Each clone and each git worktree gets its own sandbox. Two worktrees of one repository do not
+  share one.
 
 ## 4. Run your agent
 
