@@ -183,9 +183,9 @@ const BOB_SETTINGS = '.bob/settings.json';
 const BOB_MCP = '.bob/mcp.json';
 const SETTINGS_LOCAL = '.claude/settings.local.json';
 const MANIFEST = '.sbx/agent-config.json';
-/** What --no-agent-config costs, said wherever it is offered. */
-const NO_CONFIG = '--no-agent-config (no sandbox server, local tools left on)';
-const WRITE_HINT = `edit it by hand, or configure the agents yourself with mocactl sbx up ${NO_CONFIG}`;
+/** What --no-agent-config does, said wherever it is offered. */
+const NO_CONFIG = '--no-agent-config (writes no agent configuration)';
+const WRITE_HINT = `edit it by hand, or run mocactl sbx up ${NO_CONFIG} and configure the agents yourself`;
 /**
  * Claude Code's own wording for the option that accepts the server, so what we tell the user to
  * pick reads the same as what they see. Its prompt also offers "Use this and all future MCP
@@ -193,7 +193,7 @@ const WRITE_HINT = `edit it by hand, or configure the agents yourself with mocac
  */
 export const CLAUDE_PROMPT_PICK = 'Use this MCP server';
 /** For an edit this module could not make safely: nothing was written. */
-const EDIT_HINT = `nothing was changed; edit it by hand (and please report it), or use up ${NO_CONFIG} or rm --keep-config`;
+const EDIT_HINT = `nothing was changed; edit it by hand (and please report it), or run mocactl sbx up ${NO_CONFIG}`;
 
 export class ConfigConflict extends Error {
   constructor(

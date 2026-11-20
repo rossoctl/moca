@@ -585,11 +585,11 @@ describe('agent configuration (SBX0 §6.3)', () => {
       expect(err.file).toBe(file);
       expect(err.message).toContain(file);
       expect(err.message).toContain(key);
-      // --no-agent-config is not a way past a conflict: it leaves the agents unsandboxed.
+      // What --no-agent-config does, true whether or not an earlier up configured the repo.
       expect(err.message).toMatch(
         key === 'permissions.allow'
           ? /move it to \.claude\/settings\.local\.json/
-          : /--no-agent-config \(no sandbox server, local tools left on\)/,
+          : /--no-agent-config \(writes no agent configuration\) and configure the agents yourself/,
       );
     }
     expect(text(d, file)).toBe(body);

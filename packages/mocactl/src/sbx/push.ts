@@ -579,7 +579,18 @@ export async function planPush(
   }
   if (tooBig.length) {
     // An ignore rule does not keep a tracked file out.
-    const tracked = new Set(splitNames(await git(root, ['ls-files', '-z', '--cached'])));
+    const tracked = new Set(
+      splitNames(
+        await git(root, [
+          '--literal-pathspecs',
+          'ls-files',
+          '-z',
+          '--cached',
+          '--',
+          ...tooBig.map((t) => t.path),
+        ]),
+      ),
+    );
     // Just over the limit, MiB to one decimal reads as the limit itself: give the bytes.
     const named = tooBig.map(
       ({ path, size }) =>
@@ -591,7 +602,7 @@ export async function planPush(
         `${named.join(', ')}. Leave them out with .git/info/exclude (yours only) or .gitignore ` +
         '(shared)' +
         (tooBig.some(({ path }) => tracked.has(path))
-          ? '; a tracked one is pushed even when ignored: git rm --cached it, which once ' +
+          ? '; a tracked one is pushed even when ignored: git rm --cached it too, which once ' +
             'committed removes it for everyone'
           : ''),
     );

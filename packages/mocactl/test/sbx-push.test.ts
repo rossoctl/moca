@@ -231,7 +231,20 @@ describe('the push list (SBX0 §6.2)', () => {
     git(r, 'add', 'big.bin');
     const tracked = String(await planPush(r).catch((e: unknown) => e));
     expect(tracked).toContain(`big.bin (12.0 MiB, ${MAX_FILE + 1} bytes, tracked)`);
-    expect(tracked).toContain('git rm --cached it, which once committed removes it for everyone');
+    // Untracked, it is listed again unless ignored.
+    expect(tracked).toContain(
+      'git rm --cached it too, which once committed removes it for everyone',
+    );
+  });
+
+  it('marks only the tracked ones, taking each name literally', async () => {
+    const r = repo();
+    writeFileSync(join(r, ':!a.bin'), Buffer.alloc(MAX_FILE + 1)); // pathspec magic, as a name
+    git(r, '--literal-pathspecs', 'add', ':!a.bin');
+    writeFileSync(join(r, 'b.bin'), Buffer.alloc(MAX_FILE + 1));
+    const err = String(await planPush(r).catch((e: unknown) => e));
+    expect(err).toContain(`:!a.bin (12.0 MiB, ${MAX_FILE + 1} bytes, tracked)`);
+    expect(err).toContain(`b.bin (12.0 MiB, ${MAX_FILE + 1} bytes)`);
   });
 
   it('is exactly at the limits it names', () => {

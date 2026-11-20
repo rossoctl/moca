@@ -26,7 +26,7 @@ sidebar_position: 2
 - **Files over 12 MiB are not pushed**: a file goes whole into one sandbox command, whose input is
   at most 14 MiB compressed. `push` refuses and names them. Leave one out with `.git/info/exclude`
   (yours only) or `.gitignore` (shared); a tracked file is pushed even when ignored, so
-  `git rm --cached` it first, which once committed removes it for everyone. A tree over 256 MiB is
+  `git rm --cached` it too, which once committed removes it for everyone. A tree over 256 MiB is
   refused (`--max-push` sets another cap). A pull larger than 8 MiB as a patch is refused, never
   cut.
 - **What a pull does not bring back:**

@@ -35,8 +35,8 @@ doctor` fails on it; `mocactl sbx claude` sets it to `1`.
 
 They are ordinary files in your working tree, so `git status` shows them. Leave them uncommitted:
 committed, they would point every teammate's agents at a sandbox and deny their local tools.
-`mocactl sbx up --no-agent-config` creates and pushes without touching them, so it is not a way past
-a conflict: the agents get no sandbox server, and their local tools stay on.
+`mocactl sbx up --no-agent-config` creates and pushes without touching them: they stay as they are,
+so where no earlier `up` wrote them, the agents get no sandbox server and keep their local tools.
 
 **Whether they reach the sandbox is up to your `.gitignore`.** `up` writes them after its push, so
 the first push never carries them. From then on, `up` and `push` treat them like any other file:
