@@ -120,8 +120,8 @@ a repository's sandbox, in the order you use it:
                                                  remembered for later commands; in a local
                                                  terminal: copies the code, opens the browser;
                                                  --no-browser: only prints the URL and the code)
-  mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--no-agent-config] [--cortex]
-                 [--lifetime DURATION]
+  mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--max-file MiB]
+                 [--no-agent-config] [--cortex] [--lifetime DURATION]
                                                  in a git repository: create or reuse its sandbox,
                                                  push the working tree, bind it in .sbx/sandbox.json,
                                                  and point Claude Code, OpenCode and IBM Bob at the
@@ -142,6 +142,7 @@ a repository's sandbox, in the order you use it:
                                                  one of the name is refused); --include-secrets:
                                                  push .env*, *.pem, *.key and id_* files too;
                                                  --max-push: refuse a tree over MiB, default 256;
+                                                 --max-file: refuse a file over MiB, default 12;
                                                  --no-agent-config:
                                                  write no agent configuration, only push and bind)
                                                  (--cortex: Cortex v0.9.3+ blocks the local tools
@@ -188,11 +189,13 @@ a repository's sandbox, in the order you use it:
   mocactl sbx pull [--apply] [-o FILE]           the sandbox's changes as a patch, on stdout or in
                                                  FILE (--apply: apply it here, then advance the
                                                  sandbox's baseline)
-  mocactl sbx push [--force] [--include-secrets] [--max-push MiB]   push the working tree again
+  mocactl sbx push [--force] [--include-secrets] [--max-push MiB] [--max-file MiB]
+                                                 push the working tree again
                                                  (refused while the sandbox has changes not yet
                                                  pulled, unless --force; .env*, *.pem, *.key and
                                                  id_* stay behind unless --include-secrets;
-                                                 --max-push: refuse a tree over MiB, default 256)
+                                                 --max-push: refuse a tree over MiB, default 256;
+                                                 --max-file: refuse a file over MiB, default 12)
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
   mocactl sbx doctor [--sandbox ID] [--json]     check login, sandbox, agent config, exec and recent
                                                  calls (exit 0 when every check passes, else 1;
@@ -707,6 +710,7 @@ const SYNC_FLAGS: [
     | 'force'
     | 'include-secrets'
     | 'max-push'
+    | 'max-file'
     | 'apply'
     | 'out'
     | 'no-agent-config'
@@ -728,6 +732,7 @@ const SYNC_FLAGS: [
   ['lifetime', ['create', 'up']],
   ['include-secrets', ['up', 'push']],
   ['max-push', ['up', 'push']],
+  ['max-file', ['up', 'push']],
   ['apply', ['pull']],
   ['out', ['pull']],
   ['no-agent-config', ['up']],
@@ -747,7 +752,7 @@ function wholeSeconds(io: Io, flag: string, raw: string | undefined): number | u
   }
   return n;
 }
-/** `--max-push` in MiB: up to 4 GiB, far above what a push should ever be. */
+/** `--max-push` and `--max-file` in MiB: up to 4 GiB, far above what a push should ever be. */
 const MAX_PUSH_MIB = 4096;
 
 const mib = (n: number) => `${(n / (1024 * 1024)).toFixed(n % (1024 * 1024) ? 1 : 0)} MiB`;
@@ -844,6 +849,7 @@ const SBX_OPTIONS = {
   force: { type: 'boolean' },
   'include-secrets': { type: 'boolean' },
   'max-push': { type: 'string' },
+  'max-file': { type: 'string' },
   apply: { type: 'boolean' },
   out: { type: 'string', short: 'o' },
   'no-agent-config': { type: 'boolean' },
@@ -1197,18 +1203,20 @@ async function sbxMainWith(
       return SBX_EXIT.usage;
     }
   }
-  let maxPush: number | undefined;
-  if (values['max-push'] !== undefined) {
-    const raw = values['max-push'].trim();
+  const sizes: Partial<Record<'max-push' | 'max-file', number>> = {};
+  for (const flag of ['max-push', 'max-file'] as const) {
+    if (values[flag] === undefined) continue;
+    const raw = values[flag].trim();
     const n = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
     if (!Number.isSafeInteger(n) || n < 1 || n > MAX_PUSH_MIB) {
       io.err(
-        `sbx: --max-push must be a whole number of MiB, 1 to ${MAX_PUSH_MIB} (got '${values['max-push']}')`,
+        `sbx: --${flag} must be a whole number of MiB, 1 to ${MAX_PUSH_MIB} (got '${values[flag]}')`,
       );
       return SBX_EXIT.usage;
     }
-    maxPush = n * 2 ** 20;
+    sizes[flag] = n * 2 ** 20;
   }
+  const { 'max-push': maxPush, 'max-file': maxFile } = sizes;
   // `run` takes everything after the command (after `--`) as CMD; `put` exactly one PATH; rm, token,
   // env and egress at most one ID; every other command no argument at all.
   const argsOk =
@@ -1674,6 +1682,7 @@ async function sbxMainWith(
           force: false,
           includeSecrets: values['include-secrets'] === true,
           ...(maxPush !== undefined ? { maxPush } : {}),
+          ...(maxFile !== undefined ? { maxFile } : {}),
           ...(values.template ? { template: values.template } : {}),
           ...(values.name ? { name: values.name } : {}),
           ...(upLifetime !== undefined ? { idleLifetimeS: upLifetime } : {}),
@@ -1694,6 +1703,7 @@ async function sbxMainWith(
           force: values.force === true,
           includeSecrets: values['include-secrets'] === true,
           ...(maxPush !== undefined ? { maxPush } : {}),
+          ...(maxFile !== undefined ? { maxFile } : {}),
           cwd,
         },
         deps.execFactory,
