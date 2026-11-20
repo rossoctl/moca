@@ -2,7 +2,6 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   appendFileSync,
-  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -96,14 +95,14 @@ export function reincludes(paths: string[]): string[] {
 }
 const SECRET_RE = /^(\.env.*|.*\.pem|.*\.key|id_.*)$/;
 /** Each push or pull Exec: a fresh VM extracting at most 14 MiB, or one git command. */
-export const SYNC_TIMEOUT_S = 300;
+const SYNC_TIMEOUT_S = 300;
 /** Marks a push that has emptied the workspace but not yet committed its baseline. */
 const INCOMPLETE = '.git/sbx-push-incomplete';
 /**
  * The baseline: a ref of its own, not HEAD, so an agent that commits (or resets) in the sandbox
  * cannot hide its work from `pull` or have it discarded by `push`.
  */
-export const BASELINE_REF = 'refs/sbx/baseline';
+const BASELINE_REF = 'refs/sbx/baseline';
 /**
  * The re-include patterns (`PushPlan.reinclude`), NUL-separated: passed as `-x` (the highest
  * precedence, above an in-tree .gitignore) wherever the sandbox lists the workspace's files.

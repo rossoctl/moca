@@ -644,7 +644,7 @@ func (p *pool) acquire(ctx context.Context, key string, lease bool) (VM, *runPoo
 			// budget. Checked BEFORE the pop mutates anything — the check is pure, and
 			// a refusal must leave the standby exactly where it was for a later,
 			// colder host to promote. On a host whose slots x PerVMBytes fit the
-			// budget this never fires; see admitPromotionLocked.
+			// budget this never fires; see admitPromotionAtLocked.
 			if err := p.admitPromotionAtLocked(vm, price); err != nil {
 				// RefuseMemoryBudget is fundable: eviction needs only
 				// perVM minus this standby's dirty charge of headroom, which other
@@ -978,7 +978,7 @@ func (p *pool) Stats() Stats {
 
 // perVMBytes is what one RUNNING VM costs the budget: full guest RAM plus
 // overhead, charged to inFlight and warming VMs (and to a standby at the moment
-// of its promotion — admitPromotionLocked). A paused standby is charged at
+// of its promotion — admitPromotionAtLocked). A paused standby is charged at
 // dirty-page cost instead; see committedLocked and standbyChargeLocked (#644).
 //
 // Delegates to the package-level PerVMBytes so this figure and the per-VM cgroup

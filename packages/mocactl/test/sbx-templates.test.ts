@@ -1142,7 +1142,7 @@ describe('templates create, build, follow, cancel', () => {
     expect(w.cp.calls.length).toBe(n);
   });
 
-  it('refuses bad usage locally, before any request', async () => {
+  it('names what is wrong with each bad usage, specs and gate records included, before any request', async () => {
     const { id: _id, image: _image, ...anon } = SPEC;
     const f = files({
       'spec.json': SPEC,

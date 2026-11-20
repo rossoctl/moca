@@ -93,7 +93,7 @@ const microvmDefaultConcurrency = 16
 // PerVMBytes, paused standbys at their measured dirty-page cost. That makes the
 // slot count's arithmetic the RUNNING component alone — N slots can commit
 // N x PerVMBytes — and it is a hard ceiling now rather than a worst case: the pool
-// re-prices a standby at full cost at pop time (admitPromotionLocked), so a host
+// re-prices a standby at full cost at pop time (admitPromotionAtLocked), so a host
 // whose slots x PerVMBytes outrun the budget will refuse warm acquires — failed
 // execs — as the slot count fills. Paused standbys over the budget are no longer
 // this warning's subject: they evict (evictForBudgetLocked) rather than fail, and
@@ -104,7 +104,7 @@ const microvmDefaultConcurrency = 16
 // many slots exist. Failing the unit would stop deployments whose worst case never
 // materialises — the same reasoning the pre-#644 version of this warning recorded,
 // now applying to a figure that bites as refusals rather than as evictions. The
-// runtime gate (admitPromotionLocked) still protects the host, so the risk is
+// runtime gate (admitPromotionAtLocked) still protects the host, so the risk is
 // degraded service rather than silent corruption -- but the operator is told at
 // startup, which is the whole point of #305: a slot count nobody chose must not be
 // invisible.

@@ -29,17 +29,17 @@ import { baselineAtHead } from './push.js';
  */
 
 /** `templates follow`'s default bound, in seconds; also the bound of a create's wait for a queue slot. */
-export const FOLLOW_TIMEOUT_S = 3600;
+const FOLLOW_TIMEOUT_S = 3600;
 /** Between two polls of a build, in milliseconds. */
-export const POLL_MS = 5000;
+const POLL_MS = 5000;
 /** `templates activate --wait`'s limit with no --timeout, in seconds: the floor of a sized one. */
-export const ACTIVATE_TIMEOUT_S = 1800;
+const ACTIVATE_TIMEOUT_S = 1800;
 /** `templates retire --wait`'s limit with no --timeout, in seconds. */
 // Past the 600 s a host keeps shipping an ended sandbox's egress before it may remove the build,
 // plus a few host polls.
 export const RETIRE_TIMEOUT_S = 900;
 /** The sized limit's ceiling: a host reporting an outlier start time never makes --wait sit longer. */
-export const ACTIVATE_TIMEOUT_CAP_S = 14_400;
+const ACTIVATE_TIMEOUT_CAP_S = 14_400;
 
 /**
  * `activate --wait`'s limit with no --timeout (§6.5): a build queued behind its host's start limit
@@ -288,7 +288,7 @@ export async function cmdHosts(c: SbxCtx): Promise<number> {
 }
 
 /** The build a create answered: the last segment of its `build` path (its handle, or its buildId). */
-export const handleOf = (q: SbxQueued): string => q.build.split('/').pop() ?? q.build;
+const handleOf = (q: SbxQueued): string => q.build.split('/').pop() ?? q.build;
 
 /** A build's name to follow it by: its handle, or its buildId for an imported build. */
 const buildRef = (b: SbxBuild): string => b.handle ?? b.buildId;
@@ -391,7 +391,7 @@ export async function cmdCancelBuild(c: SbxCtx, id: string, build: string): Prom
 }
 
 /** The most a create's gate record may hold: the create routes take a body of at most 1 MiB. */
-export const GATE_RECORD_MAX_BYTES = 1024 * 1024;
+const GATE_RECORD_MAX_BYTES = 1024 * 1024;
 
 /** What a create reads from its files: one spec (or a gate record's `template` block). */
 export interface CreateInput {

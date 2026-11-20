@@ -100,7 +100,7 @@ export function routeProfileFromEnv(env: NodeJS.ProcessEnv): RouteProfile {
  * The longest sandbox token (SBX0 §3.6): a delete or a de-enrollment takes effect within one token
  * lifetime, so this bounds how late that can be. setup.sh's SBX_TOKEN_TTL_MINUTES stops at 60 too.
  */
-export const MAX_SANDBOX_TOKEN_TTL_S = 3600;
+const MAX_SANDBOX_TOKEN_TTL_S = 3600;
 
 /** The shortest lease idle timeout an owner may set (`idleTimeoutS`); 0 means the worker's default. */
 export const MIN_IDLE_TIMEOUT_S = 30;

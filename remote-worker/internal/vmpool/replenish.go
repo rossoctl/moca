@@ -22,7 +22,7 @@ func nextBackoff(d time.Duration) time.Duration {
 	return min(d*2, replenishBackoffMax)
 }
 
-// scheduleReplenish arms a refill of ONE slot for key.
+// scheduleReplenishLocked arms a refill of ONE slot for rp. Caller holds p.mu.
 //
 // DELAYED, NOT IMMEDIATE, and spec §4.4 is worth restating because the number is
 // large: every Exec schedules a replenishment, so an unconditional refill hands D
@@ -38,15 +38,6 @@ func nextBackoff(d time.Duration) time.Duration {
 // refill for a run that is already over. StandbyIdle ages that remainder out; only
 // spec §9's Release removes it, and §7.3's idle-standby-residency metric is what
 // measures it.
-func (p *pool) scheduleReplenish(key string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if rp := p.runs[key]; rp != nil {
-		p.scheduleReplenishLocked(rp)
-	}
-}
-
-// scheduleReplenishLocked arms the timer. Caller holds p.mu.
 func (p *pool) scheduleReplenishLocked(rp *runPool) {
 	if p.closed {
 		return

@@ -6,7 +6,6 @@ import {
   EGRESS_LOG_BYTES,
   EGRESS_LOG_CAP,
   EGRESS_POST_MAX,
-  EGRESS_TOTAL_BYTES,
   MemoryEgressStore,
   RedisEgressStore,
   compareEntryIds,
@@ -349,7 +348,7 @@ describe.each([
     });
 
     it(`stops at ${EGRESS_LOG_CAP} entries and counts the rest as cap drops`, async () => {
-      expect([EGRESS_LOG_BYTES, EGRESS_TOTAL_BYTES]).toEqual([4 * 1024 * 1024, 64 * 1024 * 1024]);
+      expect(EGRESS_LOG_BYTES).toBe(4 * 1024 * 1024);
       const { store, prefix, done } = isolated();
       const exp = Math.floor(Date.now() / 1000) + 600;
       const k = `${prefix}sbx-c`;

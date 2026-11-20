@@ -87,6 +87,17 @@ spec:
             - name: SH_ASYNC_DRAIN
               valueFrom:
                 { configMapKeyRef: { name: moca-settings, key: SH_ASYNC_DRAIN, optional: true } }
+            # #391: async leaves one owner may RUN deployment-wide. Counted in Redis, so unlike
+            # SH_TURNS_PER_SUBJECT it holds across replicas -- which is the only place it matters.
+            # Every supervisor pod reads the same ConfigMap, so they cannot disagree on the value.
+            # `optional`, and unset is off. setup.sh does not write the key, so adding it by hand
+            # leaves the settings-hash unchanged: roll this Deployment to pick it up.
+            - name: MOCA_ASYNC_RUNNING_PER_OWNER
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: MOCA_ASYNC_RUNNING_PER_OWNER, optional: true },
+                }
             # The turn record's TTL is derived from this (+1 h margin); it must match the control
             # plane's copy (LEAF_RESULT_TTL_SECONDS there), or the worker's own async leaf results
             # expire on a different schedule than the record that explains them.

@@ -86,7 +86,9 @@ one owner's running fan-out cannot also fill the worker with interactive turns: 
 that owner's cap is handed back unrun (counted as `async_deferred_subject`) and waits out the 90 s
 reclaim window. That cap does not pace an async-only drain — a worker runs one queued leaf at a time,
 so queued work alone never reaches it, and one owner's deep backlog is still served before another
-owner's single turn (open on #391).
+owner's single turn. `MOCA_ASYNC_RUNNING_PER_OWNER` is the cap that does bound an async-only drain,
+across every worker, because it counts in Redis rather than in one process; it is unset by default,
+which is right for a single-user VM, and a deferral costs the entry the same 90 s.
 
 The crash path has its own test, skipped unless you ask for it -- it waits out the production 90 s
 reclaim window, so it cannot run in CI:

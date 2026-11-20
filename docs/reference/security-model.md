@@ -83,8 +83,10 @@ A user is `github:<numeric id>` from the GitHub device flow, or `oidc:<sub>` fro
 `SH_ADMIN_SUBJECTS` or, on a control plane with a template store (`SH_PROVENANCE_DIR`), from an API grant on
 `/v1/subjects`. Without a store, a token's roles are those of `SH_ADMIN_SUBJECTS` (read at boot) at its mint or refresh;
 with one, the router replaces them on every request with the subject's roles now, so a grant or revoke takes effect at
-the next request (`server.ts`, `members.ts`). Only an admin named in `SH_ADMIN_SUBJECTS`, or the sandbox profile's
-installer token (`SH_INSTALLER_TOKEN`), may change enrollment or roles. On the harness profile an admin can list another
+the next request (`server.ts`, `members.ts`). Only an admin named in `SH_ADMIN_SUBJECTS`, or the sandbox or combined
+profile's installer token (`SH_INSTALLER_TOKEN`), may change enrollment or roles. The installer token can grant the admin
+role (`PUT /v1/subjects/{subject}/roles/admin`), so it reaches admin powers in one indirect step, through that subject's
+own login: treat it as admin-equivalent. On the harness profile an admin can list another
 user's sessions (`?owner=`) and delete any config bundle, and with a template store it also administers templates, the
 template policy and quotas. It does not bypass session ownership. See
 [Users, enrollment and roles](users-and-roles.md). Another user's session answers 404, never 403, so ids cannot be probed.

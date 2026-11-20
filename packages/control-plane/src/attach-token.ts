@@ -22,7 +22,7 @@ export const ATTACH_WORKLOAD_RE = /^w-[0-9a-f]{32}$/;
 /** `recordScope(owner)`: the 32-hex owner hash the workload record key already uses. */
 export const ATTACH_OWNER_RE = /^[0-9a-f]{32}$/;
 /** A tier name as a label value; the relay stamps it as `moca.dev/tier`. */
-export const ATTACH_TIER_RE = /^[a-z][a-z0-9-]{0,62}$/;
+const ATTACH_TIER_RE = /^[a-z][a-z0-9-]{0,62}$/;
 
 export interface AttachTokenClaims {
   iss: string;

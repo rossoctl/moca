@@ -1789,25 +1789,99 @@ describe('retire (§5.1)', () => {
     expect(await refusal(() => retireBuild(d, 't1', hash('9')))).toBe('template_not_found');
   });
 
-  it('never retires a build an active session is pinned to; deleting the session frees it', async () => {
+  it('moves `default` to the newest registered build when a retire ends the build it names (#909)', async () => {
     const d = await setup();
-    attachedNow = ['sbx_t1'];
+    attachedNow = [];
     await registered(d, 't1', hash('1'), 'sbx_t1');
-    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
-    await activate(d, 't1');
-    await seedCredential(d);
-    const s = (
-      await HANDLERS.createSession!(
-        ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
-        d,
-      )
-    ).body as Body;
-    expect(s.sessionId).toEqual(expect.any(String));
-    expect(await refusal(() => retire(d, 't1'))).toBe('build_in_use');
-    expect(await refusal(() => retireBuild(d, 't1', hash('1')))).toBe('build_in_use');
-    expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
-    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: s.sessionId } }), d);
-    expect((await retire(d, 't1')).status).toBe(200);
+    await registered(d, 't1', hash('2'), 'sbx_t1b', alice, { another: true, vcpus: 4 });
+    await registered(d, 't1', hash('3'), 'sbx_t1c', alice, { another: true, vcpus: 8 });
+    // The first registered build took `default`; the later ones did not move it.
+    expect((await d.templates!.get('t1'))!.tags.default).toBe(hash('1'));
+    const before = (await d.provenance!.chain('template/t1')).length;
+    const r = (await retireBuild(d, 't1', hash('1'))).body as Body;
+    // The newest build left takes `default`, with a `tag` record, and the answer names the move.
+    const doc = (await d.templates!.get('t1'))!;
+    expect(doc.tags.default).toBe(hash('3'));
+    expect(doc.tagsMeta?.default).toMatchObject({ by: alice.sub });
+    expect(r.default).toEqual({
+      buildId: hash('3'),
+      before: hash('1'),
+      record: expect.any(String),
+    });
+    const added = (await d.provenance!.chain('template/t1')).slice(before);
+    expect(added.map((x) => x.kind)).toEqual(['retire', 'tag']);
+    expect(added[1]).toMatchObject({
+      kind: 'tag',
+      subject: alice.sub,
+      body: { tag: 'default', buildId: hash('3'), before: hash('1') },
+    });
+    expect(recordDigestOf(added[1]!)).toBe(r.default.record);
+    // A bare id resolves again: to the new default, not 410.
+    expect(await refusal(() => sandbox(d, 't1'))).not.toBe('template_retired');
+  });
+
+  it('leaves `default` alone when a retire ends a build it does not name (#909)', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't1', hash('2'), 'sbx_t1b', alice, { another: true, vcpus: 4 });
+    const before = (await d.provenance!.chain('template/t1')).length;
+    const r = (await retireBuild(d, 't1', hash('2'))).body as Body;
+    expect((await d.templates!.get('t1'))!.tags.default).toBe(hash('1'));
+    expect(r.default).toBeNull();
+    const added = (await d.provenance!.chain('template/t1')).slice(before);
+    expect(added.map((x) => x.kind)).toEqual(['retire']);
+  });
+
+  it('keeps `default` when no registered build is left, and the 410 names the tag (#909)', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    const r = (await retireBuild(d, 't1', hash('1'))).body as Body;
+    expect(r.default).toBeNull();
+    expect((await d.templates!.get('t1'))!.tags.default).toBe(hash('1'));
+    const msg = async (ref: string) => {
+      try {
+        await sandbox(d, ref);
+      } catch (e) {
+        return { code: (e as { code: string }).code, message: (e as Error).message };
+      }
+      return null;
+    };
+    expect(await msg('t1')).toEqual({
+      code: 'template_retired',
+      message: expect.stringContaining(`its 'default' tag names retired build ${hash('1')}`),
+    });
+    // A build named directly is only retired: no tag to blame.
+    expect((await msg(`t1@${hash('1')}`))!.message).not.toContain('tag names');
+    // Retiring the whole template moves nothing either: there is nothing left to name.
+    const all = (await retire(d, 't1')).body as Body;
+    expect(all.default).toBeNull();
+  });
+
+  it('a build registering while `default` names a retired build takes `default` (#909)', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await retire(d, 't1');
+    expect(await refusal(() => sandbox(d, 't1'))).toBe('template_retired');
+    const before = (await d.provenance!.chain('template/t1')).length;
+    await registered(d, 't1', hash('2'), 'sbx_t1b', alice, { another: true, vcpus: 4 });
+    const doc = (await d.templates!.get('t1'))!;
+    expect(doc.tags.default).toBe(hash('2'));
+    expect(doc.tagsMeta?.default).toMatchObject({ by: null });
+    const added = (await d.provenance!.chain('template/t1')).slice(before);
+    expect(added.filter((x) => x.kind === 'tag')).toEqual([
+      expect.objectContaining({
+        subject: 'host:host-1',
+        body: { tag: 'default', buildId: hash('2'), before: hash('1') },
+      }),
+    ]);
+    // The bare id resolves to the new build: no longer gone.
+    expect(await refusal(() => sandbox(d, 't1'))).not.toBe('template_retired');
+    // A third build doesn't move it: `default` names a registered build.
+    await registered(d, 't1', hash('3'), 'sbx_t1c', alice, { another: true, vcpus: 8 });
+    expect((await d.templates!.get('t1'))!.tags.default).toBe(hash('2'));
   });
 
   it("prunes a pinned session that ended without the cascade's removal; an active one still blocks", async () => {
@@ -2076,33 +2150,6 @@ describe('retire (§5.1)', () => {
     expect(q.active.used).toBe(0);
   });
 
-  it('a retire waits for an activation taking its lease, then drops that lease', async () => {
-    const d = await setup();
-    attachedNow = [];
-    await registered(d, 't1', hash('1'), 'sbx_t1');
-    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
-    // A retire arrives while the activation is between its checks and its lease write (its
-    // `activate` record is written first). Under the lock the retire waits for the lease, then
-    // drops it; without it, the retire would finish first and the lease land on a retired build.
-    const prov = d.provenance!;
-    const append = prov.append.bind(prov);
-    let retiring: Promise<unknown> | null = null;
-    prov.append = async (input) => {
-      const rec = await append(input);
-      if (input.kind === 'activate' && !retiring) {
-        retiring = retire(d, 't1');
-        await Promise.race([retiring, new Promise((r) => setTimeout(r, 200))]);
-      }
-      return rec;
-    };
-    expect((await activate(d, 't1')).status).toBe(200);
-    await retiring;
-    expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
-      status: 'retired',
-      leases: [],
-    });
-  });
-
   it("refuses another subject and a bad reason; an admin may retire anyone's", async () => {
     const d = await setup();
     attachedNow = [];
@@ -2217,6 +2264,23 @@ describe('reject after the fact (§5.2)', () => {
     expect((await d.provenance!.chain('template/t1')).length).toBe(n);
   });
 
+  it('a reject of the build `default` names moves `default` to the newest registered build (#909)', async () => {
+    const d = await setup();
+    attachedNow = [];
+    await registered(d, 't1', hash('1'), 'sbx_t1');
+    await registered(d, 't1', hash('2'), 'sbx_t1b', alice, { another: true, vcpus: 4 });
+    const r = (await reject(d, 't1', hash('1'), { reason: 'rule M1 found broken' })).body as Body;
+    expect((await d.templates!.get('t1'))!.tags.default).toBe(hash('2'));
+    expect(r.default).toEqual({
+      buildId: hash('2'),
+      before: hash('1'),
+      record: expect.any(String),
+    });
+    expect(await refusal(() => sandbox(d, 't1'))).not.toBe('unknown_template');
+    // A reject of a build `default` does not name moves nothing.
+    const r2 = (await reject(d, 't1', hash('1'), { reason: 'again' })).body as Body;
+    expect(r2.default).toBeNull();
+  });
   it('removes a retired build whose snapshot only an admin-rejected build shares; that one is only stopped', async () => {
     const d = await setup();
     attachedNow = [];
@@ -2273,57 +2337,75 @@ describe('reject after the fact (§5.2)', () => {
     expect((await reject(d, 't1', hash('1'), { reason: 'broken' })).status).toBe(200);
   });
 
-  it('never rejects a build an active session is pinned to (409 build_in_use)', async () => {
-    const d = await setup();
-    attachedNow = ['sbx_t1'];
-    await registered(d, 't1', hash('1'), 'sbx_t1');
-    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
-    await activate(d, 't1');
-    await seedCredential(d);
-    const s = (
-      await HANDLERS.createSession!(
-        ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
-        d,
-      )
-    ).body as Body;
-    expect(await refusal(() => reject(d, 't1', hash('1'), { reason: 'broken' }))).toBe(
-      'build_in_use',
-    );
-    expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
-    await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: s.sessionId } }), d);
-    expect((await reject(d, 't1', hash('1'), { reason: 'broken' })).status).toBe(200);
-  });
-
-  it('a reject waits for an activation taking its lease, then drops that lease', async () => {
-    const d = await setup();
-    attachedNow = [];
-    await registered(d, 't1', hash('1'), 'sbx_t1');
-    await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
-    // A reject arrives while the activation is between its checks and its lease write: under the
-    // activation lock it waits for the lease, then drops it.
-    const prov = d.provenance!;
-    const append = prov.append.bind(prov);
-    let rejecting: Promise<unknown> | null = null;
-    prov.append = async (input) => {
-      const rec = await append(input);
-      if (input.kind === 'activate' && !rejecting) {
-        rejecting = reject(d, 't1', hash('1'), { reason: 'broken' });
-        await Promise.race([rejecting, new Promise((r) => setTimeout(r, 200))]);
-      }
-      return rec;
-    };
-    expect((await activate(d, 't1')).status).toBe(200);
-    await rejecting;
-    expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
-      status: 'rejected',
-      leases: [],
-    });
-    expect((await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body).toMatchObject({
-      active: { used: 0 },
-    });
-  });
-
   for (const how of ['reject', 'retire'] as const) {
+    // A reject ends t1's one build; a retire, the whole template (and, through retireTemplateBuild,
+    // the one build).
+    const ends = (d: TestDeps): (() => Promise<{ status: number }>)[] =>
+      how === 'reject'
+        ? [() => reject(d, 't1', hash('1'), { reason: 'broken' })]
+        : [
+            () =>
+              HANDLERS.retireTemplate!(
+                ctx({ principal: alice, params: { id: 't1' }, body: {} }),
+                d,
+              ),
+            () =>
+              HANDLERS.retireTemplateBuild!(
+                ctx({ principal: alice, params: { id: 't1', build: hash('1') } }),
+                d,
+              ),
+          ];
+
+    it(`never ${how}s a build an active session is pinned to (409 build_in_use); deleting the session frees it`, async () => {
+      const d = await setup();
+      attachedNow = ['sbx_t1'];
+      await registered(d, 't1', hash('1'), 'sbx_t1');
+      await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+      await activate(d, 't1');
+      await seedCredential(d);
+      const s = (
+        await HANDLERS.createSession!(
+          ctx({ principal: alice, body: { sandbox: { template: `t1@${hash('1')}` } } }),
+          d,
+        )
+      ).body as Body;
+      expect(s.sessionId).toEqual(expect.any(String));
+      for (const end of ends(d)) expect(await refusal(end)).toBe('build_in_use');
+      expect((await d.templates!.get('t1'))!.builds[0].status).toBe('registered');
+      await HANDLERS.deleteSession!(ctx({ principal: alice, params: { id: s.sessionId } }), d);
+      expect((await ends(d)[0]!()).status).toBe(200);
+    });
+
+    it(`a ${how} waits for an activation taking its lease, then drops that lease`, async () => {
+      const d = await setup();
+      attachedNow = [];
+      await registered(d, 't1', hash('1'), 'sbx_t1');
+      await inventory(d, 'host-1', { [hash('1')]: 't1' }, 2);
+      // The end arrives while the activation is between its checks and its lease write (its
+      // `activate` record is written first). Under the activation lock it waits for the lease, then
+      // drops it; without the lock, it would finish first and the lease land on an ended build.
+      const prov = d.provenance!;
+      const append = prov.append.bind(prov);
+      let ending: Promise<unknown> | null = null;
+      prov.append = async (input) => {
+        const rec = await append(input);
+        if (input.kind === 'activate' && !ending) {
+          ending = ends(d)[0]!();
+          await Promise.race([ending, new Promise((r) => setTimeout(r, 200))]);
+        }
+        return rec;
+      };
+      expect((await activate(d, 't1')).status).toBe(200);
+      await ending;
+      expect((await d.templates!.get('t1'))!.builds[0]).toMatchObject({
+        status: how === 'reject' ? 'rejected' : 'retired',
+        leases: [],
+      });
+      expect((await HANDLERS.getQuota!(ctx({ principal: alice }), d)).body).toMatchObject({
+        active: { used: 0 },
+      });
+    });
+
     it(`a ${how} judges live use on the template as it is under its locks, not as first read`, async () => {
       const d = await setup();
       attachedNow = ['sbx_t1'];

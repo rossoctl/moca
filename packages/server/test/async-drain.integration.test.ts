@@ -17,7 +17,7 @@ import { resultKey } from '@moca/harness/leaf-result-store';
 import type { LeafEnvelope, LeafResult } from '@moca/harness/run-leaf';
 import { createLeafDrainLoop } from '../src/leaf-drain-loop.js';
 import { claimTurn, deadLetterTurn } from '../src/turn-claim.js';
-import { asyncFinalizeState } from '../src/async-worker.js';
+import { asyncFinalizeState, ownerAdmission } from '../src/async-worker.js';
 import { TurnCounter } from '../src/worker.js';
 import { SubjectCounter } from '../src/subject-quota.js';
 
@@ -227,13 +227,13 @@ describe('§8 — the drain under mixed load', () => {
 });
 
 describe('§5.3 — two owners on one drain (#391)', () => {
-  // The guarantee that SHIPS, and the one that does not. `SubjectCounter` is per worker and
-  // in-process, and `admitOwner` is the only thing on the drain that reads it, so what is bounded is
-  // an owner's MIXED load: A's interactive turn fills A's cap, and A's queued leaves then wait while
-  // B's turn is claimed and run. An async-only backlog is NOT paced -- a worker runs one queued leaf
-  // at a time, so the drain alone never reaches a cap of max(1, S/2) and A's entries would be served
-  // in FIFO order ahead of B's. That is what the docs now say (spec §12); the cluster-wide count
-  // that would bound an async-only drain is still open on #391.
+  // What `SH_TURNS_PER_SUBJECT` alone bounds, and what it does not. It is a Map in ONE worker
+  // process, and `admitOwner` is the only thing on the drain that reads it, so what it bounds is an
+  // owner's MIXED load: A's interactive turn fills A's cap, and A's queued leaves then wait while
+  // B's turn is claimed and run. An async-only backlog is NOT paced by it -- a worker runs one
+  // queued leaf at a time, so the drain alone never reaches a cap of max(1, S/2) and A's entries
+  // are served in FIFO order ahead of B's. `MOCA_ASYNC_RUNNING_PER_OWNER` is what bounds that, in
+  // the describe below.
   it("defers the owner at their cap, unrun and unpenalised, and runs the other owner's turn", async () => {
     const cap = 1;
     const queue = await newQueue();
@@ -257,9 +257,9 @@ describe('§5.3 — two owners on one drain (#391)', () => {
     };
     const job: LeafJobDeps = {
       ...jobFor(queue, 'w-fair', runLeaf),
-      // Production's own wiring (async-worker.ts): the owner comes off the record, and the cap is
-      // checked against the counter the sync path shares.
-      admitOwner: async (turnId) => subjects.acquire(await turns.owner(turnId), cap),
+      // Production's own wiring, and the production function: the owner comes off the record, and
+      // the cap is checked against the counter the sync path shares.
+      admitOwner: ownerAdmission({ turns, subjects, subjectCap: cap }),
       // High on purpose: a deferred entry must not be reclaimed by the NEXT claim in this loop, or
       // the claim order under test would be A's entries coming back round rather than B's turn.
       minIdleMs: 60_000,
@@ -286,6 +286,87 @@ describe('§5.3 — two owners on one drain (#391)', () => {
     for (let i = 0; i < 3; i++) await processOne({ ...job, minIdleMs: 0 });
     expect(ran).toHaveLength(4);
     for (const t of backlog) expect((await turns.get(t.turnId))?.state).toBe('done');
+  });
+});
+
+describe('§5.3 — one owner across TWO drains (#391)', () => {
+  // The guarantee the per-worker cap above cannot give, and the reason this suite needs real Redis:
+  // two worker PROCESSES, so two `SubjectCounter` maps that know nothing of each other. The second
+  // worker's own counter is empty when it claims, so only a count that lives outside both processes
+  // can tell it this owner is already running their share.
+  it("defers an owner already at their cluster-wide cap on ANOTHER worker, and takes the slot back when that worker's leaf ends", async () => {
+    const queue1 = await newQueue();
+    const queue2 = await newQueue();
+    const owner = `owner-cw-${tag}`;
+    const held = await submit(owner);
+    const paced = await submit(owner);
+    const next = await submit(owner);
+
+    // Two processes' worth of in-process state, and nothing shared but Redis.
+    const admission = (subjects: SubjectCounter) =>
+      ownerAdmission({ turns, subjects, runningCap: 1 });
+
+    // Worker 1's leaf parks inside runLeaf, so its slot is genuinely held while worker 2 claims --
+    // which is the whole of the race. `entered` is what makes the ordering deterministic rather
+    // than a sleep.
+    let enter!: () => void;
+    const entered = new Promise<void>((r) => (enter = r));
+    let release!: () => void;
+    const finish = new Promise<void>((r) => (release = r));
+
+    const ran: string[] = [];
+    const job = (q: RedisWorkQueue, id: string, park: boolean): LeafJobDeps => ({
+      ...jobFor(q, id, async (env) => {
+        ran.push(env.sessionId);
+        if (park) {
+          enter();
+          await finish;
+        }
+        return { status: 'done' } as LeafResult;
+      }),
+      admitOwner: admission(new SubjectCounter()),
+      // High on purpose, as in the test above: worker 2 must claim a FRESH entry rather than
+      // reclaim the one worker 1 is holding, or the deferral under test would be a reclaim.
+      minIdleMs: 60_000,
+    });
+
+    const first = processOne(job(queue1, 'w-cw-1', true));
+    await entered;
+    expect(await processOne(job(queue2, 'w-cw-2', false))).toMatchObject({
+      kind: 'deferred',
+      turnId: paced.turnId,
+    });
+
+    release();
+    expect(await first).toMatchObject({ kind: 'completed', turnId: held.turnId });
+    // Unrun and unpenalised, exactly as the per-worker defer leaves it: no credential was minted
+    // and no delivery was charged.
+    const pacedRec = await turns.get(paced.turnId);
+    expect(pacedRec?.state).toBe('queued');
+    expect(pacedRec?.attempts).toBe(0);
+    expect(ran).toEqual([held.sessionId]);
+
+    // The slot came back with worker 1's leaf -- not with a timeout, and not with the reaper. Worker
+    // 2 now admits this owner's next entry.
+    expect(await processOne(job(queue2, 'w-cw-2', false))).toMatchObject({
+      kind: 'completed',
+      turnId: next.turnId,
+    });
+    expect(ran).toEqual([held.sessionId, next.sessionId]);
+  });
+
+  it('admits every entry when no cluster-wide cap is configured', async () => {
+    // Off unless the operator asks for it: an upgrade must not start pacing a single-owner
+    // deployment's own fan-out, which is the common case for `mocactl spawn` x N.
+    const owner = `owner-nocap-${tag}`;
+    const turnIds = [await submit(owner), await submit(owner)];
+    const queue = await newQueue();
+    expect(ownerAdmission({ turns, subjects: new SubjectCounter() })).toBeUndefined();
+
+    const job = jobFor(queue, 'w-nocap', async () => ({ status: 'done' }) as LeafResult);
+    for (const t of turnIds) {
+      expect(await processOne(job)).toMatchObject({ kind: 'completed', turnId: t.turnId });
+    }
   });
 });
 

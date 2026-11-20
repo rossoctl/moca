@@ -1,5 +1,5 @@
 import { CpError } from './errors.js';
-import { asRecord, membershipNow, seconds } from './handler-util.js';
+import { asRecord, auditBestEffort, membershipNow, seconds } from './handler-util.js';
 import type { CpDeps, Handler, RequestCtx } from './handlers.js';
 import { buildRecordOf, recordDigest } from './provenance.js';
 import {
@@ -310,7 +310,7 @@ export const heldFresh = (deps: CpDeps, buildId: string): boolean =>
  * heldFresh, leaving one host out: at registration, the host reporting `built` is expected to
  * hold the snapshot it has just built (its inventory may list it before the report arrives).
  */
-export const heldFreshElsewhere = (deps: CpDeps, buildId: string, host: string): boolean =>
+const heldFreshElsewhere = (deps: CpDeps, buildId: string, host: string): boolean =>
   freshHosts(deps).some(([id, h]) => id !== host && h.holds[buildId] !== undefined);
 
 function catalogOf(deps: CpDeps) {
@@ -350,7 +350,7 @@ export function parseHostStart(l: Record<string, unknown>): HostStart | undefine
 const GRACE_MAX = 86_400;
 
 /** The inventory limits' idleGraceSeconds (§6.5): a whole number 0..GRACE_MAX, else none. */
-export function parseIdleGrace(l: Record<string, unknown>): number | undefined {
+function parseIdleGrace(l: Record<string, unknown>): number | undefined {
   const g = nonNeg(l.idleGraceSeconds);
   return g !== undefined && g <= GRACE_MAX ? g : undefined;
 }
@@ -963,10 +963,13 @@ export const HOST_HANDLERS: Record<string, Handler> = {
     const manifestHash = String(t.manifest_hash);
     // Set inside the update (a closure TypeScript's narrowing does not follow).
     const verdict: { failed?: { rule: string; message?: string } } = {};
+    let retook = false;
     // The status re-check, the registration check and both records happen inside the update, so
     // a cancel either lands first (this report is refused, and no record says it registered) or
     // after (it finds the build registered or rejected, and refuses).
     await withBuild(async (y, c) => {
+      // Reset per run: a re-run of the update must not keep an earlier run's move.
+      retook = false;
       const buildRec = await prov.append({
         stream,
         kind: 'build',
@@ -1104,11 +1107,37 @@ export const HOST_HANDLERS: Record<string, Handler> = {
                   : x,
             ),
           };
-      // A first registered build of a template takes `default` (§3.2); later ones are tagged by the owner.
-      return !failed && c.tags.default === undefined
-        ? { ...next, tags: { ...c.tags, default: manifestHash } }
-        : next;
+      // A first registered build of a template takes `default` (§3.2); later ones are tagged by the
+      // owner. So does a build registering while `default` names an ended build (retired or
+      // rejected, or none at all), so a bare id resolves again (#909): a `tag` record, as a retire's
+      // move writes. A superseding rebuild keeps the twin's id, so its tags already follow.
+      if (failed) return next;
+      const def = Object.hasOwn(c.tags, 'default') ? c.tags.default : undefined;
+      if (def === undefined) return { ...next, tags: { ...c.tags, default: manifestHash } };
+      const named = buildById(c.builds, def);
+      if (
+        def === manifestHash ||
+        (named && named.status !== 'retired' && named.status !== 'rejected')
+      )
+        return next;
+      await prov.append({
+        stream,
+        kind: 'tag',
+        subject: `host:${host}`,
+        body: { tag: 'default', buildId: manifestHash, before: def },
+      });
+      retook = true;
+      return {
+        ...next,
+        tags: { ...c.tags, default: manifestHash },
+        tagsMeta: { ...(c.tagsMeta ?? {}), default: { at: seconds(deps), by: null } },
+      };
     });
+    if (retook)
+      await auditBestEffort(deps, 'template_tags_moved', doc.id, {
+        subject: `host:${host}`,
+        decision: 'template_tags_moved',
+      });
     const { failed } = verdict;
     const outcome = failed ? 'rejected' : 'registered';
     return {

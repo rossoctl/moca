@@ -26,7 +26,7 @@ import { serveSbxMcp, stdioTransport } from './mcp.js';
 import { noticingExec, printNotices } from './notices.js';
 
 /** `put`'s timeout: a write of at most 14 MiB, well inside any token's life (no extra mint). */
-export const PUT_TIMEOUT_S = 120;
+const PUT_TIMEOUT_S = 120;
 
 /**
  * `--timeout S`: a whole number of seconds, at least 1. Undefined when absent; null (after saying
@@ -60,7 +60,7 @@ function passThrough(io: Io, stdout: Buffer, stderr: Buffer): void {
 }
 
 /** How many times `sbx run` sends a command the sandbox refused before starting it. */
-export const DEFAULT_BUSY_RETRIES = 4;
+const DEFAULT_BUSY_RETRIES = 4;
 /** The waits between those tries: 1, 2, 4, 8 s (under 30 s in all with the jitter), then 8 s each. */
 const BUSY_BACKOFF_MS = [1000, 2000, 4000, 8000];
 

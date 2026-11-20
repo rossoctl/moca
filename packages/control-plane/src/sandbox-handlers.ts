@@ -576,10 +576,7 @@ function catalog(deps: CpDeps): TemplateCatalog {
  * or not the record was trusted at create (`selfAttestProfile`; `selfAttested` implies it).
  * Recomputed on every read, never stored, so an admin's promotion or removal needs no rewrite.
  */
-export function attestationOf(
-  b: TemplateBuild,
-  trusted: ReadonlySet<string>,
-): 'deployment' | 'self' {
+function attestationOf(b: TemplateBuild, trusted: ReadonlySet<string>): 'deployment' | 'self' {
   const g = b.request?.gateRecordSha256;
   const onSelfProfile = b.selfAttestProfile === true || b.selfAttested === true;
   return onSelfProfile && g !== undefined && !trusted.has(g) ? 'self' : 'deployment';
@@ -590,7 +587,7 @@ export function attestationOf(
  * builds is self-attested now, whatever is stored, so a record whose trust an admin removed narrows
  * its templates on the next read. Otherwise the stored visibility.
  */
-export function effectiveVisibility(
+function effectiveVisibility(
   d: TemplateDoc,
   trusted: ReadonlySet<string>,
 ): 'private' | 'deployment' {
@@ -624,15 +621,20 @@ async function visibleTemplate(deps: CpDeps, p: TokenClaims, id: string): Promis
 /**
  * What readiness is derived from (§3.3): attached workers, and, where this control plane holds
  * sandbox records (the sandbox profile), the live sandboxes per worker and the latest creation
- * on each. The harness profile's sessions name a template, not a worker, so there `inUse` and
- * `lastUsed` are null (not zero): unknown, until use records exist (spec §7.1 `use`).
+ * on each build. The harness profile's sessions name a template, not a worker, so there `inUse`
+ * and `lastUsed` are null (not zero): unknown, until use records exist (spec §7.1 `use`).
  */
 interface ReadinessFacts {
   /** worker sandbox id -> its advertised capacity; present = attached to the relay. */
   attached: Map<string, number> | null;
   inUse: Map<string, number> | null;
-  /** worker -> epoch seconds of the newest sandbox created on it, retained records included. */
-  lastUsed: Map<string, number> | null;
+  /**
+   * The newest sandbox creation, retained records included, in epoch seconds: per build id
+   * (`byBuild`), and per worker (`byWorker`) for the records from before tracing, which carry no
+   * buildId. A build's worker id is shared by every build of its template from one image, so a
+   * per-worker time would report another build's use.
+   */
+  lastUsed: { byBuild: Map<string, number>; byWorker: Map<string, number> } | null;
   /** Where wanted builds are placed (§6.2), when any host agent has reported; else null. */
   placement: Placement | null;
   /**
@@ -707,13 +709,26 @@ async function readinessFacts(deps: CpDeps, docs?: TemplateDoc[]): Promise<Readi
     };
   }
   const inUse = new Map<string, number>();
-  const lastUsed = new Map<string, number>();
+  const lastUsed = { byBuild: new Map<string, number>(), byWorker: new Map<string, number>() };
   const now = seconds(deps);
   for (const r of await deps.sandboxes.listAll(now)) {
     if (isLive(r, now)) inUse.set(r.worker, (inUse.get(r.worker) ?? 0) + 1);
-    lastUsed.set(r.worker, Math.max(lastUsed.get(r.worker) ?? 0, r.createdAt));
+    const [m, k] = r.buildId ? [lastUsed.byBuild, r.buildId] : [lastUsed.byWorker, r.worker];
+    m.set(k, Math.max(m.get(k) ?? 0, r.createdAt));
   }
   return { attached, inUse, lastUsed, placement, queue, hosts, holders, shared, nowS, trusted };
+}
+
+/**
+ * A build's newest sandbox creation: its own records (by build id), or, for records from before
+ * tracing that carry no build id, its worker's, whichever is later; null when neither has one.
+ */
+function lastUsedAt(
+  b: TemplateBuild,
+  lu: { byBuild: Map<string, number>; byWorker: Map<string, number> },
+): number | null {
+  const t = Math.max(lu.byBuild.get(b.buildId) ?? 0, lu.byWorker.get(b.worker) ?? 0);
+  return t > 0 ? t : null;
 }
 
 /**
@@ -765,7 +780,7 @@ function buildBody(d: TemplateDoc, b: TemplateBuild, f: ReadinessFacts, full: bo
     // A retired build whose snapshot or worker a build neither retired nor rejected shares: its
     // worker is kept for that build. False for every other build.
     shared,
-    lastUsedAt: f.lastUsed === null ? null : (f.lastUsed.get(b.worker) ?? null),
+    lastUsedAt: f.lastUsed === null ? null : lastUsedAt(b, f.lastUsed),
     // The hosts whose last inventory holds this build's snapshot (§6.1), a host silent past
     // HOST_STALE_S too: ids only, no paths, so a client sees which hosts still hold a retired
     // build. Null without host agents.
@@ -862,9 +877,13 @@ export async function resolveForUse(
     (b?.status === 'retired' ||
       (!b && d.builds.length > 0 && d.builds.every((x) => x.status === 'retired')))
   ) {
+    const tag = 'build' in r ? undefined : (r.tag ?? 'default');
     throw new CpError(
       'template_retired',
-      `template '${d.id}'${b ? ` build ${b.buildId}` : ''} is retired`,
+      b && tag !== undefined
+        ? `template '${d.id}': its '${tag}' tag names retired build ${b.buildId}; tag another build ` +
+            `(POST /v1/templates/${d.id}/tags) or pin one (${d.id}@<build id>)`
+        : `template '${d.id}'${b ? ` build ${b.buildId}` : ''} is retired`,
     );
   }
   if (!d || !b || b.status !== 'registered' || !b.worker) {
@@ -1876,6 +1895,12 @@ async function adminTemplate(ctx: RequestCtx, deps: CpDeps) {
  * `retire` record naming the caller, the status before (`from`) and the build's `build` record
  * (`buildRecord`). Idempotent: an already retired build is answered with `record: null`.
  *
+ * A retire (or a reject) that ends the build the template's `default` tag names moves `default` to
+ * the newest registered build it leaves (#909), so a bare id keeps resolving; the move is a `tag`
+ * record, as an owner's tag is, and the answer names it (`default`). With no such build, `default`
+ * stays, and a bare id answers `410 template_retired` naming the tag; the next build to register
+ * takes `default` (hostBuildReport).
+ *
  * Reject after the fact (§5.2, `mode: 'reject'`) takes the same path: an admin only, with a
  * reason, on a registered build. The build becomes `rejected` (`reason.rule: admin`) rather than
  * `retired`, and the record is a `reject` one; the rest (leases, the host's stop, the refusal under
@@ -1886,7 +1911,12 @@ async function retireBuilds(
   deps: CpDeps,
   which: (b: TemplateBuild, builds: readonly TemplateBuild[]) => boolean,
   mode: 'retire' | 'reject' = 'retire',
-): Promise<{ templateId: string; subject: string; builds: RetiredBuild[] }> {
+): Promise<{
+  templateId: string;
+  subject: string;
+  builds: RetiredBuild[];
+  default: { buildId: string; before: string; record: string } | null;
+}> {
   // Retire: the owner, or an admin; the owner's check is made on the template as read and again
   // under its lock (ownerCheck), so a retire by an owner it was transferred away from meanwhile is
   // refused. Reject: an admin only, whoever owns the template (adminTemplate).
@@ -1903,6 +1933,7 @@ async function retireBuilds(
     mode === 'reject' ? rejectedByAdmin(x) : x.status === 'retired';
   const done: TemplateBuild[] = [];
   const records = new Map<string, string>();
+  let movedDefault: { buildId: string; before: string; record: string } | null = null;
   // Under the activation lock, so an activation never writes a lease onto a build retired or
   // rejected after it resolved the build: it re-reads the build's status under the same lock
   // (takeLeaseLocked).
@@ -1926,6 +1957,7 @@ async function retireBuilds(
         const cur = own(c);
         done.length = 0;
         records.clear();
+        movedDefault = null;
         const targets = cur.builds.filter((x) => which(x, cur.builds));
         if (targets.length === 0)
           throw new CpError('template_not_found', 'no such build of this template');
@@ -1959,8 +1991,38 @@ async function retireBuilds(
           });
           records.set(x.handle ?? x.buildId, rec.digest);
         }
+        // #909: a retire or a reject that ends the build `default` names moves `default` to the
+        // newest registered build left (builds are newest first; createdAt orders them, the list
+        // order breaks a tie), so a bare id keeps resolving. Newest registered, not newest active:
+        // active is per request (leases), so `default` would flap with it.
+        let tags = cur.tags;
+        let tagsMeta = cur.tagsMeta;
+        const def = Object.hasOwn(cur.tags, 'default') ? cur.tags.default : undefined;
+        if (def !== undefined && done.some((x) => x.buildId === def)) {
+          const next = cur.builds
+            .filter((x) => x.status === 'registered' && !done.includes(x) && x.buildId !== def)
+            .reduce<TemplateBuild | undefined>(
+              (a, x) => (a && a.createdAt >= x.createdAt ? a : x),
+              undefined,
+            );
+          if (next) {
+            const [rec] = await appendRecords(prov, [
+              {
+                stream: `template/${d0.id}`,
+                kind: 'tag',
+                subject: p.sub,
+                body: { tag: 'default', buildId: next.buildId, before: def },
+              },
+            ]);
+            movedDefault = { buildId: next.buildId, before: def, record: rec! };
+            tags = { ...cur.tags, default: next.buildId };
+            tagsMeta = { ...(cur.tagsMeta ?? {}), default: { at: seconds(deps), by: p.sub } };
+          }
+        }
         return {
           ...cur,
+          tags,
+          ...(tagsMeta !== undefined ? { tagsMeta } : {}),
           builds: cur.builds.map((x) =>
             done.includes(x)
               ? mode === 'reject'
@@ -1979,6 +2041,11 @@ async function retireBuilds(
   );
   const decision = mode === 'reject' ? 'template_build_rejected' : 'template_retired';
   if (done.length > 0) await auditBestEffort(deps, decision, d0.id, { subject: p.sub, decision });
+  if (movedDefault)
+    await auditBestEffort(deps, 'template_tags_moved', d0.id, {
+      subject: p.sub,
+      decision: 'template_tags_moved',
+    });
   // Each build, its id, its readiness and the record written now (null for one already retired),
   // so a client can tie the answer to the template's chain.
   const after = (await cat.get(d0.id))!;
@@ -1998,6 +2065,7 @@ async function retireBuilds(
         readiness: 'retired' as const,
         record: records.get(x.handle ?? x.buildId) ?? null,
       })),
+    default: movedDefault,
   };
 }
 
@@ -2049,7 +2117,13 @@ async function retireTemplateBuild(ctx: RequestCtx, deps: CpDeps) {
   const r = await retireBuilds(ctx, deps, (x, all) => x === buildByRef(all, ref));
   return {
     status: 200,
-    body: { templateId: r.templateId, subject: r.subject, ...r.builds[0], status: 'retired' },
+    body: {
+      templateId: r.templateId,
+      subject: r.subject,
+      ...r.builds[0],
+      status: 'retired',
+      default: r.default,
+    },
   };
 }
 
@@ -2071,12 +2145,13 @@ async function rejectTemplateBuild(ctx: RequestCtx, deps: CpDeps) {
       buildId: b?.buildId ?? null,
       record: b?.record ?? null,
       status: 'rejected',
+      default: r.default,
     },
   };
 }
 
 /** How long a client waits before retrying a create on a template still activating (§6.4). */
-export const FIRST_USE_RETRY_S = 30;
+const FIRST_USE_RETRY_S = 30;
 
 /**
  * Activation on first use (§6.4): on a deployment with host agents, a sandbox is created only on

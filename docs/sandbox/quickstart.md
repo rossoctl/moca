@@ -31,7 +31,8 @@ You need:
 - **Node.js 22 or later** and `git`.
 - A **sandbox service deployment** and its URL, `https://<api host>`. Moca is self-hosted:
   [deploy one](../operate/sandbox-service/install.md), or ask whoever runs yours.
-- A GitHub account **enrolled** in that deployment (its allowed subjects).
+- A GitHub account that whoever runs the deployment has **added to its access list**. If yours isn't
+  on it yet, step 2 shows the ID to send them.
 - Claude Code or OpenCode. (Codex and IBM Bob work too. See
   [the user guide](how-to/connect-agents.md#codex-cli).)
 
@@ -58,9 +59,10 @@ Open https://github.com/login/device and enter the code ABCD-1234 (valid for 15 
 logged in to the sandbox service as <your GitHub login>
 ```
 
-If you see `this account (github:<id>) is not enrolled in the sandbox service`, send that
-`github:<id>` to whoever runs the deployment, so they can add it to the allowed
-subjects.
+If you see `this account (github:<id>) is not enrolled in the sandbox service`, your
+account isn't on the deployment's access list yet. Send that `github:<id>` (your numeric GitHub
+user ID) to whoever runs the deployment, so they can add you. The operator calls this list the
+_allowed subjects_.
 
 ## 3. Bring your repository up
 

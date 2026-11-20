@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SubjectCounter, turnsPerSubjectCap } from '../src/subject-quota.js';
+import { runningPerOwnerCap, SubjectCounter, turnsPerSubjectCap } from '../src/subject-quota.js';
 
 describe('turnsPerSubjectCap', () => {
   it('an operator-set SH_TURNS_PER_SUBJECT wins over the derived default', () => {
@@ -23,6 +23,29 @@ describe('turnsPerSubjectCap', () => {
     expect(turnsPerSubjectCap({ SH_TURNS_PER_SUBJECT: 'abc', SH_TURNS_PER_WORKER: '8' })).toBe(4);
     expect(turnsPerSubjectCap({ SH_TURNS_PER_SUBJECT: '0', SH_TURNS_PER_WORKER: '8' })).toBe(4);
     expect(turnsPerSubjectCap({ SH_TURNS_PER_SUBJECT: '0' })).toBeUndefined();
+  });
+});
+
+describe('runningPerOwnerCap (#391)', () => {
+  it('is OFF unless the operator sets it, deriving nothing from the worker size', () => {
+    // Deliberately unlike turnsPerSubjectCap: the value is deployment-wide and every worker must
+    // agree on it, so S cannot imply it -- and a cap appearing on upgrade would start pacing a
+    // single-owner deployment's own fan-out.
+    expect(runningPerOwnerCap({})).toBeUndefined();
+    expect(
+      runningPerOwnerCap({ SH_TURNS_PER_WORKER: '8', SH_TURNS_PER_SUBJECT: '4' }),
+    ).toBeUndefined();
+  });
+
+  it('takes a positive integer, and reads anything else as unset', () => {
+    expect(runningPerOwnerCap({ MOCA_ASYNC_RUNNING_PER_OWNER: '4' })).toBe(4);
+    expect(runningPerOwnerCap({ MOCA_ASYNC_RUNNING_PER_OWNER: ' 1 ' })).toBe(1);
+    // `0` honoured would defer every async turn in the deployment forever, with nothing to report it.
+    expect(runningPerOwnerCap({ MOCA_ASYNC_RUNNING_PER_OWNER: '0' })).toBeUndefined();
+    expect(runningPerOwnerCap({ MOCA_ASYNC_RUNNING_PER_OWNER: '-2' })).toBeUndefined();
+    expect(runningPerOwnerCap({ MOCA_ASYNC_RUNNING_PER_OWNER: '2.5' })).toBeUndefined();
+    expect(runningPerOwnerCap({ MOCA_ASYNC_RUNNING_PER_OWNER: 'lots' })).toBeUndefined();
+    expect(runningPerOwnerCap({ MOCA_ASYNC_RUNNING_PER_OWNER: '' })).toBeUndefined();
   });
 });
 

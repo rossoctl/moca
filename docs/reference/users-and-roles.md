@@ -73,7 +73,7 @@ From most to least trusted:
 | ----------------- | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Operator          | Access to the deployment's settings             | Edit the settings and re-deploy (`setup.sh`, a restart): the bootstrap lists, every setting below                                                                                                                                                               |
 | Settings admin    | `SH_ADMIN_SUBJECTS`                             | Everything an admin may, plus enroll, unenroll, grant and revoke through `/v1/subjects`, and widen the template policy                                                                                                                                          |
-| Installer token   | `SH_INSTALLER_TOKEN` (sandbox profile)          | The `/v1/subjects*` routes only, as a settings admin: list, enroll, unenroll, grant, revoke. Nothing else                                                                                                                                                       |
+| Installer token   | `SH_INSTALLER_TOKEN` (sandbox, combined)        | The `/v1/subjects*` routes only, as a settings admin: list, enroll, unenroll, grant, revoke. Nothing else                                                                                                                                                       |
 | API-granted admin | A grant on `/v1/subjects/{subject}/roles/admin` | Every admin route except changing enrollment or roles (`403 forbidden`) and widening the template policy (`403`): read the subject list, templates, quotas, owner transfers, narrowing the policy, another user's sessions (`?owner=`) and sandboxes (`?all=1`) |
 | Enrolled subject  | Any of the `enrolled(s)` terms                  | On `sandbox` and `combined`: sandboxes and template writes                                                                                                                                                                                                      |
 | Logged-in subject | A login                                         | On `harness` and `combined`: sessions, credentials, bundles, and reads of templates, policy and quota                                                                                                                                                           |
@@ -83,15 +83,15 @@ No admin, of either kind, can mint a token for another user's sandbox (run code 
 its mode: those routes are owner-only (`sandbox-handlers.ts` `assertSandboxOwner`).
 
 **The installer token.** `SH_INSTALLER_TOKEN` is a static bearer for automation, an enrollment
-sync for example, that needs no login and no refresh tokens. It is read on the `sandbox` profile
-only, must be at least 32 characters (or the control plane refuses to boot), and is compared in
+sync for example, that needs no login and no refresh tokens. It is read on the `sandbox` and
+`combined` profiles, must be at least 32 characters (or the control plane refuses to boot), and is compared in
 constant time. A request bearing it on a `/v1/subjects*` route acts as the synthetic subject
 `installer` with the admin role, which no login can mint; the store counts it among the settings
 admins, so it can change enrollment and roles and appears in `GET /v1/subjects` as an admin from
 the settings (`server.ts`, `main.ts`, `identity.ts` `INSTALLER_SUBJECT`). On every other route it
 is not a token. On the sandbox service, `deploy/sbx/setup.sh` generates it once into the
-`moca-mu1` Secret; rotate it by deleting the key and re-running `setup.sh`. Treat it as you treat
-a settings admin's login.
+`moca-mu1` Secret; rotate it by deleting the key and re-running `setup.sh`, which rolls the control
+plane so the old token stops working. Treat it as you treat a settings admin's login.
 
 ### A damaged `members.json`
 

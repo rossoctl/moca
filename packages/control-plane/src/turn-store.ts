@@ -4,6 +4,7 @@ import { sanitizeLimits } from './models.js';
 import {
   idempotencyKeyKey,
   isTerminalState,
+  ownerRunningTurnsKey,
   ownerTurnsKey,
   sessionTurnsKey,
   turnKey,
@@ -47,6 +48,29 @@ local fields = {}
 for i = n + 2, #ARGV do fields[#fields + 1] = ARGV[i] end
 redis.call('HSET', KEYS[1], unpack(fields))
 return 1
+`;
+
+/**
+ * Take an owner's CLUSTER-WIDE running slot and answer their count, in one step (#391).
+ *
+ * ARGV is `[score, turnId, cap]`. The add and the count have to be atomic because separately they
+ * are exact in one direction only. Counting first is wrong: N workers that each read an under-limit
+ * ZCARD before any of them writes all pass (`reserveOpenSlot` measured that against real Redis).
+ * Adding first and counting second never admits more than `cap` -- but N workers that each add
+ * before any of them counts all see the full total and all hand their entry back, with none of them
+ * running anything, which is exactly the contended case the cap exists for and costs each entry a
+ * reclaim window. In one script the loser's add is the only one undone.
+ *
+ * A returned count over `cap` therefore means "not admitted, and holding nothing": the member is
+ * already gone and the caller has no slot to give back.
+ */
+export const RESERVE_RUNNING_LUA = `
+redis.call('ZADD', KEYS[1], ARGV[1], ARGV[2])
+local n = redis.call('ZCARD', KEYS[1])
+if n > tonumber(ARGV[3]) then
+  redis.call('ZREM', KEYS[1], ARGV[2])
+end
+return n
 `;
 
 /** The two states a turn can be written from: everything else is already final (§5.4). */
@@ -100,6 +124,10 @@ export class TurnStore {
 
   private ownerKey(owner: string): string {
     return ownerTurnsKey(this.tag(owner));
+  }
+
+  private runningKey(owner: string): string {
+    return ownerRunningTurnsKey(this.tag(owner));
   }
 
   private sessionKey(sessionId: string): string {
@@ -278,6 +306,39 @@ export class TurnStore {
   }
 
   /**
+   * Take a CLUSTER-WIDE running slot for `turnId` and answer the owner's running count INCLUDING it
+   * (#391, `ownerRunningTurnsKey`). Called by the async worker when it admits a claimed entry, which
+   * is why it lives here rather than behind a control-plane route: records and queue share one Redis
+   * in M1, the same thing `cancelRequested` relies on.
+   *
+   * `cap` is passed in and enforced inside `RESERVE_RUNNING_LUA` rather than compared by the caller,
+   * so that two workers claiming one owner's entries at once cannot both defer: a count over `cap`
+   * comes back with this turn's member already removed, and the caller owes nothing.
+   *
+   * On admission the caller MUST `releaseRunningSlot` on every way out, including the ones that leave
+   * the record `running` for another worker to reclaim: the member describes a delivery in flight,
+   * not a turn.
+   */
+  async reserveRunningSlot(
+    owner: string,
+    turnId: string,
+    now: number,
+    cap: number,
+  ): Promise<number> {
+    const n = await this.guard(() =>
+      this.redis.eval(RESERVE_RUNNING_LUA, {
+        keys: [this.runningKey(owner)],
+        arguments: [String(now), turnId, String(cap)],
+      }),
+    );
+    return Number(n ?? 0);
+  }
+
+  async releaseRunningSlot(owner: string, turnId: string): Promise<void> {
+    await this.guard(() => this.redis.zRem(this.runningKey(owner), turnId));
+  }
+
+  /**
    * Delete every one of `sessionId`'s turns -- record, stored result and quota slot -- for
    * `OwnershipIndex.cascadeDelete` (F2).
    *
@@ -332,6 +393,9 @@ export class TurnStore {
       // nothing about who the turn belonged to, and its hash is not this delete's to remove.
       if (rec ? rec.sessionId !== sessionId : !indexed.has(turnId)) continue;
       await this.guard(() => this.redis.zRem(this.ownerKey(owner), turnId));
+      // And its running slot (#391), for the reason the open-set removal above exists: this walk
+      // deletes the record outright instead of going through `toTerminal`, so nothing else will.
+      await this.guard(() => this.redis.zRem(this.runningKey(owner), turnId));
       // The record AND this turn's result key, which `cascadeDelete`'s `dataKeys` cannot name: the
       // key carries a turn id, so only an enumeration of the session's turns reaches it.
       await this.guard(() => this.redis.del([this.key(turnId), leafResultKey(sessionId, turnId)]));
@@ -486,6 +550,11 @@ export class TurnStore {
     }
     await this.releaseIdempotencyKeyIf(rec.owner, rec.idempotencyKey, rec.turnId);
     await this.guard(() => this.redis.zRem(this.ownerKey(rec.owner), rec.turnId));
+    // The cluster-wide running slot too (#391). The worker that admitted the delivery releases it
+    // itself on every path out, so this is the one case that worker cannot cover: it was SIGKILLed
+    // mid-leaf, and the entry's redelivery dead-lettered rather than ran. Idempotent -- a ZREM of a
+    // member that is not there is the normal case here.
+    await this.guard(() => this.redis.zRem(this.runningKey(rec.owner), rec.turnId));
     await this.guard(() => this.redis.expire(this.key(rec.turnId), this.ttlSeconds()));
     // The session index LAST, and off the same sum: it must never expire while a record it points at
     // is still there, or `deleteSessionTurns` loses its only route to that record and its result.

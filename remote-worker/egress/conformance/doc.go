@@ -26,9 +26,13 @@
 //
 //   - via: the string "moca-egress" on every event;
 //   - vm_id, sid: the VM and session the conn's listener was registered with;
-//   - sub: the subject, present on credential_injected events (the lookup's
-//     subject, for the audit only) and absent or "" on every other; this one
-//     is checked on every event a case reads, not only those it waits for;
+//   - sub: the subject (the lookup's subject, for the audit only), present on
+//     credential_injected events and on upstream_unreachable after injection,
+//     where it means the token may have been sent, not that it was delivered.
+//     It is absent or "" on every other event, credential_revoked and aborted
+//     included (an aborted event carries no credential either); this one is
+//     checked on every event a case reads, not only those it waits for. Count
+//     injections by decision, not by sub;
 //   - host: the destination host as requested, normalised (lower case, no
 //     trailing dot); for conn_cap, which is decided before any request is
 //     read, it is not checked;
@@ -55,8 +59,9 @@
 // An intercepted request that no credential covers emits decision=forward with
 // its path and status. A credential_revoked event carries credential and sid.
 // credential, the name of the credential injected or revoked (never its
-// value), is read on credential_injected and credential_revoked events. Other
-// fields, such as time, are not read.
+// value), is read on credential_injected and credential_revoked events and on
+// upstream_unreachable after injection. Other fields, such as time, are not
+// read.
 //
 // Interception. When MOCA_EGRESS_CREDENTIALS_URL is set, the harness also
 // provides a fake control plane speaking POST /v1/egress/credential (SBX0.2b
@@ -72,6 +77,8 @@
 //   - a lookup error answers 503 credential_unavailable, with no dial;
 //   - an upstream certificate failure answers 502 upstream_unverified, not a
 //     tunnel;
+//   - an upstream that drops an injected request answers 502
+//     upstream_unreachable, its event keeping credential and sub;
 //   - an inner Host or an SNI that differs from the CONNECT host is refused
 //     (421);
 //   - a plain-HTTP request to a host with a credential answers

@@ -165,6 +165,19 @@ state_hash() { cat "$MOCK_STATE"/secret-*.json | jq -S .data | { sha256sum 2>/de
 K="$MOCK_STATE/applied-kustomization.yaml"
 # The generated overlay as the cluster would get it: the real kustomize over the copied tree.
 render() { "$REAL_KUBECTL" kustomize "$GEN" >"$TMP/render.yaml" 2>"$TMP/render.err" || { cat "$TMP/render.err" >&2; fail 'the generated overlay does not render'; }; }
+# refuse_each RESET PREFIX CASE...: for each 'BAD => WANT' case, eval RESET, then run setup with
+# PREFIX and BAD: it must fail with /WANT/ before applying, patching or deleting anything.
+refuse_each() {
+  local reset="$1" prefix="$2" r bad want
+  shift 2
+  for r in "$@"; do
+    bad="${r%% => *}" want="${r#* => }"
+    eval "$reset"
+    ! run_setup eval "$prefix$bad" || fail "accepted: $bad"
+    grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
+    ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
+  done
+}
 # The settings-hash annotation on one Deployment's pod template, from the rendered overlay.
 pod_hash() {
   awk -v n="$1" '/^---$/ { d = 0; hit = 0 } /^kind: Deployment$/ { d = 1 } d && $1 == "name:" && $2 == n { hit = 1 }
@@ -201,6 +214,8 @@ refusals=(
   'export SBX_IDENTITY_PROVIDER=oidc => SBX_OIDC_ISSUER is required with SBX_IDENTITY_PROVIDER=oidc'
   'export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid => SBX_OIDC_CLIENT_ID is required with SBX_IDENTITY_PROVIDER=oidc'
   'export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid SBX_OIDC_CLIENT_ID=abc => SBX_OIDC_REDIRECT_URI is required with SBX_IDENTITY_PROVIDER=oidc'
+  'export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid SBX_OIDC_CLIENT_ID=abc SBX_OIDC_REDIRECT_URI=https://sbx-api.example.invalid/cb SBX_TRUSTED_PROXY_HOPS=one => SBX_TRUSTED_PROXY_HOPS must be a whole number'
+  'export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid SBX_OIDC_CLIENT_ID=abc SBX_OIDC_REDIRECT_URI=https://sbx-api.example.invalid/cb SBX_OIDC_MAX_PENDING_PER_SOURCE=-1 => SBX_OIDC_MAX_PENDING_PER_SOURCE must be a whole number'
   'unset SBX_ALLOWED_SUBJECTS => SBX_ALLOWED_SUBJECTS is required'
   'export SBX_ALLOWED_SUBJECTS=alice => SBX_ALLOWED_SUBJECTS is required'
   'export SBX_ALLOWED_SUBJECTS="github:1, github:2" => SBX_ALLOWED_SUBJECTS is required'
@@ -263,13 +278,7 @@ refusals=(
   'export SBX_API_CA_FILE=$TMP/nonexistent.crt => SBX_API_CA_FILE must name a readable PEM certificate'
   'export SBX_API_CA_FILE=$TMP/templates.json => SBX_API_CA_FILE must name a readable PEM certificate'
 )
-for r in "${refusals[@]}"; do
-  bad="${r%% => *}" want="${r#* => }"
-  : >"$MOCK_LOG"
-  ! run_setup eval "$bad" || fail "accepted: $bad"
-  grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
-  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
-done
+refuse_each ': >"$MOCK_LOG"' '' "${refusals[@]}"
 pass 'refuses missing or malformed inputs before applying anything, each saying why'
 
 # #907: the workspace-size cap in setup.sh and install-host.sh is the golden snapshot's workspace drive,
@@ -389,6 +398,11 @@ fi
 cm sbx-settings SH_SANDBOX_TEMPLATES | jq -e 'length == 2 and .[1].worker == "sbx_py312"' >/dev/null || fail 'templates'
 cm sbx-settings SH_SANDBOX_EXEC_CA | grep -q 'BEGIN CERTIFICATE' || fail 'the self-signed exec CA is not advertised'
 [[ "$(cm moca-settings SH_GITHUB_CLIENT_ID)" == Iv1.example ]] || fail 'client id'
+# A GitHub deployment's settings stay byte-identical (#937 writes the hop count and the OIDC bound
+# only with oidc; the per-source bound is the OIDC login start's), so its settings hash does not move.
+jq -e '.data | (has("SH_TRUSTED_PROXY_HOPS") or has("SH_OIDC_MAX_PENDING_PER_SOURCE")) | not' "$MOCK_STATE/configmap-moca-settings.json" >/dev/null ||
+  fail 'a github deployment must not write SH_TRUSTED_PROXY_HOPS or SH_OIDC_MAX_PENDING_PER_SOURCE'
+! grep -q 'is set but ignored: the identity provider is github' "$TMP/out" || fail 'a github run with neither knob set warns about them'
 [[ "$(cm moca-settings SH_ADMIN_SUBJECTS)" == github:1 ]] || fail 'admin subjects'
 jq -e '.data | has("SH_API_TOKEN_TTL_SECONDS") and has("SH_SESSION_TOKEN_TTL_SECONDS")' \
   "$MOCK_STATE/configmap-moca-settings.json" >/dev/null || fail 'moca-settings lacks the token TTL keys the base reads'
@@ -465,6 +479,23 @@ render
 [[ "$(pod_hash moca-control-plane)" == "$cp_hash" && "$(pod_hash sandbox-relay)" == "$relay_hash" ]] ||
   fail 'a settings hash moved on a re-run with the same inputs'
 pass 'a re-run keeps every token, password, key and certificate, and the settings hash'
+
+# 4'. Rotating the installer token (delete the key, re-run) rolls the control plane (#939): it reads
+# the token once at start, so the settings hash must move with it, and only the control plane's.
+jq 'del(.data.SH_INSTALLER_TOKEN)' "$MOCK_STATE/secret-moca-mu1.json" >"$TMP/mu1" && mv "$TMP/mu1" "$MOCK_STATE/secret-moca-mu1.json"
+run_setup true || fail 'the rotation run failed'
+itok2="$(secret_val moca-mu1 SH_INSTALLER_TOKEN)"
+[[ "$itok2" =~ ^[0-9a-f]{64}$ && "$itok2" != "$itok" ]] || fail 'deleting SH_INSTALLER_TOKEN did not rotate it'
+! grep -qF "$itok2" "$TMP/out" "$MOCK_LOG" || fail 'the new installer token reached the log or argv'
+render
+rot_hash="$(pod_hash moca-control-plane)"
+[[ "$rot_hash" != "$cp_hash" ]] || fail 'a rotated installer token did not move the settings hash, so the control plane keeps the old one'
+[[ "$(pod_hash sandbox-relay)" == "$relay_hash" ]] || fail 'a rotated installer token rolled the relay, which never reads it'
+run_setup true || fail 're-run after the rotation failed'
+render
+[[ "$(pod_hash moca-control-plane)" == "$rot_hash" ]] || fail 'the settings hash moved on a re-run with an unchanged installer token'
+cp_hash="$rot_hash" itok="$itok2" before="$(state_hash)"
+pass "a rotated installer token moves the control plane's settings hash (and not the relay's); an unchanged one keeps it"
 
 # 4a. A list separated by newlines or tabs is the same list: nothing is revoked, nothing rotates.
 : >"$MOCK_LOG"
@@ -1034,6 +1065,12 @@ jq -e '.data | has("SH_GITHUB_CLIENT_ID") and (.SH_GITHUB_CLIENT_ID == "")' "$MO
   fail 'an oidc deployment must write an empty SH_GITHUB_CLIENT_ID (the base reads the key unconditionally)'
 [[ "$(cm sbx-settings SH_ALLOWED_SUBJECTS)" == 'oidc:ghe@us.ibm.com,github:1' ]] || fail 'oidc allowed subjects not written'
 [[ "$(cm moca-settings SH_ADMIN_SUBJECTS)" == oidc:ghe@us.ibm.com ]] || fail 'oidc admin subject not written'
+# The client address behind the Route (#937): the per-source login bound keys on the X-Forwarded-For
+# entry the Route appends, so the hop count defaults to 1 there, and an empty bound is the control
+# plane's default (20).
+[[ "$(cm moca-settings SH_TRUSTED_PROXY_HOPS)" == 1 ]] || fail 'an oidc deployment must write SH_TRUSTED_PROXY_HOPS=1 (the Route appends X-Forwarded-For)'
+jq -e '.data | has("SH_OIDC_MAX_PENDING_PER_SOURCE") and (.SH_OIDC_MAX_PENDING_PER_SOURCE == "")' "$MOCK_STATE/configmap-moca-settings.json" >/dev/null ||
+  fail 'an oidc deployment must write SH_OIDC_MAX_PENDING_PER_SOURCE, empty by default (the control plane default)'
 render
 oidc_cp_hash="$(pod_hash moca-control-plane)"
 [[ "$oidc_cp_hash" =~ ^[0-9a-f]{16}$ ]] || fail 'the oidc run stamps no settings hash'
@@ -1048,6 +1085,38 @@ for ref in $(jq -r '.[] | select(.kind == "Deployment" and .metadata.name == "mo
     fail "the control plane reads $ref non-optionally, but setup.sh wrote no such key"
 done
 pass 'an oidc deployment writes the identity settings, oidc: subjects and no GitHub client id'
+
+# 13b'. The two #937 knobs set: written as given; and both reach the control plane's env (the base
+# reads them as optional keys of moca-settings).
+reset_state
+( base_env; unset SBX_GITHUB_CLIENT_ID
+  export SBX_IDENTITY_PROVIDER=oidc SBX_OIDC_ISSUER=https://idp.example.invalid/oidc/endpoint/default \
+    SBX_OIDC_CLIENT_ID=0123456789abcdef SBX_OIDC_REDIRECT_URI=https://sbx-api.apps.example.invalid/v1/auth/oidc/callback \
+    SBX_ALLOWED_SUBJECTS='oidc:user1' SBX_TRUSTED_PROXY_HOPS=2 SBX_OIDC_MAX_PENDING_PER_SOURCE=0
+  bash "$SETUP" ) >"$TMP/out" 2>&1 || { cat "$TMP/out" >&2; fail 'the oidc run with the hop count and the bound set failed'; }
+[[ "$(cm moca-settings SH_TRUSTED_PROXY_HOPS)" == 2 ]] || fail 'SBX_TRUSTED_PROXY_HOPS=2 not written'
+[[ "$(cm moca-settings SH_OIDC_MAX_PENDING_PER_SOURCE)" == 0 ]] || fail 'SBX_OIDC_MAX_PENDING_PER_SOURCE=0 not written'
+render
+KUBECONFIG=/dev/null "$REAL_KUBECTL" label --local -f "$TMP/render.yaml" sbx-render- -o json 2>/dev/null | jq -s . >"$TMP/render.json"
+for k in SH_TRUSTED_PROXY_HOPS SH_OIDC_MAX_PENDING_PER_SOURCE; do
+  jq -e --arg k "$k" '.[] | select(.kind == "Deployment" and .metadata.name == "moca-control-plane")
+      | .spec.template.spec.containers[].env[]? | select(.name == $k) | .valueFrom.configMapKeyRef.name == "moca-settings"' \
+    "$TMP/render.json" >/dev/null || fail "the rendered control plane does not read $k from moca-settings"
+done
+pass 'an oidc deployment writes SH_TRUSTED_PROXY_HOPS and SH_OIDC_MAX_PENDING_PER_SOURCE, and the control plane reads them'
+
+# 13b''. On a github deployment the two oidc-only knobs are ignored, with a warning naming each, and
+# written nowhere (the default github run above warns about neither).
+reset_state
+run_setup export SBX_TRUSTED_PROXY_HOPS=2 SBX_OIDC_MAX_PENDING_PER_SOURCE=5 ||
+  { cat "$TMP/out" >&2; fail 'the github run with the oidc-only knobs set failed'; }
+for k in SBX_TRUSTED_PROXY_HOPS SBX_OIDC_MAX_PENDING_PER_SOURCE; do
+  grep -q "WARNING: $k is set but ignored: the identity provider is github" "$TMP/out" ||
+    fail "a github run with $k set does not warn that it is ignored"
+done
+jq -e '.data | (has("SH_TRUSTED_PROXY_HOPS") or has("SH_OIDC_MAX_PENDING_PER_SOURCE")) | not' "$MOCK_STATE/configmap-moca-settings.json" >/dev/null ||
+  fail 'a github run must not write the oidc-only keys, set or not'
+pass 'a github deployment warns about the oidc-only knobs and writes neither'
 
 # 13c. SBX_STORAGE_CLASS: one class on every claim this run renders. The base shape (no store, no
 # egress) patches only the redis StatefulSet's volumeClaimTemplates -- a patch naming an absent PVC
@@ -1242,6 +1311,7 @@ HASH="$({
   raw_val sbx-token-keys PUBLIC_KEYS
   raw_val moca-relay-tls tls.crt
   raw_val sbx-exec-tls tls.crt
+  jq -cS '.data // {}' "$MOCK_STATE/secret-moca-mu1.json"
 } | openssl dgst -sha256 -hex | awk '{print substr($NF, 1, 16)}')"
 RELAY_HASH="$({
   printf '%s\n' 'SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane' 'SH_SANDBOX_MAX_INFLIGHT=2'
@@ -1407,13 +1477,7 @@ egress_refusals=(
   'export SBX_EGRESS_CREDENTIAL_TTL_SECONDS=301 => SBX_EGRESS_CREDENTIAL_TTL_SECONDS must be'
   'export SBX_EGRESS_CREDENTIAL_TTL_SECONDS=1m => SBX_EGRESS_CREDENTIAL_TTL_SECONDS must be'
 )
-for r in "${egress_refusals[@]}"; do
-  bad="${r%% => *}" want="${r#* => }"
-  reset_state
-  ! run_setup eval "export SBX_EGRESS_CREDENTIALS=1; $bad" || fail "accepted: $bad"
-  grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
-  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
-done
+refuse_each reset_state 'export SBX_EGRESS_CREDENTIALS=1; ' "${egress_refusals[@]}"
 # A worker in SBX_WORKERS with no template is not an egress worker (the control plane refuses it at boot):
 # the default kvm host leaves it out, and naming it in SBX_EGRESS_HOSTS is refused before anything is applied.
 reset_state
@@ -1489,17 +1553,11 @@ run_setup true || fail 'store off again failed'
 ! grep -qE 'delete.*(pvc|persistentvolumeclaim).*moca-sbx-templates' "$MOCK_LOG" || fail 'turning the store off deleted its PVC'
 pass 'turning the store off drops the component and leaves its PVC'
 
-for r in 'export SBX_TEMPLATE_STORE=2 => SBX_TEMPLATE_STORE must be unset, 0 or 1' \
+refuse_each reset_state '' 'export SBX_TEMPLATE_STORE=2 => SBX_TEMPLATE_STORE must be unset, 0 or 1' \
   'export SBX_TEMPLATE_STORE=yes => SBX_TEMPLATE_STORE must be unset, 0 or 1' \
   'export SBX_TEMPLATE_HOSTS=a => SBX_TEMPLATE_HOSTS needs SBX_TEMPLATE_STORE=1' \
   "export SBX_TEMPLATE_STORE=1 SBX_TEMPLATE_HOSTS='A' => template host id .A. must match" \
-  "export SBX_TEMPLATE_STORE=1 SBX_TEMPLATE_HOSTS='a a' => listed twice"; do
-  bad="${r%% => *}" want="${r#* => }"
-  reset_state
-  ! run_setup eval "$bad" || fail "accepted: $bad"
-  grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
-  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
-done
+  "export SBX_TEMPLATE_STORE=1 SBX_TEMPLATE_HOSTS='a a' => listed twice"
 pass 'refuses a bad store switch, hosts without the store, a bad or repeated host id, before anything is applied'
 
 # 16. SBX_PROFILE=combined (combined control plane design §3.6): the ocp-combined overlay, the
@@ -1569,13 +1627,7 @@ refusals=(
   "export SBX_PROFILE=combined SBX_MOCA_HOST=moca.apps.example.invalid SBX_SANDBOX_IMAGE=\$RW => SBX_IMAGE must be pinned by digest"
   "export SBX_PROFILE=combined SBX_MOCA_HOST=moca.apps.example.invalid SBX_SANDBOX_IMAGE=\$RW SBX_IMAGE=\$MI SBX_SANDBOX_REPLICAS=10 => SBX_SANDBOX_REPLICAS must be 0-9"
 )
-for r in "${refusals[@]}"; do
-  bad="${r%% => *}" want="${r#* => }"
-  reset_state
-  ! run_setup eval "$bad" || fail "accepted: $bad"
-  grep -Eq -- "$want" "$TMP/out" || fail "refused '$bad', but not with /$want/"
-  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing: $bad"
-done
+refuse_each reset_state '' "${refusals[@]}"
 pass 'refuses a bad profile, a missing or clashing SBX_MOCA_HOST, egress, no store and a bad replica count with combined'
 
 # 17. SBX_PROFILE=combined refuses an SBX0 namespace (its moca-mu1, or its sbx-api Route) before

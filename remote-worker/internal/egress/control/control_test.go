@@ -738,17 +738,6 @@ func (r *recorder) held() []string {
 	return out
 }
 
-// slowRecorder delays Register for the listed VMs.
-type slowRecorder struct {
-	*recorder
-	slow map[string]time.Duration
-}
-
-func (r *slowRecorder) Register(vmID, sid string, grant []byte, ln net.Listener) error {
-	time.Sleep(r.slow[vmID])
-	return r.recorder.Register(vmID, sid, grant, ln)
-}
-
 // Close stops a heal loop that is retrying against a server that never comes back.
 func TestCloseStopsTheHealLoop(t *testing.T) {
 	dir := shortDir(t)
