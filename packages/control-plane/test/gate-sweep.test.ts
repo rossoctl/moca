@@ -193,6 +193,26 @@ describe('sweepGates (#393, design §3)', () => {
     expect(deps.turnQueue.ids).toEqual([(byHand.body as { turnId: string }).turnId]);
   });
 
+  it('hands the gate back when the resume fails to submit, and a later pass retries it', async () => {
+    // The ZREM is the lock, so a claim whose submission failed is the one way a gate stops being
+    // due forever. The hand-back is what keeps the deadline a promise rather than a best effort.
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await pausedTurn();
+      deps.turnQueue.fails.add('t-id-1');
+      expect(await sweepGates(deps)).toBe(0);
+      expect(await deps.turns.dueGates(deps.nowOf())).toEqual(['t-1']);
+      // The failed resume must not look like an answer either, or nothing could retry it.
+      expect((await deps.turns.findPausedBySession('s-1'))?.resumed).toBe(false);
+      deps.turnQueue.fails.clear();
+      expect(await sweepGates(deps)).toBe(1);
+      expect(deps.turnQueue.ids).toEqual(['t-id-2']);
+      expect(logged).toHaveBeenCalledTimes(1);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
   it('one error does not stop the pass', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {

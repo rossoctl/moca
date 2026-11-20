@@ -194,6 +194,19 @@ export async function submitResume(
 }
 
 /**
+ * Is `sent` the decision the existing resume already carries? The gate id is equal by construction
+ * (it is in the idempotency key), so only the action and the feedback are left to compare.
+ *
+ * What this guards: `docs/api/CHANGELOG.md` promises the replay for "the same decision". Without the
+ * comparison, a human's `approve` arriving after the deadline sweep's `abort` would be answered 202
+ * with the abort turn's id and silently dropped -- a conflict reported as success.
+ */
+function sameDecision(prior: TurnRecord, sent: GateDecisionSubmission): boolean {
+  const was = prior.envelope.decision as GateDecisionSubmission | undefined;
+  return was?.action === sent.action && (was?.feedback ?? '') === (sent.feedback ?? '');
+}
+
+/**
  * SSE pacing (#392). Not settings: a client that wants different pacing reconnects with its
  * cursor, and every one of these is invisible on the wire except as timing.
  */
@@ -401,7 +414,7 @@ export const TURN_HANDLERS: Record<string, Handler> = {
         `${rec.sessionId}:gate:${decision.gateId}`,
       );
       const prior = held ? await turns.get(held) : null;
-      if (prior?.resumeOf === found.paused.turnId) {
+      if (prior?.resumeOf === found.paused.turnId && sameDecision(prior, decision)) {
         return { status: 202, body: { sessionId: rec.sessionId, turnId: prior.turnId } };
       }
       await refusal(deps, rec, 'gate_not_pending');

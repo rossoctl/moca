@@ -156,6 +156,26 @@ describe('decideGate (#393, design §2)', () => {
     expect(pausedId).toBeTruthy();
   });
 
+  it('409s on a DIFFERENT decision for a gate already resumed, rather than replaying', async () => {
+    // The replay is promised for "the same decision" only. A human's `approve` landing after the
+    // deadline sweep's `abort` must not be answered 202 with the abort turn's id -- that reports a
+    // conflict as success and drops the approval silently.
+    const d = turnDeps();
+    const sid = await session(d);
+    await paused(d, sid);
+    const first = await decide(d, sid, { gateId: 0, action: 'abort' });
+    expect(await codeOf(() => decide(d, sid, { gateId: 0, action: 'approve' }))).toBe(
+      'gate_not_pending',
+    );
+    // Same action, different feedback is also a different decision: the first one already ran.
+    expect(
+      await codeOf(() => decide(d, sid, { gateId: 0, action: 'abort', feedback: 'why' })),
+    ).toBe('gate_not_pending');
+    // And the decision that DID resume it still replays, with its own turn id.
+    expect((await decide(d, sid, { gateId: 0, action: 'abort' })).body).toEqual(first.body);
+    expect(d.turnQueue.ids).toHaveLength(1);
+  });
+
   it('409s when the session has no paused turn', async () => {
     const d = turnDeps();
     const sid = await session(d);

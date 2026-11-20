@@ -343,7 +343,13 @@ export class TurnStore {
     for (const id of ids) {
       const rec = await this.get(id);
       if (!rec) continue;
-      if (rec.resumeOf) resumed.add(rec.resumeOf);
+      // A `failed` resume does NOT answer the gate it links to. `submitResume` compensates a failed
+      // enqueue by finalizing the record it had already created, and that record still carries
+      // `resumeOf` -- counting it would leave the gate unanswerable by hand (409 `gate_not_pending`)
+      // and, on the sweep path, unanswerable by anyone. Safe for a resume that did run and then
+      // failed: re-sending the decision creates a retry, and the HARNESS is the authority on the
+      // gate's durable state, so it can never flip a decision that was already recorded there.
+      if (rec.resumeOf && rec.state !== 'failed') resumed.add(rec.resumeOf);
       if (rec.state === 'paused') return { paused: rec, resumed: resumed.has(rec.turnId) };
     }
     return null;
@@ -376,6 +382,18 @@ export class TurnStore {
     // An UNTAGGED member, as the session index holds: the key carries the tag, and `dueGates` hands
     // these ids straight to `get`, which tags itself.
     return Number(await this.guard(() => this.redis.zRem(this.gateKey(), turnId))) === 1;
+  }
+
+  /**
+   * Put a claimed gate back in the index, scored by the deadline it already had (#393 §3).
+   *
+   * The one caller is the sweep, when the resume it claimed the gate for failed to submit: the ZREM
+   * is the lock, so without this hand-back no later pass would ever look at that gate again and the
+   * deadline it promised would never fire. Re-adding at the ORIGINAL score keeps `dueGates`'
+   * oldest-first fairness, and `submitResume`'s gate-keyed idempotency key makes the retry safe.
+   */
+  async releaseGate(turnId: string, dueAt: number): Promise<void> {
+    await this.guard(() => this.redis.zAdd(this.gateKey(), { score: dueAt, value: turnId }));
   }
 
   /**

@@ -59,6 +59,30 @@ describe('a gate resume on the record and the store (#393)', () => {
     expect(found?.resumed).toBe(true);
   });
 
+  it('does not count a FAILED resume as having answered the gate', async () => {
+    // `submitResume` compensates a failed enqueue by finalizing the record it already created, and
+    // that record keeps its `resumeOf`. Counting it would report the gate answered while nothing
+    // ever ran it: the human retry would get 409 `gate_not_pending` and the gate would be stranded.
+    await store.create({ ...base, turnId: 't-40', createdAt: 1000 });
+    await store.finalize('t-40', 'paused', 2000);
+    await store.create({ ...base, turnId: 't-41', createdAt: 3000, resumeOf: 't-40' });
+    await store.finalize('t-41', 'failed', 4000);
+    const found = await store.findPausedBySession(base.sessionId);
+    expect(found?.paused.turnId).toBe('t-40');
+    expect(found?.resumed).toBe(false);
+  });
+
+  it('releaseGate puts a claimed gate back at its own deadline', async () => {
+    await store.create({ ...base, turnId: 't-50', gateDeadlineS: 60 });
+    await store.finalize('t-50', 'paused', 1_000);
+    expect(await store.claimGate('t-50')).toBe(true);
+    expect(await store.dueGates(61_000)).toEqual([]);
+    await store.releaseGate('t-50', 61_000);
+    expect(await store.dueGates(61_000)).toEqual(['t-50']);
+    // And not before it: the hand-back must not turn a deadline into an immediate one.
+    expect(await store.dueGates(60_999)).toEqual([]);
+  });
+
   it('answers null for a session with no paused turn', async () => {
     await store.create({ ...base, turnId: 't-30' });
     expect(await store.findPausedBySession(base.sessionId)).toBeNull();
