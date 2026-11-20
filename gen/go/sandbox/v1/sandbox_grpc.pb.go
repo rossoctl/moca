@@ -125,6 +125,7 @@ const (
 	SandboxExec_Abort_FullMethodName          = "/sandbox.v1.SandboxExec/Abort"
 	SandboxExec_LeaseControl_FullMethodName   = "/sandbox.v1.SandboxExec/LeaseControl"
 	SandboxExec_LeaseKeepalive_FullMethodName = "/sandbox.v1.SandboxExec/LeaseKeepalive"
+	SandboxExec_Release_FullMethodName        = "/sandbox.v1.SandboxExec/Release"
 )
 
 // SandboxExecClient is the client API for SandboxExec service.
@@ -144,6 +145,14 @@ type SandboxExecClient interface {
 	// keepalive-loss rule); it never resets idle, and the worker gives no answer.
 	LeaseControl(ctx context.Context, in *LeaseControlRequest, opts ...grpc.CallOption) (*LeaseControlResponse, error)
 	LeaseKeepalive(ctx context.Context, in *LeaseKeepaliveRequest, opts ...grpc.CallOption) (*LeaseKeepaliveResponse, error)
+	// Release (#338). The caller's sandbox has ended: the relay sends a ReleaseFrame for the
+	// sandbox's own workspace key to its worker and returns the worker's outcome. Authorized as
+	// an Exec is (the sandbox token's worker and workspace key). Errors are gRPC statuses:
+	// FAILED_PRECONDITION "release_unsupported: …" (the worker predates release; don't retry),
+	// RESOURCE_EXHAUSTED "busy: …" (retry later), INVALID_ARGUMENT for a refused key (don't
+	// retry), DEADLINE_EXCEEDED or UNAVAILABLE (retry; idle reclaim stays the backstop).
+	// Follow the ReleaseFrame's SENDER CONTRACT: send it only at the sandbox's terminal end.
+	Release(ctx context.Context, in *ReleaseRequest, opts ...grpc.CallOption) (*ReleaseResponse, error)
 }
 
 type sandboxExecClient struct {
@@ -203,6 +212,16 @@ func (c *sandboxExecClient) LeaseKeepalive(ctx context.Context, in *LeaseKeepali
 	return out, nil
 }
 
+func (c *sandboxExecClient) Release(ctx context.Context, in *ReleaseRequest, opts ...grpc.CallOption) (*ReleaseResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReleaseResponse)
+	err := c.cc.Invoke(ctx, SandboxExec_Release_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // SandboxExecServer is the server API for SandboxExec service.
 // All implementations must embed UnimplementedSandboxExecServer
 // for forward compatibility.
@@ -220,6 +239,14 @@ type SandboxExecServer interface {
 	// keepalive-loss rule); it never resets idle, and the worker gives no answer.
 	LeaseControl(context.Context, *LeaseControlRequest) (*LeaseControlResponse, error)
 	LeaseKeepalive(context.Context, *LeaseKeepaliveRequest) (*LeaseKeepaliveResponse, error)
+	// Release (#338). The caller's sandbox has ended: the relay sends a ReleaseFrame for the
+	// sandbox's own workspace key to its worker and returns the worker's outcome. Authorized as
+	// an Exec is (the sandbox token's worker and workspace key). Errors are gRPC statuses:
+	// FAILED_PRECONDITION "release_unsupported: …" (the worker predates release; don't retry),
+	// RESOURCE_EXHAUSTED "busy: …" (retry later), INVALID_ARGUMENT for a refused key (don't
+	// retry), DEADLINE_EXCEEDED or UNAVAILABLE (retry; idle reclaim stays the backstop).
+	// Follow the ReleaseFrame's SENDER CONTRACT: send it only at the sandbox's terminal end.
+	Release(context.Context, *ReleaseRequest) (*ReleaseResponse, error)
 	mustEmbedUnimplementedSandboxExecServer()
 }
 
@@ -241,6 +268,9 @@ func (UnimplementedSandboxExecServer) LeaseControl(context.Context, *LeaseContro
 }
 func (UnimplementedSandboxExecServer) LeaseKeepalive(context.Context, *LeaseKeepaliveRequest) (*LeaseKeepaliveResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method LeaseKeepalive not implemented")
+}
+func (UnimplementedSandboxExecServer) Release(context.Context, *ReleaseRequest) (*ReleaseResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Release not implemented")
 }
 func (UnimplementedSandboxExecServer) mustEmbedUnimplementedSandboxExecServer() {}
 func (UnimplementedSandboxExecServer) testEmbeddedByValue()                     {}
@@ -328,6 +358,24 @@ func _SandboxExec_LeaseKeepalive_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxExec_Release_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReleaseRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxExecServer).Release(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxExec_Release_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxExecServer).Release(ctx, req.(*ReleaseRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // SandboxExec_ServiceDesc is the grpc.ServiceDesc for SandboxExec service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -346,6 +394,10 @@ var SandboxExec_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "LeaseKeepalive",
 			Handler:    _SandboxExec_LeaseKeepalive_Handler,
+		},
+		{
+			MethodName: "Release",
+			Handler:    _SandboxExec_Release_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

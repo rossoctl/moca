@@ -8,11 +8,14 @@ import {
   LeaseKeepaliveRequest,
   LeaseOp,
   ProcessArgs,
+  ReleaseOutcome,
+  ReleaseRequest,
   SandboxExecClient,
   Stream,
   type ExecEvent,
   type LeaseControlResponse,
   type LeaseEvent,
+  type ReleaseResponse,
 } from './gen/sandbox/v1/sandbox.js';
 import {
   LeaseControlError,
@@ -395,6 +398,16 @@ const BACKSTOP_MARGIN_S = 90;
 const LEASE_STATUS_BACKSTOP_MS = 30_000;
 const LEASE_MUTATE_BACKSTOP_MS = 32 * 60_000;
 const LEASE_KEEPALIVE_BACKSTOP_MS = 15_000;
+/** Release's backstop (#338): the relay's own 15 s timeout plus a margin. */
+const RELEASE_BACKSTOP_MS = 30_000;
+
+/** What a Release did on the worker (#338; sandbox.proto ReleaseOutcome). */
+export type ReleaseOutcomeName = 'released' | 'kept_busy' | 'unknown_key';
+const RELEASE_OUTCOMES: Partial<Record<ReleaseOutcome, ReleaseOutcomeName>> = {
+  [ReleaseOutcome.RELEASE_OUTCOME_RELEASED]: 'released',
+  [ReleaseOutcome.RELEASE_OUTCOME_KEPT_BUSY]: 'kept_busy',
+  [ReleaseOutcome.RELEASE_OUTCOME_UNKNOWN_KEY]: 'unknown_key',
+};
 const LEASE_OPS = {
   status: LeaseOp.LEASE_OP_STATUS,
   reset: LeaseOp.LEASE_OP_RESET,
@@ -672,6 +685,44 @@ export class SandboxExecConn {
         }),
     );
     return leaseStatusView(res.status);
+  };
+
+  /**
+   * Releases this sandbox's workspace on its worker (#338): its standbys and its workspace go at
+   * once, or when the Exec using it ends. Send it only at the sandbox's end (sandbox.proto's SENDER
+   * CONTRACT): the worker then refuses new Execs for the key. Under the sandbox token, with the
+   * lease calls' token-refusal retry; not counted as use. A failure is a LeaseControlError: `failed`
+   * with `wire` `release_unsupported: …` is a worker that predates release. An abort of `signal`
+   * cancels it (`cancelled`), and one already aborted sends nothing.
+   */
+  release = async (opts: { signal?: AbortSignal } = {}): Promise<ReleaseOutcomeName> => {
+    const req = ReleaseRequest.fromPartial({ sandboxId: this.o.sandboxId });
+    const { signal } = opts;
+    const res = await this.leaseCall(
+      false,
+      (md) =>
+        new Promise<ReleaseResponse>((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new LeaseControlError('cancelled', 'the release was cancelled'));
+            return;
+          }
+          const call = this.client.release(
+            req,
+            md,
+            { deadline: Date.now() + RELEASE_BACKSTOP_MS },
+            (e, r) => {
+              signal?.removeEventListener('abort', cancel);
+              if (e) reject(LeaseControlError.fromStatus(e.code, e.details || e.message));
+              else resolve(r);
+            },
+          );
+          const cancel = () => call.cancel();
+          signal?.addEventListener('abort', cancel, { once: true });
+        }),
+    );
+    const name = RELEASE_OUTCOMES[res.outcome];
+    if (!name) throw new LeaseControlError('failed', `an unknown release outcome (${res.outcome})`);
+    return name;
   };
 
   /** Records harness liveness for a live lease (spec §4, §8.3); the relay answers OK at once. */

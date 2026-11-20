@@ -14,7 +14,9 @@ import {
   Exec,
   LeaseEvent,
   LeaseControlResult,
+  ReleaseResult,
   type ExecEvent,
+  type ReleaseFrame,
   type LeaseControlFrame,
   type LeaseKeepaliveFrame,
   type ServerFrame,
@@ -126,6 +128,9 @@ export type LeaseReply = (
   f: LeaseControlFrame,
 ) => Omit<Partial<LeaseControlResult>, 'ctlId'> | undefined;
 
+/** How a fake worker answers one ReleaseFrame: a result without its ctl_id, or silence. */
+export type ReleaseReply = (f: ReleaseFrame) => Omit<Partial<ReleaseResult>, 'ctlId'> | undefined;
+
 /**
  * A fake worker. `auto`: answers each Exec with a chunk (its workspace key, so each caller's frames
  * are recognisable) and an End after `delayMs`, or with `reply(exec)` when given. `hold`: answers
@@ -144,11 +149,14 @@ export async function worker(
   lease?: LeaseReply,
   /** Hello.capabilities; a level-2 microVM worker adds LEASE_PROCESSES_CAPABILITY (P5-R37). */
   capabilities: string[] = [],
+  /** Answers a ReleaseFrame (#338); without it a release is recorded and never answered. */
+  releaseReply?: ReleaseReply,
 ) {
   const execs: Exec[] = [];
   const aborts: number[] = [];
   const controls: LeaseControlFrame[] = [];
   const keepalives: LeaseKeepaliveFrame[] = [];
+  const releases: ReleaseFrame[] = [];
   const client = new WorkerClient(addr, credentials.createInsecure()) as unknown as Client & {
     attach: (md?: Metadata) => ClientDuplexStream<WorkerFrame, ServerFrame>;
   };
@@ -185,7 +193,15 @@ export async function worker(
   };
   const answerControl = (ctlId: number, r: Omit<Partial<LeaseControlResult>, 'ctlId'>) =>
     stream.write({ leaseResult: LeaseControlResult.fromPartial({ ...r, ctlId }) } as WorkerFrame);
+  const answerRelease = (ctlId: number, r: Omit<Partial<ReleaseResult>, 'ctlId'>) =>
+    stream.write({ releaseResult: ReleaseResult.fromPartial({ ...r, ctlId }) } as WorkerFrame);
   stream.on('data', (f: ServerFrame) => {
+    if (f.release) {
+      releases.push(f.release);
+      const r = releaseReply?.(f.release);
+      if (r) answerRelease(f.release.ctlId, r);
+      return;
+    }
     if (f.leaseControl) {
       const ctl = f.leaseControl;
       controls.push(ctl);
@@ -230,7 +246,10 @@ export async function worker(
     aborts,
     controls,
     keepalives,
+    releases,
     close,
+    /** Answer a ReleaseFrame by its ctl_id, whenever the test chooses. */
+    answerRelease,
     /** Answer a LeaseControlFrame by its ctl_id, whenever the test chooses. */
     answerControl,
     /** Answer a held Exec by its WORKER req_id. */

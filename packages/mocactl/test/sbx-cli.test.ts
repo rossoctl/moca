@@ -1065,7 +1065,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     );
   });
 
-  it('rm sends sandbox_deleted before DELETE for a lease sandbox, and not for per-exec', async () => {
+  it('rm sends sandbox_deleted (a lease sandbox), then release (every sandbox), before DELETE', async () => {
     for (const mode of ['lease', 'lease+processes', 'per-exec']) {
       const { home, env, io } = setup();
       const order: string[] = [];
@@ -1089,6 +1089,10 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
         close: () => void closed++,
         leaseControl: lease.leaseControl,
         leaseKeepalive: lease.leaseKeepalive,
+        release: async () => {
+          order.push('release');
+          return 'released';
+        },
       });
       expect(
         await sbxMain(['rm', '--force', SBX], env, io, {
@@ -1097,10 +1101,79 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
           execFactory,
         }),
       ).toBe(0);
-      expect(order).toEqual(mode === 'per-exec' ? ['DELETE'] : ['sandbox_deleted', 'DELETE']);
-      expect(closed).toBe(mode === 'per-exec' ? 0 : 1);
+      expect(order).toEqual(
+        mode === 'per-exec' ? ['release', 'DELETE'] : ['sandbox_deleted', 'release', 'DELETE'],
+      );
+      expect(closed).toBe(1);
     }
-    // Best effort: a lease call that fails, or a record that cannot be read, still deletes.
+    // Best effort: a release that fails (a worker that predates it), a lease call that fails, or a
+    // record that cannot be read, still deletes.
+    {
+      const { home, env, io } = setup();
+      const cp = fakeCp({
+        [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox({ mode: 'per-exec' }) }),
+        [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+        [`DELETE /v1/sandboxes/${SBX}`]: () => ({
+          status: 200,
+          body: { id: SBX, state: 'terminated', reason: 'deleted' },
+        }),
+      });
+      const lease = fakeLease(() => new LeaseControlError('unavailable', 'no worker'));
+      const execFactory: ExecFactory = () => ({
+        exec: async () => {
+          throw new Error('no command runs in this test');
+        },
+        close: () => {},
+        ...lease,
+        release: async () => {
+          throw new LeaseControlError(
+            'failed',
+            "release_unsupported: this sandbox's worker does not support release",
+          );
+        },
+      });
+      expect(
+        await sbxMain(['rm', '--force', SBX], env, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+          execFactory,
+        }),
+      ).toBe(0);
+      expect(cp.calls.at(-1)).toMatchObject({ method: 'DELETE' });
+    }
+    // A DELETE that fails after the worker took the release: the workspace takes no more Execs, so
+    // rm says the sandbox still exists and to re-run it. Nothing to say when nothing was released.
+    for (const outcome of ['released', 'kept_busy', 'unknown_key'] as const) {
+      const { home, env, io } = setup();
+      const cp = fakeCp({
+        [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox({ mode: 'per-exec' }) }),
+        [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+        [`DELETE /v1/sandboxes/${SBX}`]: () => ({
+          status: 500,
+          body: { error: 'internal', message: 'boom' },
+        }),
+      });
+      const execFactory: ExecFactory = () => ({
+        exec: async () => {
+          throw new Error('no command runs in this test');
+        },
+        close: () => {},
+        ...fakeLease(() => new LeaseControlError('unavailable', 'no worker')),
+        release: async () => outcome,
+      });
+      expect(
+        await sbxMain(['rm', '--force', SBX], env, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+          execFactory,
+        }),
+      ).not.toBe(0);
+      const note =
+        `sbx: ${SBX}'s workspace was released on its worker but the sandbox still exists: ` +
+        `re-run \`mocactl sbx rm ${SBX}\``;
+      if (outcome === 'unknown_key') expect(io.errs).not.toContain(note);
+      else expect(io.errs.at(-1)).toBe(note);
+    }
     for (const broken of ['lease', 'get'] as const) {
       const { home, env, io } = setup();
       const cp = fakeCp({

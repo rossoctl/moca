@@ -365,6 +365,31 @@ would run a `process_start`'s command as a plain command. Nothing ran; retrying 
 the operator upgrades the worker. Level 2 is off by default: only a deployment that allows
 `lease+processes` issues a token whose mode claim is `lease+processes`.
 
+## Releasing the workspace when you delete
+
+**`Release {sandbox_id}`** tells the sandbox's worker that the sandbox has ended: the worker frees
+its paused standby VMs and its workspace at once, rather than at its idle reclaim, and refuses any
+later `Exec` for the workspace for the workspace's idle period (`released: …`). Send it just before
+`DELETE /v1/sandboxes/{id}`, after a lease sandbox's `LEASE_OP_SANDBOX_DELETED`, as `mocactl sbx rm`
+does; best effort, since the delete stands either way and idle reclaim stays the backstop. Never
+send it while you still mean to use the sandbox, and if the `DELETE` then fails, retry the delete:
+the sandbox still exists but takes no more commands (`mocactl sbx rm` says so). It carries your
+sandbox token, and the relay sends the token's own workspace key, never one you name. The answer is
+a `ReleaseOutcome`: `RELEASED` (freed), `KEPT_BUSY` (an `Exec` or a live lease is using it: the
+standbys go now, the workspace when it is free) or `UNKNOWN_KEY` (the worker holds no workspace for
+it).
+
+| Code                  | Cause                                                                                                           |
+| --------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `UNAUTHENTICATED`     | Missing, expired or invalid sandbox token                                                                       |
+| `PERMISSION_DENIED`   | A harness exec token; `sandbox_id` is not the token's worker or is a workload sandbox                           |
+| `FAILED_PRECONDITION` | `release_unsupported: …`: the worker predates release (nothing was sent); don't retry                           |
+| `UNIMPLEMENTED`       | A relay that predates `Release` (nothing was sent); don't retry                                                 |
+| `RESOURCE_EXHAUSTED`  | `busy: …`: 2 releases for this sandbox already in flight, or the worker is saturated; retry later               |
+| `INVALID_ARGUMENT`    | The worker refused the workspace key; don't retry                                                               |
+| `DEADLINE_EXCEEDED`   | The worker did not answer within 15 s                                                                           |
+| `UNAVAILABLE`         | The worker is not attached, went away before answering, or failed the release; retry, or let idle reclaim do it |
+
 ## Limits
 
 - **One command at a time per sandbox.** A second concurrent call waits at the worker until the

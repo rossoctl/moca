@@ -620,6 +620,15 @@ export interface LeaseKeepaliveRequest {
 export interface LeaseKeepaliveResponse {
 }
 
+/** ---- client ↔ relay (SandboxExec Release) ---- */
+export interface ReleaseRequest {
+  sandboxId: string;
+}
+
+export interface ReleaseResponse {
+  outcome: ReleaseOutcome;
+}
+
 /**
  * relay → worker: the session or sandbox that owns workspace_key has ended, so the worker
  * may free the key's standbys and workspace now instead of at its idle reclaim. ADDITIVE: a
@@ -3364,6 +3373,122 @@ export const LeaseKeepaliveResponse: MessageFns<LeaseKeepaliveResponse> = {
   },
 };
 
+function createBaseReleaseRequest(): ReleaseRequest {
+  return { sandboxId: "" };
+}
+
+export const ReleaseRequest: MessageFns<ReleaseRequest> = {
+  encode(message: ReleaseRequest, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.sandboxId !== "") {
+      writer.uint32(10).string(message.sandboxId);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ReleaseRequest {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseReleaseRequest();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 10) {
+            break;
+          }
+
+          message.sandboxId = reader.string();
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ReleaseRequest {
+    return { sandboxId: isSet(object.sandboxId) ? globalThis.String(object.sandboxId) : "" };
+  },
+
+  toJSON(message: ReleaseRequest): unknown {
+    const obj: any = {};
+    if (message.sandboxId !== "") {
+      obj.sandboxId = message.sandboxId;
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ReleaseRequest>, I>>(base?: I): ReleaseRequest {
+    return ReleaseRequest.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ReleaseRequest>, I>>(object: I): ReleaseRequest {
+    const message = createBaseReleaseRequest();
+    message.sandboxId = object.sandboxId ?? "";
+    return message;
+  },
+};
+
+function createBaseReleaseResponse(): ReleaseResponse {
+  return { outcome: 0 };
+}
+
+export const ReleaseResponse: MessageFns<ReleaseResponse> = {
+  encode(message: ReleaseResponse, writer: BinaryWriter = new BinaryWriter()): BinaryWriter {
+    if (message.outcome !== 0) {
+      writer.uint32(8).int32(message.outcome);
+    }
+    return writer;
+  },
+
+  decode(input: BinaryReader | Uint8Array, length?: number): ReleaseResponse {
+    const reader = input instanceof BinaryReader ? input : new BinaryReader(input);
+    let end = length === undefined ? reader.len : reader.pos + length;
+    const message = createBaseReleaseResponse();
+    while (reader.pos < end) {
+      const tag = reader.uint32();
+      switch (tag >>> 3) {
+        case 1: {
+          if (tag !== 8) {
+            break;
+          }
+
+          message.outcome = reader.int32() as any;
+          continue;
+        }
+      }
+      if ((tag & 7) === 4 || tag === 0) {
+        break;
+      }
+      reader.skip(tag & 7);
+    }
+    return message;
+  },
+
+  fromJSON(object: any): ReleaseResponse {
+    return { outcome: isSet(object.outcome) ? releaseOutcomeFromJSON(object.outcome) : 0 };
+  },
+
+  toJSON(message: ReleaseResponse): unknown {
+    const obj: any = {};
+    if (message.outcome !== 0) {
+      obj.outcome = releaseOutcomeToJSON(message.outcome);
+    }
+    return obj;
+  },
+
+  create<I extends Exact<DeepPartial<ReleaseResponse>, I>>(base?: I): ReleaseResponse {
+    return ReleaseResponse.fromPartial(base ?? ({} as any));
+  },
+  fromPartial<I extends Exact<DeepPartial<ReleaseResponse>, I>>(object: I): ReleaseResponse {
+    const message = createBaseReleaseResponse();
+    message.outcome = object.outcome ?? 0;
+    return message;
+  },
+};
+
 function createBaseReleaseFrame(): ReleaseFrame {
   return { ctlId: 0, workspaceKey: "" };
 }
@@ -3619,6 +3744,24 @@ export const SandboxExecService = {
     responseSerialize: (value: LeaseKeepaliveResponse) => Buffer.from(LeaseKeepaliveResponse.encode(value).finish()),
     responseDeserialize: (value: Buffer) => LeaseKeepaliveResponse.decode(value),
   },
+  /**
+   * Release (#338). The caller's sandbox has ended: the relay sends a ReleaseFrame for the
+   * sandbox's own workspace key to its worker and returns the worker's outcome. Authorized as
+   * an Exec is (the sandbox token's worker and workspace key). Errors are gRPC statuses:
+   * FAILED_PRECONDITION "release_unsupported: …" (the worker predates release; don't retry),
+   * RESOURCE_EXHAUSTED "busy: …" (retry later), INVALID_ARGUMENT for a refused key (don't
+   * retry), DEADLINE_EXCEEDED or UNAVAILABLE (retry; idle reclaim stays the backstop).
+   * Follow the ReleaseFrame's SENDER CONTRACT: send it only at the sandbox's terminal end.
+   */
+  release: {
+    path: "/sandbox.v1.SandboxExec/Release",
+    requestStream: false,
+    responseStream: false,
+    requestSerialize: (value: ReleaseRequest) => Buffer.from(ReleaseRequest.encode(value).finish()),
+    requestDeserialize: (value: Buffer) => ReleaseRequest.decode(value),
+    responseSerialize: (value: ReleaseResponse) => Buffer.from(ReleaseResponse.encode(value).finish()),
+    responseDeserialize: (value: Buffer) => ReleaseResponse.decode(value),
+  },
 } as const;
 
 export interface SandboxExecServer extends UntypedServiceImplementation {
@@ -3634,6 +3777,16 @@ export interface SandboxExecServer extends UntypedServiceImplementation {
    */
   leaseControl: handleUnaryCall<LeaseControlRequest, LeaseControlResponse>;
   leaseKeepalive: handleUnaryCall<LeaseKeepaliveRequest, LeaseKeepaliveResponse>;
+  /**
+   * Release (#338). The caller's sandbox has ended: the relay sends a ReleaseFrame for the
+   * sandbox's own workspace key to its worker and returns the worker's outcome. Authorized as
+   * an Exec is (the sandbox token's worker and workspace key). Errors are gRPC statuses:
+   * FAILED_PRECONDITION "release_unsupported: …" (the worker predates release; don't retry),
+   * RESOURCE_EXHAUSTED "busy: …" (retry later), INVALID_ARGUMENT for a refused key (don't
+   * retry), DEADLINE_EXCEEDED or UNAVAILABLE (retry; idle reclaim stays the backstop).
+   * Follow the ReleaseFrame's SENDER CONTRACT: send it only at the sandbox's terminal end.
+   */
+  release: handleUnaryCall<ReleaseRequest, ReleaseResponse>;
 }
 
 export interface SandboxExecClient extends Client {
@@ -3691,6 +3844,30 @@ export interface SandboxExecClient extends Client {
     metadata: Metadata,
     options: Partial<CallOptions>,
     callback: (error: ServiceError | null, response: LeaseKeepaliveResponse) => void,
+  ): ClientUnaryCall;
+  /**
+   * Release (#338). The caller's sandbox has ended: the relay sends a ReleaseFrame for the
+   * sandbox's own workspace key to its worker and returns the worker's outcome. Authorized as
+   * an Exec is (the sandbox token's worker and workspace key). Errors are gRPC statuses:
+   * FAILED_PRECONDITION "release_unsupported: …" (the worker predates release; don't retry),
+   * RESOURCE_EXHAUSTED "busy: …" (retry later), INVALID_ARGUMENT for a refused key (don't
+   * retry), DEADLINE_EXCEEDED or UNAVAILABLE (retry; idle reclaim stays the backstop).
+   * Follow the ReleaseFrame's SENDER CONTRACT: send it only at the sandbox's terminal end.
+   */
+  release(
+    request: ReleaseRequest,
+    callback: (error: ServiceError | null, response: ReleaseResponse) => void,
+  ): ClientUnaryCall;
+  release(
+    request: ReleaseRequest,
+    metadata: Metadata,
+    callback: (error: ServiceError | null, response: ReleaseResponse) => void,
+  ): ClientUnaryCall;
+  release(
+    request: ReleaseRequest,
+    metadata: Metadata,
+    options: Partial<CallOptions>,
+    callback: (error: ServiceError | null, response: ReleaseResponse) => void,
   ): ClientUnaryCall;
 }
 

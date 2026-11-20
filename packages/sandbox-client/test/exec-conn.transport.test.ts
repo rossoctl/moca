@@ -11,6 +11,7 @@ import {
   LeaseEvent,
   LeaseOp,
   LeaseStatus,
+  ReleaseOutcome,
   SandboxExecService,
   SandboxMode,
   type AbortRequest,
@@ -19,6 +20,8 @@ import {
   type LeaseControlRequest,
   type LeaseControlResponse,
   type LeaseKeepaliveRequest,
+  type ReleaseRequest,
+  type ReleaseResponse,
 } from '../src/gen/sandbox/v1/sandbox.js';
 import {
   CLIENT_CHANNEL_OPTIONS,
@@ -47,6 +50,7 @@ type UnaryAnswer<R> = { code: number; details: string } | typeof HANG | R;
 interface LeaseBehaviour {
   control?: (req: LeaseControlRequest) => UnaryAnswer<LeaseControlResponse>;
   keepalive?: (req: LeaseKeepaliveRequest) => UnaryAnswer<object>;
+  release?: (req: ReleaseRequest) => UnaryAnswer<ReleaseResponse>;
 }
 
 type Unary<Req> = { request: Req; metadata: { get(k: string): unknown[] } };
@@ -75,6 +79,7 @@ async function fakeRelay(
   const aborts: { req: AbortRequest; auth: string | undefined }[] = [];
   const controls: { req: LeaseControlRequest; auth: string | undefined }[] = [];
   const keepalives: { req: LeaseKeepaliveRequest; auth: string | undefined }[] = [];
+  const releases: { req: ReleaseRequest; auth: string | undefined }[] = [];
   const cancelled: number[] = [];
   const server = new Server();
   server.addService(SandboxExecService, {
@@ -96,6 +101,7 @@ async function fakeRelay(
     },
     leaseControl: unary(controls, lease.control),
     leaseKeepalive: unary(keepalives, lease.keepalive),
+    release: unary(releases, lease.release),
   });
   const creds = tls
     ? ServerCredentials.createSsl(null, [{ cert_chain: tls.cert, private_key: tls.key }], false)
@@ -104,7 +110,7 @@ async function fakeRelay(
     server.bindAsync('127.0.0.1:0', creds, (e, p) => (e ? rej(e) : res(p))),
   );
   closers.push(() => server.forceShutdown());
-  return { addr: `127.0.0.1:${port}`, seen, aborts, cancelled, controls, keepalives };
+  return { addr: `127.0.0.1:${port}`, seen, aborts, cancelled, controls, keepalives, releases };
 }
 
 /** A TCP proxy in front of a fake relay whose live connections can be cut, as a load balancer does. */
@@ -1124,6 +1130,35 @@ describe('SandboxExecConn lease mode (plan 4, spec §5, §8.3)', () => {
       .c.leaseControl('reset')
       .catch((x: unknown) => x);
     expect(e).toMatchObject({ code: 'failed', grpcCode: status.INTERNAL, wire: undefined });
+  });
+
+  it('sends release under the sandbox token and names its outcome (#338)', async () => {
+    const r = await fakeRelay(ok, undefined, {
+      release: () => ({ outcome: ReleaseOutcome.RELEASE_OUTCOME_KEPT_BUSY }),
+    });
+    const { c, asks } = conn(r.addr);
+    expect(await c.release()).toBe('kept_busy');
+    expect(r.releases).toEqual([{ req: { sandboxId: 'sbx_default' }, auth: 'Bearer stale' }]);
+    // Releasing is not use: the token ask says so.
+    expect(asks.at(-1)).toMatchObject({ activity: false });
+    const old = await fakeRelay(ok, undefined, {
+      release: () => ({
+        code: status.FAILED_PRECONDITION,
+        details: "release_unsupported: this sandbox's worker does not support release",
+      }),
+    });
+    await expect(conn(old.addr).c.release()).rejects.toMatchObject({
+      name: 'LeaseControlError',
+      code: 'failed',
+      wire: "release_unsupported: this sandbox's worker does not support release",
+    });
+    const ac = new AbortController();
+    ac.abort();
+    const none = await fakeRelay(ok);
+    await expect(conn(none.addr).c.release({ signal: ac.signal })).rejects.toMatchObject({
+      code: 'cancelled',
+    });
+    expect(none.releases).toEqual([]);
   });
 
   it('sends leaseKeepalive under the sandbox token, and maps its errors', async () => {

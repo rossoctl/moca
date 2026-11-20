@@ -7,6 +7,7 @@ import {
   type LeaseOpName,
   type LeaseStatusView,
   type ProcessCall,
+  type ReleaseOutcomeName,
   type SandboxModeName,
   type SandboxTokenGrant,
   type TokenFn,
@@ -37,7 +38,11 @@ export type ExecFactory = (o: ExecConnOptions) => {
   leaseControl: LeaseControlFn;
   leaseKeepalive: () => Promise<void>;
   process?: ProcessCall;
+  /** Release of the sandbox's workspace (#338); optional so a fake need not have one. */
+  release?: ReleaseFn;
 };
+/** The connection's release call: what the worker did with the workspace. */
+export type ReleaseFn = (o?: { signal?: AbortSignal }) => Promise<ReleaseOutcomeName>;
 const realFactory: ExecFactory = (o) => {
   const c = new SandboxExecConn(o);
   return {
@@ -46,7 +51,13 @@ const realFactory: ExecFactory = (o) => {
     leaseControl: c.leaseControl,
     leaseKeepalive: c.leaseKeepalive,
     process: c.process,
+    release: c.release,
   };
+};
+
+/** A connection without release (a test fake, or a client before #338) fails a release plainly. */
+const noRelease: ReleaseFn = async () => {
+  throw new Error('this connection has no release call');
 };
 
 /** A connection without process calls (a test fake) fails a process call plainly. */
@@ -223,6 +234,8 @@ export interface OpenedExec {
   leaseKeepalive(): Promise<void>;
   /** The process calls (plan 5, spec §7). */
   process: ProcessCall;
+  /** Releases the sandbox's workspace on its worker (#338): only at the sandbox's end. */
+  release: ReleaseFn;
   /**
    * Mints a fresh sandbox token now, as the next Exec would after a refusal (P5-R29). `signal`
    * (a cancelled tool call's) aborts it.
@@ -285,6 +298,7 @@ export async function openExec(
     leaseControl: c.leaseControl,
     leaseKeepalive: c.leaseKeepalive,
     process: c.process ?? noProcess,
+    release: c.release ?? noRelease,
     remint: async (signal?: AbortSignal) => {
       await t.force(signal);
     },
