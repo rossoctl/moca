@@ -1231,7 +1231,7 @@ describe('agent configuration (SBX0 §6.3)', () => {
           join(d, '.claude/settings.local.json'),
           JSON.stringify({ autoMemoryEnabled: true }),
         ),
-      /Claude Code: \.claude\/settings\.local\.json autoMemoryEnabled/,
+      /Claude Code: \.claude\/settings\.local\.json autoMemoryEnabled.*set it to false in \.claude\/settings\.local\.json/,
     ],
     [
       'auto-memory no longer off',

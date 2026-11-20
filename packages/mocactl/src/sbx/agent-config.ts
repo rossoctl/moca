@@ -1465,7 +1465,11 @@ export function checkAgentConfig(root: string, mode?: SandboxModeName): string[]
   const memFile = at(local, ['autoMemoryEnabled']) !== undefined ? SETTINGS_LOCAL : SETTINGS;
   const mem = at(memFile === SETTINGS ? settings : local, ['autoMemoryEnabled']);
   if (mem !== false) {
-    problems.push(`Claude Code: ${memFile} autoMemoryEnabled is not false: ${MEMORY_WHY}`);
+    // `up` re-merges a missing key but refuses to overwrite a value, so name that fix.
+    problems.push(
+      `Claude Code: ${memFile} autoMemoryEnabled is not false: ${MEMORY_WHY}` +
+        (mem === undefined ? '' : `; set it to false in ${memFile}`),
+    );
   }
   if (!isOpencodeServer(at(oc, ['mcp', SERVER]))) {
     problems.push(`OpenCode: ${ocFile} has no enabled ${SERVER} MCP server (mocactl sbx mcp)`);
