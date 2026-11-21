@@ -696,8 +696,8 @@ var S_STEPS = [
 },
 {
   title: 'The worker starts a fresh VM',
-  body: 'The worker takes a standby VM or boots one from the template snapshot. The guest agent is PID 1. The guest runs the command in /workspace as uid sbx. The VM has no network device. Nothing the command starts survives the Exec.',
-  wire: ['guest: bash -c "npm test" · cwd /workspace · uid sbx',
+  body: 'The worker takes a standby VM or boots one from the template snapshot. The guest agent is PID 1. The guest runs the command in /workspace as root inside the disposable VM. The VM has no network device. Nothing the command starts survives the Exec.',
+  wire: ['guest: bash -c "npm test" · cwd /workspace',
          'worker → caller: ExecEvent chunk / end'],
   chips: ['one fresh VM per Exec', 'files under /workspace persist', 'no secrets in the guest'],
   dur: 4600,

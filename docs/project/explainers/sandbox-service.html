@@ -441,7 +441,7 @@ function drawVm(){
   }
   if (scene.exec){
     chip('bash -c ' + scene.exec.cmd, g.x + 16, g.y + 62, 216, C.sync);
-    tiny('cwd /workspace · uid sbx', g.x + 16, g.y + 102);
+    tiny('cwd /workspace · runs as root', g.x + 16, g.y + 102);
   }
 }
 function drawWs(){
@@ -589,8 +589,8 @@ var STEPS = [
 },
 {
   title: 'The command runs in /workspace',
-  body: 'The guest runs bash -c with the command. The working directory is /workspace. The command runs as uid sbx. The VM has no network device. A template with egress reaches only allowlisted hosts. Output streams back in chunks.',
-  wire: ['guest: bash -c "npm test" · cwd /workspace · uid sbx',
+  body: 'The guest runs bash -c with the command. The working directory is /workspace. The command runs as root inside the disposable VM. The VM has no network device. A template with egress reaches only allowlisted hosts. Output streams back in chunks.',
+  wire: ['guest: bash -c "npm test" · cwd /workspace',
          'worker → relay → caller: ExecEvent chunk {data, stream}',
          'no NIC · egress only through the host proxy allowlist'],
   chips: ['files under /workspace persist', 'nothing else survives', 'output capped at 8 MiB'],

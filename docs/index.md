@@ -25,7 +25,7 @@ capabilities**. You can use either one on its own, or both together.
 **See it step by step.** Two interactive diagrams walk through these capabilities:
 [the harness and the sandbox together](pathname://./project/explainers/harness-and-sandbox.html) and
 [the sandbox service alone](pathname://./project/explainers/sandbox-service.html). Press Next to advance
-one message at a time.
+one step at a time.
 
 ## How the two fit together
 
