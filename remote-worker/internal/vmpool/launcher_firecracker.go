@@ -1102,14 +1102,15 @@ func (v *firecrackerVM) LeaseCgroup(maxBytes int64) error {
 	return writeMemoryMax(v.cgroups.abs(v.cgroupRel), maxBytes)
 }
 
-// LeaseBytes implements leaseFootprinter (budget.go): this lease VM's cgroup memory.current,
-// read fresh on every call. Never cached -- a lease VM runs between reads, unlike the paused
-// standby StandbyBytes prices once.
+// LeaseBytes implements leaseFootprinter (budget.go): this lease VM's cgroup memory.current
+// less its reclaimable page cache (readLeaseFootprint), read fresh on every call. Never
+// cached -- a lease VM runs between reads, unlike the paused standby StandbyBytes prices
+// once.
 func (v *firecrackerVM) LeaseBytes() (int64, error) {
 	if v.cgroups == nil || v.cgroupRel == "" {
 		return 0, fmt.Errorf("firecracker VM %s: no pooled cgroup to read (ParentCgroup unset?)", v.id)
 	}
-	return readMemoryCurrent(v.cgroups.abs(v.cgroupRel))
+	return readLeaseFootprint(v.cgroups.abs(v.cgroupRel))
 }
 
 // ResumePhases implements resumePhaser (diag.go). Zero until the first Resume.

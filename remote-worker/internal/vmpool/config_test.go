@@ -162,6 +162,7 @@ func TestLeaseConfigRefusesWhatItCannotHonour(t *testing.T) {
 		"headroom NaN":          func(c *Config) { c.LeaseHeadroom = math.NaN() },
 		"default above ceiling": func(c *Config) { c.LeaseIdleDefault = 2 * time.Hour },
 		"default below floor":   func(c *Config) { c.LeaseIdleDefault = 10 * time.Second },
+		"cache drop above 24 h": func(c *Config) { c.LeaseCacheDropAfter = MaxLeaseCacheDrop + time.Second },
 	} {
 		c := good()
 		mut(&c)

@@ -631,6 +631,27 @@ func TestPoolConfigLeaseEnv(t *testing.T) {
 	}
 }
 
+// F1: SH_LEASE_CACHE_DROP_S is whole seconds, 0 turns the idle page-cache drop off (a
+// negative LeaseCacheDropAfter, which Normalize keeps), unset leaves the default to
+// Normalize, and anything else refuses to start, naming the variable.
+func TestPoolConfigLeaseCacheDrop(t *testing.T) {
+	for v, want := range map[string]time.Duration{"45": 45 * time.Second, "0": -1, "86400": 24 * time.Hour} {
+		cfg, err := poolConfig(baseEnv(map[string]string{"SH_LEASE_CACHE_DROP_S": v}))
+		if err != nil || cfg.LeaseCacheDropAfter != want {
+			t.Errorf("SH_LEASE_CACHE_DROP_S=%s: LeaseCacheDropAfter %v, err %v; want %v", v, cfg.LeaseCacheDropAfter, err, want)
+		}
+	}
+	if cfg, err := poolConfig(baseEnv(nil)); err != nil || cfg.LeaseCacheDropAfter != 0 {
+		t.Errorf("unset: LeaseCacheDropAfter %v, err %v; want 0 for Normalize", cfg.LeaseCacheDropAfter, err)
+	}
+	for _, bad := range []string{"-1", "abc", "1.5", "30s", "86401", " "} {
+		if _, err := poolConfig(baseEnv(map[string]string{"SH_LEASE_CACHE_DROP_S": bad})); err == nil ||
+			!strings.Contains(err.Error(), "SH_LEASE_CACHE_DROP_S") {
+			t.Errorf("SH_LEASE_CACHE_DROP_S=%q: err = %v, want a refusal naming the variable", bad, err)
+		}
+	}
+}
+
 // M6 (plan 4): the relay gives reset and set_mode 31 min, the default grace plus 60 s,
 // and a downgrade or reset waits up to the grace limit. A grace above 1800 s would let the
 // relay fail a call the worker is still running, so it is refused at boot, naming why.

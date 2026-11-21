@@ -99,10 +99,12 @@ you opt in:
 **Known limits of the experimental lease (level 1).** They come from the lease-mode measurement
 on bare metal (E17b), and none affects `per-exec` sandboxes:
 
-- **A lease VM's memory stays near its ceiling.** Free-page reporting returns what a command frees,
-  but the guest keeps its page cache, so an idle lease is charged close to its full guest RAM. On a
-  memory-bound host, leases fit fewer sessions than their working sets suggest. Under pressure the
-  worker reclaims the lease idle the longest before it refuses new work.
+- **A lease VM's memory stays near its ceiling on an older snapshot.** With a golden snapshot built
+  before v0.12.0, the guest keeps its page cache, so an idle lease is charged close to its full guest
+  RAM, and on a memory-bound host leases fit fewer sessions than their working sets suggest. From
+  v0.12.0 the guest drops its page cache once a lease has been idle for `SH_LEASE_CACHE_DROP_S`
+  (default 30 s), and the worker no longer charges a lease for the host's cache of its workspace.
+  Under pressure the worker reclaims the lease idle the longest before it refuses new work.
 - **Cancelling a running command ends its lease on an older snapshot.** With a golden snapshot
   built before v0.12.0, a client that aborts an Exec (Ctrl-C) ends the lease (`agent_dead`); the
   next command starts a new guest. `/workspace` is kept. A snapshot built from v0.12.0 on keeps the

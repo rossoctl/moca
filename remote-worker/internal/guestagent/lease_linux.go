@@ -47,6 +47,12 @@ type leaseRuntime struct {
 	uids    *uidAllocator
 	cgroups trackedCgroups
 	exits   exitSignals
+	// drop is the idle page-cache drop armed by the last lease request (armCacheDrop),
+	// and dropGen the request count it was armed at: a request since then disarms it.
+	// Both under mu. stopped is set by stopLease, after which no drop runs.
+	drop    *time.Timer
+	dropGen uint64
+	stopped atomic.Bool
 }
 
 // leasePrepare readies the guest for lease mode. NewAgent calls it when CgroupRoot is
@@ -146,6 +152,8 @@ func enableExecControllers(root string) error {
 var (
 	agentOomScoreAdjPath = "/proc/self/oom_score_adj"
 	memInfoPath          = "/proc/meminfo"
+	// dropCachesPath is where the idle page-cache drop writes 1 (dropIdleCache).
+	dropCachesPath = "/proc/sys/vm/drop_caches"
 )
 
 // protectAgentFromOOM sets the agent's oom_score_adj to -1000. It is defence in depth,
@@ -196,8 +204,48 @@ func remountNoDevNoSuid(dir string) error {
 // stopLease stops the reaper, if a lease request ever started it. It does not take
 // lease.mu, which a running Exec holds: Close must not wait for that Exec to end.
 func (a *Agent) stopLease() {
+	a.lease.stopped.Store(true)
 	if r := a.lease.r.Load(); r != nil {
 		r.stop()
+	}
+}
+
+// armCacheDrop disarms the drop the previous lease request armed and, when the host sent
+// a delay, arms one for this request. Caller holds the lease mutex.
+func (a *Agent) armCacheDrop(afterS uint32) {
+	l := &a.lease
+	l.dropGen++
+	if l.drop != nil {
+		l.drop.Stop()
+		l.drop = nil
+	}
+	if afterS == 0 || a.dead.Load() {
+		return
+	}
+	gen := l.dropGen
+	l.drop = time.AfterFunc(time.Duration(afterS)*time.Second, func() { a.dropIdleCache(gen) })
+}
+
+// dropIdleCache drops the guest's clean page cache (F1 of the E17b report) unless a
+// lease request has run since the drop was armed at gen: the dataset and venv a command
+// read stay in guest RAM otherwise, and free-page reporting returns only what the guest
+// frees. sync first, so pages written back since the last request can go too: outside
+// the lease mutex, because it frees nothing, and a request arriving meanwhile must not
+// wait for a sync of a busy workspace (#974 review). The drop itself runs under the
+// mutex and only if no request ran since gen, during the sync included, so it never
+// runs beside a request. tmpfs (/tmp, /var) is not page cache that drop_caches frees,
+// and stays.
+func (a *Agent) dropIdleCache(gen uint64) {
+	l := &a.lease
+	unix.Sync()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.dropGen != gen || l.stopped.Load() || a.dead.Load() {
+		return
+	}
+	l.drop = nil
+	if err := os.WriteFile(dropCachesPath, []byte("1\n"), 0); err != nil {
+		log.Printf("guest-agent: lease: idle page-cache drop: %v", err)
 	}
 }
 
@@ -218,6 +266,9 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter, conn io.Read
 	l := &a.lease
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// On the way out, under mu: whatever this request did, the lease's idle time starts
+	// again from its end (armCacheDrop also disarms the previous request's drop).
+	defer a.armCacheDrop(req.CacheDropAfterS)
 	// Under mu, so no lease Exec runs during these steps; before the latch, so a failure
 	// leaves the agent as it was and the next lease request retries them. leaseOn is
 	// only ever set under mu, so reading it here is exact.

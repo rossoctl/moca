@@ -185,6 +185,7 @@ func guestRequest(c Command, capBytes int64, now time.Time) ga.Request {
 		HostUnixNanos:      now.UnixNano(),
 		Lease:              c.Lease,
 		NormaliseWorkspace: c.NormaliseWorkspace,
+		CacheDropAfterS:    c.CacheDropAfterS,
 	}
 	if c.Kind != ExecKindCommand {
 		a := c.Process
