@@ -17,6 +17,25 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
+## 1.35.0
+
+`GET /metrics` reports a second counter and is served on both route profiles
+([#823](https://github.com/rossoctl/moca/issues/823)). Additive: no route added or removed, no
+existing field changed.
+
+- `counters.credential_nonprimary_kek_reads` counts stored credentials opened under a **retired** key
+  of the `SH_CREDENTIAL_KEK` ring. Re-sealing is write-driven, so a credential nobody writes keeps the
+  old key; this is the terminating condition of a KEK rotation, and the retired key may only be
+  dropped once the counter stops moving. Not deduplicated — one per stale read, so a long-lived
+  process cannot look clean while credentials are still stale. The matching log line names which
+  credential; this answers whether any.
+- `GET /metrics` moves from the `harness` profile to **both** profiles. It was harness-only while
+  `async_quota_refusals` was the only counter, which is structurally zero on `sandbox` (no turns).
+  The sandbox profile is the only one that runs a file or Vault credential store with egress
+  credentials, so it is the only profile where the new counter can move — and harness-only made it
+  the one profile that could not read it. Still admin-only, and still unversioned (an operator
+  surface, not client API).
+
 ## 1.34.0
 
 A client is told about turn state changes instead of polling for them

@@ -102,6 +102,24 @@
 #                           and delete any PVC whose class must change (its contents do not
 #                           survive). A claim class the cluster's default StorageClass filled in
 #                           (no SBX_STORAGE_CLASS run applied it) is left alone with the knob unset.
+#                           With SBX_CREDENTIAL_STORE=vault there is no egress credential PVC to
+#                           carry a class: the ciphertext is in Vault.
+#   SBX_CREDENTIAL_STORE    optional, with SBX_EGRESS_CREDENTIALS=1: file (default) or vault (moca#823).
+#                           file is the PVC store as before. vault points the control plane at a Vault
+#                           KV v2 instead -- no PVC and no Recreate, because the ciphertext is not on a
+#                           volume -- and needs SBX_VAULT_ADDR. The KEK stays in the Secret sbx-egress
+#                           either way: Vault holds only ciphertext, so the key that opens it must not
+#                           live there. Switching an existing deployment does NOT migrate what the file
+#                           store already holds (moca#823)
+#   SBX_VAULT_ADDR          required with SBX_CREDENTIAL_STORE=vault: the Vault base URL, e.g.
+#                           https://vault.internal:8200 (an absolute http(s) URL; a path is kept, for a
+#                           Vault behind a reverse proxy under a sub-path)
+#   SBX_VAULT_KV_MOUNT      optional, with vault: the KV v2 mount, default secret (v1 will not work)
+#   SBX_VAULT_PATH          optional, with vault: the prefix under the mount, default moca/credentials
+#   SBX_VAULT_NAMESPACE     optional, with vault: Vault Enterprise / HCP namespace. Unset: no namespace
+#                           header. The control plane reads a short-lived token from a FILE
+#                           (/run/vault/token, an in-memory volume a Vault Agent sidecar writes), never
+#                           a static VAULT_TOKEN; adding that sidecar is deployment-specific (moca#823)
 #   SBX_REDIS_IMAGE         optional; repository[:tag]@sha256:<digest>: the image Redis runs instead of the
 #                           base's valkey/valkey:9-alpine. For a namespace whose data a Redis 7.4 wrote
 #                           (RDB format 12, which Valkey 9 cannot read: its AOF load aborts), e.g.
@@ -423,20 +441,49 @@ validate_store() {
 # SBX_EGRESS_CREDENTIALS and what it takes (spec §4.3). Sets EGRESS_ON, EGRESS_IDS (host ids, in
 # order), EGRESS_SPEC ("id=w1,w2" per host) and EGRESS_HOSTS_JSON, and checks the hosts against
 # the template workers: each owned by exactly one host, so a bad list is refused before anything is applied.
+# Also sets EGRESS_STORE (file|vault, moca#823): which of the two credential-store Components the
+# generated kustomization lists.
 EGRESS_ON=''
 EGRESS_IDS=''
 EGRESS_SPEC=''
 EGRESS_HOSTS_JSON=''
+EGRESS_STORE=''
 EGRESS_HOST_RE='^[a-z0-9][a-z0-9-]{0,30}$'
 validate_egress() {
+  local v
   case "${SBX_EGRESS_CREDENTIALS:-}" in
-    '' | 0) return 0 ;;
+    '' | 0)
+      # The store settings only mean anything with the feature on. Refused rather than ignored: a
+      # SBX_VAULT_ADDR that silently did nothing would look like a deployment on Vault that is not.
+      for v in SBX_CREDENTIAL_STORE SBX_VAULT_ADDR SBX_VAULT_KV_MOUNT SBX_VAULT_PATH SBX_VAULT_NAMESPACE; do
+        [[ -z "${!v:-}" ]] || die "$v needs SBX_EGRESS_CREDENTIALS=1"
+      done
+      return 0
+      ;;
     1) EGRESS_ON=1 ;;
     *) die 'SBX_EGRESS_CREDENTIALS must be unset, 0 or 1' ;;
   esac
   if [[ -n "${SBX_EGRESS_CREDENTIAL_TTL_SECONDS:-}" ]]; then
     [[ "$SBX_EGRESS_CREDENTIAL_TTL_SECONDS" =~ ^([5-9]|[1-9][0-9]|[12][0-9][0-9]|300)$ ]] ||
       die 'SBX_EGRESS_CREDENTIAL_TTL_SECONDS must be a whole number of seconds, 5-300'
+  fi
+  # file or vault. An unknown value dies here rather than rendering a stack with no store, the same
+  # reasoning as the control plane failing STARTUP on a bad SH_CREDENTIAL_STORE (main.ts).
+  case "${SBX_CREDENTIAL_STORE:-file}" in
+    file) EGRESS_STORE='file' ;;
+    vault) EGRESS_STORE='vault' ;;
+    *) die 'SBX_CREDENTIAL_STORE must be file or vault' ;;
+  esac
+  if [[ "$EGRESS_STORE" == vault ]]; then
+    [[ -n "${SBX_VAULT_ADDR:-}" ]] || die 'SBX_CREDENTIAL_STORE=vault needs SBX_VAULT_ADDR'
+    # The store itself refuses a non-absolute URL at startup; refusing here names the setup variable
+    # instead of leaving it to a CrashLoopBackOff.
+    [[ "$SBX_VAULT_ADDR" =~ ^https?://[^[:space:]]+$ ]] ||
+      die 'SBX_VAULT_ADDR must be an absolute http(s) URL (e.g. https://vault.internal:8200)'
+  else
+    for v in SBX_VAULT_ADDR SBX_VAULT_KV_MOUNT SBX_VAULT_PATH SBX_VAULT_NAMESPACE; do
+      [[ -z "${!v:-}" ]] || die "$v needs SBX_CREDENTIAL_STORE=vault"
+    done
   fi
   local spec="${SBX_EGRESS_HOSTS:-}" entry id ws w owned=' ' seen=' '
   if [[ -z "$spec" ]]; then
@@ -712,7 +759,11 @@ check_redis_image() {
 # applying it could not change the claim, and the render has no patch target for it).
 rendered_pvc_claims() {
   [[ -z "$STORE_ON" && -z "$COMBINED" ]] || printf 'moca-sbx-templates\n'
-  [[ -z "$EGRESS_ON" ]] || printf 'moca-sbx-credentials\n'
+  # EGRESS_STORE, not just EGRESS_ON: the vault component renders no credential PVC, so with
+  # SBX_CREDENTIAL_STORE=vault this run neither patches nor should check moca-sbx-credentials. A
+  # namespace migrating file -> vault still has the old claim live, and checking it would die about a
+  # class on a claim this run no longer manages.
+  [[ -z "$EGRESS_ON" || "$EGRESS_STORE" == vault ]] || printf 'moca-sbx-credentials\n'
   [[ -n "$COMBINED" ]] && printf 'moca-credentials\n'
   return 0
 }
@@ -1174,6 +1225,15 @@ ensure_settings() {
   if [[ -n "$EGRESS_ON" ]]; then
     sbx+=("SH_EGRESS_HOSTS=$EGRESS_HOSTS_JSON")
     [[ -z "${SBX_EGRESS_CREDENTIAL_TTL_SECONDS:-}" ]] || sbx+=("SH_EGRESS_CREDENTIAL_TTL_SECONDS=$SBX_EGRESS_CREDENTIAL_TTL_SECONDS")
+    # The Vault store's connection settings (moca#823). Only VAULT_ADDR is required: the mount and the
+    # path have code defaults the Component leaves optional, so an unset key is the default rather than
+    # a refusal. The TOKEN is never here -- it is a file a Vault Agent writes (VAULT_TOKEN_FILE).
+    if [[ "$EGRESS_STORE" == vault ]]; then
+      sbx+=("VAULT_ADDR=$SBX_VAULT_ADDR")
+      [[ -z "${SBX_VAULT_KV_MOUNT:-}" ]] || sbx+=("SH_VAULT_KV_MOUNT=$SBX_VAULT_KV_MOUNT")
+      [[ -z "${SBX_VAULT_PATH:-}" ]] || sbx+=("SH_VAULT_PATH=$SBX_VAULT_PATH")
+      [[ -z "${SBX_VAULT_NAMESPACE:-}" ]] || sbx+=("VAULT_NAMESPACE=$SBX_VAULT_NAMESPACE")
+    fi
   fi
   apply_configmap moca-settings "${moca[@]}"
   apply_configmap sbx-settings "${sbx[@]}"
@@ -1284,7 +1344,15 @@ write_overlay() {
     # The combined overlay already holds the template store (and refuses egress, validate_profile).
     if [[ -z "$COMBINED" ]] && [[ -n "$EGRESS_ON" || -n "$STORE_ON" ]]; then
       printf 'components:\n'
-      [[ -z "$EGRESS_ON" ]] || printf '  - %s/egress-credentials\n' "$OVERLAY_REL"
+      # Exactly one credential-store Component: both set SH_CREDENTIAL_STORE, so listing the two
+      # would leave the later one deciding (moca#823). EGRESS_STORE is file unless asked otherwise.
+      if [[ -n "$EGRESS_ON" ]]; then
+        if [[ "$EGRESS_STORE" == vault ]]; then
+          printf '  - %s/egress-credentials-vault\n' "$OVERLAY_REL"
+        else
+          printf '  - %s/egress-credentials\n' "$OVERLAY_REL"
+        fi
+      fi
       [[ -z "$STORE_ON" ]] || printf '  - %s/template-store\n' "$OVERLAY_REL"
     fi
     printf 'patches:\n'
@@ -1321,7 +1389,10 @@ write_overlay() {
       if [[ -n "$STORE_ON" || -n "$COMBINED" ]]; then
         printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-templates }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
       fi
-      if [[ -n "$EGRESS_ON" ]]; then
+      # Mirrors rendered_pvc_claims: the vault store renders no credential PVC, so emitting the patch
+      # would leave a target kustomize matches nothing for (it tolerates that silently, which is worse
+      # than refusing -- the class would simply never be applied anywhere).
+      if [[ -n "$EGRESS_ON" && "$EGRESS_STORE" != vault ]]; then
         printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-credentials }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
       fi
       # ocp-combined's own claim (pvc-credentials.yaml): the harness's file credential store.

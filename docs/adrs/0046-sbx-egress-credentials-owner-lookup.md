@@ -64,7 +64,12 @@ and is not ruled out by that.
   semi-trusted multiplexing worker SBX does not have. Phase 2 reuses the sandbox token instead.
 - **Kubernetes Secret store:** it would give the sandbox control plane Kubernetes API access, which is
   a tested absence.
-- **Vault now:** none is deployed. Standing one up would dominate the slice.
+- **Vault now:** none is deployed. Standing one up would dominate the slice. **Amended 2026-11-20
+  (moca#823):** still true of this slice's decision, but no longer true of the tree. The Vault store
+  (`vault-store.ts`, `SH_CREDENTIAL_STORE=vault`) and a deploy Component that wires it
+  (`deploy/k8s/overlays/ocp-sbx/egress-credentials-vault`, `SBX_CREDENTIAL_STORE=vault`) both exist;
+  what is still absent is a Vault to point at, its policy and token supply, and a migration of what
+  the file store already holds. The "Vault later, configuration only" framing above was right.
 - **Secrets on the KVM host:** it concentrates every user's secrets where phase 2 aims to reduce
   exposure.
 
@@ -73,6 +78,10 @@ and is not ruled out by that.
 - Positive: `git`, `gh`, `curl` and Streamable-HTTP MCP clients work unmodified in a sandbox as the
   user, while the token stays out of the guest. Delivering it needs no proto, relay or worker change. MI1's interception design
   (§8.5, §8.7) gets its first implementation, which the harness's own microVM sessions can reuse.
+- **Amended 2026-11-20 (moca#823):** the `Recreate`/one-replica cost below followed from the PVC, so
+  the Vault Component does not impose it — KV v2 check-and-set makes concurrent writers safe, and that
+  Component renders neither a PVC nor `Recreate`. It still leaves `replicas` at the base's 1: lifting
+  the count needs the other single-replica assumptions checked, which Vault alone does not settle.
 - Negative / accepted cost (phase 1): **a stolen host egress token yields the `sandbox-egress`
   credentials of every owner with a live sandbox on that host, usable from off the host, without
   any user's sandbox token**, for those sandboxes' lifetime. It is bounded per host, every issuance

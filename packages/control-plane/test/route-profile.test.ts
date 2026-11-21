@@ -12,6 +12,10 @@ const SHARED = [
   'GET /',
   'GET /healthz',
   'GET /readyz',
+  // Admin-only, and on both since #823: the sandbox profile is the only one that runs a file or Vault
+  // credential store, so `credential_nonprimary_kek_reads` can only move there -- harness-only made
+  // the KEK rotation procedure (RUNBOOK) unreadable exactly where it is needed.
+  'GET /metrics',
   'GET /v1/discovery',
   'POST /v1/auth/device',
   'POST /v1/auth/device/token',

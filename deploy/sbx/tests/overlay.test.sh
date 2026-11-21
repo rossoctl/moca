@@ -256,6 +256,70 @@ cp_ports="$(obj NetworkPolicy moca-control-plane | jq -r '[.spec.egress[].ports[
 [[ "$(obj NetworkPolicy moca-control-plane | jq -c '.spec.ingress')" == '[]' ]] || fail 'egress on opened ingress to the control plane'
 pass 'egress on: PVC (RWO 1Gi) mounted at /var/lib/moca/credentials, Recreate, store=file, sbx-egress projected beside moca-mu1, no service account token, NetworkPolicy unchanged'
 
+# The Vault credential store (moca#823): the ALTERNATIVE component, as setup.sh lists it behind
+# SBX_EGRESS_CREDENTIALS=1 with SBX_CREDENTIAL_STORE=vault. The point of the variant is what it does
+# NOT render -- no PVC and no Recreate -- because the ciphertext is in Vault rather than on a volume.
+VAULT="$(cd -P "$TMPD" && pwd)/vault"
+mkdir -p "$VAULT"
+vrel() { python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$1" "$VAULT"; }
+printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - %s\ncomponents:\n  - %s\n' \
+  "$(vrel "$ROOT/deploy/k8s/overlays/ocp-sbx")" "$(vrel "$ROOT/deploy/k8s/overlays/ocp-sbx/egress-credentials-vault")" >"$VAULT/kustomization.yaml"
+kubectl kustomize "$VAULT" >"$OUT" || fail 'the overlay with the egress-credentials-vault component does not render'
+KUBECONFIG=/dev/null kubectl label --local -f "$OUT" sbx-render- -o json | jq -s . >"$JSON"
+CP="$(obj Deployment moca-control-plane)"
+[[ -n "$CP" ]] || fail 'could not isolate the control-plane Deployment (vault store)'
+[[ "$(cp_env SH_CREDENTIAL_STORE | jq -r .value)" == vault ]] || fail 'SH_CREDENTIAL_STORE is not vault'
+[[ -z "$(cp_env SH_CREDENTIAL_DIR)" ]] || fail 'the vault store still sets SH_CREDENTIAL_DIR (a file-store setting)'
+# No volume to keep off a surge pod, so the base's rolling update must survive: this is what lifts
+# ADR-0046's one-replica/Recreate constraint. The replica count itself is unchanged (still the base's).
+[[ -z "$(obj PersistentVolumeClaim moca-sbx-credentials)" ]] || fail 'the vault store renders the file store PVC'
+[[ -z "$(q '.[] | select(.kind == "PersistentVolumeClaim")' -c)" ]] || fail 'the vault store renders a PVC'
+[[ "$(jq -r '.spec.strategy.type // "default"' <<<"$CP")" != Recreate ]] || fail 'the vault store forces Recreate'
+[[ -z "$(jq -r '.spec.template.spec.volumes[] | select(.persistentVolumeClaim) | .name' <<<"$CP")" ]] || fail 'the vault store volumes a PVC'
+# VAULT_ADDR is required (setup.sh refuses vault without it), so it must NOT be optional: a missing
+# key has to fail the pod rather than start it with no store. The rest default in code.
+[[ "$(cp_env VAULT_ADDR | jq -r '.valueFrom.configMapKeyRef | "\(.name)/\(.key)/\(.optional // false)"')" == sbx-settings/VAULT_ADDR/false ]] ||
+  fail "VAULT_ADDR is not a required sbx-settings key: $(cp_env VAULT_ADDR)"
+for k in SH_VAULT_KV_MOUNT SH_VAULT_PATH VAULT_NAMESPACE; do
+  [[ "$(cp_env "$k" | jq -r '.valueFrom.configMapKeyRef | "\(.name)/\(.key)/\(.optional)"')" == "sbx-settings/$k/true" ]] ||
+    fail "$k is not an optional sbx-settings key"
+done
+# A FILE, never a static token: vault-store.ts re-reads it per request so an Agent can renew it.
+[[ "$(cp_env VAULT_TOKEN_FILE | jq -r .value)" == /run/vault/token ]] || fail 'VAULT_TOKEN_FILE is not /run/vault/token'
+[[ -z "$(cp_env VAULT_TOKEN)" ]] || fail 'the vault store sets a static VAULT_TOKEN (it must be a file)'
+# The egress feature's OWN settings, which this component must wire exactly as the file one does: the
+# KEK is projected either way, and the control plane refuses to boot with a KEK and no SH_EGRESS_HOSTS
+# (egress-config.ts). Omitting them crash-loops the pod, so assert PRESENCE, not just absence of the
+# file-store keys -- the omission this test missed the first time.
+for k in SH_EGRESS_HOSTS SH_EGRESS_CREDENTIAL_TTL_SECONDS; do
+  [[ "$(cp_env "$k" | jq -r '.valueFrom.configMapKeyRef | "\(.name)/\(.key)/\(.optional)"')" == "sbx-settings/$k/true" ]] ||
+    fail "the vault store does not read $k from sbx-settings: with the KEK mounted and no hosts, the control plane refuses to boot"
+done
+# Stronger than greping the render: the two components must agree on the egress env, so diff the
+# control plane's env NAMES between them and allow only the store-specific keys to differ.
+VENV="$(jq -r '[.spec.template.spec.containers[] | select(.name == "control-plane") | .env[].name] | sort | join(" ")' <<<"$CP")"
+for k in SH_EGRESS_HOSTS SH_EGRESS_CREDENTIAL_TTL_SECONDS SH_CREDENTIAL_STORE CREDENTIALS_DIRECTORY; do
+  [[ " $VENV " == *" $k "* ]] || fail "the vault store's env is missing $k (have: $VENV)"
+done
+# The sink is writable and in memory; /run/credentials stays read-only, so it cannot hold the sink.
+[[ "$(jq -r '.spec.template.spec.volumes[] | select(.name == "vault-token") | .emptyDir.medium' <<<"$CP")" == Memory ]] ||
+  fail 'the vault token sink is not an in-memory emptyDir'
+[[ "$(jq -r '.spec.template.spec.containers[] | select(.name == "control-plane") | .volumeMounts[] | select(.name == "vault-token") | "\(.mountPath) \(.readOnly // false)"' <<<"$CP")" == '/run/vault false' ]] ||
+  fail 'the vault token sink is not mounted writable at /run/vault'
+# The KEK still comes from sbx-egress: Vault holds ciphertext, so the key that opens it lives apart.
+# A strategic merge REPLACES the source list, so this component restates every source the other two
+# would add: moca-mu1's three items, the optional moca-oidc secret, and sbx-template-hosts (optional,
+# because the template store may be off). Asserted in full, so a source dropped here -- which would
+# silently unmount the installer token or the oidc secret -- fails rather than going unnoticed.
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[]?.secret | [.name, (.optional // false)]]' <<<"$CP")" == '[["moca-mu1",false],["moca-oidc",true],["sbx-egress",false],["sbx-template-hosts",true]]' ]] ||
+  fail "vault store: the credentials volume is not moca-mu1, moca-oidc, sbx-egress and sbx-template-hosts: $(jq -c '.spec.template.spec.volumes[] | select(.name == "credentials")' <<<"$CP")"
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[] | .secret.items[]?.key]' <<<"$CP")" == '["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN","SH_INSTALLER_TOKEN","SH_OIDC_CLIENT_SECRET"]' ]] ||
+  fail "the vault store changed the projected keys in the credentials volume"
+# The sandbox profile still has no Kubernetes API access: the Vault store needs none either.
+[[ "$(jq -r .spec.template.spec.automountServiceAccountToken <<<"$CP")" == false ]] || fail 'the vault store mounts a service account token'
+[[ "$(obj NetworkPolicy moca-control-plane | jq -c '.spec.ingress')" == '[]' ]] || fail 'the vault store opened ingress to the control plane'
+pass 'egress on with vault: store=vault, no PVC, no Recreate, VAULT_ADDR required and the rest optional, token from an in-memory file sink, KEK still from sbx-egress, no service account token'
+
 # The template store (template lifecycle spec §3.1, §7.2): the component alone, as setup.sh lists it
 # behind SBX_TEMPLATE_STORE=1.
 STORE="$(cd -P "$TMPD" && pwd)/store"

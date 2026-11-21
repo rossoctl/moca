@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { asyncCounters, resetAsyncCounters } from '../../src/counters.js';
 import { KEK_BYTES } from '../../src/envelope.js';
 import {
   parseCredentialBody,
@@ -184,10 +185,14 @@ export function storeContract(label: string, backend: () => ContractBackend): vo
       beforeEach(() => {
         warns = [];
         console.warn = (...args: unknown[]) => void warns.push(args.join(' '));
+        resetAsyncCounters();
       });
       afterEach(() => {
         console.warn = original;
+        resetAsyncCounters();
       });
+
+      const nonPrimaryReads = () => asyncCounters().credential_nonprimary_kek_reads;
 
       it('opens under a retired KEK and logs it, then re-seals forward on the next put', async () => {
         const oldKek = newKek();
@@ -203,6 +208,45 @@ export function storeContract(label: string, backend: () => ContractBackend): vo
         expect(warns).toEqual([]);
         // And the retired key alone no longer opens it: the rotation actually moved.
         await expect(make([oldKek]).store.get(ALICE, 'github-work')).rejects.toThrow(/decrypt/);
+      });
+
+      /**
+       * The counter is what an operator watches to decide the retired key is unused
+       * (docs/operate/sandbox-service/runbook.md, "Rotating the credential KEK"), so it must track the
+       * same transitions the log does: one per stale READ -- not deduplicated, or a long-lived process
+       * would report zero while credentials were still stale -- and back to still once the entry has
+       * been re-sealed forward.
+       */
+      it('counts every read under a retired KEK, and stops counting once re-sealed', async () => {
+        const oldKek = newKek();
+        const newer = newKek();
+        await make([oldKek]).store.put(ALICE, cred('github-work'));
+        expect(nonPrimaryReads()).toBe(0); // sealed and read under its own primary
+
+        const rotated = make([newer, oldKek]).store;
+        await rotated.get(ALICE, 'github-work');
+        await rotated.get(ALICE, 'github-work');
+        expect(nonPrimaryReads()).toBe(2);
+
+        await rotated.put(ALICE, cred('github-work'));
+        await rotated.get(ALICE, 'github-work');
+        expect(nonPrimaryReads()).toBe(2);
+      });
+
+      /**
+       * `list` decrypts nothing (spec §6.2), so it cannot see a retired key and must not report one.
+       * The same store then READS the same stale entry and does count it -- otherwise this passes for
+       * the uninteresting reason that nothing in the test opened a credential at all, which is true of
+       * any implementation that counts only in `readCredential`.
+       */
+      it('counts a stale read but not the list that preceded it', async () => {
+        const oldKek = newKek();
+        await make([oldKek]).store.put(ALICE, cred('github-work'));
+        const rotated = make([newKek(), oldKek]).store;
+        expect((await rotated.list(ALICE)).map((d) => d.name)).toEqual(['github-work']);
+        expect(nonPrimaryReads()).toBe(0);
+        await rotated.get(ALICE, 'github-work');
+        expect(nonPrimaryReads()).toBe(1);
       });
     });
 
