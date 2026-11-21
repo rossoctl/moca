@@ -641,7 +641,6 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
       writeFileSync(join(h.r, file), JSON.stringify(body));
       expect(await h.run(['up'])).toBe(1);
       expect(h.err()).toContain(`sbx: ${named}`);
-      expect(h.err()).toContain('--no-agent-config');
       expect(h.cp.calls).toEqual([]);
       expect(h.ws.counts().opened).toBe(0);
       expect(existsSync(join(h.r, '.sbx'))).toBe(false);

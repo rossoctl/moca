@@ -585,11 +585,38 @@ describe('agent configuration (SBX0 §6.3)', () => {
       expect(err.file).toBe(file);
       expect(err.message).toContain(file);
       expect(err.message).toContain(key);
-      expect(err.message).toMatch(/--no-agent-config/);
+      // What --no-agent-config does, true whether or not an earlier up configured the repo.
+      expect(err.message).toMatch(
+        key === 'permissions.allow'
+          ? /move it to \.claude\/settings\.local\.json/
+          : /--no-agent-config \(writes no agent configuration\) and configure the agents yourself/,
+      );
     }
     expect(text(d, file)).toBe(body);
     for (const f of FILES.filter((f) => f !== file)) expect(existsSync(join(d, f)), f).toBe(false);
     expect(existsSync(join(d, '.sbx'))).toBe(false);
+  });
+
+  it('says only to delete a local-tool allow rule in Cortex mode, where no deny list outranks it', () => {
+    const d = dir();
+    mkdirSync(join(d, '.claude'));
+    writeFileSync(
+      join(d, '.claude/settings.json'),
+      JSON.stringify({ permissions: { allow: ['Bash'] } }),
+    );
+    const err = conflictOf(() => writeAgentConfig(d, { dryRun: true, cortex: true }));
+    expect(err.message).toMatch(/permissions\.allow .*; delete it/);
+    expect(err.message).not.toMatch(/move it/);
+  });
+
+  it('takes a local-tool allow rule moved to settings.local.json, as that conflict says', () => {
+    const d = dir();
+    mkdirSync(join(d, '.claude'));
+    const local = { permissions: { allow: ['Bash(ls:*)'] } };
+    writeFileSync(join(d, '.claude/settings.local.json'), JSON.stringify(local));
+    writeAgentConfig(d);
+    expect(checkAgentConfig(d)).toEqual([]);
+    expect(json(d, '.claude/settings.local.json')).toEqual(local);
   });
 
   // Review I2: OpenCode's agent config overrides the global `tools`, and `permission` is the

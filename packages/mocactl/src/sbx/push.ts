@@ -529,7 +529,7 @@ export async function planPush(
   const names = [...new Set(splitNames(raw).map((n) => n.replace(/\/$/, '')))];
   const excludedSecrets: string[] = [];
   const skipped: string[] = [];
-  const tooBig: string[] = [];
+  const tooBig: { path: string; size: number }[] = [];
   const byTop = new Map<string, number>();
   const kept: { path: string; st: Stats }[] = [];
   let bytes = 0;
@@ -570,10 +570,7 @@ export async function planPush(
       continue;
     }
     if (st.isFile()) {
-      if (st.size > MAX_FILE) {
-        // Just over the limit, MiB to one decimal reads as the limit itself: give the bytes.
-        tooBig.push(`${p} (${mib(st.size)}, ${st.size} bytes)`);
-      }
+      if (st.size > MAX_FILE) tooBig.push({ path: p, size: st.size });
       bytes += st.size;
       const top = p.includes('/') ? p.slice(0, p.indexOf('/')) : '.';
       byTop.set(top, (byTop.get(top) ?? 0) + st.size);
@@ -581,9 +578,33 @@ export async function planPush(
     kept.push({ path: p, st });
   }
   if (tooBig.length) {
+    // An ignore rule does not keep a tracked file out.
+    const tracked = new Set(
+      splitNames(
+        await git(root, [
+          '--literal-pathspecs',
+          'ls-files',
+          '-z',
+          '--cached',
+          '--',
+          ...tooBig.map((t) => t.path),
+        ]),
+      ),
+    );
+    // Just over the limit, MiB to one decimal reads as the limit itself: give the bytes.
+    const named = tooBig.map(
+      ({ path, size }) =>
+        `${path} (${mib(size)}, ${size} bytes${tracked.has(path) ? ', tracked' : ''})`,
+    );
     throw new PushError(
-      `files over ${MAX_FILE >> 20} MiB (${MAX_FILE} bytes) are not pushed; remove them, or ` +
-        `.gitignore them: ${tooBig.join(', ')}`,
+      `files over ${MAX_FILE >> 20} MiB (${MAX_FILE} bytes) are not pushed: a file goes whole ` +
+        `into one sandbox command, whose input is at most ${MAX_STDIN >> 20} MiB compressed: ` +
+        `${named.join(', ')}. Leave them out with .git/info/exclude (yours only) or .gitignore ` +
+        '(shared)' +
+        (tooBig.some(({ path }) => tracked.has(path))
+          ? '; a tracked one is pushed even when ignored: git rm --cached it too, which once ' +
+            'committed removes it for everyone'
+          : ''),
     );
   }
   const max = o.maxPush ?? DEFAULT_MAX_PUSH;
