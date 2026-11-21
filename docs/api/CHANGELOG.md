@@ -21,7 +21,8 @@ that shipped it ("The data plane's twin … goes to"):
 ## 1.36.0
 
 A gate can be given a deadline ([#393](https://github.com/rossoctl/moca/issues/393)). Additive: two
-optional fields on the async submission.
+optional fields on the async submission, one new field on the status read, and two refusals for
+submissions that were accepted and then did the wrong thing.
 
 - `gateDeadlineS` bounds how long THIS turn's gate may stay unanswered, and `onTimeout` (`abort` or
   `reject`, default `abort`) says what the control plane decides when it expires. There is no
@@ -30,6 +31,14 @@ optional fields on the async submission.
   (default `0`, never), the submission's `gateDeadlineS`, and the turn record's own TTL. A
   submission may ask to be bounded sooner and never later.
 - The deadline is carried onto a resume, so a second gate on the same work is bounded too.
+- ONE open gate per session: a submission asking for a gate while the session already has a paused
+  turn is `409 gate_pending`, naming that turn. The gate lives in the session's own durable state,
+  so a second gated turn used to park on the open gate and take the decision meant for the first.
+- `requireApproval` on a `converge` submission is `400 invalid_request` instead of a silently
+  dropped flag, which ran an ungated turn for a caller who asked for a gate. That kind asks with
+  `item.require_approval`.
+- `TurnStatus.resumeOf` names the paused turn a resume answers the gate of, so a client holding only
+  the new turn's id can walk back to the one that asked.
 
 ## 1.35.0
 

@@ -24,9 +24,9 @@
   `0x1F90` with no upper bound. Several worker settings (`SH_STATS_INTERVAL_MS`, the
   `KAGENTI_SANDBOX_*` lease and affinity timings, `KAGENTI_SYNC_SATURATION_*`) also fall back
   silently, so a typo produces no error. The Go microVM worker refuses a malformed
-  `WORKER_MAX_CONCURRENT`. `MOCA_ASYNC_QUEUED_PER_OWNER` and `MOCA_TURN_SUMMARY_BYTES` are the
-  exceptions: they use a strict parser (`countEnv`), because `0` is a meaningful setting for both and
-  `intEnv` would read it as "unset".
+  `WORKER_MAX_CONCURRENT`. `MOCA_ASYNC_QUEUED_PER_OWNER`, `MOCA_TURN_SUMMARY_BYTES` and
+  `MOCA_GATE_DEADLINE_S` are the exceptions: they use a strict parser (`countEnv`), because `0` is a
+  meaningful setting for all three and `intEnv` would read it as "unset".
 - **`CREDENTIALS_DIRECTORY`.** When systemd (or the K8s manifests) sets it, the control plane reads
   all four of its secrets from that directory first and falls back to the same-named env var; both
   present is fatal.

@@ -327,6 +327,13 @@ export class TurnStore {
    * rather than walking a week of turns -- a session whose last 50 turns are all unpaused has no
    * pending gate worth finding, and the alternative (a second index keyed by session) would have to
    * be kept in step with every transition.
+   *
+   * shortcut: a gate stops being findable once `scan` NEWER turns exist on the session, which reads
+   * as `409 gate_not_pending` on the decision route and as a gate the sweep's `claimGate` has
+   * already dropped -- a refusal, never a decision landing on the wrong turn. Hard to reach now that
+   * `submitTurn` refuses a second GATED turn while one is open: it takes 50 ungated turns on the
+   * same session while a human thinks. Upgrade to a per-session paused marker written by
+   * `toTerminal` if a caller ever needs to hold a gate open across a long run of other turns.
    */
   async findPausedBySession(
     sessionId: string,

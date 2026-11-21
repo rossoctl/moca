@@ -30,7 +30,9 @@ still run in a sandbox with its own filesystem, and `workspaceRef` is a path ins
 `item` is `{item_id: string, file: string, pattern: string, require_approval?: boolean}`.
 
 Optional fields on any envelope: `decision`, `model`, `provider`, `workspaceRef`, `repoUrl`, `ref`,
-`maxTurns` (verdict leaf only), `tenant`, `configRef`, `problemStatement`, `prompt`, `env_key`.
+`maxTurns` (verdict leaf only), `requireApproval` (prompt and solve leaves only — a verdict leaf asks
+for its gate with `item.require_approval`), `tenant`, `configRef`, `problemStatement`, `prompt`,
+`env_key`.
 
 **`configRef`** names a [config bundle](../how-to/promote-claude-workflow.md) (`sha256:` plus 64 lowercase hex
 characters). It applies to **prompt and solve leaves only**; a verdict leaf never reads it and runs without the

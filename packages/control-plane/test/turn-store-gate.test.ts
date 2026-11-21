@@ -83,6 +83,17 @@ describe('a gate resume on the record and the store (#393)', () => {
     expect(await store.dueGates(60_999)).toEqual([]);
   });
 
+  it('pages gates due in the same millisecond in a stable order', async () => {
+    // Real Redis breaks a score tie BY MEMBER, and the fake now does too -- so a bounded `dueGates`
+    // page cannot come out in insertion order here and in member order in production.
+    for (const turnId of ['t-b', 't-a']) {
+      await store.create({ ...base, turnId, gateDeadlineS: 60 });
+      await store.finalize(turnId, 'paused', 1_000);
+    }
+    expect(await store.dueGates(61_000)).toEqual(['t-a', 't-b']);
+    expect(await store.dueGates(61_000, 1)).toEqual(['t-a']);
+  });
+
   it('answers null for a session with no paused turn', async () => {
     await store.create({ ...base, turnId: 't-30' });
     expect(await store.findPausedBySession(base.sessionId)).toBeNull();

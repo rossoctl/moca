@@ -150,6 +150,7 @@ components:
             - workload_runs_unavailable
             - turn_not_cancellable
             - gate_not_pending
+            - gate_pending
             - turn_not_claimable
             - turn_not_found
             - credential_required
@@ -334,6 +335,9 @@ components:
           description: |
             a note for the model, carried into the resumed turn's prompt. Bounded because it is
             prompt text the owner is billed for and the session stores for good.
+
+            The server's bound is 4096 BYTES, not characters: `maxLength` above counts characters,
+            so multi-byte text is refused (`400 invalid_request`) before it reaches that many.
     TurnStatus:
       type: object
       required: [turnId, state, attempts]
@@ -359,6 +363,12 @@ components:
             present and `true` only on a `running` turn a `DELETE` has asked to stop (#391): the
             request is in flight and the worker has not yet reported. The turn reaches `cancelled`
             on its own; absent otherwise.
+        resumeOf:
+          type: string
+          description: |
+            the `paused` turn whose gate this turn answers (#393); absent on every other turn. A
+            paused turn is terminal and never reopened, so a decision always produces a new turn --
+            this is the link back to the one that asked.
         result:
           type: object
           description: |
@@ -2060,7 +2070,13 @@ paths:
                     `request_approval` call, after which the turn ends `paused` with a `gate` on its
                     result; resolve it with `POST /v1/sessions/{id}/decision`, which resumes the work
                     as a NEW turn linked by `resumeOf`. Applies to the `prompt` and `solve` kinds; a
-                    `converge` leaf carries the same request on `item.require_approval`.
+                    `converge` leaf carries the same request on `item.require_approval`, and sending
+                    this field with one is `400 invalid_request` rather than an ignored flag.
+
+                    ONE open gate per session: a gated submission while the session already has a
+                    paused turn is `409 gate_pending`. The gate lives in the session's own durable
+                    state, so a second gated turn would park on the open gate and take the decision
+                    meant for the first.
                 gateDeadlineS:
                   type: integer
                   minimum: 1
@@ -2124,6 +2140,14 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: |
+            `gate_pending`: this submission asks for a gate and the session already has one open.
+            One open gate per session (#393) -- the message names the paused turn. Answer it with
+            `POST /v1/sessions/{id}/decision`, or submit this turn without `requireApproval`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '429':
           description: |
             `async_quota_exhausted`: the caller already holds `MOCA_ASYNC_QUEUED_PER_OWNER`

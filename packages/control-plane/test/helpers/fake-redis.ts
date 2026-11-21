@@ -11,6 +11,9 @@ import type { ResultRedisLike } from '../../src/turn-result.js';
  * RECORDED rather than simulated: `expires` is what a test asserts against, so a TTL assertion reads
  * the same way here as against `fakeBundleRedis`.
  */
+/** Byte-wise, as Redis compares members of equal score; `localeCompare` would not be. */
+const byMember = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
 export function fakeRedis() {
   const hashes = new Map<string, Record<string, string>>();
   // Plain string keys. Only `leaf:result:<sid>:<turnId>` lives here today -- the leaf result the
@@ -82,7 +85,14 @@ export function fakeRedis() {
         .filter((m) => (hi.exclusive ? m.score < hi.bound : m.score <= hi.bound))
         .filter((m) => (lo.exclusive ? m.score > lo.bound : m.score >= lo.bound))
         // LIMIT applies AFTER the sort, so the direction decides which page a bounded read gets.
-        .sort((a, b) => (opts.REV ? b.score - a.score : a.score - b.score));
+        // Ties broken BY MEMBER, as Redis does -- ascending forward, descending REV. Without it a
+        // tie paged in insertion order, so a test could pass on an order real Redis never gives:
+        // two gates due in the same millisecond, or two turns created in one.
+        .sort((a, b) =>
+          opts.REV
+            ? b.score - a.score || byMember(b.value, a.value)
+            : a.score - b.score || byMember(a.value, b.value),
+        );
       if (opts.LIMIT) rows = rows.slice(opts.LIMIT.offset, opts.LIMIT.offset + opts.LIMIT.count);
       return rows.map((m) => m.value);
     },
