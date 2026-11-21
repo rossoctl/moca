@@ -754,9 +754,10 @@ check_redis_image() {
   die "StatefulSet redis in $NS runs $image, not Valkey, and Valkey 9 (the default without SBX_REDIS_IMAGE) cannot read the RDB format 12 Redis 7.4 writes: redis-0 would crash-loop. Until the data is migrated, set SBX_REDIS_IMAGE to that image pinned by digest (repository[:tag]@sha256:<digest>; the running digest: kubectl -n $NS get pod redis-0 -o jsonpath='{.status.containerStatuses[0].imageID}'). See docs/operate/sandbox-service/runbook.md §2"
 }
 
-# Every PVC this run writes SBX_STORAGE_CLASS into (write_overlay emits one patch per name here;
-# the conditions mirror its, so a claim this run does not render is neither patched nor checked --
-# applying it could not change the claim, and the render has no patch target for it).
+# Every PVC this run writes SBX_STORAGE_CLASS into (write_overlay emits one patch per name here; the
+# conditions mirror its, so a claim this run does not render is neither patched nor checked -- applying
+# it could not change the claim, and kustomize SKIPS a patch whose target nothing matches, silently and
+# with exit 0, so the class would simply never be applied rather than failing the build).
 rendered_pvc_claims() {
   [[ -z "$STORE_ON" && -z "$COMBINED" ]] || printf 'moca-sbx-templates\n'
   # EGRESS_STORE, not just EGRESS_ON: the vault component renders no credential PVC, so with
