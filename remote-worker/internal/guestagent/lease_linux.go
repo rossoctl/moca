@@ -229,18 +229,21 @@ func (a *Agent) armCacheDrop(afterS uint32) {
 // dropIdleCache drops the guest's clean page cache (F1 of the E17b report) unless a
 // lease request has run since the drop was armed at gen: the dataset and venv a command
 // read stay in guest RAM otherwise, and free-page reporting returns only what the guest
-// frees. sync first, so pages written back since the last request can go too. tmpfs
-// (/tmp, /var) is not page cache that drop_caches frees, and stays. Under the lease
-// mutex, so it never runs beside a request; one that arrives meanwhile waits for it.
+// frees. sync first, so pages written back since the last request can go too: outside
+// the lease mutex, because it frees nothing, and a request arriving meanwhile must not
+// wait for a sync of a busy workspace (#974 review). The drop itself runs under the
+// mutex and only if no request ran since gen, during the sync included, so it never
+// runs beside a request. tmpfs (/tmp, /var) is not page cache that drop_caches frees,
+// and stays.
 func (a *Agent) dropIdleCache(gen uint64) {
 	l := &a.lease
+	unix.Sync()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.dropGen != gen || l.stopped.Load() || a.dead.Load() {
 		return
 	}
 	l.drop = nil
-	unix.Sync()
 	if err := os.WriteFile(dropCachesPath, []byte("1\n"), 0); err != nil {
 		log.Printf("guest-agent: lease: idle page-cache drop: %v", err)
 	}
