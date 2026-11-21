@@ -15,7 +15,7 @@ The agent sends every command to the moca sandbox service, which runs each comma
 At the end, you apply the agent's work to your laptop as a patch.
 
 > **Preview.** The sandbox service is implemented but not yet declared Stable; interfaces and
-> limits may change.
+> limits may change. Known limits: [Limits](concepts/limits.md).
 
 ## What happens to your files
 
@@ -153,28 +153,18 @@ sbx: .claude/settings.json: permissions.allow lists local built-in tools (Bash(g
 which would act on this machine; edit it by hand, or run mocactl sbx up --no-agent-config
 ```
 
-This check protects you. In Claude Code an allow rule beats a deny rule, so the listed commands
-would run **on your laptop** while you expect the sandbox to run them.
+At run time the deny wins: an allow rule cannot carve an exception out of a deny, so the listed
+commands do not run on your laptop. `up` stops because the two rules contradict each other. A
+repository that keeps both says one thing and does another, and the allow rule is inert.
 
-Move the rules to `.claude/settings.local.json`, which `up` does not write and does not check:
+Delete the local-tool rules from `permissions.allow` in `.claude/settings.json`, then run `up`
+again. Keep a rule that names a sandbox tool, such as `mcp__sandbox__*`.
 
-```bash
-# Add the rules to .claude/settings.local.json, remove them from .claude/settings.json.
-echo .claude/settings.local.json >> .gitignore
-mocactl sbx up
-```
+The agent does not need those rules. It uses the sandbox's tools, which `up` allows for you.
 
-Add the file to `.gitignore` in the same step, or git reports it as a new file.
-
-**This passes the check, and the allow rules still apply.** Claude Code merges
-`settings.local.json` over `settings.json`, and an allow rule still beats a deny rule, so those
-commands can still run on your laptop. `up` does not report it, because it reads
-`permissions.allow` only in `settings.json`. For a sandbox you can depend on, delete the rules
-instead, or move the file aside while you use the sandbox:
-
-```bash
-mv .claude/settings.local.json .claude/settings.local.json.off
-```
+If you want the rules for your own sessions outside the sandbox, put them in
+`.claude/settings.local.json`, which `up` neither writes nor reads for permissions. Add that file
+to `.gitignore`, or git reports it as a new file. The rules stay inert while the deny is in place.
 
 Do not use `--no-agent-config` to get past this check. It writes **no** agent configuration, so
 Claude Code gets no sandbox MCP server, keeps its local tools, and runs every command on your
