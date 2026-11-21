@@ -146,6 +146,22 @@ export interface TurnRecord {
    * turn is still cancelled outright and never carries this.
    */
   cancelRequested?: boolean;
+  /**
+   * The PAUSED turn this one resumes (#393). A decision does not reopen a paused record -- it cannot:
+   * `toTerminal` CASes against the open states, so a terminal record never transitions again. So the
+   * resume is a new turn that copies the paused one's envelope and appends the decision, and this
+   * field is the only link between them. It is also the "already answered" marker the decision route
+   * reads, which is why it is on the RESUME rather than on the paused turn.
+   */
+  resumeOf?: string;
+  /**
+   * Seconds this turn's gate may stay unanswered (#393 §3), already clamped by `resolveGateDeadline`
+   * at submission to the tightest of the deployment ceiling, the submission and the record's TTL.
+   * Absent means no deadline, which is the default: expiring a gate spends the owner's decision for
+   * them. `onTimeout` is never stored without it.
+   */
+  gateDeadlineS?: number;
+  onTimeout?: GateTimeoutAction;
 }
 
 export const turnKey = (turnId: string): string => `sh:cp:turn:${turnId}`;
@@ -311,6 +327,16 @@ export function compareCursor(a: string, b: string): number {
  */
 export const sessionTurnsKey = (sessionId: string): string => `sh:cp:session:${sessionId}:turns`;
 
+/**
+ * Paused turns awaiting a decision, scored by their deadline (#393, design §3). One global zset
+ * rather than one per owner: the sweep is a single pass for the whole deployment, and an owner with
+ * no gates must cost it nothing.
+ *
+ * Takes the key tag the way nothing else in this block does, because it is the only key here with no
+ * id to tag -- and an untagged global index would leak between the test suites `keyTag` isolates.
+ */
+export const gateIndexKey = (tag?: string): string => (tag ? `sh:cp:gates:${tag}` : 'sh:cp:gates');
+
 /** Owner-scoped, so one owner's key cannot address another's turn. */
 export const idempotencyKeyKey = (owner: string, key: string): string =>
   `sh:cp:turnidem:${subjectHash(owner)}:${key}`;
@@ -322,6 +348,39 @@ export interface ParsedSubmission {
   idempotencyKey?: string;
   /** Reported, not refused: the 501 is the handler's, before admission and before enqueue (§4.2). */
   workloadId?: string;
+  /** Seconds a gate on this turn may stay unanswered (#393 §3); absent = forever. A CEILING. */
+  gateDeadlineS?: number;
+  /** What the sweep decides when that deadline passes (#393 §3); absent = `'abort'`. */
+  onTimeout?: GateTimeoutAction;
+}
+
+/** What the deadline sweep decides for a gate nobody answered (#393, design §3). */
+export type GateTimeoutAction = 'abort' | 'reject';
+
+/**
+ * Does this ask for a gate? `requireApproval` for the prompt and solve kinds, and
+ * `item.require_approval` for the verdict kind, which has carried its own flag since ADR-0016.
+ *
+ * Reads a raw submission body and a stored envelope alike -- the two spellings survive the parse
+ * unchanged -- which is why `parseTurnSubmission` and `submitTurn`'s admission guard can share it.
+ */
+export function asksForGate(body: Record<string, unknown>): boolean {
+  if (body.requireApproval === true) return true;
+  const item = body.item as { require_approval?: unknown } | undefined;
+  return item?.require_approval === true;
+}
+
+/**
+ * The tightest gate deadline in force (#393 §3). EVERY input is a CEILING and the tightest one wins
+ * -- the same rule budgets follow, for the same reason: a submission may ask to be bounded sooner
+ * and never later.
+ *
+ * 0 and undefined both mean "this side imposes no bound": 0 is `countEnv`'s convention for a count
+ * where 0 is meaningful rather than missing, and it is also what an unset env var produces.
+ */
+export function resolveGateDeadline(...bounds: (number | undefined)[]): number | undefined {
+  const real = bounds.filter((v): v is number => typeof v === 'number' && v > 0);
+  return real.length ? Math.min(...real) : undefined;
 }
 
 const KEY_RE = /^[\x21-\x7e]{1,128}$/;
@@ -384,12 +443,50 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
     idempotencyKey = b.idempotencyKey;
   }
 
+  // CP-side scheduling, so they stay OFF the envelope: the harness has no sweep and no clock for
+  // this -- a gate's deadline is enforced by whoever is still running when the gate is not.
+  if (
+    b.gateDeadlineS !== undefined &&
+    (typeof b.gateDeadlineS !== 'number' ||
+      !Number.isSafeInteger(b.gateDeadlineS) ||
+      b.gateDeadlineS <= 0)
+  ) {
+    throw new CpError('invalid_request', 'gateDeadlineS must be a positive integer');
+  }
+  // No 'approve' here. An unanswered gate must never be read as consent -- the whole point of the
+  // gate is that a human said yes, and a clock cannot. 'reject' is the lenient end of the range.
+  if (b.onTimeout !== undefined && b.onTimeout !== 'abort' && b.onTimeout !== 'reject') {
+    throw new CpError('invalid_request', 'onTimeout must be "abort" or "reject"');
+  }
+  // REFUSED on an ungated turn, for the same reason `requireApproval` on a converge leaf is: both
+  // are silently inert otherwise. `toTerminal` arms the gate index only on the `paused` transition,
+  // so a turn that never asks for a gate stores these two and nothing ever reads them -- a caller
+  // who set a deadline would get a 202 and learn it had none only when the gate it expected never
+  // expired.
+  if ((b.gateDeadlineS !== undefined || b.onTimeout !== undefined) && !asksForGate(b)) {
+    throw new CpError(
+      'invalid_request',
+      'gateDeadlineS and onTimeout apply to a gated turn; set requireApproval (or item.require_approval on a converge turn) or omit them',
+    );
+  }
+
   const workloadId = typeof b.workloadId === 'string' ? b.workloadId : undefined;
   const common = {
     caps,
     ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
     ...(workloadId !== undefined ? { workloadId } : {}),
+    ...(b.gateDeadlineS !== undefined ? { gateDeadlineS: b.gateDeadlineS as number } : {}),
+    ...(b.onTimeout !== undefined ? { onTimeout: b.onTimeout as GateTimeoutAction } : {}),
   };
+
+  // #393: a gate on a prompt or solve turn. The converge kind has carried this on
+  // `item.require_approval` since ADR-0016 and keeps it, so this is read only for the other two.
+  if (b.requireApproval !== undefined && typeof b.requireApproval !== 'boolean') {
+    throw new CpError('invalid_request', 'requireApproval must be a boolean');
+  }
+  // `true` only: an absent flag and `false` mean the same thing, and storing both would put two
+  // spellings of "no gate" on the wire (the same rule the `converge` normalisation below follows).
+  const gated = b.requireApproval === true ? { requireApproval: true as const } : {};
 
   const item = asRecord(b.item);
   // `converge` is the explicit wire spelling of the default kind (spec §10 parity table: "Leaf
@@ -404,10 +501,18 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
     str(item.file) &&
     str(item.pattern)
   ) {
+    // REFUSED, not dropped: the verdict kind asks for its gate with `item.require_approval`, so a
+    // top-level flag silently ignored here would run an UNGATED turn for a caller who asked for one.
+    if (b.requireApproval === true) {
+      throw new CpError(
+        'invalid_request',
+        'requireApproval applies to the prompt and solve kinds; a converge leaf asks for its gate with item.require_approval',
+      );
+    }
     return { kind: 'verdict', envelope: { item: b.item }, ...common };
   }
   if (b.kind === 'prompt' && str(b.prompt)) {
-    return { kind: 'prompt', envelope: { kind: 'prompt', prompt: b.prompt }, ...common };
+    return { kind: 'prompt', envelope: { kind: 'prompt', prompt: b.prompt, ...gated }, ...common };
   }
   if (b.kind === 'solve' && str(b.problemStatement) && str(b.repoUrl) && str(b.ref)) {
     return {
@@ -417,6 +522,7 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
         problemStatement: b.problemStatement,
         repoUrl: b.repoUrl,
         ref: b.ref,
+        ...gated,
       },
       ...common,
     };
@@ -425,4 +531,40 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
     'envelope_invalid',
     'body must be a verdict leaf (item), a prompt leaf (kind:prompt, prompt) or a solve leaf (kind:solve, problemStatement, repoUrl, ref)',
   );
+}
+
+export const GATE_FEEDBACK_BYTES = 4096;
+
+export interface GateDecisionSubmission {
+  gateId: number;
+  action: 'approve' | 'reject' | 'abort';
+  feedback?: string;
+}
+
+/**
+ * A human's answer to a pending gate (#393). The harness re-validates it (`gate.validateDecision`);
+ * this is the HTTP boundary's own check, so a malformed body is a 400 rather than a queued turn that
+ * parks again for the same reason.
+ */
+export function parseGateDecision(body: unknown): GateDecisionSubmission {
+  const b = asRecord(body);
+  if (typeof b.gateId !== 'number' || !Number.isInteger(b.gateId) || b.gateId < 0) {
+    throw new CpError('invalid_request', 'gateId must be a non-negative integer');
+  }
+  if (b.action !== 'approve' && b.action !== 'reject' && b.action !== 'abort') {
+    throw new CpError('invalid_request', 'action must be "approve", "reject" or "abort"');
+  }
+  if (b.feedback !== undefined && typeof b.feedback !== 'string') {
+    throw new CpError('invalid_request', 'feedback must be a string when present');
+  }
+  // Bounded because it reaches the model as part of the next turn's prompt: an unbounded field here
+  // is an unbounded prompt, billed to the owner, stored forever on the session's entry log.
+  if (typeof b.feedback === 'string' && Buffer.byteLength(b.feedback) > GATE_FEEDBACK_BYTES) {
+    throw new CpError('invalid_request', `feedback must be at most ${GATE_FEEDBACK_BYTES} bytes`);
+  }
+  return {
+    gateId: b.gateId,
+    action: b.action,
+    ...(b.feedback !== undefined ? { feedback: b.feedback } : {}),
+  };
 }

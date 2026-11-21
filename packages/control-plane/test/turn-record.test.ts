@@ -6,6 +6,7 @@ import {
   isTerminalState,
   ownerTurnsKey,
   parseTurnSubmission,
+  resolveGateDeadline,
   resultTtlSeconds,
   TURN_STATES,
   turnKey,
@@ -130,6 +131,105 @@ describe('parseTurnSubmission (spec §4.1)', () => {
     expect(p.envelope).toMatchObject({ repoUrl: 'https://example.invalid/r.git', ref: 'main' });
   });
 
+  it('carries requireApproval onto a prompt envelope', () => {
+    const p = parseTurnSubmission({
+      async: true,
+      kind: 'prompt',
+      prompt: 'hi',
+      requireApproval: true,
+    });
+    expect(p.envelope).toEqual({ kind: 'prompt', prompt: 'hi', requireApproval: true });
+  });
+
+  it('carries requireApproval onto a solve envelope', () => {
+    const p = parseTurnSubmission({
+      async: true,
+      kind: 'solve',
+      problemStatement: 'fix it',
+      repoUrl: 'https://example.invalid/r.git',
+      ref: 'main',
+      requireApproval: true,
+    });
+    expect(p.envelope).toMatchObject({ requireApproval: true });
+  });
+
+  it('omits the flag rather than storing false', () => {
+    // One representation per meaning, as the `converge` kind normalisation does.
+    const p = parseTurnSubmission({
+      async: true,
+      kind: 'prompt',
+      prompt: 'hi',
+      requireApproval: false,
+    });
+    expect(p.envelope).toEqual({ kind: 'prompt', prompt: 'hi' });
+  });
+
+  it('refuses a non-boolean requireApproval', () => {
+    expect(
+      codeOf(() =>
+        parseTurnSubmission({ async: true, kind: 'prompt', prompt: 'hi', requireApproval: 'yes' }),
+      ),
+    ).toBe('invalid_request');
+  });
+
+  it('refuses it on a converge leaf, which has item.require_approval', () => {
+    // Dropped silently until now, which ran an UNGATED turn for a caller who asked for a gate.
+    expect(
+      codeOf(() => parseTurnSubmission({ async: true, item: { ...item }, requireApproval: true })),
+    ).toBe('invalid_request');
+    // The kind's own flag is untouched, and needs no top-level one.
+    const p = parseTurnSubmission({ async: true, item: { ...item, require_approval: true } });
+    expect(p.envelope).toEqual({ item: { ...item, require_approval: true } });
+  });
+
+  it('parses gateDeadlineS and onTimeout', () => {
+    const p = parseTurnSubmission({
+      async: true,
+      kind: 'prompt',
+      prompt: 'hi',
+      requireApproval: true,
+      gateDeadlineS: 60,
+      onTimeout: 'reject',
+    });
+    expect(p).toMatchObject({ gateDeadlineS: 60, onTimeout: 'reject' });
+    // CP-side scheduling, not model input: they must NOT reach the harness.
+    expect(p.envelope.gateDeadlineS).toBeUndefined();
+    expect(p.envelope.onTimeout).toBeUndefined();
+  });
+
+  it('refuses a gate deadline on a turn that asks for no gate', () => {
+    // Inert otherwise: `toTerminal` arms the gate index only on `paused`, so nothing would ever
+    // read these -- the same silently-dropped flag `requireApproval` on a converge leaf is.
+    const bare = { async: true, kind: 'prompt', prompt: 'hi' };
+    expect(codeOf(() => parseTurnSubmission({ ...bare, gateDeadlineS: 60 }))).toBe(
+      'invalid_request',
+    );
+    expect(codeOf(() => parseTurnSubmission({ ...bare, onTimeout: 'reject' }))).toBe(
+      'invalid_request',
+    );
+    // Both spellings of "gated" satisfy it, including the converge kind's own flag.
+    expect(
+      parseTurnSubmission({ ...bare, requireApproval: true, gateDeadlineS: 60 }),
+    ).toMatchObject({ gateDeadlineS: 60 });
+    expect(
+      parseTurnSubmission({
+        async: true,
+        item: { item_id: 'i', file: 'a.ts', pattern: 'p', require_approval: true },
+        gateDeadlineS: 60,
+      }),
+    ).toMatchObject({ gateDeadlineS: 60 });
+  });
+
+  it('refuses a non-positive or non-integer gateDeadlineS and an unknown onTimeout', () => {
+    const bad = (extra: object) => () =>
+      parseTurnSubmission({ async: true, kind: 'prompt', prompt: 'hi', ...extra });
+    expect(bad({ gateDeadlineS: 0 })).toThrow(/gateDeadlineS/);
+    expect(bad({ gateDeadlineS: -1 })).toThrow(/gateDeadlineS/);
+    expect(bad({ gateDeadlineS: 1.5 })).toThrow(/gateDeadlineS/);
+    // Never 'approve': an unanswered gate must not be read as consent.
+    expect(bad({ onTimeout: 'approve' })).toThrow(/onTimeout/);
+  });
+
   it('refuses a body that is not one of the three kinds', () => {
     expect(codeOf(() => parseTurnSubmission({ async: true }))).toBe('envelope_invalid');
     expect(codeOf(() => parseTurnSubmission({ kind: 'prompt', async: true }))).toBe(
@@ -205,6 +305,27 @@ describe('parseTurnSubmission (spec §4.1)', () => {
     expect(codeOf(() => parseTurnSubmission({ item, async: true, idempotencyKey: 'a b' }))).toBe(
       'invalid_request',
     );
+  });
+});
+
+describe('resolveGateDeadline', () => {
+  it('is undefined when neither side asks for one', () => {
+    expect(resolveGateDeadline(0, undefined)).toBeUndefined();
+  });
+  it('takes the deployment ceiling when the submission is silent', () => {
+    expect(resolveGateDeadline(600, undefined)).toBe(600);
+  });
+  it('takes the submission when it is tighter', () => {
+    expect(resolveGateDeadline(600, 60)).toBe(60);
+  });
+  it('clamps a submission that asks for longer than the ceiling', () => {
+    expect(resolveGateDeadline(600, 9000)).toBe(600);
+  });
+  it('honours a submission deadline with no ceiling configured', () => {
+    expect(resolveGateDeadline(0, 60)).toBe(60);
+  });
+  it('takes the tightest of three', () => {
+    expect(resolveGateDeadline(600, 60, 30)).toBe(30);
   });
 });
 

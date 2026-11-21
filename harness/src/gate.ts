@@ -103,16 +103,43 @@ export function computeGateState(entries: unknown[]): GateState {
   };
 }
 
-export function continuationPrompt(action: 'approve' | 'reject', feedback?: string): string {
+/**
+ * The prompt a resumed leaf runs instead of its own.
+ *
+ * `verdictTool` is false for the prompt and solve kinds (#393 §1): they register
+ * `request_approval` alone, so naming `submit_verdict` tells them to call a tool they do not have.
+ */
+export function continuationPrompt(
+  action: 'approve' | 'reject',
+  feedback?: string,
+  verdictTool = true,
+): string {
   if (action === 'approve') {
     return [
       `Human decision: APPROVED.${feedback ? ` ${feedback}` : ''}`,
-      `Proceed with the proposed action. When finished, call submit_verdict exactly once, then stop.`,
+      verdictTool
+        ? `Proceed with the proposed action. When finished, call submit_verdict exactly once, then stop.`
+        : `Proceed with the proposed action, then stop.`,
     ].join('\n');
   }
   return [
     `Human decision: REJECTED. ${feedback ?? 'No feedback provided.'}`,
-    `Revise accordingly. You may call request_approval again when ready, or call submit_verdict when done.`,
+    verdictTool
+      ? `Revise accordingly. You may call request_approval again when ready, or call submit_verdict when done.`
+      : `Revise accordingly. You may call request_approval again when ready, then stop.`,
+  ].join('\n');
+}
+
+/**
+ * The instruction a gated prompt or solve leaf gets appended to its own prompt. The converge leaf's
+ * equivalent is inline in `buildLeafPrompt`, which also WITHHOLDS the submit_verdict instruction --
+ * there is nothing to withhold here, so this is only the steer toward request_approval.
+ */
+export function gatePromptNote(): string {
+  return [
+    'A human MUST approve before you act on this. Your FIRST action is to call the request_approval',
+    'tool exactly once, with a short summary of what you intend and a proposed_action stating what',
+    'you will do. Then stop: the session pauses and resumes with the human decision.',
   ].join('\n');
 }
 
@@ -121,38 +148,74 @@ export type SeedDecision =
   | { kind: 'abort'; record: GateDecision | null }
   | { kind: 'seed'; prompt: string; record: GateDecision | null };
 
+export type GateShortCircuit = Extract<SeedDecision, { kind: 'paused' } | { kind: 'abort' }>;
+
+/** The decision entry to append for a gate this invocation is consuming, or null if already there. */
+function decisionRecord(state: GateState, decision: Decision): GateDecision | null {
+  if (state.gateDecisions.some((d) => d.gateId === decision.gateId)) return null;
+  return { gateId: decision.gateId, action: decision.action, feedback: decision.feedback };
+}
+
+/**
+ * The half of `decideSeed` that needs no prompt: does this invocation stop before doing any work?
+ * `null` means "run the turn".
+ *
+ * Split out so a leaf can answer paused or aborted BEFORE it leases a sandbox (#393). The verdict
+ * path used to lease a pod and converge a worktree on its way to discovering it was parked -- on a
+ * saturated pool, a lease taken from a leaf that could have used it.
+ */
+export function gateShortCircuit(
+  state: GateState,
+  decision: Decision | null,
+): GateShortCircuit | null {
+  const { pendingGate, lastDecision } = state;
+  if (pendingGate) {
+    if (!decision || decision.gateId !== pendingGate.gateId) {
+      return { kind: 'paused', gate: pendingGate };
+    }
+    if (decision.action !== 'abort') return null;
+    return { kind: 'abort', record: decisionRecord(state, decision) };
+  }
+  // No pending gate: a prior abort is terminal.
+  if (lastDecision?.action === 'abort') return { kind: 'abort', record: null };
+  return null;
+}
+
 /**
  * Decide what a runLeaf invocation should do, given the durable gate state, the (optional) decision
  * read from decisionRef, and the fresh job-mode prompt. Pure: the caller performs the side effects
  * (append `record`, run `session.prompt(prompt)`, set capture flags). See spec §3.
+ *
+ * Delegates the stop-now half to `gateShortCircuit` so the two can never disagree; what is left here
+ * is only the cases that need a prompt.
  */
 export function decideSeed(
   state: GateState,
   decision: Decision | null,
   freshPrompt: string,
+  /** False for a leaf with no `submit_verdict` tool; see `continuationPrompt`. */
+  verdictTool = true,
 ): SeedDecision {
-  const { pendingGate, lastDecision, gateDecisions } = state;
-  const decidedIds = new Set(gateDecisions.map((d) => d.gateId));
+  const short = gateShortCircuit(state, decision);
+  if (short) return short;
 
-  if (pendingGate) {
-    if (decision && decision.gateId === pendingGate.gateId) {
-      const record: GateDecision | null = decidedIds.has(pendingGate.gateId)
-        ? null
-        : { gateId: decision.gateId, action: decision.action, feedback: decision.feedback };
-      if (decision.action === 'abort') return { kind: 'abort', record };
-      return {
-        kind: 'seed',
-        prompt: continuationPrompt(decision.action, decision.feedback),
-        record,
-      };
-    }
-    return { kind: 'paused', gate: pendingGate };
+  const { pendingGate, lastDecision } = state;
+  // Narrowed by gateShortCircuit returning null: with a pending gate this decision matches it and is
+  // not an abort.
+  if (pendingGate && decision && decision.action !== 'abort') {
+    return {
+      kind: 'seed',
+      prompt: continuationPrompt(decision.action, decision.feedback, verdictTool),
+      record: decisionRecord(state, decision),
+    };
   }
 
-  // No pending gate. A prior abort is terminal; otherwise re-derive the last continuation, else fresh.
-  if (lastDecision?.action === 'abort') return { kind: 'abort', record: null };
-  const prompt = lastDecision
-    ? continuationPrompt(lastDecision.action, lastDecision.feedback)
-    : freshPrompt;
+  // No pending gate: re-derive the last continuation, else the fresh prompt. The `!== 'abort'` is
+  // what narrows GateAction to continuationPrompt's two values -- gateShortCircuit already returned
+  // for an abort, but that is not a narrowing the compiler can see.
+  const prompt =
+    lastDecision && lastDecision.action !== 'abort'
+      ? continuationPrompt(lastDecision.action, lastDecision.feedback, verdictTool)
+      : freshPrompt;
   return { kind: 'seed', prompt, record: null };
 }

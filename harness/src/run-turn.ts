@@ -37,6 +37,7 @@ import {
   type WorkspaceReset,
 } from './select-sandbox.js';
 import { checkpointExtension } from './checkpoint-extension.js';
+import { requestApprovalExtension, type GateCapture } from './request-approval-tool.js';
 import { budgetVoterExtension, branchSpend, resolveBudgetLimit } from './budget-voter.js';
 import { AMBIENT_KEY_SENTINEL } from './ambient-sentinel.js';
 import { toolChoiceExtension } from './tool-choice-extension.js';
@@ -110,7 +111,7 @@ export { BundleNotFoundError, BundleFormatError } from '@moca/config-bundle';
  */
 let sessionStoreMemo: { url: string; store: RedisSessionBackend<FileEntry> } | null = null;
 
-function sharedSessionStore(url: string): RedisSessionBackend<FileEntry> {
+export function sharedSessionStore(url: string): RedisSessionBackend<FileEntry> {
   if (!sessionStoreMemo || sessionStoreMemo.url !== url) {
     // A changed REDIS_URL is a different Redis; replace rather than silently address the old one.
     if (sessionStoreMemo) void sessionStoreMemo.store.close().catch(() => {});
@@ -1317,6 +1318,12 @@ export interface ExecuteTurnInput {
    * Not called when nothing was leased (an injected sandbox, the single-pod path, no pool).
    */
   onPlacement?: (p: NonNullable<TurnResult['sandbox']>) => void;
+  /**
+   * Register the `request_approval` tool on this turn's stack (#393). The caller owns the capture
+   * and decides what a captured gate MEANS -- a leaf turns it into `status: 'paused'`; `/v1/turn`
+   * would report it in its own shape. Absent ⇒ no gate tool, exactly as before.
+   */
+  gate?: { capture: GateCapture; nextGateId: number };
 }
 
 /**
@@ -1556,6 +1563,11 @@ async function executeTurnCore(
     promptCacheExtension(),
     // A reset workspace (#338): the note goes to the model beside the prompt, not inside it.
     ...(workspace.resetNote ? [workspaceResetNoteExtension()] : []),
+    // #393: the gate tool, when the caller asked for one. A spread rather than a push for the same
+    // reason the sandbox entry is one -- the stack's order is readable in one literal.
+    ...(input.gate
+      ? [requestApprovalExtension(input.gate.capture, sessionManager, input.gate.nextGateId)]
+      : []),
   ];
   if (budgetLimit !== undefined) {
     // session_start is not emitted in the headless path, so compute the pre-turn baseline

@@ -11,11 +11,15 @@ import {
 } from './handlers.js';
 import type { SessionRecord } from './ownership.js';
 import {
+  asksForGate,
   compareCursor,
   CURSOR_RE,
   FROM_START,
   isTerminalState,
+  parseGateDecision,
   parseTurnSubmission,
+  resolveGateDeadline,
+  type GateDecisionSubmission,
   type TurnEvent,
   type TurnRecord,
 } from './turn-record.js';
@@ -101,6 +105,112 @@ async function claimKey(
 }
 
 /**
+ * The gate id a paused turn parked at, from its stored leaf result -- or null when the control plane
+ * cannot see it (no result store configured, result not written yet, record already expired).
+ * Null means "do not refuse on this": the harness re-validates every decision against the session's
+ * own durable gate state, so a wrong id costs a re-pause, not a wrong approval.
+ */
+export async function pausedGateId(deps: CpDeps, paused: TurnRecord): Promise<number | null> {
+  if (!deps.leafResults) return null;
+  const result = await readLeafResult(deps.leafResults, paused.sessionId, paused.turnId);
+  return typeof result?.gateId === 'number' ? result.gateId : null;
+}
+
+/**
+ * Submit the resume of a paused turn (#393, design §2): a NEW turn carrying the paused one's
+ * envelope plus the decision, linked by `resumeOf`. Shared by the decision route and the deadline
+ * sweep (design §3), which is why it takes a record and a decision rather than a request.
+ *
+ * Everything the turn spends is copied from the PAUSED RECORD, not re-read from the live session:
+ * §5.1's rule, and the same reason #388 copied the model -- a gate can stay open for an hour, and a
+ * `PATCH /v1/sessions/{id}` in the meantime must not move the resume onto a model the submitter of
+ * the paused turn never chose.
+ *
+ * No quota reserve, deliberately. A resume replaces a turn that has already terminated and freed its
+ * own slot, and the number of resumes is bounded by the number of paused turns -- each of which was
+ * admitted by the quota and can be resumed exactly once (the idempotency key below plus
+ * `findPausedBySession`'s `resumed` marker). `turns.create` still adds the open-set member, so the
+ * quota stays accurate for everything that comes after.
+ */
+export async function submitResume(
+  deps: CpDeps,
+  paused: TurnRecord,
+  decision: GateDecisionSubmission,
+): Promise<{ turnId: string; created: boolean }> {
+  const { turns, queue } = service(deps);
+  // Keyed by the GATE, not by the session: it makes a double-click return the first resume instead
+  // of fanning out a second, and it is what makes a human decision and the deadline sweep converge
+  // on one turn when they race (design §3).
+  const idempotencyKey = `${paused.sessionId}:gate:${decision.gateId}`;
+  const candidate = `t-${deps.newId()}`;
+  const claim = await claimKey(turns, paused.owner, idempotencyKey, candidate);
+  // `created: false` is a REPLAY of somebody else's resume -- a double-clicked decision, or the
+  // human and the sweep racing. Reported rather than hidden because the sweep counts gates it
+  // expired, and counting a turn it did not create overstates that count (and its test asserts it).
+  if (!claim.fresh) return { turnId: claim.turnId, created: false };
+
+  const turn: TurnRecord = {
+    turnId: claim.turnId,
+    owner: paused.owner,
+    tenant: paused.tenant,
+    sessionId: paused.sessionId,
+    cfg: paused.cfg,
+    credentialName: paused.credentialName,
+    model: paused.model,
+    ...(paused.modelLimits ? { modelLimits: paused.modelLimits } : {}),
+    sandboxTier: paused.sandboxTier,
+    caps: paused.caps,
+    idempotencyKey,
+    envelope: { ...paused.envelope, decision },
+    state: 'queued',
+    attempts: 0,
+    createdAt: deps.now(),
+    resumeOf: paused.turnId,
+    // Carried over like every other field: a resumed turn can hit a SECOND gate, and the deadline
+    // its submitter asked for applies to that one too.
+    ...(paused.gateDeadlineS
+      ? {
+          gateDeadlineS: paused.gateDeadlineS,
+          ...(paused.onTimeout ? { onTimeout: paused.onTimeout } : {}),
+        }
+      : {}),
+  };
+  await turns.create(turn);
+  try {
+    await queue.enqueue(turn.turnId);
+  } catch (err) {
+    // The same compensation submitTurn does, for the same leak and with the same COMPARING release.
+    await turns.finalize(turn.turnId, 'failed', deps.now());
+    await turns.releaseIdempotencyKeyIf(paused.owner, idempotencyKey, turn.turnId);
+    throw err;
+  }
+  // The gate is answered: out of the index, so the sweep cannot also expire it. After the enqueue,
+  // because a claim that is not followed by a submission is the one failure that strands a gate.
+  await turns.claimGate(paused.turnId);
+  await auditBestEffort(deps, 'turn_submitted', turn.turnId, {
+    subject: paused.owner,
+    sessionId: paused.sessionId,
+    turnId: turn.turnId,
+    credential: paused.credentialName,
+    decision: 'turn_submitted',
+  });
+  return { turnId: turn.turnId, created: true };
+}
+
+/**
+ * Is `sent` the decision the existing resume already carries? The gate id is equal by construction
+ * (it is in the idempotency key), so only the action and the feedback are left to compare.
+ *
+ * What this guards: `docs/api/CHANGELOG.md` promises the replay for "the same decision". Without the
+ * comparison, a human's `approve` arriving after the deadline sweep's `abort` would be answered 202
+ * with the abort turn's id and silently dropped -- a conflict reported as success.
+ */
+function sameDecision(prior: TurnRecord, sent: GateDecisionSubmission): boolean {
+  const was = prior.envelope.decision as GateDecisionSubmission | undefined;
+  return was?.action === sent.action && (was?.feedback ?? '') === (sent.feedback ?? '');
+}
+
+/**
  * SSE pacing (#392). Not settings: a client that wants different pacing reconnects with its
  * cursor, and every one of these is invisible on the wire except as timing.
  */
@@ -182,6 +292,42 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       );
     }
 
+    // One open gate per session (#393). A gate is SESSION state: the harness derives it from the
+    // session's own durable entries, so a second gated turn admitted while one is open parks on the
+    // OPEN gate, reports that gate id as its own, and is then the turn a decision resumes
+    // (`findPausedBySession` takes the newest) -- leaving the first turn paused with nothing able to
+    // answer it, and no sweep either at the default `MOCA_GATE_DEADLINE_S=0`. Refused HERE because
+    // the control plane is the only side that can tell a fresh submission from a re-dispatch of the
+    // same envelope. Before the reservation, like every other refusal on this path: nothing left
+    // behind. Only for a GATED submission -- an ordinary turn on the session never touches the gate.
+    //
+    // A gated turn still `queued` or `running` holds the gate too, which is why this asks
+    // `findGateHolder` rather than reading `paused` alone: the first turn is unpaused for the whole
+    // of its run, and a `paused`-only read admitted a second gated turn through all of it.
+    if (asksForGate(parsed.envelope)) {
+      const holder = await turns.findGateHolder(rec.sessionId);
+      if (holder) {
+        await refusal(deps, rec, 'gate_pending');
+        throw new CpError(
+          'gate_pending',
+          holder.paused
+            ? `turn ${holder.turn.turnId} of this session is paused at a gate; answer it with POST /v1/sessions/{id}/decision before submitting another gated turn`
+            : `turn ${holder.turn.turnId} of this session is a gated turn that has not finished; wait for it before submitting another gated turn`,
+        );
+      }
+    }
+
+    // Third ceiling: the record's own TTL, armed when the turn goes terminal (`toTerminal`'s
+    // `expire`). A deadline past it would fire on a record that no longer exists -- neither the human
+    // nor the sweep can answer a gate whose turn is gone, so the deadline is the shorter of the two.
+    // It clamps an EXISTING deadline rather than joining the other two as an equal: the TTL is always
+    // set, so folding it in unconditionally would put a deadline on every turn of a deployment that
+    // asked for none.
+    const asked = resolveGateDeadline(deps.config.gateDeadlineS, parsed.gateDeadlineS);
+    const gateDeadlineS = asked
+      ? resolveGateDeadline(asked, deps.config.turnRecordTtlSeconds)
+      : undefined;
+
     // Pre-enqueue, so a refusal leaves nothing behind (§4.3): no record, no entry, no key claimed,
     // no slot held. The slot is RESERVED rather than counted, because a read-then-check cannot hold
     // a limit against parallel submitters -- they all read the same under-limit count and all pass.
@@ -231,6 +377,10 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       state: 'queued',
       attempts: 0,
       createdAt: deps.now(),
+      // Both or neither: an `onTimeout` with no deadline is a field nothing will ever read.
+      ...(gateDeadlineS
+        ? { gateDeadlineS, ...(parsed.onTimeout ? { onTimeout: parsed.onTimeout } : {}) }
+        : {}),
     };
     await turns.create(turn);
     try {
@@ -261,6 +411,63 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       decision: 'turn_submitted',
     });
     return { status: 202, body: { sessionId: rec.sessionId, turnId: turn.turnId } };
+  },
+
+  /**
+   * POST /v1/sessions/{id}/decision (#393, design §2). 202 with the resume turn's id.
+   *
+   * The client sends only the decision: the envelope is copied from the paused record, so resolving
+   * a gate needs no session token, no memory of what was submitted, and no way to change the turn's
+   * inputs on the way through.
+   *
+   * `assertOwner` FIRST, as every handler in this file does (see the file's note).
+   */
+  decideGate: async (ctx, deps) => {
+    const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
+    if (rec.tombstone) throw new CpError('session_not_found', undefined, rec.sessionId);
+    const { turns } = service(deps);
+    const decision = parseGateDecision(ctx.body);
+
+    const found = await turns.findPausedBySession(rec.sessionId);
+    if (!found) {
+      await refusal(deps, rec, 'gate_not_pending');
+      throw new CpError('gate_not_pending', 'no turn of this session is paused at a gate');
+    }
+    if (found.resumed) {
+      // A RETRY of the decision that resumed it is answered with the turn it already created, so a
+      // client re-sending a 202 it never saw is not told its gate is gone. The gate-keyed
+      // idempotency key is the discriminator, and it survives exactly as long as the resume is live
+      // (`toTerminal` releases it) -- after that, and for any other decision, the gate is answered.
+      const held = await turns.idempotencyHolder(
+        rec.owner,
+        `${rec.sessionId}:gate:${decision.gateId}`,
+      );
+      const prior = held ? await turns.get(held) : null;
+      if (prior?.resumeOf === found.paused.turnId && sameDecision(prior, decision)) {
+        return { status: 202, body: { sessionId: rec.sessionId, turnId: prior.turnId } };
+      }
+      await refusal(deps, rec, 'gate_not_pending');
+      throw new CpError(
+        'gate_not_pending',
+        `the gate on turn ${found.paused.turnId} has already been answered`,
+      );
+    }
+    // The paused leaf's own result names the gate it parked at. Checked here so a wrong `gateId` is
+    // a 409 rather than a queued turn that parks again -- but the HARNESS is the authority
+    // (`decideSeed` ignores a decision for another gate and stays paused), so a deployment with no
+    // result store, or a result not yet written, lets the submitted id through rather than refusing
+    // a decision the control plane simply cannot see.
+    const pendingId = await pausedGateId(deps, found.paused);
+    if (pendingId !== null && pendingId !== decision.gateId) {
+      await refusal(deps, rec, 'gate_not_pending');
+      throw new CpError(
+        'gate_not_pending',
+        `gate ${decision.gateId} is not pending; this session is paused at gate ${pendingId}`,
+      );
+    }
+
+    const { turnId } = await submitResume(deps, found.paused, decision);
+    return { status: 202, body: { sessionId: rec.sessionId, turnId } };
   },
 
   /**
@@ -297,6 +504,10 @@ export const TURN_HANDLERS: Record<string, Handler> = {
         // "still stopping" on a turn that is over. The contract (openapi.yaml) says this field is
         // present only on a running turn, so terminality drops it.
         ...(turn.cancelRequested && turn.state === 'running' ? { cancelRequested: true } : {}),
+        // The paused turn this one answers the gate of (#393). Exposed because a gate's answer is
+        // always a NEW turn, so without it a client holding only a resume's id cannot walk back to
+        // the turn that paused -- which is the link openapi.yaml's decision route promises.
+        ...(turn.resumeOf ? { resumeOf: turn.resumeOf } : {}),
         // PROJECTED, not the stored record (#390): the patch and the assistant text are fetched as
         // artifacts instead, so the RESPONSE is bounded whatever the leaf produced.
         //

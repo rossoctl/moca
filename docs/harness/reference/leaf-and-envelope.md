@@ -30,7 +30,9 @@ still run in a sandbox with its own filesystem, and `workspaceRef` is a path ins
 `item` is `{item_id: string, file: string, pattern: string, require_approval?: boolean}`.
 
 Optional fields on any envelope: `decision`, `model`, `provider`, `workspaceRef`, `repoUrl`, `ref`,
-`maxTurns` (verdict leaf only), `tenant`, `configRef`, `problemStatement`, `prompt`, `env_key`.
+`maxTurns` (verdict leaf only), `requireApproval` (prompt and solve leaves only — a verdict leaf asks
+for its gate with `item.require_approval`), `tenant`, `configRef`, `problemStatement`, `prompt`,
+`env_key`.
 
 **`configRef`** names a [config bundle](../how-to/promote-claude-workflow.md) (`sha256:` plus 64 lowercase hex
 characters). It applies to **prompt and solve leaves only**; a verdict leaf never reads it and runs without the
@@ -86,8 +88,10 @@ and the lookup takes `tenant` as a query parameter (unauthenticated callers only
 
 ## The human gate
 
-A verdict leaf whose `item.require_approval` is `true` is told to call `request_approval` once and stop.
-`submit_verdict` is withheld until a decision exists. The run then returns
+Any leaf kind can be gated (#393). A verdict leaf asks with `item.require_approval`; a prompt or
+solve leaf asks with `requireApproval: true` on its own envelope. The leaf is told to call
+`request_approval` once and stop; on a verdict leaf `submit_verdict` is withheld until a decision
+exists (the other two have nothing to withhold). The run then returns
 `{status: "paused", gateId, gate: {summary, proposed_action}}` (also stored, and shown by
 `/runs/status` in its reduced view). There is no `awaiting_approval` status in the current code.
 
@@ -111,8 +115,46 @@ To resolve it, re-POST the **same envelope** to `/v1/runs` with an inline decisi
   also leaves it paused; repeating an already-recorded decision appends nothing.
 - `abort` returns `{status: "aborted"}`. `approve` or `reject` continues the agent with a prompt that
   carries the decision.
-- There is no harness-side timeout while paused; the result record's TTL is the only bound.
-- Gates exist only on the verdict leaf, not on solve or prompt leaves and not on `/turn`.
+- There is no harness-side timeout while paused on this route; the result record's TTL is the only
+  bound.
+- A prompt or solve envelope takes the same `decision` field, and the decision replaces the leaf's
+  own prompt on the resumed run — the model already has that prompt in its session. `requireApproval`
+  need not be repeated with it: an envelope carrying a `decision` gets `request_approval` registered
+  either way, so a rejected leaf can do what its continuation invites and gate again.
+- An ASYNC turn is not resolved by re-POSTing an envelope: the client holds no envelope. Answer it
+  with `POST /v1/sessions/{id}/decision` ({`gateId`, `action`, `feedback`}), which copies the paused
+  turn's envelope, appends the decision and 202s with a new turn id (`docs/api/openapi.yaml`).
+- An async turn may also carry a **deadline**. `gateDeadlineS` on the submission bounds how long its
+  gate may stay unanswered, and `MOCA_GATE_DEADLINE_S` bounds it for the whole deployment (default
+  `0`, never); both are ceilings, and the tightest in force wins — including the turn record's own
+  TTL, since a gate whose record is gone can no longer be answered by anyone. When the deadline
+  passes, the control plane decides the gate itself with the submission's `onTimeout`: `abort` by
+  default, `reject` by request, and **never `approve`** — an expired gate is the absence of a yes,
+  and a clock cannot consent. The resume it submits is an ordinary turn with its own id and
+  `resumeOf`, so it shows up in the session's turn list exactly as a human decision's would.
+- `/turn` has no gate: the tool is registered only when its caller asks for one.
+
+### What survives an open gate
+
+A gate can stay open for an hour, and the sandbox the leaf was using may be gone when the decision
+lands. What that costs, and what it does not:
+
+- **The gate and the conversation survive.** Both the request and the decision are **session
+  entries** in Redis, which is also where the transcript lives. No gate state is held in the
+  sandbox, so nothing about reclaiming one can lose a pending gate or a recorded decision.
+- **A solve resume rebuilds its workspace.** The resume runs the ordinary dispatch path, which
+  converges unconditionally: a missing or corrupt `/workspace/repo` is re-created from `repoUrl` and
+  `ref`, and a leaf worktree that did survive is reused with the baseline it was first pinned to —
+  so a patch captured after the gate still applies against the commit the turn started from.
+- **A prompt leaf has no repo to rebuild.** There is no `repoUrl`, so if its sandbox was reclaimed
+  while the gate was open, the resume runs in a fresh sandbox with an empty workspace. The
+  conversation survives (it is session entries, like the gate); the files do not.
+- **Uncommitted edits do not survive a move, on any kind.** A model's unstaged work lives in the
+  leaf worktree, not in Redis. A resume that lands on a different sandbox re-creates that worktree at
+  the pinned commit, so those edits are gone and the model continues from the transcript alone.
+
+Closing the last two means holding the lease across the pause, which is
+[#338](https://github.com/rossoctl/moca/issues/338)'s explicit-release work, not the gate's.
 
 ## Async and scheduled dispatch
 

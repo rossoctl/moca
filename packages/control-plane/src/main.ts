@@ -59,6 +59,7 @@ import { refuseMisnamedIdentityProvider } from './identity-switch.js';
 import { TurnStore } from './turn-store.js';
 import { resultTtlSeconds, TURN_RECORD_TTL_MARGIN_SECONDS } from './turn-record.js';
 import { RedisTurnQueue } from './turn-queue.js';
+import { startGateSweep } from './gate-sweep.js';
 import { guardSchemaVersion } from './schema-version.js';
 import type { ResultRedisLike } from './turn-result.js';
 
@@ -374,6 +375,9 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     // Async fan-out: the only containment against unbounded fan-out in M1 (spec §4.3). Counts
     // NON-TERMINAL turns per owner, enforced before the enqueue.
     asyncQueuedPerOwner: countEnv(env, 'MOCA_ASYNC_QUEUED_PER_OWNER', 50),
+    // 0 = no deadline (#393 §3). A gate that expires decides for the owner, so opting in is the
+    // deployment's call; a submission may ask for a tighter one but never a longer.
+    gateDeadlineS: countEnv(env, 'MOCA_GATE_DEADLINE_S', 0),
     // The control plane reads MOCA_TENANCY for the first time here. readTenancy throws on a
     // near-miss NAME, so a control-plane env with a misspelled switch now fails to boot -- the same
     // contract the worker has had, and the point of the check.
@@ -493,6 +497,8 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
     version: resolveVersion(env),
     testUsers: 0,
     asyncQueuedPerOwner: 0,
+    // The sandbox profile serves no turns, so it gates nothing and sweeps nothing.
+    gateDeadlineS: 0,
     tenancy: 'single',
     turnRecordTtlSeconds: turnRecordTtlFromEnv(env),
     turnSummaryBytes: countEnv(env, 'MOCA_TURN_SUMMARY_BYTES', 2048),
@@ -886,6 +892,10 @@ if (isMainModule) {
   const env = withCredentials(process.env, CONTROL_PLANE_SECRETS);
   const deps = depsFromEnv(env);
   startControlPlane(deps, portFromEnv(env), hostFromEnv(env));
+  // #393 §3: answers gates nobody answered. Unconditional -- a per-submission `gateDeadlineS` works
+  // with MOCA_GATE_DEADLINE_S unset, so the sweep cannot be gated on the config value. Costs one
+  // ZRANGEBYSCORE per 30 s when no gate is open.
+  startGateSweep(deps);
   // The Redis schema version (#509): written if absent, and the process exits on a newer one once
   // Redis answers. In the background, because this server starts before Redis and waits for it.
   void guardSchemaVersion({

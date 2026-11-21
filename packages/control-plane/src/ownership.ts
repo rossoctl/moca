@@ -23,16 +23,18 @@ export interface CpRedisLike {
    */
   hGet(key: string, field: string): Promise<string | null | undefined>;
   zAdd(key: string, member: { score: number; value: string }): Promise<unknown>;
-  zRem(key: string, member: string): Promise<unknown>;
+  /** An array removes every named member at once and ignores the ones that were never there. */
+  zRem(key: string, member: string | string[]): Promise<unknown>;
   /**
    * NOTE the argument order: node-redis takes (key, min, max) normally but (key, MAX, MIN) when
-   * `REV` is set, which is the only way this index reads. Written max-first so the call site and the
-   * client agree; the test fake reproduces the same order deliberately.
+   * `REV` is set, which is how nearly every index here reads. So the two bounds are named by their
+   * POSITION, not by which is larger: with `REV` the first is the max, without it the first is the
+   * min. The test fake reproduces the same order deliberately.
    */
   zRange(
     key: string,
-    max: number | string,
-    min: number | string,
+    from: number | string,
+    to: number | string,
     opts?: { BY?: 'SCORE'; REV?: boolean; LIMIT?: { offset: number; count: number } },
   ): Promise<string[]>;
   /**

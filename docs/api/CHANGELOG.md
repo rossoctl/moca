@@ -8,6 +8,7 @@ that shipped it ("The data plane's twin … goes to"):
 
 | `harness-openapi.yaml` | Shipped with                   |
 | ---------------------- | ------------------------------ |
+| 1.8.0                  | [1.35.0](#1350)                |
 | 1.7.0                  | [1.31.0](#1310)                |
 | 1.6.0                  | [1.30.0](#1300)                |
 | 1.5.0                  | [1.28.0](#1280)                |
@@ -16,6 +17,55 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.2.0                  | [1.16.0](#1160)                |
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
+
+## 1.36.0
+
+A gate can be given a deadline ([#393](https://github.com/rossoctl/moca/issues/393)). Additive: two
+optional fields on the async submission, one new field on the status read, and two refusals for
+submissions that were accepted and then did the wrong thing.
+
+- `gateDeadlineS` bounds how long THIS turn's gate may stay unanswered, and `onTimeout` (`abort` or
+  `reject`, default `abort`) says what the control plane decides when it expires. There is no
+  `approve`: an unanswered gate is never read as consent.
+- Every bound is a ceiling and the tightest wins -- the deployment's `MOCA_GATE_DEADLINE_S`
+  (default `0`, never), the submission's `gateDeadlineS`, and the turn record's own TTL. A
+  submission may ask to be bounded sooner and never later.
+- The deadline is carried onto a resume, so a second gate on the same work is bounded too.
+- ONE open gate per session: a submission asking for a gate is `409 gate_pending` while the session
+  has an unanswered paused turn, and also while an earlier gated turn of the session is still
+  `queued` or `running` -- that turn has not opened its gate yet, but it will. The gate lives in the
+  session's own durable state, so a second gated turn used to park on the open gate and take the
+  decision meant for the first. Ungated turns are never refused by this.
+- `requireApproval` on a `converge` submission is `400 invalid_request` instead of a silently
+  dropped flag, which ran an ungated turn for a caller who asked for a gate. That kind asks with
+  `item.require_approval`.
+- `TurnStatus.resumeOf` names the paused turn a resume answers the gate of, so a client holding only
+  the new turn's id can walk back to the one that asked.
+- `gateDeadlineS` and `onTimeout` on a submission that asks for no gate are `400 invalid_request`
+  rather than stored and never read: the gate index is armed only when a turn pauses, so a caller
+  who set a deadline on an ungated turn had none and would have learned it only when the gate it
+  expected never expired.
+
+## 1.35.0
+
+A human gate works on any leaf kind, and an async one is resolved over HTTP
+([#393](https://github.com/rossoctl/moca/issues/393)). Additive on the wire: one new route and one
+new field. The data plane's twin goes to 1.8.0.
+
+- `requireApproval: true` on a `POST /v1/sessions/{id}/turns` submission of the `prompt` or `solve`
+  kind gates the turn on a human decision: the leaf's first action is a `request_approval` call, and
+  the turn ends `paused` with the gate on its result. Until now only a `converge` leaf could ask,
+  with `item.require_approval`, which is unchanged.
+- `POST /v1/sessions/{id}/decision` answers that gate with `{gateId, action, feedback?}` and `202`s
+  with a NEW turn id. A paused turn is terminal and is never reopened, so the resume is a fresh turn
+  carrying the paused one's envelope plus the decision, linked by `resumeOf`; everything it spends —
+  model, credential name, sandbox tier, caps — is copied from the paused record, so resolving a gate
+  cannot change what the turn runs.
+- Re-sending the same decision while its resume is still live answers `202` with that same turn id.
+  Otherwise `409 gate_not_pending`: no paused turn, a `gateId` that is not the pending one, or a
+  gate already answered. The caller's move in all three is to re-read the turn.
+- The data plane (1.8.0) documents `requireApproval` and `decision` on the `prompt` and `solve` run
+  envelopes, which is how a synchronous run asks for and resolves the same gate.
 
 ## 1.34.0
 

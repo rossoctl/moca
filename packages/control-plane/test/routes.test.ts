@@ -29,6 +29,8 @@ describe('the route table', () => {
         'GET /v1/sessions/{id}/turns/{turnId}',
         'GET /v1/sessions/{id}/turns/{turnId}/artifacts/{kind}',
         'DELETE /v1/sessions/{id}/turns/{turnId}',
+        // #393: resolving a human gate, which resumes the paused turn as a new one.
+        'POST /v1/sessions/{id}/decision',
         // #392: the owner-scoped event stream over the same transitions.
         'GET /v1/events',
         'GET /v1/credentials',
