@@ -41,8 +41,8 @@ a repository's sandbox, in the order you use it:
                                                  remembered for later commands; in a local
                                                  terminal: copies the code, opens the browser;
                                                  --no-browser: only prints the URL and the code)
-  mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--no-agent-config] [--cortex]
-                 [--lifetime DURATION]
+  mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--max-file MiB]
+                 [--no-agent-config] [--cortex] [--lifetime DURATION]
                                                  in a git repository: create or reuse its sandbox,
                                                  push the working tree, bind it in .sbx/sandbox.json,
                                                  and point Claude Code, OpenCode and IBM Bob at the
@@ -63,6 +63,7 @@ a repository's sandbox, in the order you use it:
                                                  one of the name is refused); --include-secrets:
                                                  push .env*, *.pem, *.key and id_* files too;
                                                  --max-push: refuse a tree over MiB, default 256;
+                                                 --max-file: refuse a file over MiB, default 12;
                                                  --no-agent-config:
                                                  write no agent configuration, only push and bind)
                                                  (--cortex: Cortex v0.9.3+ blocks the local tools
@@ -109,11 +110,13 @@ a repository's sandbox, in the order you use it:
   mocactl sbx pull [--apply] [-o FILE]           the sandbox's changes as a patch, on stdout or in
                                                  FILE (--apply: apply it here, then advance the
                                                  sandbox's baseline)
-  mocactl sbx push [--force] [--include-secrets] [--max-push MiB]   push the working tree again
+  mocactl sbx push [--force] [--include-secrets] [--max-push MiB] [--max-file MiB]
+                                                 push the working tree again
                                                  (refused while the sandbox has changes not yet
                                                  pulled, unless --force; .env*, *.pem, *.key and
                                                  id_* stay behind unless --include-secrets;
-                                                 --max-push: refuse a tree over MiB, default 256)
+                                                 --max-push: refuse a tree over MiB, default 256;
+                                                 --max-file: refuse a file over MiB, default 12)
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
   mocactl sbx doctor [--sandbox ID] [--json]     check login, sandbox, agent config, exec and recent
                                                  calls (exit 0 when every check passes, else 1;
