@@ -663,6 +663,11 @@ func TestLeaseBytesIsNotCached(t *testing.T) {
 	var _ leaseFootprinter = (*firecrackerVM)(nil)
 	vm, pool, rel := newLeaseTestVM(t, "vm-92")
 	cur := filepath.Join(pool.abs(rel), "memory.current")
+	// No reclaimable page cache, so the footprint is memory.current (readLeaseFootprint).
+	stat := "file 0\nfile_mapped 0\nshmem 0\nfile_dirty 0\nfile_writeback 0\n"
+	if err := os.WriteFile(filepath.Join(pool.abs(rel), "memory.stat"), []byte(stat), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := os.WriteFile(cur, []byte(strconv.FormatInt(100<<20, 10)+"\n"), 0o644); err != nil {
 		t.Fatal(err)

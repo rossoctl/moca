@@ -49,6 +49,15 @@ const LeaseAbortGrace = LeaseTimeoutSlack
 // G2): a walk over a big tree may take far longer than a short command's timeout.
 const LeaseNormaliseTimeout = 10 * time.Minute
 
+// leaseCacheDropS is d as the guest's cache_drop_after_s: whole seconds, rounded up, and
+// 0 (never) for a negative d, the drop turned off.
+func leaseCacheDropS(d time.Duration) uint32 {
+	if d <= 0 {
+		return 0
+	}
+	return uint32((d + time.Second - 1) / time.Second)
+}
+
 // leaseGuestTimeoutS is the timeout_s a lease Exec's guest gets when Run starts at now:
 // what is left of the budget until deadline, rounded up to whole seconds, and at least 1 s.
 // The gate wait, a cold restore and Resume have spent the rest.
@@ -790,6 +799,8 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 		Kind:      e.Kind,
 		Process:   e.Process,
 		Abort:     abort, // nil for a process kind
+		// Every lease request restarts the guest's idle page-cache drop (F1).
+		CacheDropAfterS: leaseCacheDropS(p.cfg.LeaseCacheDropAfter),
 	}
 	if e.Kind == ExecKindProcessStart {
 		c.MaxProcesses = p.cfg.LeaseMaxProcesses

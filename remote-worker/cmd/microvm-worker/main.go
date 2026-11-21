@@ -312,6 +312,21 @@ func leaseConfig(get func(string) string, cfg *vmpool.Config) error {
 	mib("SH_LEASE_START_MB", &cfg.LeaseStartBytes)
 	mib("SH_LEASE_PAGECACHE_MB", &cfg.LeasePageCacheBytes)
 	mib("SH_LEASE_RECLAIM_FREE_MB", &cfg.LeaseReclaimFreeBytes)
+	if v := get("SH_LEASE_CACHE_DROP_S"); v != "" {
+		// 0 is accepted here, unlike the other _S knobs: it turns the idle drop off.
+		n, e := strconv.ParseUint(v, 10, 32)
+		switch {
+		case e != nil || time.Duration(n)*time.Second > vmpool.MaxLeaseCacheDrop:
+			if err == nil {
+				err = fmt.Errorf("SH_LEASE_CACHE_DROP_S=%q must be whole seconds from 0 (off) to %d",
+					v, int64(vmpool.MaxLeaseCacheDrop/time.Second))
+			}
+		case n == 0:
+			cfg.LeaseCacheDropAfter = -1
+		default:
+			cfg.LeaseCacheDropAfter = time.Duration(n) * time.Second
+		}
+	}
 	if get("SH_LEASE_MAX_PROCESSES") != "" {
 		// Level 2's cap on running tracked processes (spec §7), at most the tracked uids
 		// a level-2 image has.
@@ -344,11 +359,15 @@ func leaseBanner(cfg vmpool.Config) string {
 	if err := c.Normalize(); err != nil {
 		return "lease=on"
 	}
+	drop := "off"
+	if c.LeaseCacheDropAfter > 0 {
+		drop = c.LeaseCacheDropAfter.String()
+	}
 	return fmt.Sprintf("lease=on lease_idle=%s/%s lease_max=%s/%s lease_grace=%s lease_start=%dMiB "+
-		"lease_headroom=%s lease_pagecache=%dMiB lease_reclaim_free=%dMiB",
+		"lease_headroom=%s lease_pagecache=%dMiB lease_reclaim_free=%dMiB lease_cache_drop=%s",
 		c.LeaseIdleDefault, c.LeaseIdleCeiling, c.LeaseMaxDuration, c.LeaseMaxDurationProcesses,
 		c.LeaseGraceLimit, c.LeaseStartBytes>>20, strconv.FormatFloat(c.LeaseHeadroom, 'g', -1, 64),
-		c.LeasePageCacheBytes>>20, c.LeaseReclaimFreeBytes>>20)
+		c.LeasePageCacheBytes>>20, c.LeaseReclaimFreeBytes>>20, drop)
 }
 
 // balloonWarning is the start-up warning for a lease-v1 snapshot built without the

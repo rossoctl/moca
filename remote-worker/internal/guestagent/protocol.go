@@ -85,6 +85,12 @@ type Request struct {
 	// MaxProcesses is the host's SH_LEASE_MAX_PROCESSES, sent on process_start: the
 	// cap on running tracked processes.
 	MaxProcesses int `json:"max_processes,omitempty"`
+	// CacheDropAfterS is the host's SH_LEASE_CACHE_DROP_S, sent on every lease request
+	// (F1 of the E17b report): once the lease has served no request for this long after
+	// this one, the agent drops the guest's clean page cache, so free-page reporting hands
+	// it back to the host and the lease's charge falls toward its working set. 0: never.
+	// omitempty: an old agent ignores it, and an old host's request is byte-identical.
+	CacheDropAfterS uint32 `json:"cache_drop_after_s,omitempty"`
 }
 
 // Request kinds. RequestKindProcessStopAll is host-only: the worker sends it on a

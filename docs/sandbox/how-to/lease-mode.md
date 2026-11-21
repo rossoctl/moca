@@ -109,8 +109,10 @@ Lease mode is experimental in v0.11.0:
   with it and the next command starts a new guest. `/workspace` is kept. On a snapshot built from
   v0.12.0 on, the guest stops the aborted command and the lease is kept. Aborting a process command
   (`lease+processes`) still ends the lease.
-- **A lease holds its guest's memory while it lives**, including files it has read. Your operator
-  may keep the idle timeout short, or the mode off, on a busy host.
+- **A lease holds its guest's memory while it lives**, including files it has read, on a snapshot
+  built before v0.12.0. From v0.12.0 the guest lets go of cached files after the lease has been idle
+  for a while (30 s by default), and the next command reads them again from the host's cache. Your
+  operator may keep the idle timeout short, or the mode off, on a busy host.
 - **At most 4 tracked processes** run at once at `lease+processes`, unless your operator changed it.
 
 ## From your own code
