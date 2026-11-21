@@ -207,3 +207,83 @@ describe('decideGate (#393, design §2)', () => {
     ).toBe('invalid_request');
   });
 });
+
+const submit = (d: Deps, sid: string, body: Record<string, unknown>) =>
+  HANDLERS.submitTurn!(
+    ctx({ principal: alice, params: { id: sid }, body: { async: true, ...body } }),
+    d,
+  );
+
+const GATED_PROMPT = { kind: 'prompt', prompt: 'again', requireApproval: true };
+
+describe('one open gate per session (#393)', () => {
+  it('refuses a second GATED turn while a gate is open', async () => {
+    // The gate is session state: a second gated turn parks on the OPEN gate, reports its id as its
+    // own, and -- being newer -- is the turn a decision resumes, stranding the first.
+    const d = turnDeps();
+    const sid = await session(d);
+    const pausedId = await paused(d, sid);
+    expect(await codeOf(() => submit(d, sid, GATED_PROMPT))).toBe('gate_pending');
+    expect(d.turnQueue.ids).toEqual([]);
+    // Refused before the reservation, so it did not burn a quota slot either.
+    expect(await d.turns.countOpen('github:1234')).toBe(0);
+    // And the gate is still the first turn's, answerable as before.
+    expect((await decide(d, sid, { gateId: 0, action: 'approve' })).status).toBe(202);
+    expect((await d.turns.get(d.turnQueue.ids[0]!))?.resumeOf).toBe(pausedId);
+  });
+
+  it('refuses a converge turn that asks with item.require_approval', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    await paused(d, sid);
+    const item = { item_id: 'i1', file: 'a.ts', pattern: 'p', require_approval: true };
+    expect(await codeOf(() => submit(d, sid, { item }))).toBe('gate_pending');
+  });
+
+  it('admits an UNGATED turn while a gate is open', async () => {
+    // The refusal is narrow by design: an ordinary turn never calls `request_approval`, so it
+    // cannot park on the open gate, and a session must stay usable while a human thinks.
+    const d = turnDeps();
+    const sid = await session(d);
+    await paused(d, sid);
+    expect((await submit(d, sid, { kind: 'prompt', prompt: 'unrelated' })).status).toBe(202);
+    expect(d.turnQueue.ids).toHaveLength(1);
+  });
+
+  it('admits a gated turn once the gate has been answered', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    await paused(d, sid);
+    await decide(d, sid, { gateId: 0, action: 'approve' });
+    // Still `paused` (it is terminal and never reopened), but answered -- so the next gated turn is
+    // not refused on it. A fresh `idempotencyKey`, since the resume holds the session's default.
+    expect((await submit(d, sid, { ...GATED_PROMPT, idempotencyKey: 'k2' })).status).toBe(202);
+  });
+
+  it('400s on requireApproval sent with a converge submission', async () => {
+    // Dropped silently until now, which ran an UNGATED turn for a caller who asked for a gate.
+    const d = turnDeps();
+    const sid = await session(d);
+    const item = { item_id: 'i1', file: 'a.ts', pattern: 'p' };
+    expect(await codeOf(() => submit(d, sid, { item, requireApproval: true }))).toBe(
+      'invalid_request',
+    );
+    expect((await submit(d, sid, { item })).status).toBe(202);
+  });
+
+  it('reports resumeOf on the status read', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    const pausedId = await paused(d, sid);
+    const resumeId = (
+      (await decide(d, sid, { gateId: 0, action: 'approve' })).body as {
+        turnId: string;
+      }
+    ).turnId;
+    const status = (id: string) =>
+      HANDLERS.getTurn!(ctx({ principal: alice, params: { id: sid, turnId: id } }), d);
+    expect((await status(resumeId)).body).toMatchObject({ resumeOf: pausedId });
+    // Absent on a turn that is not a resume, rather than null.
+    expect('resumeOf' in ((await status(pausedId)).body as object)).toBe(false);
+  });
+});

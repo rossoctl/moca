@@ -207,6 +207,16 @@ function sameDecision(prior: TurnRecord, sent: GateDecisionSubmission): boolean 
 }
 
 /**
+ * Does this submission ask for a gate? `requireApproval` for the prompt and solve kinds, and
+ * `item.require_approval` for the verdict kind, which has carried its own flag since ADR-0016.
+ */
+function asksForGate(envelope: Record<string, unknown>): boolean {
+  if (envelope.requireApproval === true) return true;
+  const item = envelope.item as { require_approval?: unknown } | undefined;
+  return item?.require_approval === true;
+}
+
+/**
  * SSE pacing (#392). Not settings: a client that wants different pacing reconnects with its
  * cursor, and every one of these is invisible on the wire except as timing.
  */
@@ -286,6 +296,25 @@ export const TURN_HANDLERS: Record<string, Handler> = {
         'workload_runs_unavailable',
         'workload runs are unavailable; submit a leaf turn without workloadId',
       );
+    }
+
+    // One open gate per session (#393). A gate is SESSION state: the harness derives it from the
+    // session's own durable entries, so a second gated turn admitted while one is open parks on the
+    // OPEN gate, reports that gate id as its own, and is then the turn a decision resumes
+    // (`findPausedBySession` takes the newest) -- leaving the first turn paused with nothing able to
+    // answer it, and no sweep either at the default `MOCA_GATE_DEADLINE_S=0`. Refused HERE because
+    // the control plane is the only side that can tell a fresh submission from a re-dispatch of the
+    // same envelope. Before the reservation, like every other refusal on this path: nothing left
+    // behind. Only for a GATED submission -- an ordinary turn on the session never touches the gate.
+    if (asksForGate(parsed.envelope)) {
+      const open = await turns.findPausedBySession(rec.sessionId);
+      if (open && !open.resumed) {
+        await refusal(deps, rec, 'gate_pending');
+        throw new CpError(
+          'gate_pending',
+          `turn ${open.paused.turnId} of this session is paused at a gate; answer it with POST /v1/sessions/{id}/decision before submitting another gated turn`,
+        );
+      }
     }
 
     // Third ceiling: the record's own TTL, armed when the turn goes terminal (`toTerminal`'s
@@ -475,6 +504,10 @@ export const TURN_HANDLERS: Record<string, Handler> = {
         // "still stopping" on a turn that is over. The contract (openapi.yaml) says this field is
         // present only on a running turn, so terminality drops it.
         ...(turn.cancelRequested && turn.state === 'running' ? { cancelRequested: true } : {}),
+        // The paused turn this one answers the gate of (#393). Exposed because a gate's answer is
+        // always a NEW turn, so without it a client holding only a resume's id cannot walk back to
+        // the turn that paused -- which is the link openapi.yaml's decision route promises.
+        ...(turn.resumeOf ? { resumeOf: turn.resumeOf } : {}),
         // PROJECTED, not the stored record (#390): the patch and the assistant text are fetched as
         // artifacts instead, so the RESPONSE is bounded whatever the leaf produced.
         //

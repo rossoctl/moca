@@ -104,8 +104,11 @@ describe('submitTurn (spec §4.1)', () => {
   it('clamps a submitted gate deadline to the record TTL (#393)', async () => {
     const d = turnDeps();
     const sid = await session(d);
+    // A PROMPT leaf: `requireApproval` is that kind's flag, and a converge submission carrying it
+    // is now a 400 (the kind asks with `item.require_approval`).
     const res = await submit(d, sid, {
-      item,
+      kind: 'prompt',
+      prompt: 'hi',
       async: true,
       requireApproval: true,
       gateDeadlineS: 10 ** 7,

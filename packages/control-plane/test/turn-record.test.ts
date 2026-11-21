@@ -172,12 +172,13 @@ describe('parseTurnSubmission (spec §4.1)', () => {
     ).toBe('invalid_request');
   });
 
-  it('ignores it on a converge leaf, which has item.require_approval', () => {
-    const p = parseTurnSubmission({
-      async: true,
-      item: { ...item, require_approval: true },
-      requireApproval: true,
-    });
+  it('refuses it on a converge leaf, which has item.require_approval', () => {
+    // Dropped silently until now, which ran an UNGATED turn for a caller who asked for a gate.
+    expect(
+      codeOf(() => parseTurnSubmission({ async: true, item: { ...item }, requireApproval: true })),
+    ).toBe('invalid_request');
+    // The kind's own flag is untouched, and needs no top-level one.
+    const p = parseTurnSubmission({ async: true, item: { ...item, require_approval: true } });
     expect(p.envelope).toEqual({ item: { ...item, require_approval: true } });
   });
 

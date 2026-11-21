@@ -477,6 +477,14 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
     str(item.file) &&
     str(item.pattern)
   ) {
+    // REFUSED, not dropped: the verdict kind asks for its gate with `item.require_approval`, so a
+    // top-level flag silently ignored here would run an UNGATED turn for a caller who asked for one.
+    if (b.requireApproval === true) {
+      throw new CpError(
+        'invalid_request',
+        'requireApproval applies to the prompt and solve kinds; a converge leaf asks for its gate with item.require_approval',
+      );
+    }
     return { kind: 'verdict', envelope: { item: b.item }, ...common };
   }
   if (b.kind === 'prompt' && str(b.prompt)) {
