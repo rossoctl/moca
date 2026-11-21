@@ -1,0 +1,31 @@
+# Egress credentials for the SBX0 control plane, in VAULT instead of a file (SBX0.2b spec §4.3,
+# moca#823). The Vault ALTERNATIVE to ../egress-credentials: exactly one of the two is listed, by
+# deploy/sbx/setup.sh, behind SBX_EGRESS_CREDENTIALS=1 and SBX_CREDENTIAL_STORE=vault. Listing both
+# would leave whichever came last deciding SH_CREDENTIAL_STORE, so setup.sh picks one.
+#   patch-control-plane.yaml    the store env (SH_CREDENTIAL_STORE=vault, VAULT_*, SH_VAULT_*), and
+#                               sbx-egress (the KEK and the host tokens) as one more projected source
+#                               of the /run/credentials volume
+# No pvc.yaml and no Recreate, which is the whole difference from the file variant: there is no RWO
+# volume to keep off a surge pod, because the ciphertext lives in Vault. KV v2 check-and-set
+# (vault-store.ts) makes concurrent writers safe, so a rolling update is no longer a correctness
+# problem -- but the replica count stays at the base's 1 until the other single-replica assumptions
+# have been checked (moca#823); this component only stops FORCING one.
+# The KEK still comes from the sbx-egress Secret: Vault holds ciphertext, and SH_CREDENTIAL_KEK is
+# what opens it, so the two must not live in the same place.
+# automountServiceAccountToken: false is untouched: the sandbox profile has no Kubernetes API access,
+# and the Vault store needs none.
+#
+# NOT DONE HERE, and it will be the first thing that breaks: the control plane's own NetworkPolicy
+# (deploy/k8s/base) allows egress to Redis and to port 443 on PUBLIC addresses only -- it excepts
+# 10/8, 172.16/12, 192.168/16, 100.64/10 and 169.254/16. An INTERNAL Vault is almost certainly in one
+# of those ranges, and almost certainly on 8200 rather than 443, so the pod will not reach it until an
+# egress rule is added for that address and port. That rule is deliberately left out: it names a host
+# this repo does not know, and widening the policy to "any private address on any port" to make a demo
+# work would quietly undo the containment the policy exists for. Add a narrow rule in the deployment's
+# own overlay, and see docs/operate/sandbox-service/runbook.md ("Vault instead of the PVC"). A private
+# CA on that Vault needs NODE_EXTRA_CA_CERTS
+# as well.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: patch-control-plane.yaml

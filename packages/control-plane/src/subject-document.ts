@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { forLog } from './audit-log.js';
+import { countAsync } from './counters.js';
 import { open, seal, type Opened } from './envelope.js';
 import { CpError } from './errors.js';
 import type { Consumer, CredentialDescriptor, StoredCredential } from './credential-store.js';
@@ -150,9 +151,11 @@ export function readCredential(
  * every store, because the KEK rotation procedure (envelope.ts) depends on them whichever backend
  * holds the ciphertext:
  *
- * - `keyIndex > 0` is logged on EVERY read, deliberately not deduplicated. The terminating condition
- *   for dropping a retired KEK is "no credential has opened under a non-primary key for N days", and a
- *   once-per-process log would let a long-lived process satisfy it while credentials were still stale.
+ * - `keyIndex > 0` is logged AND counted on EVERY read, deliberately not deduplicated. The terminating
+ *   condition for dropping a retired KEK is "no credential has opened under a non-primary key for N
+ *   days", and a once-per-process log would let a long-lived process satisfy it while credentials were
+ *   still stale. The log line carries the subject and credential, for finding WHICH is stale; the
+ *   counter (`GET /metrics`) is the same signal without log scraping, for deciding WHETHER any is.
  * - On failure, the error gains the subject hash. `open`'s own message names the credential, but a
  *   credential name is user-chosen and collides freely across subjects, so without the hash an
  *   operator knew some users were broken and could not enumerate which. The hash is already every
@@ -174,6 +177,7 @@ export function openOrBlameSubject(
     });
   }
   if (opened.keyIndex > 0) {
+    countAsync('credential_nonprimary_kek_reads');
     console.warn(
       `[control-plane] credential opened under NON-PRIMARY KEK ring index ${opened.keyIndex}: ` +
         `subject=${subjectHash(subject)} credential=${forLog(name)} -- re-seals on its next PUT; ` +

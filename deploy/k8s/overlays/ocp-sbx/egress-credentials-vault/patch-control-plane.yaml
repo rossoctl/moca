@@ -1,0 +1,71 @@
+# The Vault credential store on the sandbox profile (SBX0.2b spec §4.3, moca#823). Names the BASE
+# namespace like every patch in the overlay. The connection settings come from sbx-settings (setup.sh
+# writes them); the KEK is a file in /run/credentials, from the Secret sbx-egress, which setup.sh
+# keeps apart from moca-mu1.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-control-plane, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - { name: SH_CREDENTIAL_STORE, value: vault }
+            # Required by the store; setup.sh refuses SBX_CREDENTIAL_STORE=vault without it, so this
+            # is not optional and a missing key must fail the pod rather than start without a store.
+            - name: VAULT_ADDR
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: VAULT_ADDR } }
+            # The rest have code defaults (SH_VAULT_KV_MOUNT=secret, SH_VAULT_PATH=moca/credentials)
+            # or are Enterprise/HCP-only (VAULT_NAMESPACE), so each is optional: an unset key leaves
+            # the store on its default rather than refusing to boot.
+            - name: SH_VAULT_KV_MOUNT
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_VAULT_KV_MOUNT, optional: true } }
+            - name: SH_VAULT_PATH
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_VAULT_PATH, optional: true } }
+            - name: VAULT_NAMESPACE
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: VAULT_NAMESPACE, optional: true } }
+            # A FILE, never VAULT_TOKEN: vault-store.ts re-reads it on every request, so a Vault Agent
+            # sidecar can log in (AppRole) and renew without the control plane holding a long-lived
+            # token or restarting. Setting both VAULT_TOKEN and VAULT_TOKEN_FILE refuses to start.
+            # The path is this deployment's contract with whatever writes the sink; the Agent sidecar
+            # itself is not added here, because its auth method is a per-deployment decision
+            # (moca#823) and a half-configured sidecar would crash-loop the pod.
+            - { name: VAULT_TOKEN_FILE, value: /run/vault/token }
+          volumeMounts:
+            # Writable, unlike /run/credentials: the Agent REWRITES the sink on every renewal. Shared
+            # with the Agent sidecar when one is added; empty until then, which the store reports as
+            # "not answering" rather than as an empty store.
+            - { name: vault-token, mountPath: /run/vault }
+      volumes:
+        - name: vault-token
+          emptyDir: { medium: Memory }
+        # moca-mu1's two items (the overlay's), every key of sbx-egress (the KEK -- Vault holds only
+        # ciphertext, so the key that opens it must not live in Vault) and every key of
+        # sbx-template-hosts (optional: only with SBX_TEMPLATE_STORE=1). A strategic merge REPLACES a
+        # projected volume's source list, so this component restates every source the other two would
+        # add -- the same reason template-store/patch-control-plane.yaml restates them.
+        - name: credentials
+          secret: null
+          projected:
+            defaultMode: 256 # 0400
+            sources:
+              - secret:
+                  name: moca-mu1
+                  items:
+                    - { key: SH_SESSION_TOKEN_PRIVATE_KEY, path: SH_SESSION_TOKEN_PRIVATE_KEY }
+                    - { key: SH_JANITOR_TOKEN, path: SH_JANITOR_TOKEN }
+                    # The operator's static bearer for the members routes (setup.sh keeps it).
+                    - { key: SH_INSTALLER_TOKEN, path: SH_INSTALLER_TOKEN }
+              # The oidc client secret, optional: a GitHub stack has no moca-oidc Secret and the
+              # source is skipped (patch-control-plane.yaml, the base).
+              - secret:
+                  name: moca-oidc
+                  optional: true
+                  items:
+                    - { key: SH_OIDC_CLIENT_SECRET, path: SH_OIDC_CLIENT_SECRET }
+              - secret: { name: sbx-egress }
+              - secret: { name: sbx-template-hosts, optional: true }
