@@ -100,6 +100,43 @@ async function pausedTurn(over: Partial<TurnRecord> & { result?: null } = {}): P
   return turn;
 }
 
+/**
+ * A session the ROUTES built, with its one gated turn parked at gate 0: what the decision route
+ * reads has to be the session `createSession` wrote, so these tests cannot shortcut it with `create`.
+ */
+async function gatedSession(): Promise<{ sessionId: string; turnId: string }> {
+  await seedCredential(deps, 'github:1234');
+  const created = await HANDLERS.createSession!(
+    ctx({ principal: alice, body: { credentials: { inference: 'my-anthropic' } } }),
+    deps,
+  );
+  const sessionId = (created.body as { sessionId: string }).sessionId;
+  const submitted = await HANDLERS.submitTurn!(
+    ctx({
+      principal: alice,
+      params: { id: sessionId },
+      body: {
+        async: true,
+        kind: 'prompt',
+        prompt: 'hi',
+        requireApproval: true,
+        gateDeadlineS: DEADLINE_S,
+      },
+    }),
+    deps,
+  );
+  // Parked by hand on the record the route created, rather than re-`create`d: the decision route
+  // reads the session the route wrote, and a second create would replace its idempotency key.
+  const turnId = (submitted.body as { turnId: string }).turnId;
+  deps.fake.strings.set(
+    leafResultKey(sessionId, turnId),
+    JSON.stringify({ status: 'paused', gateId: 0, gate: { summary: 's', proposed_action: 'p' } }),
+  );
+  await deps.turns.finalize(turnId, 'paused', PAUSED_AT);
+  deps.turnQueue.ids.length = 0;
+  return { sessionId, turnId };
+}
+
 const decisionOf = async (turnId: string) =>
   (await deps.turns.get(turnId))?.envelope.decision as
     { gateId: number; action: string; feedback?: string } | undefined;
@@ -153,36 +190,7 @@ describe('sweepGates (#393, design §3)', () => {
   });
 
   it('a human decision and the sweep converge on one resume', async () => {
-    await seedCredential(deps, 'github:1234');
-    const created = await HANDLERS.createSession!(
-      ctx({ principal: alice, body: { credentials: { inference: 'my-anthropic' } } }),
-      deps,
-    );
-    const sessionId = (created.body as { sessionId: string }).sessionId;
-    const submitted = await HANDLERS.submitTurn!(
-      ctx({
-        principal: alice,
-        params: { id: sessionId },
-        body: {
-          async: true,
-          kind: 'prompt',
-          prompt: 'hi',
-          requireApproval: true,
-          gateDeadlineS: DEADLINE_S,
-        },
-      }),
-      deps,
-    );
-    // Parked by hand on the record the route created, rather than re-`create`d: the decision route
-    // reads the session the route wrote, and a second create would replace its idempotency key.
-    const turnId = (submitted.body as { turnId: string }).turnId;
-    deps.fake.strings.set(
-      leafResultKey(sessionId, turnId),
-      JSON.stringify({ status: 'paused', gateId: 0, gate: { summary: 's', proposed_action: 'p' } }),
-    );
-    await deps.turns.finalize(turnId, 'paused', PAUSED_AT);
-    deps.turnQueue.ids.length = 0;
-
+    const { sessionId } = await gatedSession();
     const byHand = await HANDLERS.decideGate!(
       ctx({ principal: alice, params: { id: sessionId }, body: { gateId: 0, action: 'approve' } }),
       deps,
@@ -211,6 +219,64 @@ describe('sweepGates (#393, design §3)', () => {
     } finally {
       logged.mockRestore();
     }
+  });
+
+  it('does NOT hand the gate back when it was answered in the failing window', async () => {
+    // The double-spend the hand-back could cause: a human decision lands while this pass is failing,
+    // and by the time a later pass looked at the member that resume has finished -- which releases
+    // its gate-keyed idempotency key, so only `resumeOf` still records that the gate was answered. A
+    // second resume there would run the continuation twice for one decision.
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const paused = await pausedTurn();
+      deps.turnQueue.fails.add('t-id-1');
+      await deps.turns.create(
+        rec({
+          turnId: 't-human',
+          createdAt: deps.nowOf(),
+          resumeOf: paused.turnId,
+          idempotencyKey: 's-1:gate:0',
+        }),
+      );
+      await deps.turns.finalize('t-human', 'done', deps.nowOf());
+      expect(await sweepGates(deps)).toBe(0);
+      expect(await deps.turns.dueGates(deps.nowOf())).toEqual([]);
+      // A later pass therefore has nothing to retry, which is the point.
+      deps.turnQueue.fails.clear();
+      expect(await sweepGates(deps)).toBe(0);
+      expect(deps.turnQueue.ids).toEqual([]);
+      expect(logged).toHaveBeenCalledTimes(1);
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it('two passes racing on one gate resume it once', async () => {
+    // Every replica runs the same pass, and `claimGate`'s ZREM is the only thing that picks one. The
+    // fake returns the count it actually removed, so the loser really does lose.
+    await pausedTurn();
+    const [a, b] = await Promise.all([sweepGates(deps), sweepGates(deps)]);
+    expect(a + b).toBe(1);
+    expect(deps.turnQueue.ids).toHaveLength(1);
+  });
+
+  it('a sweep racing a human decision produces one resume', async () => {
+    const { sessionId, turnId } = await gatedSession();
+    const decision = HANDLERS.decideGate!(
+      ctx({ principal: alice, params: { id: sessionId }, body: { gateId: 0, action: 'approve' } }),
+      deps,
+    ).then(
+      (res) => (res.body as { turnId: string }).turnId,
+      (e: { code?: string }) => e.code,
+    );
+    const [swept, answered] = await Promise.all([sweepGates(deps), decision]);
+    // Whichever way they interleave, the gate-keyed idempotency key leaves ONE resume: the loser
+    // either replays the winner's turn id or is told the gate has been answered.
+    expect(deps.turnQueue.ids).toHaveLength(1);
+    const only = deps.turnQueue.ids[0]!;
+    expect((await deps.turns.get(only))?.resumeOf).toBe(turnId);
+    expect(answered === only || answered === 'gate_not_pending').toBe(true);
+    expect(swept).toBeLessThanOrEqual(1);
   });
 
   it('one error does not stop the pass', async () => {

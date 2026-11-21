@@ -62,8 +62,30 @@ export async function sweepGates(deps: CpDeps, limit = SWEEP_LIMIT): Promise<num
         // Hand the claim back, or this gate's deadline never fires again: the ZREM is the lock, so
         // the member is the only thing that brings a later pass back to it. Re-added at the deadline
         // it already had, which `toTerminal` scored as `paused-at + gateDeadlineS`.
-        const dueAt = (paused.endedAt ?? deps.now()) + (paused.gateDeadlineS ?? 0) * 1000;
-        await turns.releaseGate(turnId, dueAt);
+        //
+        // ONLY while the gate is still UNANSWERED, which is the same question the decision route
+        // asks: a human decision can land in the window this submission failed in, and handing the
+        // member back then would let a later pass build a SECOND resume from the same paused turn --
+        // the continuation running twice, double spend and double side effects for one decision. The
+        // gate-keyed idempotency key cannot answer it, because `toTerminal` releases that key as
+        // soon as the resume finishes; `resumeOf` on the record is durable, so this reads it.
+        //
+        // `found` must be THIS turn and unresumed. A newest-paused that is some other turn means the
+        // chain moved on -- somebody's resume ran and paused at a gate of its own, which has its own
+        // member -- and a `resumed` marker means the gate is answered. This submission's own failed
+        // resume does not count (`findPausedBySession` skips a `failed` one), so the ordinary enqueue
+        // failure still hands back.
+        //
+        // Its own try/catch: a hand-back that throws must not replace the error that caused it.
+        try {
+          const found = await turns.findPausedBySession(paused.sessionId);
+          if (found?.paused.turnId === paused.turnId && !found.resumed) {
+            const dueAt = (paused.endedAt ?? deps.now()) + (paused.gateDeadlineS ?? 0) * 1000;
+            await turns.releaseGate(turnId, dueAt);
+          }
+        } catch (handBack) {
+          console.error(`[gate-sweep] ${turnId}: gate hand-back failed:`, handBack);
+        }
         throw err;
       }
       resumed += 1;
