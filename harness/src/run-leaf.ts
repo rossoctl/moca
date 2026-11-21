@@ -960,7 +960,12 @@ async function runPromptLeaf(
       // resumed leaf is steered at a tool it does not have -- the same failure `verdictTool` exists
       // to prevent, one level out. Costs nothing on the ungated path: `planLeafGate` already read
       // the session for any invocation carrying a decision.
-      ...(env.requireApproval || env.decision !== undefined
+      //
+      // `!!env.decision` and not `!== undefined`, to match `planLeafGate`'s own `!env.decision`
+      // exactly: a JSON `decision: null` is NOT carrying a decision, and registering the tool for
+      // one would hand the model a `nextGateId` of 0 on a session that never got read -- appending
+      // its request as gate 0 on a session that already has gates.
+      ...(env.requireApproval || !!env.decision
         ? { gate: { capture: gateCapture, nextGateId: plan.nextGateId } }
         : {}),
     });
@@ -1196,7 +1201,8 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps,
         // durable entries this session was opened from. A leaf carrying a DECISION gets the tool
         // too, for the reason runPromptLeaf's own registration gives: the reject continuation
         // invites another `request_approval`, so the tool has to be there to call.
-        ...((env.requireApproval || env.decision !== undefined) && gate
+        // `!!env.decision`, as in runPromptLeaf and for the same reason: a `null` decision is not one.
+        ...((env.requireApproval || !!env.decision) && gate
           ? [requestApprovalExtension(capture, sessionManager, gate.nextGateId)]
           : []),
       ],

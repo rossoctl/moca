@@ -182,6 +182,23 @@ describe('a gated prompt leaf', () => {
     expect(res).toMatchObject({ status: 'responded', text: 'revised' });
   });
 
+  it('treats a null decision as no decision, as planLeafGate does', async () => {
+    // `decision: null` is what a client sends for "no decision" in JSON, and `planLeafGate` agrees:
+    // its guard is `!env.decision`, so it returns `nextGateId: 0` WITHOUT reading the session.
+    // Registering on `!== undefined` here would hand the model a 0 on a session that already has
+    // gates -- appending its request as gate 0, which `computeGateState` reads as already decided.
+    const sid = 'gate-kinds-null-decision';
+    await pendingGate(sid);
+    read.mockClear();
+    const executeTurn = vi.fn(async (input: Record<string, unknown>) => {
+      expect(input.gate).toBeUndefined();
+      return { response: 'hi', stopReason: 'end_turn' };
+    });
+    const res = await runLeaf(env(sid, { decision: null }), CONFIG, { executeTurn } as never);
+    expect(res).toMatchObject({ status: 'responded', text: 'hi' });
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it('wires no gate and reads no session state when requireApproval is absent', async () => {
     const executeTurn = vi.fn(async (input: Record<string, unknown>) => {
       expect(input.gate).toBeUndefined();
