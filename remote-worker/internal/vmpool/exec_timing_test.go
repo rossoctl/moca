@@ -26,7 +26,7 @@ func (v *fakeVM) CgroupCPU() (user, sys time.Duration, ok bool) {
 // both tiers; the microVM fields follow err=.
 var timingRe = regexp.MustCompile(`^exec-timing req=(\d+) workspace_key="([^"]*)" start_ms=(\d+) dur_ms=([\d.]+) ` +
 	`user_ms=(-?[\d.]+) sys_ms=(-?[\d.]+) exit=(-?\d+) err="([^"]*)" tier="microvm" acquire_us=\d+ resume_us=\d+ ` +
-	`mount_us=\d+ run_us=\d+ destroy_us=\d+ cold="[^"]*" vm=\S*$`)
+	`mount_us=\d+ normalise_us=\d+ run_us=\d+ destroy_us=\d+ cold="[^"]*" vm=\S*$`)
 
 func captureTiming(t *testing.T) *[]string {
 	t.Helper()

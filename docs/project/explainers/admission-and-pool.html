@@ -1,0 +1,936 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Admission and the microVM pool · moca</title>
+<meta name="description" content="Interactive walkthrough of the sandbox service's four admission gates, its microVM pool and the memory budget, step by step.">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  /* Layout concept: single control-room column; canvas diagram on top, step narration beside it, reference tables below.
+     Palette: slate neutrals with a teal console accent; VM states use semantic colors kept apart from the accent. */
+  :root {
+    --bg: #f4f6f8;
+    --panel: #ffffff;
+    --panel2: #edf1f4;
+    --fg: #16212b;
+    --muted: #5a6b78;
+    --line: #d3dbe2;
+    --accent: #0e7490;
+    --accent-soft: rgba(14, 116, 144, 0.10);
+    --c-ready: #1d6fb8;
+    --c-warm: #b45309;
+    --c-run: #1a7f4b;
+    --c-destroy: #64707b;
+    --c-refuse: #b3261e;
+    --c-refuse-soft: rgba(179, 38, 30, 0.08);
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0c1218;
+      --panel: #121b23;
+      --panel2: #17222c;
+      --fg: #e4ecf1;
+      --muted: #8ba1b0;
+      --line: #263643;
+      --accent: #45bccf;
+      --accent-soft: rgba(69, 188, 207, 0.12);
+      --c-ready: #5da9dd;
+      --c-warm: #e0a247;
+      --c-run: #48b878;
+      --c-destroy: #7d8b96;
+      --c-refuse: #ef6a5e;
+      --c-refuse-soft: rgba(239, 106, 94, 0.10);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0c1218;
+    --panel: #121b23;
+    --panel2: #17222c;
+    --fg: #e4ecf1;
+    --muted: #8ba1b0;
+    --line: #263643;
+    --accent: #45bccf;
+    --accent-soft: rgba(69, 188, 207, 0.12);
+    --c-ready: #5da9dd;
+    --c-warm: #e0a247;
+    --c-run: #48b878;
+    --c-destroy: #7d8b96;
+    --c-refuse: #ef6a5e;
+    --c-refuse-soft: rgba(239, 106, 94, 0.10);
+    color-scheme: dark;
+  }
+  html { background: var(--bg); }
+  body { margin: 0; background: var(--bg); color: var(--fg); font-family: "IBM Plex Sans", system-ui, sans-serif; }
+  .mono { font-family: "IBM Plex Mono", ui-monospace, monospace; }
+  .muted { color: var(--muted); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 11px; white-space: nowrap; }
+  .knob { background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 6px; padding: 2px 8px; font-size: 11.5px; color: var(--fg); white-space: nowrap; }
+  .ste li { margin-bottom: 7px; line-height: 1.55; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  .dot { width: 9px; height: 9px; border-radius: 999px; border: 1px solid var(--muted); background: transparent; padding: 0; cursor: pointer; }
+  .dot.on { background: var(--accent); border-color: var(--accent); }
+  .dot.seen { border-color: var(--accent); }
+  .btn { border: 1px solid var(--line); background: var(--panel2); color: var(--fg); border-radius: 8px; padding: 7px 16px; font-weight: 600; font-size: 13.5px; cursor: pointer; }
+  .btn:hover:not(:disabled) { border-color: var(--accent); }
+  .btn:disabled { opacity: 0.4; cursor: default; }
+  .btn:focus-visible, .dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #viz { display: block; width: 100%; }
+  @media (max-width: 700px) { #viz { min-width: 720px; } }
+  .vizwrap { overflow-x: auto; }
+  .sw { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<noscript><p style="margin:16px;color:#b42318">This page needs JavaScript: the steps are built by script.</p></noscript>
+<div class="mx-auto" style="max-width: 1120px; padding: 28px max(16px, env(safe-area-inset-left, 0px)) 56px max(16px, env(safe-area-inset-right, 0px));">
+
+  <header class="mb-6">
+    <div class="mono muted" style="font-size: 11.5px; letter-spacing: 0.14em; text-transform: uppercase;">moca · sandbox service</div>
+    <h1 class="mt-1 font-bold" style="font-size: clamp(24px, 4vw, 34px); text-wrap: balance;">Admission and the microVM pool</h1>
+    <p class="muted mt-2" style="max-width: 68ch; line-height: 1.55;">A request for a sandbox passes through four admission gates. This page shows each gate, each computation, and the pool that serves the Execs. Step through the sequence with the controls.</p>
+  <p class="muted" style="margin-top:10px;font-size:13px"><a href="https://www.rossoctl.dev/moca/" target="_blank" rel="noopener">&lsaquo; moca docs</a> · written page: <a href="https://www.rossoctl.dev/moca/sandbox/concepts/limits" target="_blank" rel="noopener">Limits</a></p>
+  </header>
+
+  <!-- ============ interactive visualization ============ -->
+  <section class="card p-4 sm:p-5 mb-10">
+    <div class="flex flex-wrap items-center gap-3 mb-4">
+      <span class="mono" id="stepNum" style="font-size: 12.5px; color: var(--muted);"></span>
+      <span class="flex-1"></span>
+      <div class="flex items-center gap-2" id="dots" role="tablist" aria-label="steps"></div>
+      <button class="btn" id="prevBtn" aria-label="previous step">&#8249; Prev</button>
+      <button class="btn" id="nextBtn" aria-label="next step">Next &#8250;</button>
+    </div>
+
+    <div class="min-w-0 mb-5">
+      <div class="vizwrap card" style="padding: 10px; background: var(--panel2);">
+        <canvas id="viz" height="500" aria-label="diagram of the SBX admission path and the microVM pool"></canvas>
+      </div>
+      <div class="mono muted mt-2 flex flex-wrap gap-x-5 gap-y-1" style="font-size: 11px;">
+        <span><span class="sw" style="background: var(--c-ready);"></span>standby · paused</span>
+        <span><span class="sw" style="background: var(--c-warm);"></span>warming</span>
+        <span><span class="sw" style="background: var(--c-run);"></span>in-flight · resumed</span>
+        <span><span class="sw" style="background: var(--c-destroy);"></span>destroying</span>
+        <span><span class="sw" style="border: 1px dashed var(--muted);"></span>parked · workspace only</span>
+      </div>
+    </div>
+
+    <aside class="min-w-0" aria-live="polite">
+      <div class="grid gap-5 md:grid-cols-[minmax(0,1fr)_340px]">
+        <div class="min-w-0">
+          <div class="mono" id="phase" style="font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--accent);"></div>
+          <h2 class="font-bold mt-1 mb-3" id="stepTitle" style="font-size: 19px;"></h2>
+          <ul class="ste pl-5 list-disc" id="narr" style="font-size: 14px;"></ul>
+        </div>
+        <div class="min-w-0">
+          <div id="compWrap" class="mt-4 md:mt-0">
+            <div class="mono muted mb-1" style="font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;">Computation</div>
+            <pre class="mono card p-3 overflow-x-auto" id="comp" style="font-size: 12px; line-height: 1.7; margin: 0;"></pre>
+          </div>
+          <div id="knobWrap" class="mt-4">
+            <div class="mono muted mb-1" style="font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;">Knobs in this step</div>
+            <div class="flex flex-wrap gap-1.5" id="knobs"></div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </section>
+
+  <!-- ============ reference ============ -->
+  <section class="mb-10">
+    <h2 class="font-bold mb-1" style="font-size: 21px;">How the system works</h2>
+    <p class="muted mb-4" style="max-width: 78ch; line-height: 1.6;">The text below follows the rules of ASD-STE100. Each sentence holds one fact. Each sentence uses one action.</p>
+
+    <div class="grid gap-6 md:grid-cols-2">
+      <div class="card p-5">
+        <h3 class="font-semibold mb-2">Admission control</h3>
+        <ul class="ste pl-5 list-disc" style="font-size: 14px;">
+          <li>A sandbox request passes through four gates. The gates are the control plane, the relay, the worker queue, and the pool budget.</li>
+          <li>The control plane checks the enrollment list first. Then the control plane counts the live sandboxes. The count runs in one Lua script. The script is atomic. Two requests cannot take the same free slot.</li>
+          <li>The quotas control disk, not memory. A user holds at most 3 live sandboxes. The service holds at most 40 live sandboxes.</li>
+          <li>The control plane does no worker I/O at create time. The worker builds the workspace at the first Exec.</li>
+          <li>The relay caps the in-flight Execs per sandbox. The default cap is 2. One Exec runs. One Exec waits at the workspace gate.</li>
+          <li>The worker holds a queue of 64 Execs. The queue answers <span class="mono" style="font-size: 12.5px;">busy: queue full</span> when it is full.</li>
+          <li>The pool checks the memory budget. The check adds the full price of one VM to the committed bytes. The price is guest RAM plus VM overhead.</li>
+          <li>A paused standby costs less than a running VM. The pool charges the measured dirty pages times the headroom factor.</li>
+          <li>A promotion over the budget evicts standbys from colder runs. The eviction picks the run with the oldest last use first.</li>
+          <li>A capacity refusal is retryable. The capacity reasons are <span class="mono" style="font-size: 12.5px;">memory-budget:</span>, <span class="mono" style="font-size: 12.5px;">max-runs:</span> and <span class="mono" style="font-size: 12.5px;">busy: queue full</span>. The caller sees HTTP 429, HTTP 503, or <span class="mono" style="font-size: 12.5px;">RESOURCE_EXHAUSTED</span>. A <span class="mono" style="font-size: 12.5px;">host-memory:</span> refusal is not a capacity refusal and is not retried. Each refusal carries a distinct reason code.</li>
+        </ul>
+      </div>
+      <div class="card p-5">
+        <h3 class="font-semibold mb-2">Pool management</h3>
+        <ul class="ste pl-5 list-disc" style="font-size: 14px;">
+          <li>The pool groups VMs by workspace. Each workspace is one run.</li>
+          <li>The pool keeps standby VMs for each run. A standby VM is paused. The target count per run is 2.</li>
+          <li>An Exec acquires one standby. The acquire pops the newest standby first.</li>
+          <li>The VM runs one command. The pool destroys the VM after the command. The pool never reuses a VM.</li>
+          <li>The destroy runs to the end before the workspace gate opens. A benchmark-only option (<span class="mono" style="font-size: 12.5px;">DeferReapWorkers</span>, default 0) can move the reap to background workers. The deployed worker does not enable it.</li>
+          <li>The pool refills a popped slot after a delay. The delay is 200 ms. The delay keeps a finished run from getting new VMs. A failed refill backs off. The backoff starts at 250 ms, doubles, and stops at 30 s.</li>
+          <li>The sweep runs on every Exec. The sweep also runs on a timer. The timer fires every 22.5 s.</li>
+          <li>A run with no Exec for 90 s drops its standbys. The run keeps the workspace. The run enters the state parked. A parked run holds disk, not memory.</li>
+          <li>The sweep destroys at most 8 VMs per scan. This rate limits the reclaim work.</li>
+          <li>A run with no Exec for a longer time loses the workspace. The default time is 30 minutes. A sandbox-service deployment typically sets it longer than the sandbox lifetime (for example 768 hours with the default 30-day maximum lifetime). A live sandbox keeps its workspace for its whole lifetime.</li>
+          <li>The host janitor runs every 15 minutes. The janitor asks the control plane for the live and terminated sandboxes. The janitor frees the disk of a terminated sandbox after a grace period.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="mb-10">
+    <h2 class="font-bold mb-4" style="font-size: 21px;">Admission gates and their knobs</h2>
+    <div class="card p-2" style="overflow-x: auto;">
+      <table class="mono" style="font-size: 12.5px;">
+        <thead><tr><th>Gate</th><th>Check</th><th>Knob</th><th>Default</th><th>Refusal</th></tr></thead>
+        <tbody>
+          <tr><td>control plane</td><td>subject is enrolled</td><td>SH_ALLOWED_SUBJECTS</td><td>required</td><td>not enrolled</td></tr>
+          <tr><td>control plane</td><td>live sandboxes per subject</td><td>SH_SANDBOX_MAX_PER_SUBJECT</td><td>3</td><td>429 quota_exceeded</td></tr>
+          <tr><td>control plane</td><td>live sandboxes, total</td><td>SH_SANDBOX_MAX_TOTAL</td><td>40</td><td>429 quota_exceeded</td></tr>
+          <tr><td>relay</td><td>in-flight Execs per sandbox</td><td>SH_SANDBOX_MAX_INFLIGHT</td><td>2</td><td>RESOURCE_EXHAUSTED "sandbox busy"</td></tr>
+          <tr><td>worker</td><td>waiting Execs</td><td>QueueCap</td><td>64, fixed</td><td>"busy: queue full"</td></tr>
+          <tr><td>worker</td><td>Exec concurrency slots</td><td>WORKER_MAX_CONCURRENT</td><td>16</td><td>queueing, back-pressure</td></tr>
+          <tr><td>worker</td><td>one Exec per workspace</td><td>execGate</td><td>fixed</td><td>wait at the gate</td></tr>
+          <tr><td>pool</td><td>memory budget</td><td>SH_MAX_COMMITTED_MB / SH_MEMORY_RESERVE_MB</td><td>required / 0</td><td>"memory-budget:" → 503</td></tr>
+          <tr><td>pool</td><td>standby charge</td><td>SH_STANDBY_HEADROOM</td><td>4.0 ("full" = full RAM)</td><td>&mdash;</td></tr>
+          <tr><td>pool</td><td>unparked runs</td><td>SH_MAX_RUNS</td><td>64</td><td>"max-runs:" → 503</td></tr>
+          <tr><td>pool</td><td>host free memory floor</td><td>SH_HOST_MEM_FLOOR_MB</td><td>0, off</td><td>"host-memory:" → refused, not retryable (no 503)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="mb-10">
+    <h2 class="font-bold mb-4" style="font-size: 21px;">Pool knobs</h2>
+    <div class="card p-2" style="overflow-x: auto;">
+      <table class="mono" style="font-size: 12.5px;">
+        <thead><tr><th>Knob</th><th>Default</th><th>What it tunes</th></tr></thead>
+        <tbody>
+          <tr><td>SH_STANDBY_DEPTH</td><td>2</td><td>standby VMs kept warm per run</td></tr>
+          <tr><td>SH_GUEST_RAM_MB</td><td>256</td><td>guest RAM per VM; the dominant cost term</td></tr>
+          <tr><td>VMOverheadBytes</td><td>32 MiB</td><td>per-VM cost outside guest RAM</td></tr>
+          <tr><td>StandbyIdle</td><td>90 s</td><td>idle time that parks a run (worker flag, not env)</td></tr>
+          <tr><td>SH_WORKSPACE_IDLE</td><td>30 min (sandbox service: set longer than the sandbox lifetime)</td><td>idle time that deletes a workspace</td></tr>
+          <tr><td>ReplenishDelay</td><td>200 ms</td><td>grace before a popped slot is refilled</td></tr>
+          <tr><td>replenish backoff</td><td>250 ms → 30 s</td><td>retry curve for a failed refill</td></tr>
+          <tr><td>MaxReclaimsPerScan</td><td>8</td><td>VMs destroyed per sweep; reclaim rate limit</td></tr>
+          <tr><td>SH_WORKSPACE_IMAGE_MB</td><td>2048</td><td>disk per sandbox workspace</td></tr>
+          <tr><td>SH_SANDBOX_LIFETIME_SECONDS</td><td>7 days</td><td>sandbox lifetime; expiry is computed, not scheduled</td></tr>
+          <tr><td>SH_SANDBOX_TOKEN_TTL_SECONDS</td><td>900</td><td>sandbox token lifetime</td></tr>
+          <tr><td>SBX_JANITOR_AGE / cadence</td><td>≥ token TTL + 5 min / 15 min</td><td>grace and run rate of the host janitor</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer class="mono muted" style="font-size: 11.5px; line-height: 1.8;">
+    Sources: remote-worker/internal/vmpool/{pool,budget,sweep,replenish,runpool,config}.go ·
+    remote-worker/internal/session/loop.go · packages/control-plane/src/sandbox-redis.ts ·
+    packages/sandbox-relay/src/sandbox-caller.ts ·
+    docs/specs/2026-09-09-p4-microvm-sandbox-design.md ·
+    deploy/microvm/microvm-worker.service · deploy/sbx/setup.sh.
+    Numbers in the diagram are example values (budget 24,576 MiB, guest RAM 256 MiB, depth 2).
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- geometry (logical units, 880 x 500) ----------
+  var LW = 880, LH = 500;
+  var BOX = {
+    client: { x: 20,  y: 60,  w: 130, h: 105, title: "CLIENT", sub: "mocactl / MCP" },
+    cp:     { x: 210, y: 30,  w: 190, h: 120, title: "CONTROL PLANE" },
+    relay:  { x: 450, y: 30,  w: 170, h: 150, title: "RELAY" },
+    worker: { x: 670, y: 30,  w: 180, h: 150, title: "WORKER" }
+  };
+  var POOL = { x: 20, y: 210, w: 830, h: 250 };
+
+  // ---------- steps ----------
+  var BASE = 9088; // committed MiB from other runs
+
+  var steps = [
+    {
+      title: "The system at rest",
+      phase: "steady state",
+      narr: [
+        "The diagram shows the SBX data path.",
+        "The client talks to the control plane. The relay forwards Exec calls to one worker. The worker owns the microVM pool.",
+        "The pool groups VMs by workspace. Each workspace is one run.",
+        "Other workspaces hold 41 runs and 62 standby VMs. Their committed charge is 9,088 MiB.",
+        "A standby VM is paused. A paused VM costs memory for dirty pages only."
+      ],
+      comp: [
+        "committed (other runs)   = 9,088 MiB",
+        "budget = SH_MAX_COMMITTED_MB - SH_MEMORY_RESERVE_MB",
+        "       = 24,576 - 0        = 24,576 MiB"
+      ],
+      knobs: ["SH_MAX_COMMITTED_MB", "SH_MEMORY_RESERVE_MB"],
+      scene: { cp: { live: 27, mine: 2, rec: "—" }, relay: 0, worker: { q: 0, s: 0, gate: "free" },
+               run: "absent", idle: "—", vms: { inflight: false, warming: false, destroying: false, standby: 0, parked: false, chip: null, janitor: false },
+               budget: BASE, counters: { warm: 0, coldF: 0, coldP: 0, refused: 0, evicted: 0 }, ghost: null }
+    },
+    {
+      title: "The client requests a sandbox",
+      phase: "gate 1 · control plane",
+      narr: [
+        "The client sends POST /v1/sandboxes to the control plane.",
+        "The control plane checks the enrollment list first. SH_ALLOWED_SUBJECTS sets the list.",
+        "The subject is on the list. The control plane continues.",
+        "A subject that is not on the list does not get a sandbox."
+      ],
+      comp: [
+        "requireEnrolled(subject)",
+        "subject ∈ SH_ALLOWED_SUBJECTS  → pass"
+      ],
+      knobs: ["SH_ALLOWED_SUBJECTS"],
+      scene: { packet: { path: "create", t: 0.55, label: "POST /v1/sandboxes" }, hl: ["client", "cp"],
+               cp: { live: 27, mine: 2, rec: "—", extra: "enrolled ✓" }, relay: 0, worker: { q: 0, s: 0, gate: "free" },
+               run: "absent", idle: "—", vms: { inflight: false, warming: false, destroying: false, standby: 0, parked: false, chip: null, janitor: false },
+               budget: BASE, counters: { warm: 0, coldF: 0, coldP: 0, refused: 0, evicted: 0 }, ghost: null }
+    },
+    {
+      title: "The control plane checks the quotas",
+      phase: "gate 1 · control plane",
+      narr: [
+        "The control plane counts the live sandboxes. The count runs in one Lua script on Redis. The script is atomic.",
+        "The service holds 27 live sandboxes. 27 is less than 40.",
+        "The subject holds 2 live sandboxes. 2 is less than 3.",
+        "The quotas control disk, not memory. SH_SANDBOX_MAX_PER_SUBJECT and SH_SANDBOX_MAX_TOTAL set the quotas.",
+        "A request above a limit gets HTTP 429 with the error quota_exceeded."
+      ],
+      comp: [
+        "ZCOUNT sbx:live (now, +inf)   = 27",
+        "27 < 40  (SH_SANDBOX_MAX_TOTAL)        → pass",
+        "live owned by subject         = 2",
+        "2  < 3   (SH_SANDBOX_MAX_PER_SUBJECT)  → pass"
+      ],
+      knobs: ["SH_SANDBOX_MAX_TOTAL", "SH_SANDBOX_MAX_PER_SUBJECT"],
+      scene: { packet: { path: "create", t: 1, label: "POST /v1/sandboxes", arrived: true }, hl: ["cp"],
+               cp: { live: 27, mine: 2, rec: "—", extra: "quota ✓" }, relay: 0, worker: { q: 0, s: 0, gate: "free" },
+               run: "absent", idle: "—", vms: { inflight: false, warming: false, destroying: false, standby: 0, parked: false, chip: null, janitor: false },
+               budget: BASE, counters: { warm: 0, coldF: 0, coldP: 0, refused: 0, evicted: 0 }, ghost: "cp" }
+    },
+    {
+      title: "The control plane creates the sandbox",
+      phase: "gate 1 · control plane",
+      narr: [
+        "The control plane writes the sandbox record. The state ready is derived when the record is read.",
+        "The control plane computes the expiry date. The date is now plus SH_SANDBOX_LIFETIME_SECONDS. The default is 7 days.",
+        "Create returns the record and no token. The control plane does no worker I/O. The worker builds the workspace at the first Exec.",
+        "The client mints a sandbox token with a separate call, POST /v1/sandboxes/{id}/token. The token is valid for 900 seconds."
+      ],
+      comp: [
+        "state = ready  (derived on read, not stored)",
+        "record.expiresAt = now + 7 d",
+        "token (separate call): ttl = 900 s  (SH_SANDBOX_TOKEN_TTL_SECONDS)"
+      ],
+      knobs: ["SH_SANDBOX_LIFETIME_SECONDS", "SH_SANDBOX_TOKEN_TTL_SECONDS"],
+      scene: { packet: { path: "return", t: 0.5, label: "201 sandbox" }, hl: ["cp", "client"],
+               cp: { live: 28, mine: 3, rec: "ready" }, relay: 0, worker: { q: 0, s: 0, gate: "free" },
+               run: "absent", idle: "—", vms: { inflight: false, warming: false, destroying: false, standby: 0, parked: false, chip: null, janitor: false },
+               budget: BASE, counters: { warm: 0, coldF: 0, coldP: 0, refused: 0, evicted: 0 }, ghost: null }
+    },
+    {
+      title: "The client sends the first Exec",
+      phase: "gate 2 · relay",
+      narr: [
+        "The client sends an Exec call to the relay. The call carries a req_id.",
+        "The relay checks the token claims. The claims name one worker and one workspace. The relay checks the req_id for a duplicate.",
+        "The relay counts the in-flight Execs for this sandbox. 0 is less than 2. The relay forwards the call.",
+        "SH_SANDBOX_MAX_INFLIGHT sets the limit. The default is 2. One Exec runs, and one Exec waits at the workspace gate.",
+        "A call above the limit gets RESOURCE_EXHAUSTED. The message is “sandbox busy”.",
+        "The worker puts the Exec into the queue. The queue holds 64 Execs. A full queue answers “busy: queue full”.",
+        "The workspace gate holds the Exec. The gate admits one Exec per workspace."
+      ],
+      comp: [
+        "inflight[sbx] = 0",
+        "0 < 2  (SH_SANDBOX_MAX_INFLIGHT)  → admit",
+        "queue = 1 / 64   slots = 1 / 16",
+        "execGate: held"
+      ],
+      knobs: ["SH_SANDBOX_MAX_INFLIGHT", "WORKER_MAX_CONCURRENT", "QueueCap"],
+      scene: { token: true, packets: [ { path: "exec", t: 0.45, label: "Exec #1 (req_id)" }, { path: "relayworker", t: 0.7, label: "" } ],
+               hl: ["client", "relay", "worker"],
+               cp: { live: 28, mine: 3, rec: "ready" }, relay: 1, worker: { q: 1, s: 1, gate: "held" },
+               run: "absent", idle: "0 s", vms: { inflight: false, warming: false, destroying: false, standby: 0, parked: false, chip: null, janitor: false },
+               budget: BASE, counters: { warm: 0, coldF: 0, coldP: 0, refused: 0, evicted: 0 }, ghost: "relay" }
+    },
+    {
+      title: "The pool warms the first VM",
+      phase: "gate 4 · pool budget",
+      narr: [
+        "The pool finds no standby VM. The workspace is new. The pool counts the cause cold/first-exec.",
+        "The pool runs the admission check. The check adds the full price of one VM to the committed bytes.",
+        "The full price is guest RAM plus VM overhead. 256 MiB plus 32 MiB is 288 MiB.",
+        "The pool counts the unparked runs. 42 is less than 64. SH_MAX_RUNS is a backstop, not the primary control.",
+        "The committed bytes plus 288 MiB stay under the budget. The pool admits the warm.",
+        "The pool builds the workspace and restores the VM from the golden snapshot. A warming VM is charged at the full price.",
+        "A refusal gets the reason memory-budget or max-runs. The harness maps the reason to HTTP 503. The call stays retryable."
+      ],
+      comp: [
+        "perVM = SH_GUEST_RAM_MB + overhead = 256 + 32 = 288 MiB",
+        "committed + perVM = 9,088 + 288 = 9,376",
+        "9,376 ≤ budget 24,576            → admit",
+        "unparked runs 42 < SH_MAX_RUNS 64  → pass"
+      ],
+      knobs: ["SH_MAX_COMMITTED_MB", "SH_MEMORY_RESERVE_MB", "SH_GUEST_RAM_MB", "SH_MAX_RUNS"],
+      scene: { hl: ["worker"], cp: { live: 28, mine: 3, rec: "ready" }, relay: 1, worker: { q: 0, s: 1, gate: "held" },
+               run: "active", idle: "0 s", vms: { inflight: false, warming: true, destroying: false, standby: 0, parked: false, chip: "cold · first-exec", janitor: false },
+               budget: BASE + 288, counters: { warm: 0, coldF: 1, coldP: 0, refused: 0, evicted: 0 }, ghost: "pool" }
+    },
+    {
+      title: "The VM runs one command",
+      phase: "exec",
+      narr: [
+        "The pool resumes the VM. The VM runs one command.",
+        "The pool charges the VM at the full price. The full price is 288 MiB.",
+        "One VM runs one command. The pool never reuses a VM.",
+        "A second Exec for the same workspace waits at the gate. The relay admits at most one more Exec in flight."
+      ],
+      comp: [
+        "vm.state: warming → in-flight",
+        "charge = 288 MiB (full price)",
+        "execGate: held for acquire → destroy"
+      ],
+      knobs: ["SH_GUEST_RAM_MB"],
+      scene: { hl: ["worker"], cp: { live: 28, mine: 3, rec: "ready" }, relay: 1, worker: { q: 0, s: 1, gate: "held" },
+               run: "active", idle: "0 s", vms: { inflight: true, warming: false, destroying: false, standby: 0, parked: false, chip: null, janitor: false },
+               budget: BASE + 288, counters: { warm: 0, coldF: 1, coldP: 0, refused: 0, evicted: 0 }, ghost: null }
+    },
+    {
+      title: "The pool destroys the VM",
+      phase: "exec teardown",
+      narr: [
+        "The command ends. The pool destroys the VM.",
+        "The reap runs to the end. The workspace gate opens when the destroy ends.",
+        "The committed bytes drop by 288 MiB.",
+        "The relay releases the in-flight slot."
+      ],
+      comp: [
+        "vm.state: in-flight → destroying → absent",
+        "committed = 9,376 - 288 = 9,088 MiB",
+        "execGate: released"
+      ],
+      knobs: [],
+      scene: { cp: { live: 28, mine: 3, rec: "ready" }, relay: 0, worker: { q: 0, s: 0, gate: "free" },
+               run: "active", idle: "0 s", vms: { inflight: false, warming: false, destroying: true, standby: 0, parked: false, chip: "destroying", janitor: false },
+               budget: BASE, counters: { warm: 0, coldF: 1, coldP: 0, refused: 0, evicted: 0 }, ghost: null }
+    },
+    {
+      title: "The pool refills a standby slot",
+      phase: "pool replenish",
+      narr: [
+        "The pool schedules a refill after the destroy. The refill waits 200 ms. The delay keeps a finished run from getting new VMs.",
+        "The refill warms one VM at a time. A failed refill backs off. The backoff starts at 250 ms, doubles, and stops at 30 s.",
+        "The pool pauses the new standby. The standby charge is the measured dirty pages times the headroom factor.",
+        "The charge is never less than the VM overhead and never more than the full price.",
+        "The pool refills up to SH_STANDBY_DEPTH. The default depth is 2."
+      ],
+      comp: [
+        "delay = ReplenishDelay 200 ms + backoff",
+        "backoff: 250 ms → double → cap 30 s",
+        "standby charge = clamp(dirty 32 × 4.0)",
+        "             = 128 MiB   (floor 32, cap 288)",
+        "depth = 1 / 2"
+      ],
+      knobs: ["SH_STANDBY_DEPTH", "SH_STANDBY_HEADROOM", "ReplenishDelay"],
+      scene: { hl: [], cp: { live: 28, mine: 3, rec: "ready" }, relay: 0, worker: { q: 0, s: 0, gate: "free" },
+               run: "active", idle: "2 s", vms: { inflight: false, warming: false, destroying: false, standby: 1, parked: false, chip: "next refill: 200 ms", janitor: false },
+               budget: BASE + 128, counters: { warm: 0, coldF: 1, coldP: 0, refused: 0, evicted: 0 }, ghost: null }
+    },
+    {
+      title: "The next Exec acquires the warm standby",
+      phase: "gate 4 · promotion",
+      narr: [
+        "A new Exec arrives. The pool pops the newest standby. The pop runs last-in, first-out.",
+        "The pool re-prices the standby for the promotion. The charge goes from 128 MiB to 288 MiB.",
+        "The new total stays under the budget. The pool admits the promotion. The pool counts a warm acquire.",
+        "A promotion above the budget evicts standbys from colder runs. The eviction picks the run with the oldest last use first. The evicted VMs go to the reclaim queue."
+      ],
+      comp: [
+        "pop standby (LIFO)",
+        "committed = 9,216 - 128 + 288 = 9,376 MiB",
+        "9,376 ≤ budget 24,576            → admit",
+        "counters: warm += 1"
+      ],
+      knobs: ["SH_STANDBY_DEPTH", "SH_STANDBY_HEADROOM", "SH_MAX_COMMITTED_MB"],
+      scene: { packets: [ { path: "exec", t: 0.85, label: "Exec #2" } ], hl: ["relay", "worker"],
+               cp: { live: 28, mine: 3, rec: "ready" }, relay: 1, worker: { q: 0, s: 1, gate: "held" },
+               run: "active", idle: "0 s", vms: { inflight: true, warming: false, destroying: false, standby: 0, parked: false, chip: "replenish scheduled", janitor: false },
+               budget: BASE + 288, counters: { warm: 1, coldF: 1, coldP: 0, refused: 0, evicted: 0 }, ghost: "pool" }
+    },
+    {
+      title: "The sweep parks the idle run",
+      phase: "pool sweep",
+      narr: [
+        "The sweep runs on every Exec. The sweep also runs on a timer. The timer fires every 22.5 s. The interval is StandbyIdle over 4.",
+        "The run gets no Exec for 90 s. The pool drops the standby VMs. The pool keeps the workspace.",
+        "The run enters the state parked. A parked run holds disk, not memory.",
+        "The sweep destroys at most 8 VMs per scan. MaxReclaimsPerScan sets this rate.",
+        "The next Exec after parking is a cold acquire. The cause is cold/parked."
+      ],
+      comp: [
+        "scan interval = StandbyIdle / 4 = 90 / 4 = 22.5 s",
+        "idle 90 s ≥ StandbyIdle 90 s  → park",
+        "destroys this scan = 1 ≤ 8"
+      ],
+      knobs: ["StandbyIdle", "MaxReclaimsPerScan", "SH_STANDBY_DEPTH"],
+      scene: { hl: [], cp: { live: 28, mine: 3, rec: "ready" }, relay: 0, worker: { q: 0, s: 0, gate: "free" },
+               run: "parked", idle: "90 s", vms: { inflight: false, warming: false, destroying: false, standby: 0, parked: true, chip: null, janitor: false },
+               budget: BASE, counters: { warm: 1, coldF: 1, coldP: 0, refused: 0, evicted: 0 }, ghost: null }
+    },
+    {
+      title: "The workspace is reclaimed",
+      phase: "pool reclaim · janitor",
+      narr: [
+        "The run stays parked. The workspace stays idle. The idle time passes SH_WORKSPACE_IDLE. The default is 30 minutes.",
+        "A sandbox-service deployment typically sets SH_WORKSPACE_IDLE to 768 hours (the default 30-day maximum lifetime plus 48 hours), longer than the sandbox lifetime. A live sandbox keeps its workspace.",
+        "The pool deletes the workspace. The run enters the state absent.",
+        "The host janitor runs every 15 minutes. The janitor asks the control plane for the live and terminated sandboxes. The janitor frees the disk of a terminated sandbox after the grace period.",
+        "The cycle is complete. The next request starts at step 1."
+      ],
+      comp: [
+        "idle 768 h ≥ SH_WORKSPACE_IDLE  → reclaim",
+        "run: parked → absent",
+        "janitor: every 15 min, age ≥ token TTL + 5 min"
+      ],
+      knobs: ["SH_WORKSPACE_IDLE", "SBX_JANITOR_AGE", "SH_SANDBOX_LIFETIME_SECONDS"],
+      scene: { hl: [], cp: { live: 28, mine: 3, rec: "ready" }, relay: 0, worker: { q: 0, s: 0, gate: "free" },
+               run: "absent", idle: "—", vms: { inflight: false, warming: false, destroying: false, standby: 0, parked: false, chip: null, janitor: true },
+               budget: BASE, counters: { warm: 1, coldF: 1, coldP: 0, refused: 0, evicted: 0 }, ghost: null }
+    }
+  ];
+
+  // ---------- canvas plumbing ----------
+  var cv = document.getElementById("viz");
+  var ctx = cv.getContext("2d");
+  var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var step = 0;
+
+  function cssv(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+  function pal() {
+    return {
+      fg: cssv("--fg"), muted: cssv("--muted"), line: cssv("--line"),
+      panel: cssv("--panel"), panel2: cssv("--panel2"), accent: cssv("--accent"),
+      ready: cssv("--c-ready"), warm: cssv("--c-warm"), run: cssv("--c-run"),
+      destroy: cssv("--c-destroy"), refuse: cssv("--c-refuse")
+    };
+  }
+
+  function resize() {
+    var w = cv.clientWidth || 760;
+    var dpr = window.devicePixelRatio || 1;
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(w * (LH / LW) * dpr);
+    cv.style.height = Math.round(w * (LH / LW)) + "px";
+  }
+
+  function rr(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  function arrow(x1, y1, x2, y2, p, active, t) {
+    ctx.strokeStyle = active ? p.accent : p.line;
+    ctx.lineWidth = active ? 2 : 1.25;
+    if (active) {
+      ctx.setLineDash([7, 5]);
+      ctx.lineDashOffset = reduced ? 0 : -(t / 40) % 12;
+    } else {
+      ctx.setLineDash([]);
+    }
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // head
+    var ang = Math.atan2(y2 - y1, x2 - x1);
+    ctx.fillStyle = ctx.strokeStyle;
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - 9 * Math.cos(ang - 0.42), y2 - 9 * Math.sin(ang - 0.42));
+    ctx.lineTo(x2 - 9 * Math.cos(ang + 0.42), y2 - 9 * Math.sin(ang + 0.42));
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  var PATHS = {
+    create:     { x1: 150, y1: 80,  x2: 210, y2: 80,  boxes: ["client", "cp"] },
+    return:     { x1: 210, y1: 120, x2: 150, y2: 120, boxes: ["cp", "client"] },
+    exec:       { x1: 150, y1: 165, x2: 450, y2: 165, boxes: ["client", "relay"] },
+    relayworker:{ x1: 620, y1: 100, x2: 670, y2: 100, boxes: ["relay", "worker"] },
+    workerpool: { x1: 760, y1: 180, x2: 760, y2: 210, boxes: ["worker"] }
+  };
+
+  function packet(pt, p) {
+    var path = PATHS[pt.path];
+    var x = path.x1 + (path.x2 - path.x1) * pt.t;
+    var y = path.y1 + (path.y2 - path.y1) * pt.t;
+    ctx.fillStyle = p.accent;
+    ctx.beginPath();
+    ctx.arc(x, y, 6.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = p.panel;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    if (pt.label) {
+      ctx.font = "600 11px 'IBM Plex Mono', monospace";
+      var w = ctx.measureText(pt.label).width;
+      var lx = x - w / 2 - 5;
+      var ly = y - 26;
+      ctx.fillStyle = p.panel2;
+      rr(lx, ly, w + 10, 17, 4);
+      ctx.fill();
+      ctx.strokeStyle = p.line;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = p.fg;
+      ctx.fillText(pt.label, lx + 5, ly + 12);
+    }
+  }
+
+  function box(key, p, scene, t) {
+    var b = BOX[key];
+    var hl = scene.hl && scene.hl.indexOf(key) >= 0;
+    var pulse = hl && !reduced ? 0.5 + 0.5 * Math.sin(t / 300) : 0;
+    ctx.fillStyle = p.panel;
+    rr(b.x, b.y, b.w, b.h, 8);
+    ctx.fill();
+    ctx.strokeStyle = hl ? p.accent : p.line;
+    ctx.lineWidth = hl ? 1.5 + pulse : 1.25;
+    ctx.stroke();
+    ctx.fillStyle = p.fg;
+    ctx.font = "600 12px 'IBM Plex Mono', monospace";
+    ctx.fillText(b.title, b.x + 12, b.y + 20);
+    ctx.fillStyle = p.muted;
+    ctx.font = "400 10.5px 'IBM Plex Mono', monospace";
+    var y = b.y + 38;
+    var lines = [];
+    if (key === "client") {
+      lines.push(b.sub);
+      if (scene.token) lines.push("token ✓ ttl 900 s");
+    } else if (key === "cp") {
+      lines.push("live " + scene.cp.live + " / 40   total quota");
+      lines.push("subject " + scene.cp.mine + " / 3   per-user quota");
+      lines.push("record: " + scene.cp.rec);
+      if (scene.cp.extra) lines.push(scene.cp.extra);
+    } else if (key === "relay") {
+      lines.push("in-flight " + scene.relay + " / 2");
+      lines.push("claims ✓  req_id ✓");
+      lines.push("drain grace 60 s");
+    } else if (key === "worker") {
+      lines.push("queue " + scene.worker.q + " / 64");
+      lines.push("slots " + scene.worker.s + " / 16");
+      lines.push("gate: " + scene.worker.gate);
+    }
+    for (var i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], b.x + 12, y);
+      y += 17;
+    }
+  }
+
+  function ghostPill(where, p) {
+    var g = { cp: { x: 210, y: 156, w: 190 }, relay: { x: 450, y: 186, w: 170 }, pool: { x: 640, y: 216, w: 208 } }[where];
+    var text = { cp: "on limit: 429 quota_exceeded", relay: "on limit: RESOURCE_EXHAUSTED", pool: "on capacity refusal: 503, retryable" }[where];
+    ctx.font = "500 10.5px 'IBM Plex Mono', monospace";
+    var w = ctx.measureText(text).width + 16;
+    ctx.fillStyle = "rgba(0,0,0,0)";
+    ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = p.refuse;
+    ctx.lineWidth = 1;
+    rr(g.x, g.y, w, 19, 9);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = p.refuse;
+    ctx.fillText(text, g.x + 8, g.y + 13);
+  }
+
+  function vmCard(x, y, state, sub, p, t) {
+    var color = { ready: p.ready, warm: p.warm, run: p.run, destroy: p.destroy }[state];
+    var w = 130, h = 92;
+    if (state === "parked") {
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = p.muted;
+      ctx.lineWidth = 1.5;
+      rr(x, y, w, h, 8);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = p.muted;
+      ctx.font = "600 11.5px 'IBM Plex Mono', monospace";
+      ctx.fillText("PARKED", x + 12, y + 22);
+      ctx.font = "400 10.5px 'IBM Plex Mono', monospace";
+      ctx.fillText("workspace kept", x + 12, y + 40);
+      ctx.fillText("0 VMs · disk only", x + 12, y + 56);
+      return;
+    }
+    var pulse = state === "warm" && !reduced ? 0.5 + 0.5 * Math.sin(t / 250) : 0;
+    ctx.globalAlpha = state === "destroy" ? 0.55 : 1;
+    ctx.fillStyle = color;
+    rr(x, y, w, h, 8);
+    ctx.globalAlpha = 0.16 + (state === "warm" ? 0.08 * pulse : 0);
+    ctx.fill();
+    ctx.globalAlpha = state === "destroy" ? 0.55 : 1;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = state === "warm" ? 1.5 + pulse : 1.5;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = color;
+    ctx.font = "600 12px 'IBM Plex Mono', monospace";
+    ctx.fillText(state === "run" ? "IN-FLIGHT" : state === "warm" ? "WARMING" : state === "destroy" ? "DESTROYING" : "STANDBY", x + 12, y + 22);
+    ctx.fillStyle = p.fg;
+    ctx.font = "400 10.5px 'IBM Plex Mono', monospace";
+    var lines = sub.split("|");
+    for (var i = 0; i < lines.length; i++) ctx.fillText(lines[i].trim(), x + 12, y + 42 + i * 16);
+  }
+
+  function meter(committed, p) {
+    var x = 36, y = 402, w = 798, h = 20, max = 24576;
+    ctx.fillStyle = p.muted;
+    ctx.font = "600 10.5px 'IBM Plex Mono', monospace";
+    ctx.fillText("MEMORY BUDGET", x, y - 8);
+    ctx.font = "400 10.5px 'IBM Plex Mono', monospace";
+    var lbl = "committed " + committed.toLocaleString("en-US") + " / " + max.toLocaleString("en-US") + " MiB";
+    ctx.fillText(lbl, x + w - ctx.measureText(lbl).width, y - 8);
+    ctx.fillStyle = p.panel;
+    rr(x, y, w, h, 5);
+    ctx.fill();
+    ctx.strokeStyle = p.line;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    var frac = Math.max(0, Math.min(1, committed / max));
+    ctx.fillStyle = committed / max > 0.9 ? p.refuse : p.accent;
+    rr(x + 2, y + 2, Math.max(2, (w - 4) * frac), h - 4, 3);
+    ctx.fill();
+    ctx.fillStyle = p.muted;
+    ctx.font = "400 10px 'IBM Plex Mono', monospace";
+    ctx.fillText("0", x, y + 34);
+    var mid = (w * 0.5).toFixed(0);
+    ctx.fillText("12,288", x + w / 2 - 16, y + 34);
+    var end = "24,576 (SH_MAX_COMMITTED_MB)";
+    ctx.fillText(end, x + w - ctx.measureText(end).width, y + 34);
+    ctx.fillText("standbys charged at dirty pages × 4.0 (SH_STANDBY_HEADROOM) · reserve 0 MiB", x, y + 50);
+  }
+
+  function counters(c, p) {
+    var x = 655, y = 276, w = 179, h = 96;
+    ctx.fillStyle = p.panel;
+    rr(x, y, w, h, 8);
+    ctx.fill();
+    ctx.strokeStyle = p.line;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = p.muted;
+    ctx.font = "600 10px 'IBM Plex Mono', monospace";
+    ctx.fillText("POOL COUNTERS", x + 10, y + 17);
+    ctx.font = "400 10.5px 'IBM Plex Mono', monospace";
+    var rows = [
+      ["warm acquires", c.warm],
+      ["cold: first-exec", c.coldF],
+      ["cold: parked", c.coldP],
+      ["refusals", c.refused],
+      ["budget evictions", c.evicted]
+    ];
+    for (var i = 0; i < rows.length; i++) {
+      var ry = y + 33 + i * 13;
+      ctx.fillStyle = p.muted;
+      ctx.fillText(rows[i][0], x + 10, ry);
+      ctx.fillStyle = p.fg;
+      var v = String(rows[i][1]);
+      ctx.fillText(v, x + w - 10 - ctx.measureText(v).width, ry);
+    }
+  }
+
+  function draw(t) {
+    var p = pal();
+    var s = cv.width / LW;
+    ctx.setTransform(s, 0, 0, s, 0, 0);
+    ctx.clearRect(0, 0, LW, LH);
+    var scene = steps[step].scene;
+
+    // arrows first (behind boxes)
+    var activeBoxes = scene.hl || [];
+    Object.keys(PATHS).forEach(function (k) {
+      var path = PATHS[k];
+      var active = (scene.packet && scene.packet.path === k) ||
+                   (scene.packets || []).some(function (pt) { return pt.path === k; });
+      if (k === "workerpool") active = activeBoxes.indexOf("worker") >= 0;
+      arrow(path.x1, path.y1, path.x2, path.y2, p, active, t);
+    });
+
+    ["client", "cp", "relay", "worker"].forEach(function (k) { box(k, p, scene, t); });
+
+    if (scene.packet) packet(scene.packet, p);
+    (scene.packets || []).forEach(function (pt) { packet(pt, p); });
+    if (scene.ghost) ghostPill(scene.ghost, p);
+
+    // pool panel
+    ctx.fillStyle = p.panel;
+    rr(POOL.x, POOL.y, POOL.w, POOL.h, 10);
+    ctx.fill();
+    ctx.strokeStyle = activeBoxes.indexOf("worker") >= 0 ? p.accent : p.line;
+    ctx.lineWidth = 1.25;
+    ctx.stroke();
+    ctx.fillStyle = p.fg;
+    ctx.font = "600 12px 'IBM Plex Mono', monospace";
+    ctx.fillText("MICROVM POOL · worker sbx-microvm-1 · SH_VMM=firecracker", POOL.x + 16, POOL.y + 22);
+
+    // run strip
+    var runState = { absent: "RunAbsent", active: "RunActive", parked: "RunParked" }[scene.run];
+    var strip = "run sbx-4f2a9c… · state " + runState + " · idle " + scene.idle + " · execGate " + scene.worker.gate;
+    ctx.fillStyle = p.panel2;
+    rr(POOL.x + 16, POOL.y + 32, POOL.w - 32, 22, 5);
+    ctx.fill();
+    ctx.fillStyle = p.fg;
+    ctx.font = "400 10.5px 'IBM Plex Mono', monospace";
+    ctx.fillText(strip, POOL.x + 26, POOL.y + 47);
+    ctx.fillStyle = p.muted;
+    ctx.fillText("other workspaces: 41 unparked runs · 62 standby VMs · 9,088 MiB", POOL.x + 26, POOL.y + 70);
+
+    // VM cards
+    var cy = 276;
+    ctx.fillStyle = p.muted;
+    ctx.font = "600 9.5px 'IBM Plex Mono', monospace";
+    ctx.fillText("IN-FLIGHT", 40, cy - 6);
+    ctx.fillText("STANDBYS · TARGET D = 2", 210, cy - 6);
+    ctx.fillText("WARM / DESTROY", 510, cy - 6);
+    var v = scene.vms;
+    if (v.inflight) vmCard(40, cy, "run", "resumed · full price|charge 288 MiB|one command per VM", p, t);
+    else vmCard(40, cy, "none", "", p, t);
+    if (v.parked) {
+      vmCard(210, cy, "parked", "", p, t);
+    } else {
+      for (var i = 0; i < 2; i++) {
+        if (v.standby > i) vmCard(210 + i * 150, cy, "ready", "paused · depth " + (i + 1) + "/2|charge 128 MiB|(dirty 32 × 4.0)", p, t);
+        else vmCard(210 + i * 150, cy, "none", "", p, t);
+      }
+    }
+    if (v.warming) vmCard(510, cy, "warm", "restore from snapshot|charge 288 MiB full|cause: " + (v.chip || ""), p, t);
+    else if (v.destroying) vmCard(510, cy, "destroy", "VM destroyed|gate opens when|the destroy ends", p, t);
+    else vmCard(510, cy, "none", "", p, t);
+
+    // slot notes
+    ctx.fillStyle = p.muted;
+    ctx.font = "400 10px 'IBM Plex Mono', monospace";
+    if (v.chip && !v.warming) ctx.fillText("▸ " + v.chip, 510, cy + 106);
+    if (v.janitor) {
+      ctx.fillStyle = p.accent;
+      ctx.fillText("▸ host janitor: runs every 15 min · asks control plane for live + terminated · frees disk after SBX_JANITOR_AGE", 40, cy + 106);
+    }
+
+    counters(scene.counters, p);
+    meter(scene.budget, p);
+  }
+
+  // "none" state: dashed empty slot
+  var origVmCard = vmCard;
+  vmCard = function (x, y, state, sub, p, t) {
+    if (state === "none") {
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = p.line;
+      ctx.lineWidth = 1;
+      rr(x, y, 130, 92, 8);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = p.muted;
+      ctx.font = "400 10.5px 'IBM Plex Mono', monospace";
+      ctx.fillText("— empty —", x + 34, y + 50);
+      return;
+    }
+    origVmCard(x, y, state, sub, p, t);
+  };
+
+  // ---------- panel + controls ----------
+  function updatePanel() {
+    var st = steps[step];
+    document.getElementById("stepNum").textContent = "STEP " + (step + 1) + " / " + steps.length;
+    document.getElementById("phase").textContent = st.phase;
+    document.getElementById("stepTitle").textContent = st.title;
+    var narr = document.getElementById("narr");
+    narr.innerHTML = "";
+    st.narr.forEach(function (s) {
+      var li = document.createElement("li");
+      li.textContent = s;
+      narr.appendChild(li);
+    });
+    var comp = document.getElementById("comp");
+    comp.textContent = st.comp.join("\n");
+    document.getElementById("compWrap").hidden = st.comp.length === 0;
+    var knobs = document.getElementById("knobs");
+    knobs.innerHTML = "";
+    st.knobs.forEach(function (k) {
+      var s = document.createElement("span");
+      s.className = "knob mono";
+      s.textContent = k;
+      knobs.appendChild(s);
+    });
+    document.getElementById("knobWrap").hidden = st.knobs.length === 0;
+    document.getElementById("prevBtn").disabled = step === 0;
+    document.getElementById("nextBtn").disabled = step === steps.length - 1;
+    Array.prototype.forEach.call(document.querySelectorAll("#dots .dot"), function (d, i) {
+      d.className = "dot" + (i === step ? " on" : i < step ? " seen" : "");
+      d.setAttribute("aria-selected", i === step ? "true" : "false");
+    });
+  }
+
+  function go(n) {
+    step = Math.max(0, Math.min(steps.length - 1, n));
+    updatePanel();
+  }
+
+  var dots = document.getElementById("dots");
+  steps.forEach(function (_, i) {
+    var d = document.createElement("button");
+    d.className = "dot";
+    d.type = "button";
+    d.setAttribute("role", "tab");
+    d.setAttribute("aria-label", "step " + (i + 1));
+    d.addEventListener("click", function () { go(i); });
+    dots.appendChild(d);
+  });
+  document.getElementById("prevBtn").addEventListener("click", function () { go(step - 1); });
+  document.getElementById("nextBtn").addEventListener("click", function () { go(step + 1); });
+  window.addEventListener("keydown", function (e) {
+    if (e.key === "ArrowRight") { go(step + 1); }
+    else if (e.key === "ArrowLeft") { go(step - 1); }
+  });
+
+  // ---------- loop ----------
+  function frame(t) {
+    draw(t);
+    if (!reduced) requestAnimationFrame(frame);
+  }
+  window.addEventListener("resize", function () { resize(); draw(0); });
+  if (window.matchMedia) {
+    var mq = window.matchMedia("(prefers-color-scheme: dark)");
+    var onChange = function () { if (reduced) draw(0); };
+    if (mq.addEventListener) mq.addEventListener("change", onChange);
+    else if (mq.addListener) mq.addListener(onChange);
+  }
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(function () { if (reduced) draw(0); });
+  }
+  resize();
+  updatePanel();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

@@ -9,12 +9,13 @@ sidebar_position: 4
 
 `up` **merges** into these files and never overwrites what you have. If a value already there
 conflicts (say, a `sandbox` MCP server of your own), it stops before doing anything and names the
-file and key.
+file and key. An allow rule for a local tool in `.claude/settings.json` (`Bash(ls:*)`, say) is one:
+move it to `.claude/settings.local.json`, which `up` leaves alone, or delete it.
 
 | File                                  | What `up` adds                                                                                                                                                                                                                                                                                |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `.mcp.json`                           | `mcpServers.sandbox`: `mocactl sbx mcp`, the sandbox's tools over stdio                                                                                                                                                                                                                       |
-| `.claude/settings.json`               | `permissions.allow`: `mcp__sandbox__*`; `permissions.deny`: Claude Code's local tools (`Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `NotebookEdit`, `WebFetch`, `WebSearch`, `Agent`, `Task`, …); `enabledMcpjsonServers`: `sandbox`                                                      |
+| `.claude/settings.json`               | `permissions.allow`: `mcp__sandbox__*`; `permissions.deny`: Claude Code's local tools (`Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `NotebookEdit`, `WebFetch`, `WebSearch`, `Agent`, `Task`, …); `enabledMcpjsonServers`: `sandbox`; `autoMemoryEnabled`: `false` (below)                |
 | `opencode.json`                       | `mcp.sandbox`: `mocactl sbx mcp`; `tools.<name>: false` for OpenCode's local tools (`bash`, `read`, `edit`, `write`, `patch`, `apply_patch`, `glob`, `grep`, `list`, `lsp`, `webfetch`, `websearch`, `task`, `multiedit`, `skill`)                                                            |
 | `.bob/settings.json`, `.bob/mcp.json` | `mcpServers.sandbox`: `mocactl sbx mcp`, the same entry `.mcp.json` gets, in both files — which one Bob reads depends on its version (2.0.9 reads `mcp.json`). Bob has no deny list, so its local tools are **not** denied, and it prefers them unless the prompt names the sandbox's (below) |
 | `CLAUDE.md`, `AGENTS.md`              | A block between `<!-- sbx:begin -->` and `<!-- sbx:end -->` telling the agent how the sandbox works (below)                                                                                                                                                                                   |
@@ -25,9 +26,17 @@ not know: it warns about each one at every start. Re-running `mocactl sbx up` ta
 back out — the ones its own record says it added. One you wrote yourself is not in that record, so
 it stays.
 
+`autoMemoryEnabled: false` keeps Claude Code from loading your machine's auto-memory
+(`~/.claude/projects/*/memory`): with `Read`, `Edit` and `Write` denied, the agent could see the
+notes but not correct them. `mocactl sbx rm` takes it back. A `true` in `.claude/settings.json` or
+`.claude/settings.local.json` stops `up`. A `CLAUDE_CODE_DISABLE_AUTO_MEMORY` of `0`, `false`,
+`no` or `off` in your shell turns auto-memory back on for a plain `claude`, and `mocactl sbx
+doctor` fails on it; `mocactl sbx claude` sets it to `1`.
+
 They are ordinary files in your working tree, so `git status` shows them. Leave them uncommitted:
 committed, they would point every teammate's agents at a sandbox and deny their local tools.
-`mocactl sbx up --no-agent-config` creates and pushes without touching them.
+`mocactl sbx up --no-agent-config` creates and pushes without touching them: they stay as they are,
+so where no earlier `up` wrote them, the agents get no sandbox server and keep their local tools.
 
 **Whether they reach the sandbox is up to your `.gitignore`.** `up` writes them after its push, so
 the first push never carries them. From then on, `up` and `push` treat them like any other file:
@@ -47,8 +56,9 @@ instead:
 
 - `up` runs `agentop script install moca-sandbox` before it creates anything, and stops if that
   fails.
-- `.claude/settings.json` gets the allow rule and `enabledMcpjsonServers`, but no
-  `permissions.deny`.
+- `.claude/settings.json` gets the allow rule, `enabledMcpjsonServers` and `autoMemoryEnabled`,
+  but no `permissions.deny`. With no deny list to outrank it, an allow rule for a local tool must
+  be deleted, not moved to `.claude/settings.local.json`.
 - Later `up` runs keep the mode. `mocactl sbx doctor` checks the script is installed and loaded.
 
 Claude Code must reach the model through Cortex (`agentop configure claude-code`). Without it,

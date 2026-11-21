@@ -47,6 +47,12 @@ type leaseRuntime struct {
 	uids    *uidAllocator
 	cgroups trackedCgroups
 	exits   exitSignals
+	// drop is the idle page-cache drop armed by the last lease request (armCacheDrop),
+	// and dropGen the request count it was armed at: a request since then disarms it.
+	// Both under mu. stopped is set by stopLease, after which no drop runs.
+	drop    *time.Timer
+	dropGen uint64
+	stopped atomic.Bool
 }
 
 // leasePrepare readies the guest for lease mode. NewAgent calls it when CgroupRoot is
@@ -146,6 +152,8 @@ func enableExecControllers(root string) error {
 var (
 	agentOomScoreAdjPath = "/proc/self/oom_score_adj"
 	memInfoPath          = "/proc/meminfo"
+	// dropCachesPath is where the idle page-cache drop writes 1 (dropIdleCache).
+	dropCachesPath = "/proc/sys/vm/drop_caches"
 )
 
 // protectAgentFromOOM sets the agent's oom_score_adj to -1000. It is defence in depth,
@@ -196,8 +204,48 @@ func remountNoDevNoSuid(dir string) error {
 // stopLease stops the reaper, if a lease request ever started it. It does not take
 // lease.mu, which a running Exec holds: Close must not wait for that Exec to end.
 func (a *Agent) stopLease() {
+	a.lease.stopped.Store(true)
 	if r := a.lease.r.Load(); r != nil {
 		r.stop()
+	}
+}
+
+// armCacheDrop disarms the drop the previous lease request armed and, when the host sent
+// a delay, arms one for this request. Caller holds the lease mutex.
+func (a *Agent) armCacheDrop(afterS uint32) {
+	l := &a.lease
+	l.dropGen++
+	if l.drop != nil {
+		l.drop.Stop()
+		l.drop = nil
+	}
+	if afterS == 0 || a.dead.Load() {
+		return
+	}
+	gen := l.dropGen
+	l.drop = time.AfterFunc(time.Duration(afterS)*time.Second, func() { a.dropIdleCache(gen) })
+}
+
+// dropIdleCache drops the guest's clean page cache (F1 of the E17b report) unless a
+// lease request has run since the drop was armed at gen: the dataset and venv a command
+// read stay in guest RAM otherwise, and free-page reporting returns only what the guest
+// frees. sync first, so pages written back since the last request can go too: outside
+// the lease mutex, because it frees nothing, and a request arriving meanwhile must not
+// wait for a sync of a busy workspace (#974 review). The drop itself runs under the
+// mutex and only if no request ran since gen, during the sync included, so it never
+// runs beside a request. tmpfs (/tmp, /var) is not page cache that drop_caches frees,
+// and stays.
+func (a *Agent) dropIdleCache(gen uint64) {
+	l := &a.lease
+	unix.Sync()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.dropGen != gen || l.stopped.Load() || a.dead.Load() {
+		return
+	}
+	l.drop = nil
+	if err := os.WriteFile(dropCachesPath, []byte("1\n"), 0); err != nil {
+		log.Printf("guest-agent: lease: idle page-cache drop: %v", err)
 	}
 }
 
@@ -218,6 +266,9 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter, conn io.Read
 	l := &a.lease
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// On the way out, under mu: whatever this request did, the lease's idle time starts
+	// again from its end (armCacheDrop also disarms the previous request's drop).
+	defer a.armCacheDrop(req.CacheDropAfterS)
 	// Under mu, so no lease Exec runs during these steps; before the latch, so a failure
 	// leaves the agent as it was and the next lease request retries them. leaseOn is
 	// only ever set under mu, so reading it here is exact.
@@ -283,10 +334,13 @@ func (a *Agent) runLease(req Request, stdin []byte, w *frameWriter, conn io.Read
 // serves many Execs, so a shell's variables, cwd, aliases and functions would leak
 // from one to the next.
 //
-// conn is the request's connection, already drained of stdin. The host sends nothing
-// more on it, so a read that returns at all means the host closed it: that is how the
-// host aborts an Exec (vmpool's closeConn on ctx.Done), and the Exec is torn down as
-// on a timeout (spec §3.1: killed when it "exits, times out or is aborted").
+// conn is the request's connection, already drained of stdin. The one frame the host
+// may send on it after that is KindAbort, its abort of the Exec (vmpool's runOverConn,
+// on a caller's abort): the Exec is torn down as on a timeout (spec §3.1: killed when it
+// "exits, times out or is aborted"), and End carries Aborted, so the host keeps the
+// lease. Any other read that returns -- the host closing the connection on its own
+// deadline, a cut, or a host that predates KindAbort -- is the same teardown, answered
+// with an error the host is not waiting to read.
 //
 // The kill is of this Exec's e<seq> only: a tracked process lives in tracked/p<id>,
 // which no Exec's teardown touches (spec §3.1). runLease holds the lease mutex.
@@ -358,10 +412,11 @@ func (a *Agent) runLeaseCommand(req Request, stdin []byte, w *frameWriter, conn 
 		timeout = tm.C
 	}
 	gone := make(chan struct{})
+	var abortFrame bool // written before gone is closed, read after
 	go func() {
 		// Returns, at the latest, when ServeConn closes the connection after this Exec.
-		var b [1]byte
-		_, _ = conn.Read(b[:])
+		k, _, err := ReadFrame(conn)
+		abortFrame = err == nil && k == KindAbort
 		close(gone)
 	}()
 
@@ -375,6 +430,8 @@ func (a *Agent) runLeaseCommand(req Request, stdin []byte, w *frameWriter, conn 
 	case <-gone:
 		aborted = true
 	}
+	// The host asked, and is reading: answer End rather than an error.
+	polite := aborted && abortFrame
 
 	// Kill whatever the command left behind, then wait for the cgroup to empty. This
 	// comes before End by design: the host may send the next Exec the moment End
@@ -398,6 +455,7 @@ func (a *Agent) runLeaseCommand(req Request, stdin []byte, w *frameWriter, conn 
 		if timedOut || aborted {
 			end.ExitCode = -1
 		}
+		end.Aborted = polite
 		return a.teardownFailed(end, terr), nil
 	}
 	// Every writer is dead, so both drains reach EOF.
@@ -409,6 +467,10 @@ func (a *Agent) runLeaseCommand(req Request, stdin []byte, w *frameWriter, conn 
 	// The cgroup is empty, so rmdir succeeds; if it somehow does not, the leftover is
 	// an empty, unused directory and the next Exec gets a fresh e<seq> regardless.
 	_ = c.remove()
+	if polite {
+		// The cgroup is empty and gone: the VM is as fit for the next Exec as after an exit.
+		return End{ExitCode: -1, Aborted: true}, nil
+	}
 	if aborted {
 		// The host is gone; ServeConn's write of this fails harmlessly.
 		return End{}, errors.New("guest-agent: the connection closed; the Exec was aborted")

@@ -2,10 +2,15 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   appendFileSync,
+  closeSync,
+  constants,
+  fstatSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  readSync,
   readlinkSync,
   realpathSync,
   renameSync,
@@ -29,6 +34,7 @@ import { PY_TAR_EXTRACT, tarEntries, type TarEntry } from './tar.js';
  * a `git diff` against it. Nothing here writes the laptop's tree except `applyPatch`.
  */
 export const CHUNK_TARGET = 8 << 20;
+/** The default per-file limit (--max-file), and the largest file a tar chunk carries. */
 export const MAX_FILE = 12 << 20;
 /** No Exec's stdin exceeds it: sandbox-client's own ceiling (the gRPC message is 16 MiB). */
 export const MAX_STDIN = MAX_STDIN_BYTES;
@@ -460,6 +466,8 @@ export async function repoId(root: string): Promise<string> {
 export interface PushPlan {
   /** gzip tars, each at most MAX_STDIN, extracted in order. */
   chunks: Buffer[];
+  /** Files over MAX_FILE: written after the chunks, MAX_STDIN bytes per Exec, read as sent. */
+  large: LargeFile[];
   /** What the baseline must contain: every pushed path. */
   paths: string[];
   /** The sandbox's `info/exclude` negations for build-named directories that hold pushed paths. */
@@ -469,6 +477,32 @@ export interface PushPlan {
   bytes: number;
   excludedSecrets: string[];
   skipped: string[];
+}
+
+export interface LargeFile {
+  path: string;
+  abs: string;
+  size: number;
+  mode: 0o755 | 0o644;
+  /** Seconds, as a tar member's. */
+  mtime: number;
+  /** `identity` when planned. */
+  id: string;
+}
+
+const CHANGED = 'a file changed, or was removed, during the push: run it again';
+
+/** Changes with any write to the file, or another file at its path. */
+const identity = (s: Stats) => `${s.ino}:${s.size}:${s.mtimeMs}:${s.ctimeMs}`;
+
+/** The file's own stat, never a symlink's target. */
+function fstatNoFollow(abs: string): Stats {
+  const fd = openSync(abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    return fstatSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 const mib = (n: number) => `${(n / 2 ** 20).toFixed(1)} MiB`;
@@ -513,7 +547,7 @@ const memberBytes = (path: string, size: number) =>
 /**
  * The push (SBX0 §6.2): `git ls-files --cached --others --exclude-standard`, so tracked files (even
  * under an ignored directory) and untracked ones that are not ignored. Refused, before anything is
- * sent: a file over MAX_FILE (by name), a tree over `maxPush` (with its largest directories).
+ * sent: a file over `maxFile` (by name), a tree over `maxPush` (with its largest directories).
  *
  * The agent configuration `sbx up` writes (`.mcp.json`, `.claude/settings.json`, `opencode.json`,
  * `.bob/`, `CLAUDE.md`, `AGENTS.md`) has no rule of its own here, by decision (ADR-0049, #683): a
@@ -523,13 +557,14 @@ const memberBytes = (path: string, size: number) =>
  */
 export async function planPush(
   root: string,
-  o: { includeSecrets?: boolean; maxPush?: number } = {},
+  o: { includeSecrets?: boolean; maxPush?: number; maxFile?: number } = {},
 ): Promise<PushPlan> {
+  const maxFile = o.maxFile ?? MAX_FILE;
   const raw = await git(root, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
   const names = [...new Set(splitNames(raw).map((n) => n.replace(/\/$/, '')))];
   const excludedSecrets: string[] = [];
   const skipped: string[] = [];
-  const tooBig: string[] = [];
+  const tooBig: { path: string; size: number }[] = [];
   const byTop = new Map<string, number>();
   const kept: { path: string; st: Stats }[] = [];
   let bytes = 0;
@@ -570,10 +605,7 @@ export async function planPush(
       continue;
     }
     if (st.isFile()) {
-      if (st.size > MAX_FILE) {
-        // Just over the limit, MiB to one decimal reads as the limit itself: give the bytes.
-        tooBig.push(`${p} (${mib(st.size)}, ${st.size} bytes)`);
-      }
+      if (st.size > maxFile) tooBig.push({ path: p, size: st.size });
       bytes += st.size;
       const top = p.includes('/') ? p.slice(0, p.indexOf('/')) : '.';
       byTop.set(top, (byTop.get(top) ?? 0) + st.size);
@@ -581,9 +613,32 @@ export async function planPush(
     kept.push({ path: p, st });
   }
   if (tooBig.length) {
+    // An ignore rule does not keep a tracked file out.
+    const tracked = new Set(
+      splitNames(
+        await git(root, [
+          '--literal-pathspecs',
+          'ls-files',
+          '-z',
+          '--cached',
+          '--',
+          ...tooBig.map((t) => t.path),
+        ]),
+      ),
+    );
+    // Just over the limit, MiB to one decimal reads as the limit itself: give the bytes.
+    const named = tooBig.map(
+      ({ path, size }) =>
+        `${path} (${mib(size)}, ${size} bytes${tracked.has(path) ? ', tracked' : ''})`,
+    );
     throw new PushError(
-      `files over ${MAX_FILE >> 20} MiB (${MAX_FILE} bytes) are not pushed; remove them, or ` +
-        `.gitignore them: ${tooBig.join(', ')}`,
+      `files over ${maxFile >> 20} MiB (${maxFile} bytes) are not pushed (--max-file sets another ` +
+        `cap): ${named.join(', ')}. Leave them out with .git/info/exclude (yours only) or ` +
+        '.gitignore (shared)' +
+        (tooBig.some(({ path }) => tracked.has(path))
+          ? '; a tracked one is pushed even when ignored: git rm --cached it too, which once ' +
+            'committed removes it for everyone'
+          : ''),
     );
   }
   const max = o.maxPush ?? DEFAULT_MAX_PUSH;
@@ -604,21 +659,30 @@ export async function planPush(
     const gz = gzipSync(tarEntries(cur));
     if (gz.length > MAX_STDIN) {
       // Only a file that grew past MAX_FILE since it was measured can get here.
-      throw new PushError('a file changed size while the push was being packed: run it again');
+      throw new PushError(CHANGED);
     }
     chunks.push(gz);
     cur = [];
     curBytes = 0;
   };
+  const large: LargeFile[] = [];
   for (const { path, st } of kept) {
     const abs = join(root, path);
+    const mode = st.mode & 0o111 ? 0o755 : 0o644;
     const mtime = Math.floor(st.mtimeMs / 1000);
+    if (st.isFile() && st.size > MAX_FILE) {
+      // Opened now, so an unreadable one fails here, as readFileSync does a small one.
+      const now = fstatNoFollow(abs);
+      if (now.size !== st.size) throw new PushError(CHANGED);
+      large.push({ path, abs, size: st.size, mode, mtime, id: identity(now) });
+      continue;
+    }
     const e: TarEntry = st.isSymbolicLink()
       ? { path, type: 'symlink', mode: 0o777, linkname: readlinkSync(abs), mtime }
       : {
           path,
           type: 'file',
-          mode: st.mode & 0o111 ? 0o755 : 0o644,
+          mode,
           data: readFileSync(abs),
           mtime,
         };
@@ -632,6 +696,7 @@ export async function planPush(
   const paths = kept.map((k) => k.path);
   return {
     chunks,
+    large,
     paths,
     reinclude: reincludes(paths),
     files: kept.length,
@@ -721,6 +786,38 @@ async function must(
   return r;
 }
 
+/** `touch -t`'s CCYYMMDDhhmm.SS, in UTC, for epoch seconds. */
+const touchStamp = (s: number) =>
+  new Date(s * 1000)
+    .toISOString()
+    .replace(/^(\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+).*/, '$1$2$3$4$5.$6');
+
+/** A large file in MAX_STDIN-byte pieces, with their offsets; CHANGED if it is not as planned. */
+function* pieces(f: LargeFile): Generator<[number, Buffer]> {
+  let fd: number;
+  try {
+    fd = openSync(f.abs, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    throw new PushError(CHANGED);
+  }
+  try {
+    for (let off = 0; off < f.size;) {
+      const buf = Buffer.allocUnsafe(Math.min(MAX_STDIN, f.size - off));
+      for (let got = 0; got < buf.length;) {
+        const k = readSync(fd, buf, got, buf.length - got, off + got);
+        if (k === 0) throw new PushError(CHANGED);
+        got += k;
+      }
+      // After each read, so no piece mixes bytes from before and after a write.
+      if (identity(fstatSync(fd)) !== f.id) throw new PushError(CHANGED);
+      yield [off, buf];
+      off += buf.length;
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** NUL-separated paths, cut into slices of at most `max` bytes at name boundaries. */
 function pathSlices(paths: string[], max: number): Buffer[] {
   const out: Buffer[] = [];
@@ -762,7 +859,7 @@ export async function pushTree(
   } = {},
 ): Promise<void> {
   const cd = `cd ${q(ws)}`;
-  const n = plan.chunks.length;
+  const n = plan.chunks.length + plan.large.reduce((k, f) => k + Math.ceil(f.size / MAX_STDIN), 0);
   const guard = o.guard
     ? `${STATE}; case "$s" in dirty|no_baseline) echo sbx-state:unpulled >&2; exit ${NO_BASELINE};; esac; `
     : '';
@@ -785,6 +882,32 @@ export async function pushTree(
     }
     if (r.exitCode !== 0) {
       throw new PushError(`the push (part ${i + 1} of ${n}) failed in the sandbox: ${outcome(r)}`);
+    }
+  }
+  let part = plan.chunks.length;
+  for (const f of plan.large) {
+    // `./`, so a name starting with `-` is never an option.
+    const dest = q(`./${f.path}`);
+    for (const [off, buf] of pieces(f)) {
+      const write =
+        off === 0
+          ? `mkdir -p ${q(`./${posix.dirname(f.path)}`)} && cat > ${dest}`
+          : `cat >> ${dest}`;
+      // The size check also catches a file another push emptied the workspace under.
+      const end =
+        off + buf.length === f.size
+          ? ` && n=$(wc -c < ${dest}) && [ $n -eq ${f.size} ] && chmod ${f.mode.toString(8)} ${dest}` +
+            ` && TZ=UTC0 touch -m -t ${touchStamp(f.mtime)} ${dest}`
+          : '';
+      o.onChunk?.(++part, n);
+      const r = await exec(`${cd} && ${later}${write}${end}`, {
+        stdin: buf,
+        timeoutS: SYNC_TIMEOUT_S,
+        ...(o.signal ? { signal: o.signal } : {}),
+      });
+      if (r.exitCode !== 0) {
+        throw new PushError(`the push (part ${part} of ${n}) failed in the sandbox: ${outcome(r)}`);
+      }
     }
   }
   const lists = pathSlices(plan.paths, MAX_STDIN);

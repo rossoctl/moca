@@ -10,7 +10,7 @@ import { parseArgs, type ParseArgsConfig } from 'node:util';
  * heads of one command with no description between them share the one after
  * (`templates quota`'s two forms, `admin subjects grant` and `revoke`).
  */
-interface UsageEntry {
+export interface UsageEntry {
   lines: string[];
   /** Each head's command words: `admin subjects enroll|unenroll SUBJECT` gives the first three. */
   heads: string[][];
@@ -43,7 +43,7 @@ function headWords(head: string): string[] {
  * note line that ends in `:` directly before a command line, or it is read as a heading; the notes
  * go after the last command (the first other non-indented line ends the entries).
  */
-function usageEntries(usage: string, head: string): UsageEntry[] {
+export function usageEntries(usage: string, head: string): UsageEntry[] {
   const entries: UsageEntry[] = [];
   let cur: UsageEntry | undefined;
   const lines = usage.split('\n').slice(1);

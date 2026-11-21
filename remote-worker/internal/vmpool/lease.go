@@ -37,11 +37,26 @@ import (
 // Execs get no slack.
 const LeaseTimeoutSlack = 8 * time.Second
 
+// LeaseAbortGrace is how long the host waits for the guest's answer to its abort of a
+// lease command (runLease, Command.Abort; F3 of the E17b report) before it cancels the Run
+// and ends the lease agent_dead. The guest's teardown may take up to its 5 s bound before it
+// answers, which is the slack's reasoning without the timeout's rounding: the same 8 s.
+const LeaseAbortGrace = LeaseTimeoutSlack
+
 // LeaseNormaliseTimeout bounds a lease start's normalise step (normaliseLease), the guest's
 // ownership walk of the workspace: the step's own timeout_s, with the host giving up
 // LeaseTimeoutSlack later. It is not charged to the Exec's budget (PR #763 second review,
 // G2): a walk over a big tree may take far longer than a short command's timeout.
 const LeaseNormaliseTimeout = 10 * time.Minute
+
+// leaseCacheDropS is d as the guest's cache_drop_after_s: whole seconds, rounded up, and
+// 0 (never) for a negative d, the drop turned off.
+func leaseCacheDropS(d time.Duration) uint32 {
+	if d <= 0 {
+		return 0
+	}
+	return uint32((d + time.Second - 1) / time.Second)
+}
 
 // leaseGuestTimeoutS is the timeout_s a lease Exec's guest gets when Run starts at now:
 // what is left of the budget until deadline, rounded up to whole seconds, and at least 1 s.
@@ -326,8 +341,9 @@ func (p *pool) cancelled(ctx context.Context, timedOut *atomic.Bool, timeoutS ui
 // once: the guest's latch refuses the launcher's per-Exec mount command after the
 // first lease Exec -- takes the normalise step when root wrote the workspace
 // (normaliseLease), and installs the lease. The Run carries Lease. A TeardownFailed
-// result, a Run error, the host's deadline or an abort ends the lease; otherwise, the
-// guest's own timeout and ErrCommandTooLarge included (runLease), its lastEnd moves to
+// result, a Run error, the host's deadline or an abort the guest did not answer cleanly
+// ends the lease; otherwise, the guest's own timeout, a command's clean abort and
+// ErrCommandTooLarge included (runLease), its lastEnd moves to
 // now and its footprint is sampled, both before the gate is released. deadline is when the Exec's budget ends.
 //
 // A process kind (plan 5) is refused processes_not_enabled unless lease+processes is
@@ -677,12 +693,17 @@ func (p *pool) normaliseLease(ctx context.Context, rp *runPool, vm VM, ph *Phase
 // The guest's report that its own timeout fired (guestTimedOut) keeps the lease (ruling
 // R8b): the guest killed the Exec's cgroup and emptied it before answering, as after an
 // exit, so the Exec fails with the timeout and the next one runs in the same VM. So does
+// the caller's abort of a command (F3 of the E17b report): it reaches the guest as
+// Command.Abort rather than as a cancelled Run, the guest tears the command down the same
+// way and answers End with Aborted, and the Exec fails ErrAborted. An abort the guest does
+// not answer within LeaseAbortGrace, or answers with an error (an agent that predates the
+// abort frame), still ends the lease agent_dead. So does
 // ErrCommandTooLarge: the command was refused before anything reached the guest. So does
 // the guest's refusal of a process kind (guestKeepsLease), which fails the Exec with the
 // guest's wire string (ProcessError). Every lease End refreshes the tracked mirror
 // (refreshTrackedLocked) before the lease is kept or ended. What
 // ends the lease is a guest that did not answer by the host's deadline, a transport
-// error, teardown_failed, or an abort (agent_dead in v1).
+// error, teardown_failed, or an abort the guest did not answer cleanly.
 func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec, out Sink, ph *Phases,
 	timedOut *atomic.Bool, timeoutS uint32, deadline time.Time, extend func(time.Time) bool) (Result, error) {
 	p.mu.Lock()
@@ -737,7 +758,31 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 	// reach the guest before the connection closes, which is what spec §4 allows for an
 	// Exec in flight when its lease is cut; the unwind below then ends the lease with the
 	// cut's reason. Only a cut set before this point is kept off Run (the check above).
-	execCtx, cancel := context.WithCancel(runCtx)
+	// A command's Run is not cancelled by the caller's abort, which is asked of the guest
+	// instead (abort, Command.Abort), with LeaseAbortGrace as the bound on its answer. The
+	// host's own deadline still cancels it at once: the timer sets timedOut before it
+	// cancels runCtx. So does a cut, which cancels execCtx directly. A process kind is
+	// cancelled by either, as before.
+	runParent := runCtx
+	var abort chan struct{}
+	if e.Kind == ExecKindCommand {
+		detached, cancelDetached := context.WithCancel(context.WithoutCancel(runCtx))
+		defer cancelDetached()
+		abort = make(chan struct{})
+		stopAbort := context.AfterFunc(runCtx, func() {
+			if timedOut.Load() {
+				cancelDetached()
+				return
+			}
+			// Armed before abort is closed, so the bound is in place whenever the guest
+			// is asked. A firing after the Run returned cancels a context already done.
+			p.clk.AfterFunc(LeaseAbortGrace, cancelDetached)
+			close(abort)
+		})
+		defer stopAbort()
+		runParent = detached
+	}
+	execCtx, cancel := context.WithCancel(runParent)
 	defer cancel()
 	l.running, l.cancel = true, cancel
 	rp.lastExec = p.clk.Now()
@@ -753,6 +798,9 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 		Lease:     true, // never NormaliseWorkspace: the lease's start took that step
 		Kind:      e.Kind,
 		Process:   e.Process,
+		Abort:     abort, // nil for a process kind
+		// Every lease request restarts the guest's idle page-cache drop (F1).
+		CacheDropAfterS: leaseCacheDropS(p.cfg.LeaseCacheDropAfter),
 	}
 	if e.Kind == ExecKindProcessStart {
 		c.MaxProcesses = p.cfg.LeaseMaxProcesses
@@ -760,6 +808,16 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 	res, runErr := vm.Run(execCtx, c, out)
 	if ph != nil {
 		ph.Run = p.clk.Now().Sub(t0)
+	}
+	if runErr == nil && res.Aborted {
+		// An aborted End answers the host's KindAbort and nothing else: one the host did
+		// not ask for is a guest off the protocol, failed as a guest error, never a success
+		// with exit -1 (#970 review). abort is closed once and only by the caller's abort.
+		select {
+		case <-abort:
+		default:
+			runErr = &guestError{msg: "an aborted End for an Exec the host did not abort"}
+		}
 	}
 	cErr := p.classify(ctx, timedOut, timeoutS)
 	// The guest answered with its own timeout: the command is dead, its cgroup empty.
@@ -781,8 +839,11 @@ func (p *pool) runLease(ctx, runCtx context.Context, rp *runPool, vm VM, e Exec,
 		reason = LeaseEndTeardownFailed
 	case timedOut.Load(), runErr != nil && !guestTimeout && !tooLarge && !refused:
 		// The host's deadline (the guest did not answer within the budget and the slack),
-		// a transport error, an abort, or a guest error: the agent may have survived, but
-		// a VM whose last Exec ended without its answer is not one to run the next in.
+		// a transport error, an abort the guest did not answer with End, or a guest error:
+		// the agent may have survived, but a VM whose last Exec ended without its answer is
+		// not one to run the next in. A clean aborted End is an answer: it keeps the lease
+		// because runErr is nil, and an aborted End the host did not ask for was made a
+		// guest error above.
 		reason = LeaseEndAgentDead
 	}
 

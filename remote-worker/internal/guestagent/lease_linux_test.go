@@ -1126,6 +1126,59 @@ func TestLeaseConnectionCloseKillsTheExec(t *testing.T) {
 	}
 }
 
+// The host's polite abort (F3 of the E17b report): a KindAbort frame instead of a close.
+// The Exec's cgroup is killed and emptied as on a close, but the agent answers with an
+// End carrying aborted and exit -1, so the host learns the teardown finished and keeps
+// the lease. Nothing of the Exec may be running by the time that End arrives, and the
+// agent must take the next Exec.
+func TestLeaseAbortFrameKillsTheExecAndAnswersEnd(t *testing.T) {
+	a, _ := newLeaseAgent(t)
+	host, guest := net.Pipe()
+	defer host.Close()
+	go func() { _ = a.ServeConn(guest) }()
+	if err := WriteJSON(host, KindRequest, leaseReq(`sleep 30 & sleep 30`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFrame(host, KindStdinEOF, nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	sleeps := regexp.MustCompile(`^sleep 30$`)
+	if n := len(procsMatching(t, sleeps, 7000)); n != 2 {
+		t.Fatalf("%d `sleep 30`s running as 7000 before the abort, want 2: the test would prove nothing", n)
+	}
+	if err := WriteFrame(host, KindAbort, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = host.SetReadDeadline(time.Now().Add(6 * time.Second))
+	var end End
+	for {
+		k, p, err := ReadFrame(host)
+		if err != nil {
+			t.Fatalf("read after the abort frame: %v, want an End", err)
+		}
+		if k == KindError {
+			t.Fatalf("the agent answered the abort frame with an error: %s", p)
+		}
+		if k == KindEnd {
+			if err := DecodeJSON(p, &end); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	if left := procsMatching(t, sleeps, 7000); len(left) > 0 {
+		t.Fatalf("End arrived with the aborted Exec's processes still running: %v", left)
+	}
+	if !end.Aborted || end.ExitCode != -1 || end.TeardownFailed {
+		t.Fatalf("end %+v, want aborted with exit -1 and a clean teardown", end)
+	}
+	if out, _, end, errMsg := drive(t, a, leaseReq(`echo ok`), nil); errMsg != "" || end.ExitCode != 0 || end.Aborted || out != "ok\n" {
+		t.Fatalf("lease request after an abort: end %+v, err %q, stdout %q", end, errMsg, out)
+	}
+}
+
 // Close must not wait for a running lease Exec: it once took the lease mutex, which
 // runLease holds for the Exec's whole run.
 func TestLeaseCloseDoesNotWaitForARunningExec(t *testing.T) {
@@ -1481,5 +1534,69 @@ func TestLeaseTrackedUIDDefaults(t *testing.T) {
 	}
 	if a.lease.uids == nil || a.lease.uids.base != 20000 || a.lease.uids.n != 4 {
 		t.Fatalf("uid allocator %+v, want 20000 and 4", a.lease.uids)
+	}
+}
+
+// scratchDropCaches points dropCachesPath at a scratch file for the test, so the idle drop
+// never touches the test host's page cache, and returns a reader of what was written.
+func scratchDropCaches(t *testing.T) func() string {
+	t.Helper()
+	f := filepath.Join(t.TempDir(), "drop_caches")
+	if err := os.WriteFile(f, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := dropCachesPath
+	dropCachesPath = f
+	t.Cleanup(func() { dropCachesPath = orig })
+	return func() string {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+}
+
+// F1 of the E17b report: a lease idle for the host's cache_drop_after_s after a request
+// drops the guest's clean page cache (drop_caches 1), once.
+func TestLeaseIdleDropsThePageCacheAfterTheDelay(t *testing.T) {
+	written := scratchDropCaches(t)
+	a, _ := newLeaseAgent(t)
+	req := leaseReq(`true`)
+	req.CacheDropAfterS = 1
+	if _, _, end, errMsg := drive(t, a, req, nil); errMsg != "" || end.ExitCode != 0 {
+		t.Fatalf("end %+v, err %q", end, errMsg)
+	}
+	if got := written(); got != "" {
+		t.Fatalf("drop_caches written %q at once, want only after the delay", got)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for written() == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("no page-cache drop 5 s after a request with cache_drop_after_s 1")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if got := written(); got != "1\n" {
+		t.Fatalf("drop_caches written %q, want \"1\\n\" (page cache only)", got)
+	}
+}
+
+// A request before the delay restarts it, and a request without the field disarms it: the
+// drop is of an idle lease's cache, never one a busy lease is using.
+func TestLeaseRequestBeforeTheDelayDisarmsTheDrop(t *testing.T) {
+	written := scratchDropCaches(t)
+	a, _ := newLeaseAgent(t)
+	req := leaseReq(`true`)
+	req.CacheDropAfterS = 1
+	if _, _, _, errMsg := drive(t, a, req, nil); errMsg != "" {
+		t.Fatal(errMsg)
+	}
+	if _, _, _, errMsg := drive(t, a, leaseReq(`true`), nil); errMsg != "" { // no delay: off
+		t.Fatal(errMsg)
+	}
+	time.Sleep(2500 * time.Millisecond)
+	if got := written(); got != "" {
+		t.Fatalf("drop_caches written %q after a later request without a delay, want nothing", got)
 	}
 }

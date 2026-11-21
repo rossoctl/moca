@@ -1474,6 +1474,13 @@ egress_refusals=(
   'export SBX_EGRESS_HOSTS="a" => SBX_EGRESS_HOSTS entry .a. is not id=worker,worker'
   'export SBX_EGRESS_HOSTS="a=sbx_default, sbx_py312" => SBX_EGRESS_HOSTS must not contain whitespace'
   'export SBX_EGRESS_CREDENTIAL_TTL_SECONDS=4 => SBX_EGRESS_CREDENTIAL_TTL_SECONDS must be a whole number of seconds, 5-300'
+  'export SBX_CREDENTIAL_STORE=vualt => SBX_CREDENTIAL_STORE must be file or vault'
+  'export SBX_CREDENTIAL_STORE=kubernetes => SBX_CREDENTIAL_STORE must be file or vault'
+  'export SBX_CREDENTIAL_STORE=vault => SBX_CREDENTIAL_STORE=vault needs SBX_VAULT_ADDR'
+  'export SBX_CREDENTIAL_STORE=vault SBX_VAULT_ADDR=vault.internal:8200 => SBX_VAULT_ADDR must be an absolute http'
+  'export SBX_CREDENTIAL_STORE=vault SBX_VAULT_ADDR=/secret => SBX_VAULT_ADDR must be an absolute http'
+  'export SBX_VAULT_ADDR=https://vault.internal:8200 => SBX_VAULT_ADDR needs SBX_CREDENTIAL_STORE=vault'
+  'export SBX_VAULT_KV_MOUNT=kv => SBX_VAULT_KV_MOUNT needs SBX_CREDENTIAL_STORE=vault'
   'export SBX_EGRESS_CREDENTIAL_TTL_SECONDS=301 => SBX_EGRESS_CREDENTIAL_TTL_SECONDS must be'
   'export SBX_EGRESS_CREDENTIAL_TTL_SECONDS=1m => SBX_EGRESS_CREDENTIAL_TTL_SECONDS must be'
 )
@@ -1489,6 +1496,81 @@ grep -q "worker 'sbx_nt' serves no template" "$TMP/out" || fail "non-template eg
 ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'changed something before refusing a non-template egress worker'
 pass 'egress hosts take only template workers: the default host skips others, an explicit one is refused'
 pass 'refuses a bad switch, a worker listed twice or owned by no host, bad ids, bad separators and an out-of-range TTL'
+
+# 14b. The Vault credential store (moca#823): SBX_CREDENTIAL_STORE=vault lists the vault Component
+# instead of the file one, and carries the connection settings into sbx-settings. The TOKEN is never a
+# setting -- a Vault Agent writes it to a file -- so no Secret and no ConfigMap key may hold one.
+reset_state
+run_setup eval "export SBX_EGRESS_CREDENTIALS=1 SBX_CREDENTIAL_STORE=vault SBX_VAULT_ADDR=https://vault.internal:8200" ||
+  fail "egress on with vault failed: $(cat "$TMP/out")"
+grep -q 'components:' "$K" || fail 'the vault run lists no components'
+grep -q -- '- ../../k8s/overlays/ocp-sbx/egress-credentials-vault$' "$K" ||
+  fail "the vault run does not list the egress-credentials-vault Component: $(cat "$K")"
+! grep -q -- '- ../../k8s/overlays/ocp-sbx/egress-credentials$' "$K" ||
+  fail 'the vault run lists the file-store Component as well (both set SH_CREDENTIAL_STORE)'
+[[ "$(cm sbx-settings VAULT_ADDR)" == https://vault.internal:8200 ]] || fail 'VAULT_ADDR is not in sbx-settings'
+# Unset optionals stay out, so the store keeps its code defaults rather than being pinned to them here.
+for k in SH_VAULT_KV_MOUNT SH_VAULT_PATH VAULT_NAMESPACE; do
+  [[ -z "$(cm sbx-settings "$k")" ]] || fail "$k is in sbx-settings although it was not set"
+done
+# The KEK is still generated and kept in sbx-egress: Vault holds ciphertext only.
+[[ -n "$(secret_val sbx-egress SH_CREDENTIAL_KEK)" ]] || fail 'the vault run did not keep the KEK in sbx-egress'
+[[ "$(secret_val sbx-egress SH_CREDENTIAL_KEK | base64 --decode | wc -c | tr -d ' ')" == 32 ]] ||
+  fail 'the vault run KEK is not 32 bytes'
+! jq -e '.data | has("VAULT_TOKEN")' "$MOCK_STATE/configmap-sbx-settings.json" >/dev/null ||
+  fail 'a static VAULT_TOKEN reached sbx-settings'
+render
+# The VALUE, not just the key: greping for the name alone passes if the FILE component had been
+# listed, or if the key came from the base (which sets kubernetes and the sbx overlay deletes).
+cp_render_env() { awk -v n="$1" '$0 ~ "- name: " n "$" { f = 1; next } f && $1 == "value:" { print $2; exit } f { exit }' "$TMP/render.yaml"; }
+[[ "$(cp_render_env SH_CREDENTIAL_STORE)" == vault ]] ||
+  fail "the rendered vault stack's SH_CREDENTIAL_STORE is not vault: '$(cp_render_env SH_CREDENTIAL_STORE)'"
+# The boot-critical pair, end to end: setup.sh writes SH_EGRESS_HOSTS into sbx-settings AND the
+# component must reference it, or the control plane refuses to boot with the KEK mounted.
+grep -q 'name: SH_EGRESS_HOSTS' "$TMP/render.yaml" ||
+  fail 'the rendered vault stack never reads SH_EGRESS_HOSTS: the control plane would refuse to boot'
+! grep -q 'claimName: moca-sbx-credentials' "$TMP/render.yaml" || fail 'the rendered vault stack still mounts the file-store PVC'
+pass 'egress on with vault: the vault Component only, VAULT_ADDR in sbx-settings, unset optionals omitted, the KEK still in sbx-egress, no token anywhere'
+
+# SBX_STORAGE_CLASS with the vault store: the vault component renders no credential PVC, so no patch
+# may target one. kustomize tolerates an unmatched target SILENTLY, so a stray patch would not fail
+# the render -- it would just never apply the class anywhere, which is why this is asserted here.
+reset_state
+run_setup eval "export SBX_EGRESS_CREDENTIALS=1 SBX_CREDENTIAL_STORE=vault SBX_VAULT_ADDR=https://v.invalid SBX_STORAGE_CLASS=gp3" ||
+  fail "egress on with vault and a storage class failed: $(cat "$TMP/out")"
+! grep -q 'name: moca-sbx-credentials' "$K" ||
+  fail 'the vault run patches a storage class onto moca-sbx-credentials, a PVC it does not render'
+grep -q 'name: moca-sbx-templates\|volumeClaimTemplates' "$K" ||
+  fail 'the vault run stopped patching the storage class onto the claims it does render'
+render
+pass 'SBX_STORAGE_CLASS with vault: no patch targets the credential PVC the vault store does not render'
+
+# The optionals do reach sbx-settings when set, under the names the control plane reads.
+reset_state
+run_setup eval "export SBX_EGRESS_CREDENTIALS=1 SBX_CREDENTIAL_STORE=vault SBX_VAULT_ADDR=https://v.invalid SBX_VAULT_KV_MOUNT=kv SBX_VAULT_PATH=sbx/creds SBX_VAULT_NAMESPACE=research" ||
+  fail "egress on with the vault optionals failed: $(cat "$TMP/out")"
+[[ "$(cm sbx-settings SH_VAULT_KV_MOUNT)" == kv ]] || fail 'SH_VAULT_KV_MOUNT is not in sbx-settings'
+[[ "$(cm sbx-settings SH_VAULT_PATH)" == sbx/creds ]] || fail 'SH_VAULT_PATH is not in sbx-settings'
+[[ "$(cm sbx-settings VAULT_NAMESPACE)" == research ]] || fail 'VAULT_NAMESPACE is not in sbx-settings'
+pass 'the vault mount, path and namespace reach sbx-settings as SH_VAULT_KV_MOUNT, SH_VAULT_PATH and VAULT_NAMESPACE'
+
+# file is the default and the unchanged shape: the file Component, and no Vault key in sbx-settings.
+reset_state
+run_setup eval "export SBX_EGRESS_CREDENTIALS=1" || fail "egress on with the default store failed: $(cat "$TMP/out")"
+grep -q -- '- ../../k8s/overlays/ocp-sbx/egress-credentials$' "$K" || fail 'the default store is not the file Component'
+! grep -q 'egress-credentials-vault' "$K" || fail 'the default store listed the vault Component'
+! jq -e '.data | keys | any(startswith("VAULT_") or startswith("SH_VAULT_"))' "$MOCK_STATE/configmap-sbx-settings.json" >/dev/null ||
+  fail 'the file store put a Vault key in sbx-settings'
+pass 'SBX_CREDENTIAL_STORE defaults to file: the file Component, no Vault settings'
+
+# The store settings are refused when the feature is off, rather than silently doing nothing.
+for bad in 'SBX_CREDENTIAL_STORE=vault' 'SBX_VAULT_ADDR=https://v.invalid' 'SBX_VAULT_NAMESPACE=research'; do
+  reset_state
+  ! run_setup eval "export $bad" || fail "accepted $bad with egress off"
+  grep -Eq -- "${bad%%=*} needs SBX_EGRESS_CREDENTIALS=1" "$TMP/out" || fail "refused $bad, but not by naming the switch: $(cat "$TMP/out")"
+  ! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail "changed something before refusing $bad"
+done
+pass 'the credential-store settings are refused with egress off, naming the switch they need'
 
 # 15. The template store (template lifecycle spec §3.1, §6.1, §7.2) behind SBX_TEMPLATE_STORE=1.
 reset_state

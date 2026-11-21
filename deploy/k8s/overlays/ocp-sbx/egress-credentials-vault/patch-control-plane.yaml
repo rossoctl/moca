@@ -1,0 +1,89 @@
+# The Vault credential store on the sandbox profile (SBX0.2b spec §4.3, moca#823). Names the BASE
+# namespace like every patch in the overlay. The connection settings come from sbx-settings (setup.sh
+# writes them); the KEK is a file in /run/credentials, from the Secret sbx-egress, which setup.sh
+# keeps apart from moca-mu1.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-control-plane, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - { name: SH_CREDENTIAL_STORE, value: vault }
+            # The egress feature's own two settings, identical to the file variant's. NOT optional to
+            # this component's correctness: the KEK is projected below either way, and the control
+            # plane refuses to BOOT when SH_CREDENTIAL_KEK is set without SH_EGRESS_HOSTS
+            # (egress-config.ts, "set both or neither"). Omitting them crash-loops the pod rather than
+            # turning egress off, so the two components must stay in step here.
+            - name: SH_EGRESS_HOSTS
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_EGRESS_HOSTS, optional: true } }
+            - name: SH_EGRESS_CREDENTIAL_TTL_SECONDS
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: sbx-settings, key: SH_EGRESS_CREDENTIAL_TTL_SECONDS, optional: true },
+                }
+            # Required by the store; setup.sh refuses SBX_CREDENTIAL_STORE=vault without it, so this
+            # is not optional and a missing key must fail the pod rather than start without a store.
+            - name: VAULT_ADDR
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: VAULT_ADDR } }
+            # The rest have code defaults (SH_VAULT_KV_MOUNT=secret, SH_VAULT_PATH=moca/credentials)
+            # or are Enterprise/HCP-only (VAULT_NAMESPACE), so each is optional: an unset key leaves
+            # the store on its default rather than refusing to boot.
+            - name: SH_VAULT_KV_MOUNT
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_VAULT_KV_MOUNT, optional: true } }
+            - name: SH_VAULT_PATH
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_VAULT_PATH, optional: true } }
+            - name: VAULT_NAMESPACE
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: VAULT_NAMESPACE, optional: true } }
+            # A FILE, never VAULT_TOKEN: vault-store.ts re-reads it on every request, so a Vault Agent
+            # sidecar can log in (AppRole) and renew without the control plane holding a long-lived
+            # token or restarting. Setting both VAULT_TOKEN and VAULT_TOKEN_FILE refuses to start.
+            #
+            # THIS COMPONENT IS NOT STARTABLE ON ITS OWN. vault-store.ts reads the sink ONCE,
+            # SYNCHRONOUSLY, at boot (`readFileSync`, so an unreadable or empty file fails startup with
+            # its name in the log). Nothing here writes /run/vault/token, so until the deployment adds
+            # something that does, the pod fails to start with ENOENT -- it does NOT come up and serve
+            # 503s. The sidecar is left out deliberately: its auth method is a per-deployment decision
+            # (moca#823), and a half-configured one would crash-loop just as surely. The path below is
+            # this component's contract with whatever fills it; see the runbook.
+            - { name: VAULT_TOKEN_FILE, value: /run/vault/token }
+          volumeMounts:
+            # Writable, unlike /run/credentials: the Agent REWRITES the sink on every renewal. Shared
+            # with the Agent sidecar once one is added. In-memory, so the token never touches a disk.
+            - { name: vault-token, mountPath: /run/vault }
+      volumes:
+        - name: vault-token
+          emptyDir: { medium: Memory }
+        # moca-mu1's two items (the overlay's), every key of sbx-egress (the KEK -- Vault holds only
+        # ciphertext, so the key that opens it must not live in Vault) and every key of
+        # sbx-template-hosts (optional: only with SBX_TEMPLATE_STORE=1). A strategic merge REPLACES a
+        # projected volume's source list, so this component restates every source the other two would
+        # add -- the same reason template-store/patch-control-plane.yaml restates them.
+        - name: credentials
+          secret: null
+          projected:
+            defaultMode: 256 # 0400
+            sources:
+              - secret:
+                  name: moca-mu1
+                  items:
+                    - { key: SH_SESSION_TOKEN_PRIVATE_KEY, path: SH_SESSION_TOKEN_PRIVATE_KEY }
+                    - { key: SH_JANITOR_TOKEN, path: SH_JANITOR_TOKEN }
+                    # The operator's static bearer for the members routes (setup.sh keeps it).
+                    - { key: SH_INSTALLER_TOKEN, path: SH_INSTALLER_TOKEN }
+              # The oidc client secret, optional: a GitHub stack has no moca-oidc Secret and the
+              # source is skipped (patch-control-plane.yaml, the base).
+              - secret:
+                  name: moca-oidc
+                  optional: true
+                  items:
+                    - { key: SH_OIDC_CLIENT_SECRET, path: SH_OIDC_CLIENT_SECRET }
+              - secret: { name: sbx-egress }
+              - secret: { name: sbx-template-hosts, optional: true }

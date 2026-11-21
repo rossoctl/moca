@@ -161,21 +161,132 @@ func TestLeaseGuestTimeoutFloorIsOneSecond(t *testing.T) {
 	}
 }
 
-// An abort (the caller cancels) still ends the lease agent_dead in v1.
-func TestLeaseAbortEndsTheLeaseAgentDead(t *testing.T) {
-	p, lc, _ := leasePool(t, nil)
-	mustSetMode(t, p, "k", ModeLease, 1)
-	entered, _ := blockRuns(lc)
+// abortedLeaseRun starts a lease Exec whose Run waits for its Command.Abort and then
+// answers with answer, and aborts it. It returns the aborted Exec's error and the Command
+// the Run saw.
+func abortedLeaseRun(t *testing.T, p *pool, lc *leaseLauncher, answer func(c Command) (Result, error)) (error, Command) {
+	t.Helper()
+	entered := make(chan Command, 1)
+	lc.setRunFn(func(_ *fakeVM, c Command, _ Sink) (Result, error) {
+		if c.Command != "sleep" {
+			return Result{}, nil
+		}
+		entered <- c
+		if c.Abort == nil {
+			return Result{}, fmt.Errorf("a lease command's Run has no Abort")
+		}
+		select {
+		case <-c.Abort:
+		case <-c.ctxDone:
+			return Result{}, fmt.Errorf("the Run was cancelled before Abort")
+		}
+		return answer(c)
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
 	go func() {
 		_, err := p.Exec(ctx, "k", leaseExec("sleep", 1), &capturingSink{})
 		errc <- err
 	}()
-	recvWithin(t, entered, "the lease Exec's Run")
+	c := recvWithin(t, entered, "the lease Exec's Run")
 	cancel()
-	if err := recvWithin(t, errc, "the aborted Exec"); !errors.Is(err, ErrAborted) {
+	return recvWithin(t, errc, "the aborted Exec"), c
+}
+
+// F3 of the E17b report: the caller's abort of a lease command reaches the guest as
+// Command.Abort, not as a cancelled Run, and the guest's End{Aborted} -- the command's
+// cgroup killed and emptied -- keeps the lease: the Exec fails ErrAborted, and the next
+// Exec runs in the same VM.
+func TestLeaseAbortKeepsTheLeaseOnTheGuestsAbortedEnd(t *testing.T) {
+	p, lc, _ := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	err, _ := abortedLeaseRun(t, p, lc, func(Command) (Result, error) {
+		return Result{ExitCode: -1, Aborted: true}, nil
+	})
+	if !errors.Is(err, ErrAborted) {
 		t.Fatalf("err = %v, want ErrAborted", err)
+	}
+	if liveLease(p, "k") == nil {
+		t.Fatal("the lease ended on a clean abort")
+	}
+	mustExec(t, p, "k", leaseExec("two", 1))
+	if n := lc.count("restore "); n != 1 {
+		t.Fatalf("restores = %d, want 1: the Exec after the abort runs in the lease's VM", n)
+	}
+	if s := loadLeaseState(p.cfg.WorkspaceRoot, "k"); s.Pending != nil && s.Pending.State == leaseEventEnd {
+		t.Fatalf("state = %+v, want no lease end", s)
+	}
+}
+
+// A guest that predates KindAbort answers it with a guest error: the lease ends
+// agent_dead, as every abort did before.
+func TestLeaseAbortOnAnOlderGuestEndsTheLeaseAgentDead(t *testing.T) {
+	p, lc, _ := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	err, _ := abortedLeaseRun(t, p, lc, func(Command) (Result, error) {
+		return Result{}, &guestError{msg: "guest-agent: the connection closed; the Exec was aborted"}
+	})
+	if !errors.Is(err, ErrAborted) {
+		t.Fatalf("err = %v, want ErrAborted", err)
+	}
+	assertEnded(t, p, lc, LeaseEndAgentDead)
+}
+
+// The guest's teardown failing on the abort ends the lease teardown_failed.
+func TestLeaseAbortWithATeardownFailureEndsTheLease(t *testing.T) {
+	p, lc, _ := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	err, _ := abortedLeaseRun(t, p, lc, func(Command) (Result, error) {
+		return Result{ExitCode: -1, Aborted: true, TeardownFailed: true}, nil
+	})
+	if !errors.Is(err, ErrAborted) {
+		t.Fatalf("err = %v, want ErrAborted", err)
+	}
+	assertEnded(t, p, lc, LeaseEndTeardownFailed)
+}
+
+// Abort asks; LeaseAbortGrace bounds the wait. A guest that never answers has its Run
+// cancelled at the bound, and the lease ends agent_dead.
+func TestLeaseAbortUnansweredWithinTheGraceEndsTheLeaseAgentDead(t *testing.T) {
+	p, lc, clk := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	asked := make(chan struct{})
+	go func() {
+		<-asked // the grace timer is armed before Abort is closed (runLease)
+		clk.Advance(LeaseAbortGrace)
+	}()
+	err, _ := abortedLeaseRun(t, p, lc, func(c Command) (Result, error) {
+		close(asked)
+		<-c.ctxDone
+		return Result{}, ErrAborted
+	})
+	if !errors.Is(err, ErrAborted) {
+		t.Fatalf("err = %v, want ErrAborted", err)
+	}
+	assertEnded(t, p, lc, LeaseEndAgentDead)
+}
+
+// The host's own deadline is not an abort: it cancels the Run at once, with no abort
+// frame, and ends the lease agent_dead as before.
+func TestLeaseHostDeadlineCancelsTheRunWithoutAnAbort(t *testing.T) {
+	p, lc, clk := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	entered := make(chan Command, 1)
+	lc.setRunFn(func(_ *fakeVM, c Command, _ Sink) (Result, error) {
+		entered <- c
+		<-c.ctxDone
+		select {
+		case <-c.Abort:
+			return Result{}, fmt.Errorf("the host deadline closed Abort")
+		default:
+		}
+		return Result{}, ErrAborted
+	})
+	errc := execAsync(p, "k", leaseExec("sleep", 1))
+	recvWithin(t, entered, "the lease Exec's Run")
+	clk.Advance(30*time.Second + LeaseTimeoutSlack)
+	if err := recvWithin(t, errc, "the timed-out Exec"); err == nil || err.Error() != ErrTimeout.Error()+":30" {
+		t.Fatalf("err = %v, want %s:30", err, ErrTimeout)
 	}
 	assertEnded(t, p, lc, LeaseEndAgentDead)
 }
@@ -414,4 +525,20 @@ func TestLeaseExecSpentDuringAColdStartNeverRuns(t *testing.T) {
 	if s := p.Stats(); leaseEndTotal(s) != 0 {
 		t.Fatalf("LeaseEnds = %v, want none", s.LeaseEnds)
 	}
+}
+
+// An End with aborted that the host never asked for (#970 review) is not an answer: the guest
+// is not behaving as the protocol says, so the Exec fails as a guest error rather than
+// returning exit -1 as a success, and the lease ends agent_dead.
+func TestLeaseUnsolicitedAbortedEndEndsTheLeaseAgentDead(t *testing.T) {
+	p, lc, _ := leasePool(t, nil)
+	mustSetMode(t, p, "k", ModeLease, 1)
+	lc.setRunFn(func(_ *fakeVM, c Command, _ Sink) (Result, error) {
+		return Result{ExitCode: -1, Aborted: true}, nil
+	})
+	_, err := p.Exec(context.Background(), "k", leaseExec("true", 1), &capturingSink{})
+	if !errors.Is(err, ErrGuest) {
+		t.Fatalf("err = %v, want ErrGuest", err)
+	}
+	assertEnded(t, p, lc, LeaseEndAgentDead)
 }

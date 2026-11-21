@@ -90,8 +90,14 @@ interface ClaudeChild {
 
 export interface ClaudeDeps {
   /** Injected in tests; spawns the real `claude` otherwise. */
-  spawnClaude?: (args: string[]) => ClaudeChild;
+  spawnClaude?: (args: string[], env: NodeJS.ProcessEnv) => ClaudeChild;
 }
+
+/**
+ * Keeps this machine's auto-memory out of the session where no settings.json of `up` is read.
+ * `1` beats both a settings `autoMemoryEnabled: true` and the caller's own `0`.
+ */
+const NO_MEMORY = 'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1';
 
 /**
  * Runs `claude` with this sandbox's MCP server, inheriting the terminal (Claude Code is a TUI),
@@ -110,15 +116,16 @@ export async function cmdClaude(
   // prints none and a caller parsing stdout would get the TUI.
   const args = claudeArgs(rest, sandboxId, urlFromFlag, cortex);
   if (cortex) c.io.err(`sbx: ${CORTEX_NOTE}`);
+  const env = { ...process.env, CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' };
   const child: ClaudeChild = deps.spawnClaude
-    ? deps.spawnClaude(args)
-    : spawn('claude', args, { stdio: 'inherit' });
+    ? deps.spawnClaude(args, env)
+    : spawn('claude', args, { stdio: 'inherit', env });
   return new Promise<number>((resolve) => {
     child.on('error', (err: NodeJS.ErrnoException) => {
       c.io.err(
         err.code === 'ENOENT'
           ? 'sbx: claude is not on PATH: install Claude Code (npm i -g @anthropic-ai/claude-code), ' +
-              `or run it yourself with: claude ${shellArgs(claudeArgs([], sandboxId, urlFromFlag, cortex))}`
+              `or run it yourself with: ${NO_MEMORY} claude ${shellArgs(claudeArgs([], sandboxId, urlFromFlag, cortex))}`
           : `sbx: could not run claude: ${err.message}`,
       );
       resolve(SBX_EXIT.failed);

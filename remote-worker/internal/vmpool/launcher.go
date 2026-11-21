@@ -48,6 +48,15 @@ type Command struct {
 	Kind         ExecKind
 	Process      ProcessArgs
 	MaxProcesses int
+	// Abort, when non-nil, is closed on the caller's abort of a lease command (runLease).
+	// The launcher sends the guest KindAbort rather than closing the connection, and keeps
+	// reading: the guest tears the command down and answers End with Aborted
+	// (Result.Aborted). Cancelling ctx still closes the connection at once; that is the
+	// bound on a guest that does not answer. nil (every other Run): ctx alone.
+	Abort <-chan struct{}
+	// CacheDropAfterS is forwarded to the guest's Request (Config.LeaseCacheDropAfter in
+	// whole seconds; 0 = never), on every lease Run.
+	CacheDropAfterS uint32
 
 	// ctxDone is TEST-ONLY plumbing: the fake launcher fills it so a run hook can
 	// block until the run context ends, which is how the timeout and abort tests
@@ -93,6 +102,9 @@ type Result struct {
 	// Tracked is the guest's End.Tracked: its whole tracked-process table, on every lease
 	// End (plan 5). The lease's mirror is refreshed from it (runLease).
 	Tracked []TrackedProcess
+	// Aborted is the guest's End.Aborted: a lease command torn down on Command.Abort, its
+	// cgroup empty, so the lease VM is as fit for the next Exec as after an exit.
+	Aborted bool
 	// ProcessesStopped is the pool's, never a launcher's: the processes_stopped notice of
 	// a lease Exec before which a downgrade's stop ran (execLease). Runner sends it on
 	// that Exec's response, and nothing acknowledges or stores it (ruling P5-R19).

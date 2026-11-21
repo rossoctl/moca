@@ -159,6 +159,13 @@ const BOB_SERVER = Object.freeze({ command: 'mocactl', args: ['sbx', 'mcp'] });
 const MCP_JSON = '.mcp.json';
 const SETTINGS = '.claude/settings.json';
 /**
+ * Why `up` sets `autoMemoryEnabled: false`: auto-memory is laptop content, as OpenCode's `skill`
+ * is, and with the local tools denied the agent could read the notes but never correct them.
+ */
+const MEMORY_WHY =
+  "Claude Code would load this machine's auto-memory (~/.claude/projects/*/memory) into the " +
+  'sandboxed session';
+/**
  * Bob's two config filenames, both written (#676).
  *
  * Which one Bob reads depends on its version, and the names moved under us: Bob 2.0.9
@@ -176,7 +183,9 @@ const BOB_SETTINGS = '.bob/settings.json';
 const BOB_MCP = '.bob/mcp.json';
 const SETTINGS_LOCAL = '.claude/settings.local.json';
 const MANIFEST = '.sbx/agent-config.json';
-const WRITE_HINT = 'edit it by hand, or run mocactl sbx up --no-agent-config';
+/** What --no-agent-config does, said wherever it is offered. */
+const NO_CONFIG = '--no-agent-config (writes no agent configuration)';
+const WRITE_HINT = `edit it by hand, or run mocactl sbx up ${NO_CONFIG} and configure the agents yourself`;
 /**
  * Claude Code's own wording for the option that accepts the server, so what we tell the user to
  * pick reads the same as what they see. Its prompt also offers "Use this and all future MCP
@@ -184,8 +193,7 @@ const WRITE_HINT = 'edit it by hand, or run mocactl sbx up --no-agent-config';
  */
 export const CLAUDE_PROMPT_PICK = 'Use this MCP server';
 /** For an edit this module could not make safely: nothing was written. */
-const EDIT_HINT =
-  'nothing was changed; edit it by hand (and please report it), or use --no-agent-config / --keep-config';
+const EDIT_HINT = `nothing was changed; edit it by hand (and please report it), or run mocactl sbx up ${NO_CONFIG}`;
 
 export class ConfigConflict extends Error {
   constructor(
@@ -1048,6 +1056,8 @@ export function writeAgentConfig(
       settings.rel,
       'permissions.allow',
       `lists local built-in tools (${reenabled.join(', ')}), which would act on this machine`,
+      // Cortex mode writes no deny list to outrank the rule in settings.local.json.
+      cortex ? 'delete it' : `move it to ${SETTINGS_LOCAL}, which up leaves alone, or delete it`,
     );
   }
   for (const [file, data] of [
@@ -1059,6 +1069,14 @@ export function writeAgentConfig(
         file,
         'disabledMcpjsonServers',
         `rejects the ${SERVER} MCP server, so Claude Code would have no tools`,
+      );
+    }
+    const mem = at(data, ['autoMemoryEnabled']);
+    if (mem !== undefined && mem !== false) {
+      throw new ConfigConflict(
+        file,
+        'autoMemoryEnabled',
+        `is ${JSON.stringify(mem)}: ${MEMORY_WHY}`,
       );
     }
   }
@@ -1141,6 +1159,9 @@ export function writeAgentConfig(
     dropped = dropDenies(settings, prev, (v) => CLAUDE_RETIRED.includes(ruleTool(v)), true);
   }
   addItems(settings, ['enabledMcpjsonServers'], enabled.includes(SERVER) ? [] : [SERVER], recs);
+  if (at(settings.data, ['autoMemoryEnabled']) === undefined) {
+    setKey(settings, ['autoMemoryEnabled'], false, recs);
+  }
   if (ocHave === undefined) setKey(oc, ['mcp', SERVER], { ...OPENCODE_SERVER }, recs);
   for (const t of OPENCODE_OFF) {
     if (at(oc.data, ['tools', t]) === undefined) setKey(oc, ['tools', t], false, recs);
@@ -1442,6 +1463,16 @@ export function checkAgentConfig(root: string, mode?: SandboxModeName): string[]
           }`,
       );
     }
+  }
+  // settings.local.json overrides settings.json.
+  const memFile = at(local, ['autoMemoryEnabled']) !== undefined ? SETTINGS_LOCAL : SETTINGS;
+  const mem = at(memFile === SETTINGS ? settings : local, ['autoMemoryEnabled']);
+  if (mem !== false) {
+    // `up` re-merges a missing key but refuses to overwrite a value, so name that fix.
+    problems.push(
+      `Claude Code: ${memFile} autoMemoryEnabled is not false: ${MEMORY_WHY}` +
+        (mem === undefined ? '' : `; set it to false in ${memFile}`),
+    );
   }
   if (!isOpencodeServer(at(oc, ['mcp', SERVER]))) {
     problems.push(`OpenCode: ${ocFile} has no enabled ${SERVER} MCP server (mocactl sbx mcp)`);

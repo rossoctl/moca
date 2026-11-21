@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -397,13 +398,18 @@ func leaseEndDrivers() []leaseEndDriver {
 		}},
 		{reason: LeaseEndAgentDead, end: func(t *testing.T, g *leaseGate, key string) *leaseGate {
 			t.Helper()
-			// An aborted Exec ends without an End: the VM is not one to run the next Exec in,
-			// whether or not the agent survived. (A timeout no longer does: the guest's own
-			// timeout fires first and keeps the lease, TestGateLeaseTimeoutKeepsTheLease.)
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			if _, err := g.p.Exec(ctx, key, g.lease("sleep 30", 1), &capturingSink{}); !errors.Is(err, ErrAborted) {
-				t.Fatalf("an Exec aborted after 2 s: err = %v, want ErrAborted", err)
+			// A guest that does not answer by the host's deadline: the VM is paused, so
+			// neither the guest's own timeout nor its answer can arrive. (Neither a timeout
+			// nor an abort ends the lease any more: the guest answers both after tearing the
+			// Exec down, TestGateLeaseTimeoutKeepsTheLease, TestGateLeaseAbortKeepsTheLease.)
+			pauseGateVM(t, g.leaseVM(t, key))
+			e := g.lease("sleep 30", 1)
+			e.TimeoutS = 2
+			// Which error depends on which of two ~10 s bounds fires first, the host's
+			// deadline (2 s + LeaseTimeoutSlack) or the vsock dial's: either fails the Exec
+			// without an answer, and the caller checks that the lease ended agent_dead.
+			if _, err := g.p.Exec(context.Background(), key, e, &capturingSink{}); err == nil {
+				t.Fatal("an Exec on a paused VM succeeded, want it to fail without the guest's answer")
 			}
 			return g
 		}},
@@ -1218,6 +1224,116 @@ poll:
 		before>>20, peak>>20, now>>20, time.Since(start).Round(100*time.Millisecond), bound>>20)
 }
 
+// gateMemoryStat is the memory.stat fields readLeaseFootprint reads, plus anon, in MiB,
+// for a gate's log line.
+func gateMemoryStat(t *testing.T, dir string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "memory.stat"))
+	if err != nil {
+		return err.Error()
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		k, v, ok := strings.Cut(line, " ")
+		switch k {
+		case "anon", "file", "file_mapped", "shmem", "file_dirty", "file_writeback":
+			if n, err := strconv.ParseInt(v, 10, 64); ok && err == nil {
+				out = append(out, fmt.Sprintf("%s=%d", k, n>>20))
+			}
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+// TestGateLeaseIdleCacheDrop (F1 of the E17b report): a lease that has read a file holds
+// it in its guest's page cache, which free-page reporting never returns. With the idle
+// drop on, the guest drops that cache once the lease has served nothing for
+// LeaseCacheDropAfter, the pages are reported free, and LeaseBytes falls toward the
+// working set; the file still reads back whole, in the same VM. With the drop off, the
+// charge stays (the control: a fall there would mean something else freed it). Then, once
+// the host has written the file back, the host's clean cache of it is still charged to the
+// VM's cgroup (memory.current) but left out of LeaseBytes, by at least 64 MiB.
+func TestGateLeaseIdleCacheDrop(t *testing.T) {
+	requireKVM(t)
+	snapshotDir, man := requireLeaseSnapshot(t)
+	if !man.HasFeature(FeatureBalloonFPRV1) {
+		t.Skipf("NOT RUN (no signal, not a pass): snapshot %s does not advertise %q (features %v)",
+			snapshotDir, FeatureBalloonFPRV1, man.Features)
+	}
+	pinLeaseGateMemfile(t, snapshotDir)
+	const fileMiB, fall = 80, int64(48 << 20)
+	for _, tc := range []struct {
+		name  string
+		after time.Duration
+	}{{"on", 2 * time.Second}, {"off", -1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newLeaseGate(t, func(c *Config) { c.LeaseCacheDropAfter = tc.after })
+			key := "lease-cache-drop-" + tc.name
+			mustSetMode(t, g.p, key, ModeLease, 1)
+			g.run(t, key, gateLease(fmt.Sprintf("head -c %dM /dev/urandom > blob && sync && cat blob > /dev/null && sha256sum blob > blob.sum", fileMiB), 1))
+			v := g.leaseVM(t, key)
+			after, err := v.LeaseBytes()
+			if err != nil {
+				t.Fatalf("LeaseBytes: %v", err)
+			}
+			cur, _ := readMemoryCurrent(v.cgroups.abs(v.cgroupRel))
+			wait := 30 * time.Second
+			if tc.after < 0 {
+				wait = 10 * time.Second
+			}
+			start := time.Now()
+			now := after
+			for time.Since(start) < wait && after-now < fall {
+				time.Sleep(250 * time.Millisecond)
+				if now, err = v.LeaseBytes(); err != nil {
+					t.Fatalf("LeaseBytes: %v", err)
+				}
+			}
+			curNow, _ := readMemoryCurrent(v.cgroups.abs(v.cgroupRel))
+			t.Logf("drop %s: LeaseBytes %d -> %d MiB in %s (memory.current %d -> %d MiB; memory.stat %s)", tc.name,
+				after>>20, now>>20, time.Since(start).Round(100*time.Millisecond), cur>>20, curNow>>20,
+				gateMemoryStat(t, v.cgroups.abs(v.cgroupRel)))
+			switch fell := after-now >= fall; {
+			case tc.after > 0 && !fell:
+				t.Fatalf("LeaseBytes fell %d MiB in %s with the drop on, want at least %d MiB: the guest's page cache stayed",
+					(after-now)>>20, wait, fall>>20)
+			case tc.after < 0 && fell:
+				t.Fatalf("LeaseBytes fell %d MiB with the drop off: something else freed the cache, so the 'on' case proves nothing",
+					(after-now)>>20)
+			}
+			if tc.after > 0 {
+				// The host's cache of the file the guest wrote is charged to this cgroup but
+				// dirty until the host writes it back (dirty_expire, 30 s by default); dirty
+				// pages stay in the footprint. Once clean, the footprint leaves it out:
+				// LeaseBytes sits that far below memory.current.
+				dir := v.cgroups.abs(v.cgroupRel)
+				deadline := time.Now().Add(60 * time.Second)
+				for {
+					fp, err1 := v.LeaseBytes()
+					mc, err2 := readMemoryCurrent(dir)
+					if err1 == nil && err2 == nil && mc-fp >= 64<<20 {
+						t.Logf("after host writeback: LeaseBytes %d MiB, memory.current %d MiB (memory.stat %s)",
+							fp>>20, mc>>20, gateMemoryStat(t, dir))
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("60 s on, LeaseBytes %d MiB vs memory.current %d MiB (memory.stat %s, errs %v %v): "+
+							"the host's clean cache of the workspace image is still in the footprint",
+							fp>>20, mc>>20, gateMemoryStat(t, dir), err1, err2)
+					}
+					time.Sleep(time.Second)
+				}
+			}
+			if got := g.run(t, key, gateLease("sha256sum -c --quiet blob.sum && echo intact", 1)); got != "intact\n" {
+				t.Fatalf("after the drop: %q, want the file intact", got)
+			}
+			if g.leaseVM(t, key) != v {
+				t.Fatal("after the drop: the lease runs in another VM")
+			}
+		})
+	}
+}
+
 // TestGateLeaseTimeoutKeepsTheLease: a lease Exec past its timeout is killed by the guest,
 // which answers with its own timeout, and the lease is kept: the next Exec runs in the
 // same VM with the agent alive as PID 1 and nothing of the timed-out command left
@@ -1250,6 +1366,53 @@ echo checked`
 	}
 	if s := g.p.Stats(); leaseEndTotal(s) != 0 {
 		t.Fatalf("LeaseEnds = %v, want none: a timeout ends the Exec, not the lease", s.LeaseEnds)
+	}
+}
+
+// pauseGateVM pauses v's vcpus over its Firecracker API: the guest stops answering
+// anything, as a wedged agent would.
+func pauseGateVM(t *testing.T, v *firecrackerVM) {
+	t.Helper()
+	if err := newFCClient(v.apiSockHost).do(context.Background(), http.MethodPatch, "/vm", struct {
+		State string `json:"state"`
+	}{State: "Paused"}); err != nil {
+		t.Fatalf("pause %s: %v", v.ID(), err)
+	}
+}
+
+// TestGateLeaseAbortKeepsTheLease (F3 of the E17b report): the caller's abort of a running
+// lease command reaches the guest as KindAbort, the guest kills and empties the command's
+// cgroup and answers End with aborted, and the lease is kept: the Exec fails ErrAborted
+// soon after the abort, the next Exec runs in the same VM with /tmp kept, and nothing of
+// the aborted command is left running.
+func TestGateLeaseAbortKeepsTheLease(t *testing.T) {
+	requireKVM(t)
+	g := newLeaseGate(t, nil)
+	const key = "lease-abort"
+	mustSetMode(t, g.p, key, ModeLease, 1)
+	g.run(t, key, gateLease("echo kept > /tmp/marker", 1))
+	v := g.leaseVM(t, key)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := g.p.Exec(ctx, key, gateLease("sleep 300 & sleep 300", 1), &capturingSink{}); !errors.Is(err, ErrAborted) {
+		t.Fatalf("an Exec aborted after 2 s: err = %v, want ErrAborted", err)
+	}
+	if took := time.Since(start); took > 2*time.Second+LeaseAbortGrace {
+		t.Fatalf("the aborted Exec returned after %s, want within the abort grace (2 s + %s)", took, LeaseAbortGrace)
+	}
+	if g.leaseVM(t, key) != v {
+		t.Fatal("after the abort: the lease runs in another VM")
+	}
+	check := `cat /proc/1/comm /tmp/marker
+for p in /proc/[0-9]*; do [ "$(cat "$p/comm" 2>/dev/null)" = sleep ] && echo sleep-left; done
+echo checked`
+	if got := g.run(t, key, gateLease(check, 1)); got != "agent\nkept\nchecked\n" {
+		t.Fatalf("after the abort: %q, want the agent as PID 1, /tmp kept and no sleep left", got)
+	}
+	if s := g.p.Stats(); leaseEndTotal(s) != 0 {
+		t.Fatalf("LeaseEnds = %v, want none: an abort ends the Exec, not the lease", s.LeaseEnds)
 	}
 }
 

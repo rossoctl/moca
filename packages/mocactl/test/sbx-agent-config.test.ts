@@ -78,6 +78,8 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(s.permissions.deny).toEqual([...CLAUDE_DENY]);
     // R7: Claude Code loads the project server without asking.
     expect(s.enabledMcpjsonServers).toEqual(['sandbox']);
+    // The laptop's auto-memory would load, and the denied Edit/Write could not correct it.
+    expect(s.autoMemoryEnabled).toBe(false);
     const o = json(d, 'opencode.json');
     expect(o.mcp.sandbox).toEqual({
       type: 'local',
@@ -429,7 +431,12 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(Object.keys(json(d, '.mcp.json').mcpServers)).toEqual(['github', 'sandbox']);
     const s = json(d, '.claude/settings.json');
     expect(s.model).toBe('x');
-    expect(Object.keys(s)).toEqual(['permissions', 'model', 'enabledMcpjsonServers']);
+    expect(Object.keys(s)).toEqual([
+      'permissions',
+      'model',
+      'enabledMcpjsonServers',
+      'autoMemoryEnabled',
+    ]);
     expect(s.permissions.allow).toEqual(['mcp__github__*', 'mcp__sandbox__*']);
     expect(s.permissions.deny.filter((x: string) => x === 'Bash')).toHaveLength(1);
     expect(s.permissions.deny).toEqual(['Bash', ...CLAUDE_DENY.filter((t) => t !== 'Bash')]);
@@ -534,6 +541,13 @@ describe('agent configuration (SBX0 §6.3)', () => {
       JSON.stringify({ disabledMcpjsonServers: ['sandbox'] }),
       'disabledMcpjsonServers',
     ],
+    ['.claude/settings.json', JSON.stringify({ autoMemoryEnabled: true }), 'autoMemoryEnabled'],
+    ['.claude/settings.json', JSON.stringify({ autoMemoryEnabled: 'false' }), 'autoMemoryEnabled'],
+    [
+      '.claude/settings.local.json',
+      JSON.stringify({ autoMemoryEnabled: true }),
+      'autoMemoryEnabled',
+    ],
     // Claude Code reads plain JSON: a comment is refused, not rewritten.
     ['.claude/settings.json', '{ // mine\n "model": "x" }', '.claude/settings.json'],
     ['opencode.json', JSON.stringify({ tools: { bash: true } }), 'tools.bash'],
@@ -571,11 +585,38 @@ describe('agent configuration (SBX0 §6.3)', () => {
       expect(err.file).toBe(file);
       expect(err.message).toContain(file);
       expect(err.message).toContain(key);
-      expect(err.message).toMatch(/--no-agent-config/);
+      // What --no-agent-config does, true whether or not an earlier up configured the repo.
+      expect(err.message).toMatch(
+        key === 'permissions.allow'
+          ? /move it to \.claude\/settings\.local\.json/
+          : /--no-agent-config \(writes no agent configuration\) and configure the agents yourself/,
+      );
     }
     expect(text(d, file)).toBe(body);
     for (const f of FILES.filter((f) => f !== file)) expect(existsSync(join(d, f)), f).toBe(false);
     expect(existsSync(join(d, '.sbx'))).toBe(false);
+  });
+
+  it('says only to delete a local-tool allow rule in Cortex mode, where no deny list outranks it', () => {
+    const d = dir();
+    mkdirSync(join(d, '.claude'));
+    writeFileSync(
+      join(d, '.claude/settings.json'),
+      JSON.stringify({ permissions: { allow: ['Bash'] } }),
+    );
+    const err = conflictOf(() => writeAgentConfig(d, { dryRun: true, cortex: true }));
+    expect(err.message).toMatch(/permissions\.allow .*; delete it/);
+    expect(err.message).not.toMatch(/move it/);
+  });
+
+  it('takes a local-tool allow rule moved to settings.local.json, as that conflict says', () => {
+    const d = dir();
+    mkdirSync(join(d, '.claude'));
+    const local = { permissions: { allow: ['Bash(ls:*)'] } };
+    writeFileSync(join(d, '.claude/settings.local.json'), JSON.stringify(local));
+    writeAgentConfig(d);
+    expect(checkAgentConfig(d)).toEqual([]);
+    expect(json(d, '.claude/settings.local.json')).toEqual(local);
   });
 
   // Review I2: OpenCode's agent config overrides the global `tools`, and `permission` is the
@@ -758,6 +799,16 @@ describe('agent configuration (SBX0 §6.3)', () => {
     }
     expect(existsSync(join(d, '.sbx/agent-config.json'))).toBe(false);
     expect(removeAgentConfig(d)).toEqual([]);
+  });
+
+  it('leaves an autoMemoryEnabled: false the developer wrote in place on rm', () => {
+    const d = dir();
+    mkdirSync(join(d, '.claude'));
+    writeFileSync(join(d, '.claude/settings.json'), JSON.stringify({ autoMemoryEnabled: false }));
+    writeAgentConfig(d);
+    expect(checkAgentConfig(d)).toEqual([]);
+    removeAgentConfig(d);
+    expect(json(d, '.claude/settings.json')).toEqual({ autoMemoryEnabled: false });
   });
 
   // Review round 4: a file sbx up created is deleted only when nothing the developer wrote is in it.
@@ -1200,6 +1251,24 @@ describe('agent configuration (SBX0 §6.3)', () => {
         writeFileSync(join(d, '.claude/settings.json'), JSON.stringify(s));
       },
       /settings\.json disabledMcpjsonServers.*remove sandbox from disabledMcpjsonServers/,
+    ],
+    [
+      'auto-memory switched back on in settings.local.json',
+      (d: string) =>
+        writeFileSync(
+          join(d, '.claude/settings.local.json'),
+          JSON.stringify({ autoMemoryEnabled: true }),
+        ),
+      /Claude Code: \.claude\/settings\.local\.json autoMemoryEnabled.*set it to false in \.claude\/settings\.local\.json/,
+    ],
+    [
+      'auto-memory no longer off',
+      (d: string) => {
+        const s = json(d, '.claude/settings.json');
+        delete s.autoMemoryEnabled;
+        writeFileSync(join(d, '.claude/settings.json'), JSON.stringify(s));
+      },
+      /Claude Code: \.claude\/settings\.json autoMemoryEnabled/,
     ],
     [
       'the rules block removed',

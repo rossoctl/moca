@@ -38,6 +38,11 @@ const (
 	KindRequest  Kind = 0x01 // payload: JSON Request
 	KindStdin    Kind = 0x02 // payload: raw stdin bytes; may be split across frames
 	KindStdinEOF Kind = 0x03 // payload: empty. `base64 -d > f` only terminates at EOF
+	// KindAbort: payload empty. The host's abort of a running lease command, after the
+	// stdin EOF: the agent tears the Exec down and answers End with Aborted. An agent
+	// built before it reads any byte after the stdin EOF as the host closing, tears down
+	// the same way and answers KindError, so the host ends the lease as it always did.
+	KindAbort Kind = 0x04
 
 	KindStdout Kind = 0x11
 	KindStderr Kind = 0x12
@@ -80,6 +85,12 @@ type Request struct {
 	// MaxProcesses is the host's SH_LEASE_MAX_PROCESSES, sent on process_start: the
 	// cap on running tracked processes.
 	MaxProcesses int `json:"max_processes,omitempty"`
+	// CacheDropAfterS is the host's SH_LEASE_CACHE_DROP_S, sent on every lease request
+	// (F1 of the E17b report): once the lease has served no request for this long after
+	// this one, the agent drops the guest's clean page cache, so free-page reporting hands
+	// it back to the host and the lease's charge falls toward its working set. 0: never.
+	// omitempty: an old agent ignores it, and an old host's request is byte-identical.
+	CacheDropAfterS uint32 `json:"cache_drop_after_s,omitempty"`
 }
 
 // Request kinds. RequestKindProcessStopAll is host-only: the worker sends it on a
@@ -134,6 +145,10 @@ type End struct {
 	// TeardownFailed reports that the guest could not tear down the command's state
 	// after it exited. omitempty: a clean teardown adds no key.
 	TeardownFailed bool `json:"teardown_failed,omitempty"`
+	// Aborted reports a lease command torn down on the host's KindAbort: its cgroup was
+	// killed and emptied before this End went out, as after an exit, and ExitCode is -1.
+	// omitempty: only that answer adds the key.
+	Aborted bool `json:"aborted,omitempty"`
 	// Tracked is the agent's whole tracked-process table, on every lease End, so the
 	// host's mirror of it is never stale. omitempty: an empty table adds no key.
 	Tracked []TrackedProcess `json:"tracked,omitempty"`

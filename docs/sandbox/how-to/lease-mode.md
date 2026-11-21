@@ -104,10 +104,15 @@ mocactl sbx proc stop web                                          # TERM, then 
 
 Lease mode is experimental in v0.11.0:
 
-- **Cancelling a running command ends the lease.** If you or your agent abort a command (Ctrl-C),
-  the lease ends with it and the next command starts a new guest. `/workspace` is kept.
-- **A lease holds its guest's memory while it lives**, including files it has read. Your operator
-  may keep the idle timeout short, or the mode off, on a busy host.
+- **Cancelling a running command ends the lease on an older snapshot.** If your operator's golden
+  snapshot was built before v0.12.0 and you or your agent abort a command (Ctrl-C), the lease ends
+  with it and the next command starts a new guest. `/workspace` is kept. On a snapshot built from
+  v0.12.0 on, the guest stops the aborted command and the lease is kept. Aborting a process command
+  (`lease+processes`) still ends the lease.
+- **A lease holds its guest's memory while it lives**, including files it has read, on a snapshot
+  built before v0.12.0. From v0.12.0 the guest lets go of cached files after the lease has been idle
+  for a while (30 s by default), and the next command reads them again from the host's cache. Your
+  operator may keep the idle timeout short, or the mode off, on a busy host.
 - **At most 4 tracked processes** run at once at `lease+processes`, unless your operator changed it.
 
 ## From your own code
@@ -118,3 +123,5 @@ and `LeaseControl` reads, resets or changes the lease. See
 [Tracked processes](direct-api.md#tracked-processes-leaseprocesses) in the API guide.
 
 All the flags: [`mocactl sbx` reference](../reference/cli-sbx.md).
+
+**See also.** [Lease mode explainer](../../project/explainers/index.md): a step-through diagram of what a lease keeps and what it costs.

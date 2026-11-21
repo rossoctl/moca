@@ -22,6 +22,11 @@ capabilities**. You can use either one on its own, or both together.
 | **Where it runs**     | You host it: an OpenShift cluster plus KVM hosts                                                                    | A laptop (Docker Compose), a single VM, or Kubernetes / OpenShift                                                         |
 | **Start here**        | [Sandbox quickstart](sandbox/quickstart.md)                                                                         | [Harness quickstart](harness/quickstart.md)                                                                               |
 
+**See it step by step.** Two interactive diagrams walk through these capabilities:
+[the harness and the sandbox together](pathname://./project/explainers/harness-and-sandbox.html) and
+[the sandbox service alone](pathname://./project/explainers/sandbox-service.html). Press Next to advance
+one step at a time.
+
 ## How the two fit together
 
 Both capabilities keep an agent's **commands away from the agent's own process**. They differ in

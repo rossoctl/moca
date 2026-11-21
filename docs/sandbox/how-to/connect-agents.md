@@ -57,6 +57,9 @@ list `up` writes. That covers directories with no `.claude/settings.json` from `
 the MCP servers, not the built-in tools. In a repository `up --cortex` set up, the launcher
 leaves the local tools to Cortex, as `up` does, and says so when it starts.
 
+It also sets `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` for the run, so your machine's auto-memory stays
+out of the session in every mode, with or without `up`'s settings.
+
 Headless use (scripts, CI) works the same way, without the prompts:
 
 ```bash

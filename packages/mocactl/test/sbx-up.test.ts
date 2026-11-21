@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -324,6 +325,9 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
       ['ls', '--max-push', '1'],
       ['push', '--max-push', '0'],
       ['push', '--max-push', '1.5'],
+      ['ls', '--max-file', '1'],
+      ['push', '--max-file', '0'],
+      ['up', '--max-file', '4097'],
       ['up', '--template', ''],
       ['up', '--template', '  '],
       ['create', '--template', ''],
@@ -403,6 +407,16 @@ describe('mocactl sbx push and pull (SBX0 §6.2, §10.3)', () => {
     expect(await h.run(['push', '--include-secrets'])).toBe(0);
     expect(readFileSync(join(h.ws.get(NEW).ws, '.env'), 'utf8')).toBe('SECRET=1\n');
   });
+
+  it('push --max-file pushes a file over 12 MiB', async () => {
+    const h = harness();
+    expect(await h.run(['up'])).toBe(0);
+    writeFileSync(join(h.r, 'big.bin'), Buffer.alloc(13 << 20));
+    expect(await h.run(['push'])).toBe(1);
+    expect(h.err()).toContain('(--max-file sets another cap)');
+    expect(await h.run(['push', '--max-file', '13'])).toBe(0);
+    expect(statSync(join(h.ws.get(NEW).ws, 'big.bin')).size).toBe(13 << 20);
+  }, 60_000);
 
   it('pull prints the patch; --apply applies it and advances the baseline; then nothing to pull', async () => {
     const h = harness();
@@ -641,7 +655,6 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
       writeFileSync(join(h.r, file), JSON.stringify(body));
       expect(await h.run(['up'])).toBe(1);
       expect(h.err()).toContain(`sbx: ${named}`);
-      expect(h.err()).toContain('--no-agent-config');
       expect(h.cp.calls).toEqual([]);
       expect(h.ws.counts().opened).toBe(0);
       expect(existsSync(join(h.r, '.sbx'))).toBe(false);

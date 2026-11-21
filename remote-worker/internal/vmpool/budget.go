@@ -30,7 +30,8 @@ type leaseCgrouper interface {
 }
 
 // leaseFootprinter is implemented by a launcher's VM when it can report a running lease VM's
-// host footprint: its cgroup's memory.current, read fresh on EVERY call. Unlike
+// host footprint: its cgroup's memory.current less the page cache the kernel can drop at
+// once (readLeaseFootprint), read fresh on EVERY call. Unlike
 // standbyFootprinter's paused standby, a lease VM runs between reads, so a cached value would
 // be stale by construction.
 type leaseFootprinter interface {
@@ -491,7 +492,8 @@ func (p *pool) leaseCommittedLocked() int64 {
 }
 
 // leaseChargeLocked is what one lease VM costs the budget (spec §6): LeaseStartBytes until
-// its first sample, then its measured memory.current times LeaseHeadroom, floored at
+// its first sample, then its measured footprint (LeaseBytes: memory.current less its
+// reclaimable page cache) times LeaseHeadroom, floored at
 // VMOverheadBytes, idle or busy. Caller holds p.mu.
 //
 // NEVER RE-PRICED TO PerVMBytes, also while an Exec runs in it: a lease VM's growth

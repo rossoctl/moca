@@ -8,7 +8,7 @@ that shipped it ("The data plane's twin … goes to"):
 
 | `harness-openapi.yaml` | Shipped with                   |
 | ---------------------- | ------------------------------ |
-| 1.8.0                  | [1.35.0](#1350)                |
+| 1.8.0                  | [1.36.0](#1360)                |
 | 1.7.0                  | [1.31.0](#1310)                |
 | 1.6.0                  | [1.30.0](#1300)                |
 | 1.5.0                  | [1.28.0](#1280)                |
@@ -18,7 +18,7 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
-## 1.36.0
+## 1.37.0
 
 A gate can be given a deadline ([#393](https://github.com/rossoctl/moca/issues/393)). Additive: two
 optional fields on the async submission, one new field on the status read, and two refusals for
@@ -46,7 +46,7 @@ submissions that were accepted and then did the wrong thing.
   who set a deadline on an ungated turn had none and would have learned it only when the gate it
   expected never expired.
 
-## 1.35.0
+## 1.36.0
 
 A human gate works on any leaf kind, and an async one is resolved over HTTP
 ([#393](https://github.com/rossoctl/moca/issues/393)). Additive on the wire: one new route and one
@@ -66,6 +66,25 @@ new field. The data plane's twin goes to 1.8.0.
   gate already answered. The caller's move in all three is to re-read the turn.
 - The data plane (1.8.0) documents `requireApproval` and `decision` on the `prompt` and `solve` run
   envelopes, which is how a synchronous run asks for and resolves the same gate.
+
+## 1.35.0
+
+`GET /metrics` reports a second counter and is served on both route profiles
+([#823](https://github.com/rossoctl/moca/issues/823)). Additive: no route added or removed, no
+existing field changed.
+
+- `counters.credential_nonprimary_kek_reads` counts stored credentials opened under a **retired** key
+  of the `SH_CREDENTIAL_KEK` ring. Re-sealing is write-driven, so a credential nobody writes keeps the
+  old key; this is the terminating condition of a KEK rotation, and the retired key may only be
+  dropped once the counter stops moving. Not deduplicated — one per stale read, so a long-lived
+  process cannot look clean while credentials are still stale. The matching log line names which
+  credential; this answers whether any.
+- `GET /metrics` moves from the `harness` profile to **both** profiles. It was harness-only while
+  `async_quota_refusals` was the only counter, which is structurally zero on `sandbox` (no turns).
+  The sandbox profile is the only one that runs a file or Vault credential store with egress
+  credentials, so it is the only profile where the new counter can move — and harness-only made it
+  the one profile that could not read it. Still admin-only, and still unversioned (an operator
+  surface, not client API).
 
 ## 1.34.0
 
