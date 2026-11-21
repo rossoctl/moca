@@ -470,8 +470,8 @@ validate_egress() {
   # file or vault. An unknown value dies here rather than rendering a stack with no store, the same
   # reasoning as the control plane failing STARTUP on a bad SH_CREDENTIAL_STORE (main.ts).
   case "${SBX_CREDENTIAL_STORE:-file}" in
-    file) EGRESS_STORE=file ;;
-    vault) EGRESS_STORE=vault ;;
+    file) EGRESS_STORE='file' ;;
+    vault) EGRESS_STORE='vault' ;;
     *) die 'SBX_CREDENTIAL_STORE must be file or vault' ;;
   esac
   if [[ "$EGRESS_STORE" == vault ]]; then
