@@ -95,7 +95,7 @@ async function withExec(
 async function plan(
   c: SbxCtx,
   root: string,
-  o: { includeSecrets?: boolean; maxPush?: number; cwd?: string },
+  o: { includeSecrets?: boolean; maxPush?: number; maxFile?: number; cwd?: string },
 ): Promise<PushPlan | number> {
   let p: PushPlan;
   try {
@@ -145,6 +145,7 @@ export interface PushFlags {
   force: boolean;
   includeSecrets: boolean;
   maxPush?: number;
+  maxFile?: number;
   /**
    * The directory `up`/`push` was run from, when known: not a CLI flag, but the plan says when it
    * differs from the work-tree root (#611). Both sides are `resolve`d before the comparison:

@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   closeSync,
   constants,
@@ -17,6 +18,7 @@ import {
   symlinkSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { randomFillSync } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -218,13 +220,14 @@ describe('the push list (SBX0 §6.2)', () => {
     );
   });
 
-  it('says why a file over 12 MiB is refused and how to leave it out, tracked or not', async () => {
+  it('names --max-file for a file over 12 MiB, and how to leave it out, tracked or not', async () => {
     const r = repo();
     writeFileSync(join(r, 'big.bin'), Buffer.alloc(MAX_FILE + 1));
     const untracked = String(await planPush(r).catch((e: unknown) => e));
-    expect(untracked).toContain(
-      `a file goes whole into one sandbox command, whose input is at most ${MAX_STDIN >> 20} MiB compressed`,
-    );
+    expect(untracked).toContain(`files over 12 MiB (${MAX_FILE} bytes) are not pushed (--max-file`);
+    expect((await planPush(r, { maxFile: 13 << 20 })).large.map((f) => f.path)).toEqual([
+      'big.bin',
+    ]);
     expect(untracked).toContain('.git/info/exclude');
     expect(untracked).not.toContain('git rm --cached');
     // An ignore rule does not keep a tracked file out.
@@ -293,6 +296,108 @@ describe('the push list (SBX0 §6.2)', () => {
     expect(pushed.equals(original)).toBe(true);
     expect(await hasUnpulled(exec)).toBe(false);
   }, 120_000);
+});
+
+describe('push of a file over 12 MiB (--max-file)', () => {
+  // Three pieces: two whole, one of 4 KiB.
+  const SIZE = 2 * MAX_STDIN + 4096;
+
+  it('sends it in pieces, each within one Exec, byte for byte and with its mode', async () => {
+    const r = repo();
+    const big = incompressible(SIZE);
+    writeFileSync(join(r, 'src/big.bin'), big);
+    chmodSync(join(r, 'src/big.bin'), 0o755);
+    const plan = await planPush(r, { maxFile: 64 << 20 });
+    for (const c of plan.chunks) expect(c.length).toBeLessThan(1 << 20);
+    const { ws, exec, sent } = localWorkspace();
+    const parts: [number, number][] = [];
+    await pushTree(exec, plan, undefined, { onChunk: (i, n) => parts.push([i, n]) });
+    expect(parts.map(([i]) => i)).toEqual([...parts.keys()].map((k) => k + 1));
+    expect(parts.at(-1)).toEqual([plan.chunks.length + 3, plan.chunks.length + 3]);
+    for (const s of sent) expect(s.stdin?.length ?? 0).toBeLessThanOrEqual(MAX_STDIN_BYTES);
+    const pushed = readFileSync(join(ws, 'src/big.bin'));
+    expect(pushed.length).toBe(SIZE);
+    expect(pushed.equals(big)).toBe(true);
+    expect(statSync(join(ws, 'src/big.bin')).mode & 0o777).toBe(0o755);
+    expect(Math.floor(statSync(join(ws, 'src/big.bin')).mtimeMs / 1000)).toBe(
+      Math.floor(statSync(join(r, 'src/big.bin')).mtimeMs / 1000),
+    );
+    expect(await hasUnpulled(exec)).toBe(false);
+  }, 120_000);
+
+  it('sends a size that is a whole number of pieces in exactly that many', async () => {
+    const r = repo();
+    const big = incompressible(2 * MAX_STDIN);
+    writeFileSync(join(r, "it's -x.bin"), big);
+    const plan = await planPush(r, { maxFile: 64 << 20 });
+    const { ws, exec } = localWorkspace();
+    const parts: number[] = [];
+    await pushTree(exec, plan, undefined, { onChunk: (i) => parts.push(i) });
+    expect(parts.length).toBe(plan.chunks.length + 2);
+    expect(readFileSync(join(ws, "it's -x.bin")).equals(big)).toBe(true);
+    expect(await hasUnpulled(exec)).toBe(false);
+  }, 120_000);
+
+  const root = process.getuid?.() === 0; // permissions do not stop root
+
+  it.skipIf(root)('refuses an unreadable one before anything is sent, as a small one', async () => {
+    const r = repo();
+    writeFileSync(join(r, 'big.bin'), incompressible(SIZE));
+    chmodSync(join(r, 'big.bin'), 0);
+    await expect(planPush(r, { maxFile: 64 << 20 })).rejects.toThrow(/EACCES/);
+  });
+
+  // Each change runs once, after the tar chunk ('opened': before the file is opened) or after its
+  // first piece ('read').
+  type Change = [string, 'opened' | 'read', (p: string) => void];
+  const changes: Change[] = [
+    ['grew', 'opened', (p) => appendFileSync(p, 'x')],
+    ['was removed', 'opened', (p) => rmSync(p)],
+    [
+      'was replaced by a symlink to a file of its size',
+      'opened',
+      (p) => {
+        writeFileSync(`${p}.other`, incompressible(SIZE));
+        rmSync(p);
+        symlinkSync(`${p}.other`, p);
+      },
+    ],
+    ...(root ? [] : [['became unreadable', 'opened', (p) => chmodSync(p, 0)] satisfies Change]),
+    ['shrank', 'read', (p) => writeFileSync(p, incompressible(MAX_STDIN + 1))],
+    [
+      'was rewritten in place, at the same size',
+      'read',
+      (p) => {
+        const fd = openSync(p, 'r+');
+        writeSync(fd, Buffer.alloc(10, 7), 0, 10, MAX_STDIN + 5);
+        closeSync(fd);
+      },
+    ],
+  ];
+  it.each(changes)(
+    'leaves the push unfinished when the file %s',
+    async (_, when, change) => {
+      const r = repo();
+      const p = join(r, '-big.bin');
+      writeFileSync(p, incompressible(SIZE));
+      const plan = await planPush(r, { maxFile: 64 << 20 });
+      const w = localWorkspace();
+      let done = false;
+      const exec: typeof w.exec = async (cmd, o) => {
+        const res = await w.exec(cmd, o);
+        if (!done && (when === 'opened' || cmd.includes('cat > '))) {
+          done = true;
+          change(p);
+        }
+        return res;
+      };
+      await expect(pushTree(exec, plan)).rejects.toThrow(
+        new PushError('a file changed, or was removed, during the push: run it again'),
+      );
+      expect(await sandboxState(w.exec)).toBe('incomplete');
+    },
+    120_000,
+  );
 });
 
 describe('push into the sandbox (SBX0 §6.2)', () => {
