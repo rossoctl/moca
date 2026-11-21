@@ -15,7 +15,7 @@ vi.mock('../src/select-sandbox.js', async (orig) => ({
   selectPoolSandbox,
 }));
 
-const { runLeaf } = await import('../src/run-leaf.js');
+const { runLeaf, leafSessionId } = await import('../src/run-leaf.js');
 const { sharedSessionStore, resetSharedSessionStore } = await import('../src/run-turn.js');
 
 const REDIS = process.env.REDIS_URL ?? 'redis://127.0.0.1:6379';
@@ -279,6 +279,27 @@ describe('a gated solve leaf', () => {
     } as never);
     expect(res).toMatchObject({ status: 'solved' });
     expect(produceSolve).toHaveBeenCalledTimes(1);
+  });
+
+  it('finds the gate of a session id `toSessionId` rewrote (#393 §1)', async () => {
+    // This kind's Pi session is opened under `leafSessionId(env)`, not the raw envelope id -- and
+    // the two differ for the documented "<run>/<item>" convention, and for any tenant. Reading the
+    // gate state under the raw id finds no pending gate, so the decision runs the leaf's FRESH
+    // problem statement instead of the continuation: an approve that asks for approval again.
+    const raw = 'gate-kinds-solve/slashed';
+    const sid = leafSessionId({ sessionId: raw });
+    expect(sid).not.toBe(raw);
+    await pendingGate(sid);
+    const produceSolve = vi.fn(async (_e, _c, capture, _d, _s, gate) => {
+      expect(String(gate.continuation)).toContain('Human decision: APPROVED');
+      capture.patch = 'diff --git a/x b/x\n';
+    });
+    const res = await runLeaf(solve(raw, { decision: { gateId: 0, action: 'approve' } }), CONFIG, {
+      produceSolve,
+    } as never);
+    expect(res).toMatchObject({ status: 'solved' });
+    // ...and the decision was appended to that same session, which is what makes it durable.
+    expect(await customTypes(sid)).toContain(GATE_DECISION_ENTRY_TYPE);
   });
 
   it('aborts without producing', async () => {

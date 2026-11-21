@@ -584,8 +584,9 @@ export async function runSolveLeaf(
   if (emptyRef) return emptyRef;
   const noWorkload = nonPromptWorkloadFailure(env);
   if (noWorkload) return noWorkload;
-  // BEFORE produce, which is what leases (design §1).
-  const plan = await planLeafGate(env, config);
+  // BEFORE produce, which is what leases (design §1). `leafSessionId`, because that is the id
+  // `realProduceSolve` opens this leaf's Pi session under -- and so the key its gate entries are on.
+  const plan = await planLeafGate(env, config, leafSessionId(env));
   if (plan.kind === 'result') return plan.result;
   const capture: SolveCapture = {};
   const produce = deps?.produceSolve ?? realProduceSolve;
@@ -643,16 +644,21 @@ type LeafGatePlan =
   | { kind: 'result'; result: LeafResult }
   | { kind: 'run'; continuation?: string; nextGateId: number };
 
-/** One entry appended durably outside a running turn: the decision that resolved a gate. */
+/**
+ * One entry appended durably outside a running turn: the decision that resolved a gate.
+ *
+ * `sessionId` is the id the LEAF'S OWN Pi session is opened under, which is not `env.sessionId` for
+ * every kind -- see `planLeafGate`.
+ */
 async function appendGateDecision(
-  env: LeafEnvelope,
+  sessionId: string,
   config: TurnConfig | undefined,
   record: GateDecision,
 ): Promise<void> {
   const store = sharedSessionStore(config?.redisUrl ?? 'redis://localhost:6379');
   const backend = new BufferedRedisBackend(store);
   const sm = await SessionManager.openFromCheckpoint(
-    env.sessionId,
+    sessionId,
     backend,
     config?.cwd ?? process.cwd(),
   );
@@ -670,14 +676,22 @@ async function appendGateDecision(
  * leaf is the common case and pays nothing for this. The cost is that a stale pending gate does not
  * park an ungated turn of the same session -- which is the point of #393, where the gate belongs to
  * the turn that asked for one.
+ *
+ * `sessionId` is the id the leaf's own Pi session is opened under, and the two kinds disagree: a
+ * prompt leaf's turn runs under the RAW `env.sessionId`, a solve leaf's under `leafSessionId(env)`.
+ * Reading the wrong one finds no pending gate whenever `toSessionId` rewrites the id -- a `tenant`,
+ * or any character outside `[A-Za-z0-9._-]`, as in the documented `run-1/item-1` -- so a re-POSTed
+ * decision would run the leaf's fresh prompt instead of the continuation: an `approve` that asks
+ * for approval again, an `abort` that does not abort.
  */
 async function planLeafGate(
   env: LeafEnvelope,
   config: TurnConfig | undefined,
+  sessionId: string,
 ): Promise<LeafGatePlan> {
   if (!env.requireApproval && !env.decision) return { kind: 'run', nextGateId: 0 };
   const store = sharedSessionStore(config?.redisUrl ?? 'redis://localhost:6379');
-  const state = computeGateState((await store.read(env.sessionId)).map((r) => r.entry));
+  const state = computeGateState((await store.read(sessionId)).map((r) => r.entry));
   const dv = env.decision ? validateDecision(env.decision) : null;
   const decision = dv && dv.ok ? dv.value : null;
 
@@ -693,7 +707,7 @@ async function planLeafGate(
     };
   }
   if (short?.kind === 'abort') {
-    if (short.record) await appendGateDecision(env, config, short.record);
+    if (short.record) await appendGateDecision(sessionId, config, short.record);
     return { kind: 'result', result: { status: 'aborted' } };
   }
   // '' is the sentinel for "the caller builds its own fresh prompt": every kind's fresh prompt is
@@ -702,7 +716,7 @@ async function planLeafGate(
   // model at a tool it does not have.
   const seed = decideSeed(state, decision, '', false);
   if (seed.kind !== 'seed') throw new Error('unreachable: gateShortCircuit missed a short circuit');
-  if (seed.record) await appendGateDecision(env, config, seed.record);
+  if (seed.record) await appendGateDecision(sessionId, config, seed.record);
   return {
     kind: 'run',
     // Only an invocation CARRYING a decision runs a continuation. Without the `decision` guard, a
@@ -736,8 +750,9 @@ async function runPromptLeaf(
   });
   const exec = deps?.executeTurn ?? executeTurn;
 
-  // BEFORE the lease (design §1): a parked or aborted leaf must hold no sandbox.
-  const plan = await planLeafGate(env, config);
+  // BEFORE the lease (design §1): a parked or aborted leaf must hold no sandbox. The RAW id, which
+  // is what this kind passes to `executeTurn` below -- `sid` is only the lease/result key.
+  const plan = await planLeafGate(env, config, env.sessionId);
   if (plan.kind === 'result') return plan.result;
   const gateCapture: GateCapture = {};
 
