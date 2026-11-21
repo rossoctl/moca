@@ -109,11 +109,16 @@ async function claimKey(
  * cannot see it (no result store configured, result not written yet, record already expired).
  * Null means "do not refuse on this": the harness re-validates every decision against the session's
  * own durable gate state, so a wrong id costs a re-pause, not a wrong approval.
+ *
+ * `gate.gateId` and NOT a top-level `gateId`: `toResultRecord` (`harness/src/leaf-result-store.ts`)
+ * nests the id when it stores a paused result, and no writer sets the top-level one -- that shape
+ * exists only on the in-process `LeafResult` a synchronous `/runs` caller is handed back.
  */
 export async function pausedGateId(deps: CpDeps, paused: TurnRecord): Promise<number | null> {
   if (!deps.leafResults) return null;
   const result = await readLeafResult(deps.leafResults, paused.sessionId, paused.turnId);
-  return typeof result?.gateId === 'number' ? result.gateId : null;
+  const gate = result?.gate as { gateId?: unknown } | undefined;
+  return typeof gate?.gateId === 'number' ? gate.gateId : null;
 }
 
 /**
@@ -208,6 +213,22 @@ export async function submitResume(
 function sameDecision(prior: TurnRecord, sent: GateDecisionSubmission): boolean {
   const was = prior.envelope.decision as GateDecisionSubmission | undefined;
   return was?.action === sent.action && (was?.feedback ?? '') === (sent.feedback ?? '');
+}
+
+/**
+ * May `sent` be answered 202 with the resume `prior` already is? Only when that resume answers THIS
+ * paused turn and carries the same decision.
+ *
+ * A `prior` of null is NOT a replay: the holder's record can expire, or be deleted with its
+ * session, between the claim and this read. Refusing there costs the caller a re-read (the 409's
+ * documented move) where accepting would 202 a decision nobody can show was the one applied.
+ */
+function replays(
+  prior: TurnRecord | null,
+  pausedTurnId: string,
+  sent: GateDecisionSubmission,
+): boolean {
+  return prior?.resumeOf === pausedTurnId && sameDecision(prior, sent);
 }
 
 /**
@@ -443,8 +464,8 @@ export const TURN_HANDLERS: Record<string, Handler> = {
         `${rec.sessionId}:gate:${decision.gateId}`,
       );
       const prior = held ? await turns.get(held) : null;
-      if (prior?.resumeOf === found.paused.turnId && sameDecision(prior, decision)) {
-        return { status: 202, body: { sessionId: rec.sessionId, turnId: prior.turnId } };
+      if (replays(prior, found.paused.turnId, decision)) {
+        return { status: 202, body: { sessionId: rec.sessionId, turnId: prior!.turnId } };
       }
       await refusal(deps, rec, 'gate_not_pending');
       throw new CpError(
@@ -466,7 +487,18 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       );
     }
 
-    const { turnId } = await submitResume(deps, found.paused, decision);
+    const { turnId, created } = await submitResume(deps, found.paused, decision);
+    // `created: false` is the branch above, RACED: a human `approve` and the sweep's `abort` can
+    // both read `resumed: false`, and then one of them wins the gate key. Without the same
+    // `sameDecision` test here the loser is 202'd with the winner's turn id, reporting that its own
+    // different decision was accepted. `found.resumed` cannot catch this -- it was already false.
+    if (!created && !replays(await turns.get(turnId), found.paused.turnId, decision)) {
+      await refusal(deps, rec, 'gate_not_pending');
+      throw new CpError(
+        'gate_not_pending',
+        `the gate on turn ${found.paused.turnId} has already been answered`,
+      );
+    }
     return { status: 202, body: { sessionId: rec.sessionId, turnId } };
   },
 

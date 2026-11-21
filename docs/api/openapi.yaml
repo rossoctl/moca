@@ -320,7 +320,7 @@ components:
           type: integer
           minimum: 0
           description: |
-            the gate being answered, as the paused turn's `result.gateId` reports it. Sent rather
+            the gate being answered, as the paused turn's `result.gate.gateId` reports it. Sent rather
             than inferred so a decision cannot land on a gate the caller never saw: a mismatch is
             `409 gate_not_pending`.
         action:

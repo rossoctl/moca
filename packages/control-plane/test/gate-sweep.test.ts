@@ -9,7 +9,7 @@ import { MemoryTurnQueue } from '../src/turn-queue.js';
 import { turnKey, type TurnRecord } from '../src/turn-record.js';
 import { leafResultKey } from '../src/turn-result.js';
 import { TurnStore } from '../src/turn-store.js';
-import { alice, ctx, makeDeps, seedCredential } from './helpers/deps.js';
+import { alice, ctx, makeDeps, pausedResult, seedCredential } from './helpers/deps.js';
 import { fakeRedis } from './helpers/fake-redis.js';
 
 /** When the gate opened, and how long it may stay open: so it is due at exactly `PAUSED_AT + 60s`. */
@@ -91,10 +91,7 @@ async function pausedTurn(over: Partial<TurnRecord> & { result?: null } = {}): P
   const turn = rec(fields);
   await deps.turns.create(turn);
   if (result !== null) {
-    deps.fake.strings.set(
-      leafResultKey(turn.sessionId, turn.turnId),
-      JSON.stringify({ status: 'paused', gateId: 0, gate: { summary: 's', proposed_action: 'p' } }),
-    );
+    deps.fake.strings.set(leafResultKey(turn.sessionId, turn.turnId), pausedResult(0));
   }
   await deps.turns.finalize(turn.turnId, 'paused', PAUSED_AT);
   return turn;
@@ -128,10 +125,7 @@ async function gatedSession(): Promise<{ sessionId: string; turnId: string }> {
   // Parked by hand on the record the route created, rather than re-`create`d: the decision route
   // reads the session the route wrote, and a second create would replace its idempotency key.
   const turnId = (submitted.body as { turnId: string }).turnId;
-  deps.fake.strings.set(
-    leafResultKey(sessionId, turnId),
-    JSON.stringify({ status: 'paused', gateId: 0, gate: { summary: 's', proposed_action: 'p' } }),
-  );
+  deps.fake.strings.set(leafResultKey(sessionId, turnId), pausedResult(0));
   await deps.turns.finalize(turnId, 'paused', PAUSED_AT);
   deps.turnQueue.ids.length = 0;
   return { sessionId, turnId };

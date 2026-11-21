@@ -3,8 +3,18 @@ import { HANDLERS } from '../src/handlers.js';
 import { OwnershipIndex } from '../src/ownership.js';
 import { MemoryTurnQueue } from '../src/turn-queue.js';
 import { TurnStore } from '../src/turn-store.js';
+import { sessionTurnsKey } from '../src/turn-record.js';
 import { leafResultKey } from '../src/turn-result.js';
-import { alice, bob, codeOf, ctx, makeDeps, NOW_MS, seedCredential } from './helpers/deps.js';
+import {
+  alice,
+  bob,
+  codeOf,
+  ctx,
+  makeDeps,
+  NOW_MS,
+  pausedResult,
+  seedCredential,
+} from './helpers/deps.js';
 import { fakeRedis } from './helpers/fake-redis.js';
 
 /**
@@ -61,10 +71,7 @@ async function paused(d: Deps, sid: string, gateId = 0, gateDeadlineS?: number):
   // session index to this moment, and the walk is newest-first -- so a paused turn scored after its
   // own resume would hide the resume that answered it.
   await d.turns.finalize(turnId, 'paused', NOW_MS - 1000);
-  d.fake.strings.set(
-    leafResultKey(sid, turnId),
-    JSON.stringify({ status: 'paused', gateId, gate: { summary: 's', proposed_action: 'p' } }),
-  );
+  d.fake.strings.set(leafResultKey(sid, turnId), pausedResult(gateId));
   d.turnQueue.ids.length = 0;
   return turnId;
 }
@@ -174,6 +181,27 @@ describe('decideGate (#393, design §2)', () => {
     // And the decision that DID resume it still replays, with its own turn id.
     expect((await decide(d, sid, { gateId: 0, action: 'abort' })).body).toEqual(first.body);
     expect(d.turnQueue.ids).toHaveLength(1);
+  });
+
+  it('409s when another decision won the gate key between the read and the submit', async () => {
+    // The race `found.resumed` cannot catch, because it was still false when this caller read: the
+    // sweep's `abort` has written its record and claimed the gate key but not yet joined the session
+    // index (`create` writes the hash first, the index after), so the human's `approve` sees an
+    // unresumed gate and goes on to lose the claim. `submitResume` hands the loser the WINNER's turn
+    // id, and a 202 there would report that the approval was accepted when the abort is what runs.
+    const d = turnDeps();
+    const sid = await session(d);
+    await paused(d, sid);
+    const winner = (
+      (await decide(d, sid, { gateId: 0, action: 'abort' })).body as { turnId: string }
+    ).turnId;
+    // Back to the mid-`create` window: record live and key held, session index not yet written.
+    await d.fake.redis.zRem(sessionTurnsKey(sid), winner);
+    expect(await codeOf(() => decide(d, sid, { gateId: 0, action: 'approve' }))).toBe(
+      'gate_not_pending',
+    );
+    // ...and no second resume fanned out: the abort is still the only queued turn.
+    expect(d.turnQueue.ids).toEqual([winner]);
   });
 
   it('409s when the session has no paused turn', async () => {
