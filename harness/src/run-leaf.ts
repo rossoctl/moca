@@ -954,7 +954,13 @@ async function runPromptLeaf(
       // here: it comes back as `r.budgetExceeded`.
       ...(signal ? { signal } : {}),
       ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
-      ...(env.requireApproval
+      // Registered for a leaf carrying a DECISION too, not only for one that asked for the gate
+      // itself: the reject continuation tells the model it "may call request_approval again", and a
+      // sync caller may re-POST `decision` without repeating `requireApproval`. Without this that
+      // resumed leaf is steered at a tool it does not have -- the same failure `verdictTool` exists
+      // to prevent, one level out. Costs nothing on the ungated path: `planLeafGate` already read
+      // the session for any invocation carrying a decision.
+      ...(env.requireApproval || env.decision !== undefined
         ? { gate: { capture: gateCapture, nextGateId: plan.nextGateId } }
         : {}),
     });
@@ -1187,8 +1193,10 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps,
         // run-turn.ts computes it -- a retry must not fail on its predecessor's tokens.
         ...budgetVoters(sessionManager, config, capture),
         // #393: a gated solve leaf. `nextGateId` comes from the caller's plan, which read the same
-        // durable entries this session was opened from.
-        ...(env.requireApproval && gate
+        // durable entries this session was opened from. A leaf carrying a DECISION gets the tool
+        // too, for the reason runPromptLeaf's own registration gives: the reject continuation
+        // invites another `request_approval`, so the tool has to be there to call.
+        ...((env.requireApproval || env.decision !== undefined) && gate
           ? [requestApprovalExtension(capture, sessionManager, gate.nextGateId)]
           : []),
       ],

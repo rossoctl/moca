@@ -118,7 +118,9 @@ To resolve it, re-POST the **same envelope** to `/v1/runs` with an inline decisi
 - There is no harness-side timeout while paused on this route; the result record's TTL is the only
   bound.
 - A prompt or solve envelope takes the same `decision` field, and the decision replaces the leaf's
-  own prompt on the resumed run — the model already has that prompt in its session.
+  own prompt on the resumed run — the model already has that prompt in its session. `requireApproval`
+  need not be repeated with it: an envelope carrying a `decision` gets `request_approval` registered
+  either way, so a rejected leaf can do what its continuation invites and gate again.
 - An ASYNC turn is not resolved by re-POSTing an envelope: the client holds no envelope. Answer it
   with `POST /v1/sessions/{id}/decision` ({`gateId`, `action`, `feedback`}), which copies the paused
   turn's envelope, appends the decision and 202s with a new turn id (`docs/api/openapi.yaml`).

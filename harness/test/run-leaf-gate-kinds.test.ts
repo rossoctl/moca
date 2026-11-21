@@ -160,6 +160,28 @@ describe('a gated prompt leaf', () => {
     expect(executeTurn).toHaveBeenCalledTimes(1);
   });
 
+  it('registers the tool for a resume carrying a decision WITHOUT requireApproval', async () => {
+    // A sync `/v1/runs` caller resolves a gate by re-POSTing the envelope with a `decision`, and
+    // need not repeat `requireApproval` -- the docs describe only the decision field. The reject
+    // continuation tells the model it may call request_approval again, so the tool has to be in its
+    // stack: registering on the flag alone steered a resumed leaf at a tool it did not have.
+    const sid = 'gate-kinds-decision-only';
+    await pendingGate(sid);
+    const executeTurn = vi.fn(async (input: Record<string, unknown>) => {
+      expect(input.gate).toBeDefined();
+      expect((input.gate as { nextGateId: number }).nextGateId).toBe(1);
+      expect(String(input.prompt)).toContain('Human decision: REJECTED');
+      expect(String(input.prompt)).toContain('request_approval');
+      return { response: 'revised', stopReason: 'end_turn' };
+    });
+    const res = await runLeaf(
+      env(sid, { decision: { gateId: 0, action: 'reject', feedback: 'no' } }),
+      CONFIG,
+      { executeTurn } as never,
+    );
+    expect(res).toMatchObject({ status: 'responded', text: 'revised' });
+  });
+
   it('wires no gate and reads no session state when requireApproval is absent', async () => {
     const executeTurn = vi.fn(async (input: Record<string, unknown>) => {
       expect(input.gate).toBeUndefined();
