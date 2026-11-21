@@ -19,7 +19,8 @@ import (
 // can be that stale: this pool's own idle reclaim would have freed it by now. Anything
 // checkKey refuses (.lease-state, _probe, a stray file name) is left alone, and so is a
 // younger directory: it may belong to a session that is between turns, and its next Exec
-// re-adopts it as before.
+// re-adopts it as before. So is a plain file, even one named as a key and old: the janitor
+// leaves every non-directory alone, and no workspace is ever a plain file.
 //
 // Tombstones (.reclaiming-*) are removed whatever their age: at startup none is this
 // process's, so each one is a previous process's detachment it never finished deleting.
@@ -86,15 +87,18 @@ func (p *pool) startupSweep() (swept, tombs int) {
 // the directory's mtime and its workspace.img's (the guest's writes land in the image, so
 // the directory's own mtime alone would make a busy session look idle). A symlink is
 // judged by the link's own mtime, never by anything it points at. ok is false when the
-// entry cannot be read, which keeps it.
+// entry cannot be read, or is a plain file, and either keeps it.
 func newestWorkspaceMtime(path string) (time.Time, bool) {
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return time.Time{}, false
 	}
 	newest := fi.ModTime()
-	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+	if fi.Mode()&os.ModeSymlink != 0 {
 		return newest, true
+	}
+	if !fi.IsDir() {
+		return time.Time{}, false
 	}
 	if img, err := os.Lstat(filepath.Join(path, "workspace.img")); err == nil && img.ModTime().After(newest) {
 		newest = img.ModTime()
