@@ -518,9 +518,11 @@ curl -sS -H @"$HDR" "$CP/metrics" | jq .counters.credential_nonprimary_kek_reads
 #    -> the same signal as a number, without scraping logs: WHETHER any is
 ```
 
-The counter is process-local and resets on restart, and with more than one replica a scrape hits one
-replica. Neither is deduplicated, on purpose: a once-per-process log would let a long-running pod look
-clean while credentials were still stale.
+`/metrics` needs the **admin** role (a non-admin gets 403, not 404), and `$CP`/`$HDR` are the same
+control-plane URL and header file as §5. The counter is process-local and resets on restart, and with
+more than one replica a scrape hits one replica — so read it from each, or scale to one while you
+finish the rotation. Neither signal is deduplicated, on purpose: a once-per-process log would let a
+long-running pod look clean while credentials were still stale.
 
 ```bash
 # 3. Only once nothing has opened under a non-primary key for long enough that every credential has
@@ -556,13 +558,27 @@ path "secret/data/moca/credentials/*" {
 }
 ```
 
-Two things this deployment does not do for you:
+Two things about that path. It must match `SBX_VAULT_KV_MOUNT` and `SBX_VAULT_PATH` — the `secret/`
+and `moca/credentials` above are the defaults, so a deployment that sets either must adjust the policy
+to match, and the `data/` segment is KV v2's own (v1 will not work). And **`read` is not optional even
+for writes**: a write is read-modify-write under check-and-set, and the version it names comes from
+reading the entry's `metadata.version`. A policy of `create` + `update` alone would let writes fail in
+a way that looks like a concurrency problem rather than a permissions one.
 
-- **The token.** `VAULT_TOKEN_FILE=/run/vault/token` is read on every request, so a Vault Agent sidecar
-  can log in (AppRole) and renew without the control plane holding a long-lived token. The sidecar is
-  not in the Component: its auth method is a per-deployment decision, and a half-configured one would
-  crash-loop the pod. Until something writes that file, the store answers "not answering" (503) rather
-  than behaving like an empty store.
+Two things this deployment does not do for you. **Both must be done before the switch works at all** —
+the component is not startable on its own:
+
+- **The token.** `VAULT_TOKEN_FILE=/run/vault/token` is re-read on every request, so a Vault Agent
+  sidecar can log in (AppRole) and renew it without the control plane ever holding a long-lived token.
+  The sidecar is not in the Component: its auth method is a per-deployment decision.
+
+  **Until something writes that file the pod does not start.** The store reads the sink once,
+  synchronously, at boot, so a missing or empty file fails startup (with the path in the log) rather
+  than coming up and serving 503s — `/run/vault` is an empty in-memory volume until an Agent fills it.
+  A 503 is what you get later, if a file that was readable at boot stops being readable. Expect
+  `CrashLoopBackOff` on the first roll after the switch if the sidecar is not in place; check the
+  control plane's logs for the token path before suspecting Vault itself.
+
 - **Reaching Vault.** The control plane's NetworkPolicy allows egress to Redis and to port 443 on
   **public** addresses only; it excepts `10/8`, `172.16/12`, `192.168/16`, `100.64/10` and `169.254/16`.
   An internal Vault is typically in one of those ranges and on 8200, so it is unreachable until a narrow

@@ -211,10 +211,11 @@ export function storeContract(label: string, backend: () => ContractBackend): vo
       });
 
       /**
-       * The counter is what an operator watches to decide the retired key is unused (RUNBOOK §7), so
-       * it must track the same transitions the log does: one per stale READ -- not deduplicated, or a
-       * long-lived process would report zero while credentials were still stale -- and back to still
-       * once the entry has been re-sealed forward.
+       * The counter is what an operator watches to decide the retired key is unused
+       * (docs/operate/sandbox-service/runbook.md, "Rotating the credential KEK"), so it must track the
+       * same transitions the log does: one per stale READ -- not deduplicated, or a long-lived process
+       * would report zero while credentials were still stale -- and back to still once the entry has
+       * been re-sealed forward.
        */
       it('counts every read under a retired KEK, and stops counting once re-sealed', async () => {
         const oldKek = newKek();
@@ -232,12 +233,20 @@ export function storeContract(label: string, backend: () => ContractBackend): vo
         expect(nonPrimaryReads()).toBe(2);
       });
 
-      /** `list` decrypts nothing, so it cannot see a retired key and must not report one. */
-      it('does not count a list', async () => {
+      /**
+       * `list` decrypts nothing (spec §6.2), so it cannot see a retired key and must not report one.
+       * The same store then READS the same stale entry and does count it -- otherwise this passes for
+       * the uninteresting reason that nothing in the test opened a credential at all, which is true of
+       * any implementation that counts only in `readCredential`.
+       */
+      it('counts a stale read but not the list that preceded it', async () => {
         const oldKek = newKek();
         await make([oldKek]).store.put(ALICE, cred('github-work'));
-        await make([newKek(), oldKek]).store.list(ALICE);
+        const rotated = make([newKek(), oldKek]).store;
+        expect((await rotated.list(ALICE)).map((d) => d.name)).toEqual(['github-work']);
         expect(nonPrimaryReads()).toBe(0);
+        await rotated.get(ALICE, 'github-work');
+        expect(nonPrimaryReads()).toBe(1);
       });
     });
 

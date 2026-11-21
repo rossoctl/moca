@@ -12,6 +12,20 @@ spec:
         - name: control-plane
           env:
             - { name: SH_CREDENTIAL_STORE, value: vault }
+            # The egress feature's own two settings, identical to the file variant's. NOT optional to
+            # this component's correctness: the KEK is projected below either way, and the control
+            # plane refuses to BOOT when SH_CREDENTIAL_KEK is set without SH_EGRESS_HOSTS
+            # (egress-config.ts, "set both or neither"). Omitting them crash-loops the pod rather than
+            # turning egress off, so the two components must stay in step here.
+            - name: SH_EGRESS_HOSTS
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_EGRESS_HOSTS, optional: true } }
+            - name: SH_EGRESS_CREDENTIAL_TTL_SECONDS
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: sbx-settings, key: SH_EGRESS_CREDENTIAL_TTL_SECONDS, optional: true },
+                }
             # Required by the store; setup.sh refuses SBX_CREDENTIAL_STORE=vault without it, so this
             # is not optional and a missing key must fail the pod rather than start without a store.
             - name: VAULT_ADDR
@@ -31,14 +45,18 @@ spec:
             # A FILE, never VAULT_TOKEN: vault-store.ts re-reads it on every request, so a Vault Agent
             # sidecar can log in (AppRole) and renew without the control plane holding a long-lived
             # token or restarting. Setting both VAULT_TOKEN and VAULT_TOKEN_FILE refuses to start.
-            # The path is this deployment's contract with whatever writes the sink; the Agent sidecar
-            # itself is not added here, because its auth method is a per-deployment decision
-            # (moca#823) and a half-configured sidecar would crash-loop the pod.
+            #
+            # THIS COMPONENT IS NOT STARTABLE ON ITS OWN. vault-store.ts reads the sink ONCE,
+            # SYNCHRONOUSLY, at boot (`readFileSync`, so an unreadable or empty file fails startup with
+            # its name in the log). Nothing here writes /run/vault/token, so until the deployment adds
+            # something that does, the pod fails to start with ENOENT -- it does NOT come up and serve
+            # 503s. The sidecar is left out deliberately: its auth method is a per-deployment decision
+            # (moca#823), and a half-configured one would crash-loop just as surely. The path below is
+            # this component's contract with whatever fills it; see the runbook.
             - { name: VAULT_TOKEN_FILE, value: /run/vault/token }
           volumeMounts:
             # Writable, unlike /run/credentials: the Agent REWRITES the sink on every renewal. Shared
-            # with the Agent sidecar when one is added; empty until then, which the store reports as
-            # "not answering" rather than as an empty store.
+            # with the Agent sidecar once one is added. In-memory, so the token never touches a disk.
             - { name: vault-token, mountPath: /run/vault }
       volumes:
         - name: vault-token

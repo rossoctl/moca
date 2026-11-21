@@ -759,7 +759,11 @@ check_redis_image() {
 # applying it could not change the claim, and the render has no patch target for it).
 rendered_pvc_claims() {
   [[ -z "$STORE_ON" && -z "$COMBINED" ]] || printf 'moca-sbx-templates\n'
-  [[ -z "$EGRESS_ON" ]] || printf 'moca-sbx-credentials\n'
+  # EGRESS_STORE, not just EGRESS_ON: the vault component renders no credential PVC, so with
+  # SBX_CREDENTIAL_STORE=vault this run neither patches nor should check moca-sbx-credentials. A
+  # namespace migrating file -> vault still has the old claim live, and checking it would die about a
+  # class on a claim this run no longer manages.
+  [[ -z "$EGRESS_ON" || "$EGRESS_STORE" == vault ]] || printf 'moca-sbx-credentials\n'
   [[ -n "$COMBINED" ]] && printf 'moca-credentials\n'
   return 0
 }
@@ -1385,7 +1389,10 @@ write_overlay() {
       if [[ -n "$STORE_ON" || -n "$COMBINED" ]]; then
         printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-templates }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
       fi
-      if [[ -n "$EGRESS_ON" ]]; then
+      # Mirrors rendered_pvc_claims: the vault store renders no credential PVC, so emitting the patch
+      # would leave a target kustomize matches nothing for (it tolerates that silently, which is worse
+      # than refusing -- the class would simply never be applied anywhere).
+      if [[ -n "$EGRESS_ON" && "$EGRESS_STORE" != vault ]]; then
         printf '  - target: { kind: PersistentVolumeClaim, name: moca-sbx-credentials }\n    patch: |-\n      - { op: add, path: /spec/storageClassName, value: "%s" }\n' "$SBX_STORAGE_CLASS"
       fi
       # ocp-combined's own claim (pvc-credentials.yaml): the harness's file credential store.

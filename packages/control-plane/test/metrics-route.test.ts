@@ -7,7 +7,14 @@ import { makeDeps, ctx, admin, alice, codeOf } from './helpers/deps.js';
 describe('GET /metrics', () => {
   beforeEach(() => resetAsyncCounters());
 
-  it('is declared once, on the harness profile only', () => {
+  /**
+   * On BOTH profiles. The sandbox profile is the only one that runs a file or Vault credential store
+   * with egress credentials, so it is the only profile where `credential_nonprimary_kek_reads` can
+   * move -- harness-only would leave the KEK rotation procedure (RUNBOOK) unreadable exactly where it
+   * is needed. Asserted rather than left implicit, because dropping `sandbox` here would silently
+   * 404 that procedure.
+   */
+  it('is declared once, on both profiles', () => {
     const route = ROUTES.filter((r) => r.path === '/metrics');
     expect(route).toHaveLength(1);
     expect(route[0]).toMatchObject({
@@ -15,7 +22,7 @@ describe('GET /metrics', () => {
       auth: 'api',
       sessionScoped: false,
       operationId: 'getMetrics',
-      profiles: ['harness'],
+      profiles: ['harness', 'sandbox'],
     });
   });
 

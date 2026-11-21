@@ -1519,11 +1519,31 @@ done
   fail 'the vault run KEK is not 32 bytes'
 ! jq -e '.data | has("VAULT_TOKEN")' "$MOCK_STATE/configmap-sbx-settings.json" >/dev/null ||
   fail 'a static VAULT_TOKEN reached sbx-settings'
-! grep -q 'VAULT_TOKEN=' "$TMP/out" || fail 'a Vault token value was printed'
 render
-grep -q 'name: SH_CREDENTIAL_STORE' "$TMP/render.yaml" || fail 'the rendered vault stack sets no credential store'
+# The VALUE, not just the key: greping for the name alone passes if the FILE component had been
+# listed, or if the key came from the base (which sets kubernetes and the sbx overlay deletes).
+cp_render_env() { awk -v n="$1" '$0 ~ "- name: " n "$" { f = 1; next } f && $1 == "value:" { print $2; exit } f { exit }' "$TMP/render.yaml"; }
+[[ "$(cp_render_env SH_CREDENTIAL_STORE)" == vault ]] ||
+  fail "the rendered vault stack's SH_CREDENTIAL_STORE is not vault: '$(cp_render_env SH_CREDENTIAL_STORE)'"
+# The boot-critical pair, end to end: setup.sh writes SH_EGRESS_HOSTS into sbx-settings AND the
+# component must reference it, or the control plane refuses to boot with the KEK mounted.
+grep -q 'name: SH_EGRESS_HOSTS' "$TMP/render.yaml" ||
+  fail 'the rendered vault stack never reads SH_EGRESS_HOSTS: the control plane would refuse to boot'
 ! grep -q 'claimName: moca-sbx-credentials' "$TMP/render.yaml" || fail 'the rendered vault stack still mounts the file-store PVC'
 pass 'egress on with vault: the vault Component only, VAULT_ADDR in sbx-settings, unset optionals omitted, the KEK still in sbx-egress, no token anywhere'
+
+# SBX_STORAGE_CLASS with the vault store: the vault component renders no credential PVC, so no patch
+# may target one. kustomize tolerates an unmatched target SILENTLY, so a stray patch would not fail
+# the render -- it would just never apply the class anywhere, which is why this is asserted here.
+reset_state
+run_setup eval "export SBX_EGRESS_CREDENTIALS=1 SBX_CREDENTIAL_STORE=vault SBX_VAULT_ADDR=https://v.invalid SBX_STORAGE_CLASS=gp3" ||
+  fail "egress on with vault and a storage class failed: $(cat "$TMP/out")"
+! grep -q 'name: moca-sbx-credentials' "$K" ||
+  fail 'the vault run patches a storage class onto moca-sbx-credentials, a PVC it does not render'
+grep -q 'name: moca-sbx-templates\|volumeClaimTemplates' "$K" ||
+  fail 'the vault run stopped patching the storage class onto the claims it does render'
+render
+pass 'SBX_STORAGE_CLASS with vault: no patch targets the credential PVC the vault store does not render'
 
 # The optionals do reach sbx-settings when set, under the names the control plane reads.
 reset_state

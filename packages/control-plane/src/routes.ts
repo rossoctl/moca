@@ -109,9 +109,15 @@ export const ROUTES: readonly RouteSpec[] = [
     operationId: 'readyz',
   },
   // §7's `async_quota_refusals`: the one async metric a worker cannot report, because §4.3 refuses
-  // the submission here and nothing is ever enqueued. HARNESS only -- the sandbox profile runs no
-  // turns, so the number is structurally zero there. Unversioned like the probes above: an operator
+  // the submission here and nothing is ever enqueued. Unversioned like the probes above: an operator
   // surface, not client API, and the same path the supervisor's admin port serves.
+  //
+  // BOTH, not HARNESS. It was harness-only while `async_quota_refusals` was the only counter, which
+  // is structurally zero on the sandbox profile (it runs no turns). That stopped being the whole
+  // story with `credential_nonprimary_kek_reads` (counters.ts): the sandbox profile is the ONLY one
+  // that runs a file or Vault credential store with egress credentials, so it is the only profile
+  // where that counter can move -- and harness-only made it the one profile that could not read it.
+  // The quota number stays zero there, which is honest rather than misleading.
   //
   // `auth: 'api'` with an admin check inside the handler, NOT `auth: 'none'` like the probes: this
   // answers how often tenants hit their quota, on the public port. A small activity side channel,
@@ -123,7 +129,7 @@ export const ROUTES: readonly RouteSpec[] = [
     path: '/metrics',
     auth: 'api',
     sessionScoped: false,
-    profiles: HARNESS,
+    profiles: BOTH,
     operationId: 'getMetrics',
   },
   // Public by design: a client asks it BEFORE logging in, to learn where the harness is.

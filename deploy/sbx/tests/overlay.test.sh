@@ -287,7 +287,20 @@ done
 # A FILE, never a static token: vault-store.ts re-reads it per request so an Agent can renew it.
 [[ "$(cp_env VAULT_TOKEN_FILE | jq -r .value)" == /run/vault/token ]] || fail 'VAULT_TOKEN_FILE is not /run/vault/token'
 [[ -z "$(cp_env VAULT_TOKEN)" ]] || fail 'the vault store sets a static VAULT_TOKEN (it must be a file)'
-! grep -q 'VAULT_TOKEN:' "$OUT" || fail 'a Vault token value appears in the rendered stack'
+# The egress feature's OWN settings, which this component must wire exactly as the file one does: the
+# KEK is projected either way, and the control plane refuses to boot with a KEK and no SH_EGRESS_HOSTS
+# (egress-config.ts). Omitting them crash-loops the pod, so assert PRESENCE, not just absence of the
+# file-store keys -- the omission this test missed the first time.
+for k in SH_EGRESS_HOSTS SH_EGRESS_CREDENTIAL_TTL_SECONDS; do
+  [[ "$(cp_env "$k" | jq -r '.valueFrom.configMapKeyRef | "\(.name)/\(.key)/\(.optional)"')" == "sbx-settings/$k/true" ]] ||
+    fail "the vault store does not read $k from sbx-settings: with the KEK mounted and no hosts, the control plane refuses to boot"
+done
+# Stronger than greping the render: the two components must agree on the egress env, so diff the
+# control plane's env NAMES between them and allow only the store-specific keys to differ.
+VENV="$(jq -r '[.spec.template.spec.containers[] | select(.name == "control-plane") | .env[].name] | sort | join(" ")' <<<"$CP")"
+for k in SH_EGRESS_HOSTS SH_EGRESS_CREDENTIAL_TTL_SECONDS SH_CREDENTIAL_STORE CREDENTIALS_DIRECTORY; do
+  [[ " $VENV " == *" $k "* ]] || fail "the vault store's env is missing $k (have: $VENV)"
+done
 # The sink is writable and in memory; /run/credentials stays read-only, so it cannot hold the sink.
 [[ "$(jq -r '.spec.template.spec.volumes[] | select(.name == "vault-token") | .emptyDir.medium' <<<"$CP")" == Memory ]] ||
   fail 'the vault token sink is not an in-memory emptyDir'

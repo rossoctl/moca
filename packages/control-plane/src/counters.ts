@@ -8,7 +8,10 @@
  * (`openOrBlameSubject`, subject-document.ts), which is the terminating condition of a KEK rotation:
  * re-sealing is write-driven, so an entry nobody writes keeps the old key, and the retired key may be
  * dropped only once this stops moving. The matching log line names the subject and credential; this
- * is the number an operator can watch without scraping logs (deploy/sbx/RUNBOOK.md).
+ * is the number an operator can watch without scraping logs
+ * (docs/operate/sandbox-service/runbook.md, "Rotating the credential KEK"). It moves for every store
+ * that opens a credential -- the file, Vault and Kubernetes backends all read through
+ * `openOrBlameSubject` -- so `GET /metrics` is served on both route profiles (routes.ts).
  *
  * Counters only -- never an input to a decision. Read by `GET /metrics` (admin-only; see routes.ts),
  * which is the whole reason `asyncCounters()` returns a copy: a caller must not be able to reset the
