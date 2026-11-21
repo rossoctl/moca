@@ -122,9 +122,16 @@ describe('submitTurn (spec §4.1)', () => {
     // acquire a 25-hour sweep entry on every turn it records.
     const d = turnDeps();
     const sid = await session(d);
-    const res = await submit(d, sid, { item, async: true, onTimeout: 'reject' });
+    // GATED, so `onTimeout` is admissible at all (it is refused on a turn that asks for no gate),
+    // and with no deadline from either side -- which is the case this pins.
+    const res = await submit(d, sid, {
+      item: { ...item, require_approval: true },
+      async: true,
+      onTimeout: 'reject',
+    });
     const rec = await d.turns.get((res.body as { turnId: string }).turnId);
     expect(rec!.gateDeadlineS).toBeUndefined();
+    // Carried only alongside a deadline: without one there is nothing for it to decide.
     expect(rec!.onTimeout).toBeUndefined();
   });
 

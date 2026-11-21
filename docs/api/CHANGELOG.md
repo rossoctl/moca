@@ -31,14 +31,20 @@ submissions that were accepted and then did the wrong thing.
   (default `0`, never), the submission's `gateDeadlineS`, and the turn record's own TTL. A
   submission may ask to be bounded sooner and never later.
 - The deadline is carried onto a resume, so a second gate on the same work is bounded too.
-- ONE open gate per session: a submission asking for a gate while the session already has a paused
-  turn is `409 gate_pending`, naming that turn. The gate lives in the session's own durable state,
-  so a second gated turn used to park on the open gate and take the decision meant for the first.
+- ONE open gate per session: a submission asking for a gate is `409 gate_pending` while the session
+  has an unanswered paused turn, and also while an earlier gated turn of the session is still
+  `queued` or `running` -- that turn has not opened its gate yet, but it will. The gate lives in the
+  session's own durable state, so a second gated turn used to park on the open gate and take the
+  decision meant for the first. Ungated turns are never refused by this.
 - `requireApproval` on a `converge` submission is `400 invalid_request` instead of a silently
   dropped flag, which ran an ungated turn for a caller who asked for a gate. That kind asks with
   `item.require_approval`.
 - `TurnStatus.resumeOf` names the paused turn a resume answers the gate of, so a client holding only
   the new turn's id can walk back to the one that asked.
+- `gateDeadlineS` and `onTimeout` on a submission that asks for no gate are `400 invalid_request`
+  rather than stored and never read: the gate index is armed only when a turn pauses, so a caller
+  who set a deadline on an ungated turn had none and would have learned it only when the gate it
+  expected never expired.
 
 ## 1.35.0
 

@@ -2073,10 +2073,13 @@ paths:
                     `converge` leaf carries the same request on `item.require_approval`, and sending
                     this field with one is `400 invalid_request` rather than an ignored flag.
 
-                    ONE open gate per session: a gated submission while the session already has a
-                    paused turn is `409 gate_pending`. The gate lives in the session's own durable
-                    state, so a second gated turn would park on the open gate and take the decision
-                    meant for the first.
+                    ONE open gate per session: a gated submission is `409 gate_pending` while the
+                    session has a paused turn whose gate is unanswered, AND while an earlier gated
+                    turn of the session is still `queued` or `running` -- including the resume a
+                    decision created, which can pause at a gate of its own. The gate lives in the
+                    session's own durable state, so a second gated turn would park on the open gate
+                    and take the decision meant for the first. Ungated turns are never refused by
+                    this and may run alongside a gated one.
                 gateDeadlineS:
                   type: integer
                   minimum: 1
@@ -2085,13 +2088,16 @@ paths:
                     itself (#393). A CEILING only: the deployment's `MOCA_GATE_DEADLINE_S` and the
                     turn record's own TTL also bound it, and the tightest wins. Absent, and with no
                     deployment ceiling, a gate waits indefinitely.
+
+                    Only on a GATED submission: sent on a turn that asks for no gate it is
+                    `400 invalid_request`, because nothing would ever read it.
                 onTimeout:
                   type: string
                   enum: [abort, reject]
                   description: |
                     what the deadline decides when it expires; defaults to `abort`. There is no
                     `approve`: an unanswered gate is never read as consent. Ignored without a
-                    deadline in force.
+                    deadline in force, and `400 invalid_request` on a turn that asks for no gate.
                 idempotencyKey:
                   type: string
                   maxLength: 128
@@ -2142,9 +2148,11 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
         '409':
           description: |
-            `gate_pending`: this submission asks for a gate and the session already has one open.
-            One open gate per session (#393) -- the message names the paused turn. Answer it with
-            `POST /v1/sessions/{id}/decision`, or submit this turn without `requireApproval`.
+            `gate_pending`: this submission asks for a gate and the session already has one open, or
+            has an earlier gated turn still running that will open one. One open gate per session
+            (#393) -- the message names that turn. Answer a paused gate with
+            `POST /v1/sessions/{id}/decision`, wait for a running one, or submit this turn without
+            `requireApproval`.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

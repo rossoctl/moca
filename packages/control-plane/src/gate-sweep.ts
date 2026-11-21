@@ -52,12 +52,13 @@ export async function sweepGates(deps: CpDeps, limit = SWEEP_LIMIT): Promise<num
       // Claimed as late as possible: everything above is a read, and a claim that is not followed by
       // a submission strands the gate.
       if (!(await turns.claimGate(turnId))) continue;
+      let created: boolean;
       try {
-        await submitResume(deps, paused, {
+        ({ created } = await submitResume(deps, paused, {
           gateId,
           action: paused.onTimeout ?? 'abort',
           feedback: GATE_TIMEOUT_FEEDBACK,
-        });
+        }));
       } catch (err) {
         // Hand the claim back, or this gate's deadline never fires again: the ZREM is the lock, so
         // the member is the only thing that brings a later pass back to it. Re-added at the deadline
@@ -88,7 +89,10 @@ export async function sweepGates(deps: CpDeps, limit = SWEEP_LIMIT): Promise<num
         }
         throw err;
       }
-      resumed += 1;
+      // Only a resume this pass actually CREATED. A human's `submitResume` that claimed the gate key
+      // between our `claimGate` and our own submission hands us their turn id back, and counting it
+      // would report a gate this sweep expired when a human answered it.
+      if (created) resumed += 1;
     } catch (err) {
       // One bad gate must not strand the rest of the pass. Logged, not rethrown: the next interval
       // retries whatever is still indexed, including the gate this pass handed back.

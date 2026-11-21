@@ -11,6 +11,7 @@ import {
 } from './handlers.js';
 import type { SessionRecord } from './ownership.js';
 import {
+  asksForGate,
   compareCursor,
   CURSOR_RE,
   FROM_START,
@@ -135,7 +136,7 @@ export async function submitResume(
   deps: CpDeps,
   paused: TurnRecord,
   decision: GateDecisionSubmission,
-): Promise<string> {
+): Promise<{ turnId: string; created: boolean }> {
   const { turns, queue } = service(deps);
   // Keyed by the GATE, not by the session: it makes a double-click return the first resume instead
   // of fanning out a second, and it is what makes a human decision and the deadline sweep converge
@@ -143,7 +144,10 @@ export async function submitResume(
   const idempotencyKey = `${paused.sessionId}:gate:${decision.gateId}`;
   const candidate = `t-${deps.newId()}`;
   const claim = await claimKey(turns, paused.owner, idempotencyKey, candidate);
-  if (!claim.fresh) return claim.turnId;
+  // `created: false` is a REPLAY of somebody else's resume -- a double-clicked decision, or the
+  // human and the sweep racing. Reported rather than hidden because the sweep counts gates it
+  // expired, and counting a turn it did not create overstates that count (and its test asserts it).
+  if (!claim.fresh) return { turnId: claim.turnId, created: false };
 
   const turn: TurnRecord = {
     turnId: claim.turnId,
@@ -190,7 +194,7 @@ export async function submitResume(
     credential: paused.credentialName,
     decision: 'turn_submitted',
   });
-  return turn.turnId;
+  return { turnId: turn.turnId, created: true };
 }
 
 /**
@@ -204,16 +208,6 @@ export async function submitResume(
 function sameDecision(prior: TurnRecord, sent: GateDecisionSubmission): boolean {
   const was = prior.envelope.decision as GateDecisionSubmission | undefined;
   return was?.action === sent.action && (was?.feedback ?? '') === (sent.feedback ?? '');
-}
-
-/**
- * Does this submission ask for a gate? `requireApproval` for the prompt and solve kinds, and
- * `item.require_approval` for the verdict kind, which has carried its own flag since ADR-0016.
- */
-function asksForGate(envelope: Record<string, unknown>): boolean {
-  if (envelope.requireApproval === true) return true;
-  const item = envelope.item as { require_approval?: unknown } | undefined;
-  return item?.require_approval === true;
 }
 
 /**
@@ -306,13 +300,19 @@ export const TURN_HANDLERS: Record<string, Handler> = {
     // the control plane is the only side that can tell a fresh submission from a re-dispatch of the
     // same envelope. Before the reservation, like every other refusal on this path: nothing left
     // behind. Only for a GATED submission -- an ordinary turn on the session never touches the gate.
+    //
+    // A gated turn still `queued` or `running` holds the gate too, which is why this asks
+    // `findGateHolder` rather than reading `paused` alone: the first turn is unpaused for the whole
+    // of its run, and a `paused`-only read admitted a second gated turn through all of it.
     if (asksForGate(parsed.envelope)) {
-      const open = await turns.findPausedBySession(rec.sessionId);
-      if (open && !open.resumed) {
+      const holder = await turns.findGateHolder(rec.sessionId);
+      if (holder) {
         await refusal(deps, rec, 'gate_pending');
         throw new CpError(
           'gate_pending',
-          `turn ${open.paused.turnId} of this session is paused at a gate; answer it with POST /v1/sessions/{id}/decision before submitting another gated turn`,
+          holder.paused
+            ? `turn ${holder.turn.turnId} of this session is paused at a gate; answer it with POST /v1/sessions/{id}/decision before submitting another gated turn`
+            : `turn ${holder.turn.turnId} of this session is a gated turn that has not finished; wait for it before submitting another gated turn`,
         );
       }
     }
@@ -466,7 +466,7 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       );
     }
 
-    const turnId = await submitResume(deps, found.paused, decision);
+    const { turnId } = await submitResume(deps, found.paused, decision);
     return { status: 202, body: { sessionId: rec.sessionId, turnId } };
   },
 

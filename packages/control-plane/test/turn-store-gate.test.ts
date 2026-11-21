@@ -72,6 +72,52 @@ describe('a gate resume on the record and the store (#393)', () => {
     expect(found?.resumed).toBe(false);
   });
 
+  describe('findGateHolder', () => {
+    const gated = { ...base, envelope: { kind: 'prompt', prompt: 'hi', requireApproval: true } };
+
+    it('reports a GATED turn that is still queued', async () => {
+      // The window a `paused`-only read missed entirely: the turn holds the session's gate from
+      // submission, not from the moment it parks.
+      await store.create({ ...gated, turnId: 't-60', createdAt: 1000 });
+      const held = await store.findGateHolder(base.sessionId);
+      expect(held?.turn.turnId).toBe('t-60');
+      expect(held?.paused).toBe(false);
+    });
+
+    it('ignores an UNGATED turn in flight', async () => {
+      // It never calls request_approval, so ordinary traffic on the session is unaffected.
+      await store.create({ ...base, turnId: 't-61', createdAt: 1000 });
+      expect(await store.findGateHolder(base.sessionId)).toBeNull();
+    });
+
+    it('reports an unresumed paused turn, and nothing once its resume is terminal', async () => {
+      await store.create({ ...gated, turnId: 't-62', createdAt: 1000 });
+      await store.finalize('t-62', 'paused', 2000);
+      expect(await store.findGateHolder(base.sessionId)).toMatchObject({ paused: true });
+      // The resume is itself a gated turn while it runs, so it keeps holding the gate...
+      await store.create({ ...gated, turnId: 't-63', createdAt: 3000, resumeOf: 't-62' });
+      expect(await store.findGateHolder(base.sessionId)).toMatchObject({
+        turn: { turnId: 't-63' },
+        paused: false,
+      });
+      // ...and releases it when it lands, which is when a new gated turn may be admitted.
+      await store.finalize('t-63', 'done', 4000);
+      expect(await store.findGateHolder(base.sessionId)).toBeNull();
+    });
+
+    it('still reports the gate when its resume FAILED', async () => {
+      // Same rule findPausedBySession follows: a failed resume answered nothing.
+      await store.create({ ...gated, turnId: 't-64', createdAt: 1000 });
+      await store.finalize('t-64', 'paused', 2000);
+      await store.create({ ...gated, turnId: 't-65', createdAt: 3000, resumeOf: 't-64' });
+      await store.finalize('t-65', 'failed', 4000);
+      expect(await store.findGateHolder(base.sessionId)).toMatchObject({
+        turn: { turnId: 't-64' },
+        paused: true,
+      });
+    });
+  });
+
   it('releaseGate puts a claimed gate back at its own deadline', async () => {
     await store.create({ ...base, turnId: 't-50', gateDeadlineS: 60 });
     await store.finalize('t-50', 'paused', 1_000);

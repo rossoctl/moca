@@ -358,6 +358,19 @@ export interface ParsedSubmission {
 export type GateTimeoutAction = 'abort' | 'reject';
 
 /**
+ * Does this ask for a gate? `requireApproval` for the prompt and solve kinds, and
+ * `item.require_approval` for the verdict kind, which has carried its own flag since ADR-0016.
+ *
+ * Reads a raw submission body and a stored envelope alike -- the two spellings survive the parse
+ * unchanged -- which is why `parseTurnSubmission` and `submitTurn`'s admission guard can share it.
+ */
+export function asksForGate(body: Record<string, unknown>): boolean {
+  if (body.requireApproval === true) return true;
+  const item = body.item as { require_approval?: unknown } | undefined;
+  return item?.require_approval === true;
+}
+
+/**
  * The tightest gate deadline in force (#393 §3). EVERY input is a CEILING and the tightest one wins
  * -- the same rule budgets follow, for the same reason: a submission may ask to be bounded sooner
  * and never later.
@@ -444,6 +457,17 @@ export function parseTurnSubmission(body: unknown): ParsedSubmission {
   // gate is that a human said yes, and a clock cannot. 'reject' is the lenient end of the range.
   if (b.onTimeout !== undefined && b.onTimeout !== 'abort' && b.onTimeout !== 'reject') {
     throw new CpError('invalid_request', 'onTimeout must be "abort" or "reject"');
+  }
+  // REFUSED on an ungated turn, for the same reason `requireApproval` on a converge leaf is: both
+  // are silently inert otherwise. `toTerminal` arms the gate index only on the `paused` transition,
+  // so a turn that never asks for a gate stores these two and nothing ever reads them -- a caller
+  // who set a deadline would get a 202 and learn it had none only when the gate it expected never
+  // expired.
+  if ((b.gateDeadlineS !== undefined || b.onTimeout !== undefined) && !asksForGate(b)) {
+    throw new CpError(
+      'invalid_request',
+      'gateDeadlineS and onTimeout apply to a gated turn; set requireApproval (or item.require_approval on a converge turn) or omit them',
+    );
   }
 
   const workloadId = typeof b.workloadId === 'string' ? b.workloadId : undefined;

@@ -2,6 +2,7 @@ import type { CpRedisLike } from './ownership.js';
 import { CpError } from './errors.js';
 import { sanitizeLimits } from './models.js';
 import {
+  asksForGate,
   decodeTurnEvent,
   encodeTurnEvent,
   EVENTS_MAXLEN,
@@ -358,6 +359,56 @@ export class TurnStore {
       // gate's durable state, so it can never flip a decision that was already recorded there.
       if (rec.resumeOf && rec.state !== 'failed') resumed.add(rec.resumeOf);
       if (rec.state === 'paused') return { paused: rec, resumed: resumed.has(rec.turnId) };
+    }
+    return null;
+  }
+
+  /**
+   * The turn that holds this session's one gate, or is on its way to holding it (#393).
+   *
+   * Two kinds of holder, because a gate is SESSION state the harness derives from the session's own
+   * durable entries: a turn already `paused` and unresumed, and a GATED turn still `queued` or
+   * `running`, which has not reached its `request_approval` call yet but will park on that same
+   * session gate when it does. `findPausedBySession` cannot answer the second -- it reports only a
+   * record that is already `paused` -- and the second is the one that matters at admission time.
+   *
+   * Newest-first over the session index, as `findPausedBySession` walks it, and with the same
+   * `scan` bound and the same `resumed` rule: a `failed` resume did not answer the gate it links to.
+   * A resume is itself a gated non-terminal turn while it runs, so an answered gate still reports a
+   * holder until the resume lands -- correct, because that resume can pause at a gate of its own.
+   *
+   * shortcut: a read, so two gated submissions landing in genuine parallel can both see no holder
+   * and both be admitted -- the window is the two Redis round-trips between this call and
+   * `turns.create`. Narrowed from the `paused`-only read (which missed the whole of a first turn's
+   * run, seconds to minutes) to that. Closing it needs a per-session admission lock with a release
+   * on every terminal transition; upgrade to one if a caller ever submits gated turns concurrently
+   * on a single session, which no on-ramp in this repo does.
+   */
+  async findGateHolder(
+    sessionId: string,
+    scan = 50,
+  ): Promise<{ turn: TurnRecord; paused: boolean } | null> {
+    const ids = await this.guard(() =>
+      this.redis.zRange(this.sessionKey(sessionId), '+inf', '-inf', {
+        BY: 'SCORE',
+        REV: true,
+        LIMIT: { offset: 0, count: scan },
+      }),
+    );
+    const resumed = new Set<string>();
+    for (const id of ids) {
+      const rec = await this.get(id);
+      if (!rec) continue;
+      if (rec.state === 'queued' || rec.state === 'running') {
+        if (asksForGate(rec.envelope)) return { turn: rec, paused: false };
+        // An UNGATED turn in flight blocks nothing: it never calls `request_approval`, so it cannot
+        // park on the session's gate. This is what keeps ordinary traffic on a session unaffected.
+        continue;
+      }
+      if (rec.resumeOf && rec.state !== 'failed') resumed.add(rec.resumeOf);
+      if (rec.state === 'paused') {
+        return resumed.has(rec.turnId) ? null : { turn: rec, paused: true };
+      }
     }
     return null;
   }

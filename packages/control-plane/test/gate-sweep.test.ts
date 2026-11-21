@@ -251,6 +251,28 @@ describe('sweepGates (#393, design §3)', () => {
     }
   });
 
+  it('does not count a resume a human created', async () => {
+    // The sweep's return value is "gates this pass expired". A human's `submitResume` that claimed
+    // the gate key between our `claimGate` and our own submission hands its turn id back to us, and
+    // counting that would report an expiry for a gate a human answered.
+    const paused = await pausedTurn();
+    const human = 't-human';
+    await deps.turns.create(
+      rec({
+        turnId: human,
+        createdAt: deps.nowOf(),
+        resumeOf: paused.turnId,
+        idempotencyKey: 's-1:gate:0',
+      }),
+    );
+    // The key, held and not yet released: exactly the state a human resume is in between its own
+    // claim and its `claimGate`.
+    expect(await deps.turns.claimIdempotencyKey(paused.owner, 's-1:gate:0', human)).toBe(human);
+    expect(await sweepGates(deps)).toBe(0);
+    // And no second turn was built: the claim replayed the human's.
+    expect(deps.turnQueue.ids).toEqual([]);
+  });
+
   it('two passes racing on one gate resume it once', async () => {
     // Every replica runs the same pass, and `claimGate`'s ZREM is the only thing that picks one. The
     // fake returns the count it actually removed, so the loser really does lose.

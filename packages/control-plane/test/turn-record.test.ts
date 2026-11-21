@@ -187,6 +187,7 @@ describe('parseTurnSubmission (spec §4.1)', () => {
       async: true,
       kind: 'prompt',
       prompt: 'hi',
+      requireApproval: true,
       gateDeadlineS: 60,
       onTimeout: 'reject',
     });
@@ -194,6 +195,29 @@ describe('parseTurnSubmission (spec §4.1)', () => {
     // CP-side scheduling, not model input: they must NOT reach the harness.
     expect(p.envelope.gateDeadlineS).toBeUndefined();
     expect(p.envelope.onTimeout).toBeUndefined();
+  });
+
+  it('refuses a gate deadline on a turn that asks for no gate', () => {
+    // Inert otherwise: `toTerminal` arms the gate index only on `paused`, so nothing would ever
+    // read these -- the same silently-dropped flag `requireApproval` on a converge leaf is.
+    const bare = { async: true, kind: 'prompt', prompt: 'hi' };
+    expect(codeOf(() => parseTurnSubmission({ ...bare, gateDeadlineS: 60 }))).toBe(
+      'invalid_request',
+    );
+    expect(codeOf(() => parseTurnSubmission({ ...bare, onTimeout: 'reject' }))).toBe(
+      'invalid_request',
+    );
+    // Both spellings of "gated" satisfy it, including the converge kind's own flag.
+    expect(
+      parseTurnSubmission({ ...bare, requireApproval: true, gateDeadlineS: 60 }),
+    ).toMatchObject({ gateDeadlineS: 60 });
+    expect(
+      parseTurnSubmission({
+        async: true,
+        item: { item_id: 'i', file: 'a.ts', pattern: 'p', require_approval: true },
+        gateDeadlineS: 60,
+      }),
+    ).toMatchObject({ gateDeadlineS: 60 });
   });
 
   it('refuses a non-positive or non-integer gateDeadlineS and an unknown onTimeout', () => {

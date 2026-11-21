@@ -250,14 +250,41 @@ describe('one open gate per session (#393)', () => {
     expect(d.turnQueue.ids).toHaveLength(1);
   });
 
-  it('admits a gated turn once the gate has been answered', async () => {
+  it('admits a gated turn once the gate has been answered AND its resume has finished', async () => {
     const d = turnDeps();
     const sid = await session(d);
     await paused(d, sid);
-    await decide(d, sid, { gateId: 0, action: 'approve' });
-    // Still `paused` (it is terminal and never reopened), but answered -- so the next gated turn is
-    // not refused on it. A fresh `idempotencyKey`, since the resume holds the session's default.
-    expect((await submit(d, sid, { ...GATED_PROMPT, idempotencyKey: 'k2' })).status).toBe(202);
+    const resumeId = (
+      (await decide(d, sid, { gateId: 0, action: 'approve' })).body as { turnId: string }
+    ).turnId;
+    // Not yet: the resume carries the paused turn's envelope, gate flag included, so while it is
+    // queued it can still park on this session's gate itself. A fresh `idempotencyKey` throughout,
+    // since the resume holds the session's default.
+    expect(await codeOf(() => submit(d, sid, { ...GATED_PROMPT, idempotencyKey: 'k2' }))).toBe(
+      'gate_pending',
+    );
+    // AFTER the paused turn's own `endedAt`, because `toTerminal` re-scores the session index to
+    // this moment and the walk is newest-first -- which is also the real ordering: a resume ends
+    // after the turn it resumes.
+    await d.turns.finalize(resumeId, 'done', NOW_MS + 1000);
+    // Now nothing holds the gate: the paused turn is answered and the resume is terminal.
+    expect((await submit(d, sid, { ...GATED_PROMPT, idempotencyKey: 'k3' })).status).toBe(202);
+  });
+
+  it('refuses a second gated turn while the first is still QUEUED', async () => {
+    // The window the `paused`-only read missed, and the wide one: a turn is unpaused for the whole
+    // of its run, so a second gated turn used to be admitted through all of it and then park on the
+    // first's gate once that opened.
+    const d = turnDeps();
+    const sid = await session(d);
+    expect((await submit(d, sid, GATED_PROMPT)).status).toBe(202);
+    expect(await codeOf(() => submit(d, sid, { ...GATED_PROMPT, idempotencyKey: 'k2' }))).toBe(
+      'gate_pending',
+    );
+    // And an UNGATED turn is still admitted alongside it: it never calls request_approval.
+    expect(
+      (await submit(d, sid, { kind: 'prompt', prompt: 'hi', idempotencyKey: 'k3' })).status,
+    ).toBe(202);
   });
 
   it('400s on requireApproval sent with a converge submission', async () => {
