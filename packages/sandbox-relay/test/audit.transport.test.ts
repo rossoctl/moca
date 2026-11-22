@@ -2,7 +2,7 @@ import { Metadata, credentials, status } from '@grpc/grpc-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Exec, SandboxExecClient, Stream } from '@moca/k8s-sandbox';
 import { makeExecAuth, startRelay } from '../src/main.js';
-import { commandPreview, type AuditLine } from '../src/sandbox-caller.js';
+import { CALL_ID_RE, callIdFrom, commandPreview, type AuditLine } from '../src/sandbox-caller.js';
 import {
   HARNESS,
   K,
@@ -397,6 +397,19 @@ describe('the command in the audit line (SBX0 §3.5)', () => {
     expect(Buffer.byteLength(cmd)).toBe(199);
     expect(cmd).toBe('a' + 'é'.repeat(99));
     expect(cmd.endsWith('\uFFFD')).toBe(false);
+  });
+
+  it("pins CALL_ID_RE to the client's pattern, and callIdFrom keeps only a matching id", () => {
+    // The client (sandbox-client exec-conn.ts) has the same literal; a change to one must change both.
+    expect(CALL_ID_RE.source).toBe('^[A-Za-z0-9._:-]{1,64}$');
+    const md = (v: unknown) => ({ get: (k: string) => (k === 'x-moca-call-id' ? [v] : []) });
+    expect(callIdFrom(md('a'.repeat(64)))).toBe('a'.repeat(64));
+    expect(callIdFrom(md('a'.repeat(65)))).toBeUndefined();
+    expect(callIdFrom(md(''))).toBeUndefined();
+    expect(callIdFrom(md('run-1:call.2_x'))).toBe('run-1:call.2_x');
+    expect(callIdFrom(md('a b'))).toBeUndefined();
+    expect(callIdFrom(md(Buffer.from('tool-7')))).toBe('tool-7');
+    expect(callIdFrom(undefined)).toBeUndefined();
   });
 
   it('commandPreview keeps a short command whole, and cuts a long one on a boundary', () => {

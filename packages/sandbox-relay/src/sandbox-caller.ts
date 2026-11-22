@@ -216,7 +216,8 @@ const AUDIT_PROCESS_BYTES = 128;
 
 /** The gRPC metadata key a client may set to correlate its own records with this audit line. */
 export const CALL_ID_METADATA = 'x-moca-call-id';
-const CALL_ID_RE = /^[A-Za-z0-9._:-]{1,64}$/;
+/** The same pattern as the client's CALL_ID_RE (sandbox-client exec-conn.ts); the relay doesn't import it. */
+export const CALL_ID_RE = /^[A-Za-z0-9._:-]{1,64}$/;
 
 /**
  * The client's correlation id, or undefined. Only a value that matches CALL_ID_RE is kept; any other
