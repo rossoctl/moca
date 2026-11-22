@@ -57,7 +57,44 @@ export interface ExecResult {
   capped?: boolean;
   /** Every lease event the Exec's response carried, in order (spec §5); empty without a lease. */
   lease: LeaseEvent[];
+  /**
+   * The distinct req_ids this Exec was sent under, in order: one, or two when a `stale_mode`
+   * refusal was retried under a fresh one (a token refusal retries the same req_id). The relay's
+   * `sandbox_exec` audit line carries each; the last one ran. Always set by SandboxExecConn; optional for other Execs.
+   */
+  reqIds?: number[];
 }
+
+/**
+ * How one attempt of an Exec ended, as a client record says it: `ok` (the command ran and exited),
+ * `timeout` (the worker timed it out), `refused_before_start` (a token or `stale_mode` refusal,
+ * retried under a fresh req_id), `refused`, `cancelled`, an ExecFailureKind, or `error` (anything
+ * else, the token source's own failure included).
+ */
+export type ExecAttemptOutcome =
+  'ok' | 'timeout' | 'refused_before_start' | 'refused' | 'cancelled' | ExecFailureKind | 'error';
+
+/**
+ * One attempt of an Exec as sent to the relay, for a client's record (`ExecOptions.onAttempt`):
+ * never the command, its output or a token.
+ */
+export interface ExecAttempt {
+  reqId: number;
+  /** When the attempt was sent, epoch ms (this client's clock). */
+  start: number;
+  ms: number;
+  /** The command's exit code, or null when it never reported one. */
+  exit: number | null;
+  outcome: ExecAttemptOutcome;
+}
+
+/**
+ * The gRPC metadata key carrying a client's correlation id with each Exec; the relay records it on
+ * its `sandbox_exec` audit line. Client-chosen and never used for auth: an id that matches
+ * CALL_ID_RE, or none.
+ */
+export const CALL_ID_HEADER = 'x-moca-call-id';
+export const CALL_ID_RE = /^[A-Za-z0-9._:-]{1,64}$/;
 
 /**
  * What went wrong, when it was not the command:
@@ -227,6 +264,9 @@ export interface ProcessCallOptions {
   signal?: AbortSignal;
   /** Seconds (default 60): short, so the call fits the token already held. */
   timeoutS?: number;
+  /** As ExecOptions'. */
+  callId?: string;
+  onAttempt?: ExecOptions['onAttempt'];
 }
 export type ProcessCall = <O extends ProcessOp>(
   op: O,
@@ -366,6 +406,10 @@ export interface ExecOptions {
    */
   timeoutS?: number;
   signal?: AbortSignal;
+  /** Sent as CALL_ID_HEADER with every attempt; must match CALL_ID_RE (a RangeError otherwise). */
+  callId?: string;
+  /** Called once per attempt sent, when it ends. An observer that throws never fails the Exec. */
+  onAttempt?: (a: ExecAttempt) => void;
 }
 
 export type Exec = (command: string, opts?: ExecOptions) => Promise<ExecResult>;
@@ -455,6 +499,24 @@ class Remint extends Error {
   }
 }
 
+/** An attempt's outcome from what it ended with (see ExecAttemptOutcome). */
+function outcomeOf(err: unknown): ExecAttemptOutcome {
+  if (err instanceof NotStarted || err instanceof Remint) return 'refused_before_start';
+  if (err instanceof ExecRefusedError) return 'refused';
+  if (err instanceof ExecAbortedError) return 'cancelled';
+  if (err instanceof ExecMachineryError) return err.kind;
+  return 'error';
+}
+
+/** Tells the caller's observer, if any; its own failure never reaches the Exec. */
+function observe(opts: ExecOptions, a: ExecAttempt): void {
+  try {
+    opts.onAttempt?.({ ...a, ms: Math.max(0, a.ms) });
+  } catch {
+    // A record is diagnostics: a full disk must not fail the command.
+  }
+}
+
 /**
  * The lease events an Exec's failure carries (spec §5): its `lease` array, whichever error it is.
  * The connection attaches the events of a refused first attempt even to a token source's own
@@ -535,7 +597,12 @@ export class SandboxExecConn {
     try {
       r = await this.send(
         op === 'start' ? (a.command ?? '') : '',
-        { timeoutS: opts.timeoutS ?? PROCESS_TIMEOUT_S, signal: opts.signal },
+        {
+          timeoutS: opts.timeoutS ?? PROCESS_TIMEOUT_S,
+          signal: opts.signal,
+          ...(opts.callId !== undefined ? { callId: opts.callId } : {}),
+          ...(opts.onAttempt ? { onAttempt: opts.onAttempt } : {}),
+        },
         kind,
       );
     } catch (err) {
@@ -578,14 +645,39 @@ export class SandboxExecConn {
     if (requested !== undefined && !(Number.isFinite(requested) && requested > 0)) {
       throw new RangeError(`timeoutS must be a positive number of seconds, got ${requested}`);
     }
+    if (opts.callId !== undefined && !CALL_ID_RE.test(opts.callId)) {
+      throw new RangeError(`callId must match ${CALL_ID_RE}, got ${JSON.stringify(opts.callId)}`);
+    }
     if (opts.signal?.aborted) throw new ExecAbortedError(opts.signal);
     const want = requested === undefined ? undefined : Math.ceil(requested);
     // Unique within the sandbox: the relay namespaces it per sandbox.
     let reqId = newReqId();
+    const reqIds: number[] = [];
     const attempt = async (force: boolean) => {
       const { grant, timeoutS, capped } = await this.prepare(want, force);
-      const r = await this.once(command, opts, reqId, timeoutS, grant.token, kind);
-      return capped ? { ...r, capped: true } : r;
+      if (reqIds[reqIds.length - 1] !== reqId) reqIds.push(reqId);
+      const start = this.now();
+      let r: ExecResult;
+      try {
+        r = await this.once(command, opts, reqId, timeoutS, grant.token, kind);
+      } catch (err) {
+        observe(opts, {
+          reqId,
+          start,
+          ms: this.now() - start,
+          exit: null,
+          outcome: outcomeOf(err),
+        });
+        throw err;
+      }
+      observe(opts, {
+        reqId,
+        start,
+        ms: this.now() - start,
+        exit: r.timedOutS === undefined ? r.exitCode : null,
+        outcome: r.timedOutS === undefined ? 'ok' : 'timeout',
+      });
+      return { ...r, reqIds: [...reqIds], ...(capped ? { capped: true } : {}) };
     };
     /** The lease events of a stale_mode refusal, which ride before the retry's own. */
     let carried: LeaseEvent[] = [];
@@ -868,6 +960,7 @@ export class SandboxExecConn {
     if (signal?.aborted) return Promise.reject(new ExecAbortedError(signal));
     const md = new Metadata();
     md.set('authorization', `Bearer ${token}`);
+    if (opts.callId !== undefined) md.set(CALL_ID_HEADER, opts.callId);
     const backstopS = timeoutS + (this.o.backstopMarginS ?? BACKSTOP_MARGIN_S);
     const call = this.client.exec(
       {
@@ -914,6 +1007,7 @@ export class SandboxExecConn {
         stderr: Buffer.concat(err),
         ...r,
         lease,
+        reqIds: [reqId],
       });
       /** Rejects with `e`, carrying the lease events that arrived before the failure. */
       const fail = (e: Error) => {

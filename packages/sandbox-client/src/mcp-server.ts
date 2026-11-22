@@ -1,6 +1,7 @@
 // The low-level `Server`, not `McpServer`: it takes the tools' JSON Schemas (Pi's, verbatim) as they
 // are, so this package needs no zod (its runtime dependencies stay the three of ADR-0042). The SDK
 // marks it deprecated only in favour of the zod-based high-level API.
+import { randomBytes } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   CallToolRequestSchema,
@@ -14,6 +15,7 @@ import {
   leaseEventsOf,
   ProcessError,
   type Exec,
+  type ExecAttempt,
   type ProcessCall,
 } from './exec-conn.js';
 import type { LeaseEvent } from './gen/sandbox/v1/sandbox.js';
@@ -62,6 +64,84 @@ export interface CallRecord {
   ok: boolean;
   /** One line, set only when the failure was not the command's: never command output. */
   error?: string;
+  /** The record's format (2): the fields below. A reader of the first format ignores them. */
+  v: 2;
+  event: 'call';
+  /** This server process's own id, minted at start (also on its `session` line). */
+  mcp_session: string;
+  sbx?: string;
+  /** This server's own call counter, 1, 2, 3…: the order, whatever ids the client sends. */
+  n: number;
+  /** The JSON-RPC id of the `tools/call` as the client sent it (a number or a string). */
+  rpc_id: string | number;
+  /** Every Exec attempt the call sent (ExecAttempt), with its start as ISO time. */
+  exec: ExecEntry[];
+  /**
+   * A tool-use id the client happens to send in the request's `_meta` (a key naming a tool use),
+   * as sent, or null. Never asked for.
+   */
+  meta_tool_use_id: string | null;
+}
+
+/** One Exec attempt on a flight-recorder line. */
+export interface ExecEntry {
+  req_id: number;
+  /** ISO UTC with ms: when it was sent, by this client's clock. */
+  start: string;
+  ms: number;
+  exit: number | null;
+  outcome: ExecAttempt['outcome'];
+}
+
+/** The first line of a server's records: who connected, from the MCP handshake. */
+export interface SessionRecord {
+  v: 2;
+  event: 'session';
+  ts: string;
+  mcp_session: string;
+  sbx?: string;
+  /** The client's `initialize` clientInfo as sent, each string capped (CLIENT_INFO_MAX). */
+  client: Record<string, string> | null;
+  /** This server's version (mocactl's). */
+  mocactl: string;
+  /** MOCACTL_SBX_RUN_ID, when the caller set it; never required. */
+  run: string | null;
+}
+
+export type FlightRecord = CallRecord | SessionRecord;
+
+/** Each clientInfo string is kept as sent up to this many characters. */
+export const CLIENT_INFO_MAX = 128;
+
+/** An Exec attempt as a record line keeps it. */
+export function execEntry(a: ExecAttempt): ExecEntry {
+  return {
+    req_id: a.reqId,
+    start: new Date(a.start).toISOString(),
+    ms: a.ms,
+    exit: a.exit,
+    outcome: a.outcome,
+  };
+}
+
+/** The handshake's clientInfo, its string fields only, each capped: nothing derived. */
+function clientInfoOf(v: unknown): Record<string, string> | null {
+  if (!v || typeof v !== 'object') return null;
+  const out: Record<string, string> = {};
+  for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+    if (typeof x === 'string' && k.length <= 64) out[k] = x.slice(0, CLIENT_INFO_MAX);
+  }
+  return out;
+}
+
+/** A `_meta` value named as a tool use's id (e.g. `toolUseId`), as sent, capped; else null. */
+function metaToolUseId(meta: unknown): string | null {
+  if (!meta || typeof meta !== 'object') return null;
+  for (const [k, x] of Object.entries(meta as Record<string, unknown>)) {
+    if (/tool[_-]?use[_-]?id$/i.test(k) && typeof x === 'string')
+      return x.slice(0, CLIENT_INFO_MAX);
+  }
+  return null;
 }
 
 /** `sandbox_info`'s text, and the sandbox's mode as the record says it now. */
@@ -100,8 +180,13 @@ export interface SandboxMcpOptions {
    * held token's mode alone.
    */
   refreshMode?: (signal: AbortSignal) => Promise<SandboxModeName | undefined>;
-  /** Called once per call. A recorder that throws never fails the call. */
-  record?: (r: CallRecord) => void;
+  /**
+   * Called with the `session` line once the client has initialized, then once per call. A recorder
+   * that throws never fails the call.
+   */
+  record?: (r: FlightRecord) => void;
+  /** MOCACTL_SBX_RUN_ID, if the caller set one: written on the session line, never required. */
+  runId?: string;
   /** How long a call may wait behind this server's running one before it is refused as busy. */
   busyWaitMs?: number;
   /** Epoch ms; tests only. */
@@ -364,12 +449,28 @@ export function line(waitMs: number, now: () => number) {
  * listed the tools under, it is sent `notifications/tools/list_changed`, once until it lists again
  * (P5-R27). The instructions stay those of the mode at start: MCP sends them once, on connecting.
  */
-export type SandboxMcpServer = Server & { tokenMinted(mode: SandboxModeName): void };
+export type SandboxMcpServer = Server & {
+  tokenMinted(mode: SandboxModeName): void;
+  /** This server's own id on every record line (`mcp_session`). */
+  readonly mcpSession: string;
+};
 
 export function createSandboxMcpServer(o: SandboxMcpOptions): SandboxMcpServer {
   const ws = o.workspace ?? WORKSPACE;
   const mode = o.mode ?? 'per-exec';
   const now = o.now ?? Date.now;
+  /** Minted here, so every record line of this process joins without anything from the client. */
+  const mcpSession = `ms_${randomBytes(16).toString('hex')}`;
+  /** Calls so far: each call's `n`. */
+  let calls = 0;
+  /** Writes a record; a recorder that throws never fails anything. */
+  const write = (r: FlightRecord) => {
+    try {
+      o.record?.(r);
+    } catch {
+      // The flight recorder is diagnostics: a full disk must not fail the agent's call.
+    }
+  };
   /** The mode `tokenMinted` was last told; undefined before the first mint. */
   let mintedMode: SandboxModeName | undefined;
   /** The mode the last tools/list answered under; undefined before the first. */
@@ -499,6 +600,17 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): SandboxMcpServer {
     { name: o.name ?? 'moca-sandbox', version: o.version ?? '0.0.0' },
     { capabilities: { tools: { listChanged: true } }, instructions: sandboxRules(ws, mode) },
   );
+  server.oninitialized = () =>
+    write({
+      v: 2,
+      event: 'session',
+      ts: new Date(now()).toISOString(),
+      mcp_session: mcpSession,
+      ...(o.sandboxId ? { sbx: o.sandboxId } : {}),
+      client: clientInfoOf(server.getClientVersion()),
+      mocactl: o.version ?? '0.0.0',
+      run: o.runId ?? null,
+    });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const m = toolMode();
@@ -511,21 +623,39 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): SandboxMcpServer {
     const name = req.params.name;
     const args = (req.params.arguments ?? {}) as Record<string, unknown>;
     const started = now();
+    const n = ++calls;
     let execs = 0;
-    const record = (ok: boolean, error?: string) => {
-      try {
-        o.record?.({
-          ts: new Date(started).toISOString(),
-          tool: name,
-          ms: Math.max(0, now() - started),
-          execs,
-          ok,
-          ...(error !== undefined ? { error: oneLine(error) } : {}),
-        });
-      } catch {
-        // The flight recorder is diagnostics: a full disk must not fail the agent's call.
-      }
-    };
+    /** Every Exec attempt this call sent, in order. */
+    const attempts: ExecEntry[] = [];
+    /** What each of this call's Execs carries: its correlation id and the attempts' observer. */
+    const tagged = <T extends { callId?: string; onAttempt?: (a: ExecAttempt) => void }>(
+      opts: T | undefined,
+    ): T =>
+      ({
+        ...opts,
+        callId: `${mcpSession}:${n}`,
+        onAttempt: (a: ExecAttempt) => {
+          attempts.push(execEntry(a));
+          opts?.onAttempt?.(a);
+        },
+      }) as T;
+    const record = (ok: boolean, error?: string) =>
+      write({
+        ts: new Date(started).toISOString(),
+        tool: name,
+        ms: Math.max(0, now() - started),
+        execs,
+        ok,
+        ...(error !== undefined ? { error: oneLine(error) } : {}),
+        v: 2,
+        event: 'call',
+        mcp_session: mcpSession,
+        ...(o.sandboxId ? { sbx: o.sandboxId } : {}),
+        n,
+        rpc_id: extra.requestId,
+        exec: [...attempts],
+        meta_tool_use_id: metaToolUseId(req.params._meta),
+      });
     // `recorded` is the record's copy when it must differ from what the agent sees.
     const refuse = (text: string, recorded = text): CallToolResult => {
       record(false, recorded);
@@ -559,7 +689,7 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): SandboxMcpServer {
     const counted: Exec = async (command, opts) => {
       execs++;
       try {
-        const r = await o.exec(command, opts);
+        const r = await o.exec(command, tagged(opts));
         events.push(...(r.lease ?? []));
         return r;
       } catch (err) {
@@ -572,7 +702,7 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): SandboxMcpServer {
       ? async (op, a, opts) => {
           execs++;
           try {
-            const r = await processCall(op, a, opts);
+            const r = await processCall(op, a, tagged(opts));
             events.push(...r.lease);
             return r;
           } catch (err) {
@@ -646,5 +776,5 @@ export function createSandboxMcpServer(o: SandboxMcpOptions): SandboxMcpServer {
       server.sendToolListChanged().catch(() => {});
     }
   };
-  return Object.assign(server, { tokenMinted });
+  return Object.assign(server, { tokenMinted, mcpSession });
 }

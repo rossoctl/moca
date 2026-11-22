@@ -615,6 +615,22 @@ nothing here changes, and moca does not need Cortex.
   `<mocactl state dir>/sbx/<id>.log`. `ok` is false for any tool error, the command's own non-zero
   exit included. `error` is set only when the failure was not the command's, and never carries
   command text or output. `doctor` summarizes it.
+  - **Format 2** (additive; a line with `"v":2` and an `event`), so a session's tool calls join its
+    Execs without anything asked of the agent:
+    - `session`, once per `sbx mcp` process after MCP `initialize`: `mcp_session` (minted by the
+      server), `sbx`, `client` (the handshake's `clientInfo` as sent, each string capped at 128),
+      `mocactl`, `run` (MOCACTL_SBX_RUN_ID, optional);
+    - `call`, the line above plus `mcp_session`, `sbx`, `n` (the server's own counter), `rpc_id` (the
+      JSON-RPC id as sent), `exec[]` (each attempt's `req_id, start, ms, exit, outcome`) and
+      `meta_tool_use_id` (a tool-use id the client happens to send in `_meta`, else null);
+    - `exec`, one per attempt for every other command (`sbx run`, `push`, `pull`, …): `sbx`,
+      `command`, `invocation` (`--record`'s id when that is on), `req_id, start, ms, exit, outcome`,
+      `run`;
+    - `session_end` when the server stops (`why`: `eof` or `signal`; best effort).
+  - Every Exec carries `x-moca-call-id` in its gRPC metadata (`<mcp_session>:<n>` or
+    `<invocation>:<k>`, `[A-Za-z0-9._:-]{1,64}`), for the relay's audit line to name. A `req_id`
+    matches the relay's `sandbox_exec.req_id`; a token refusal retries the same one, a `stale_mode`
+    refusal a fresh one.
 
 ### 6.5 The gRPC client
 

@@ -158,7 +158,7 @@ export async function cmdRun(
 ): Promise<number> {
   let x;
   try {
-    x = await openExec(c.api, id, factory);
+    x = await openExec(c, id, factory);
   } catch (err) {
     return execFailed(c, err);
   }
@@ -245,7 +245,7 @@ export async function cmdPut(
 ): Promise<number> {
   let x;
   try {
-    x = await openExec(c.api, id, factory);
+    x = await openExec(c, id, factory);
   } catch (err) {
     return execFailed(c, err);
   }

@@ -73,7 +73,7 @@ async function withExec(
 ): Promise<number> {
   let x: OpenedExec;
   try {
-    x = await openExec(c.api, id, factory);
+    x = await openExec(c, id, factory);
   } catch (err) {
     return execFailed(c, err);
   }
@@ -453,7 +453,7 @@ export async function checkBeforeRm(
   };
   let x: OpenedExec;
   try {
-    x = await openExec(c.api, id, factory);
+    x = await openExec(c, id, factory);
   } catch (err) {
     if (c.signal?.aborted) return 130;
     if (err instanceof ApiError) {

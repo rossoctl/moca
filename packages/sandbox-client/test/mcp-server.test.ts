@@ -21,6 +21,7 @@ import {
   execFailureText,
   type CallRecord,
   type SandboxMcpOptions,
+  type SessionRecord,
   line,
   sandboxRules,
 } from '../src/mcp-server.js';
@@ -50,10 +51,11 @@ afterEach(async () => {
 
 async function connect(over: Partial<SandboxMcpOptions> & { exec: Exec }) {
   const records: CallRecord[] = [];
+  const sessions: SessionRecord[] = [];
   const server = createSandboxMcpServer({
     info: async () => 'template default',
     lease: async () => NO_LEASE,
-    record: (r) => records.push(r),
+    record: (r) => (r.event === 'session' ? sessions.push(r) : records.push(r)),
     ...over,
   });
   const [a, b] = InMemoryTransport.createLinkedPair();
@@ -61,7 +63,7 @@ async function connect(over: Partial<SandboxMcpOptions> & { exec: Exec }) {
   const client = new Client({ name: 'test', version: '0' });
   await client.connect(b);
   closers.push(() => client.close());
-  return { client, records, server };
+  return { client, records, sessions, server };
 }
 type Res = { content: { text: string }[]; isError?: boolean };
 const call = (c: Client, name: string, args: Record<string, unknown>, signal?: AbortSignal) =>
@@ -1768,5 +1770,111 @@ describe("a failed re-mint's carried events (Minor 1)", () => {
       else process.env.TZ = tz;
       tz = undefined;
     }
+  });
+});
+
+describe('the flight record, format 2 (TRAJECTORY-JOINER §9)', () => {
+  it('writes a session line from the handshake, with ids the server mints itself', async () => {
+    const { sessions, server } = await connect({
+      exec: async () => res(),
+      sandboxId: 'sbx-0a1b2c3d4e5f60718293a4b5c6',
+      version: '9.9.9',
+    });
+    await vi.waitFor(() => expect(sessions).toHaveLength(1));
+    expect(sessions[0]).toMatchObject({
+      v: 2,
+      event: 'session',
+      mcp_session: server.mcpSession,
+      sbx: 'sbx-0a1b2c3d4e5f60718293a4b5c6',
+      client: { name: 'test', version: '0' },
+      mocactl: '9.9.9',
+      run: null,
+    });
+    expect(server.mcpSession).toMatch(/^ms_[0-9a-f]{32}$/);
+    expect(sessions[0]!.ts).toMatch(/^\d{4}-\d\d-\d\dT.*Z$/);
+  });
+
+  it('records the run id only when the caller sets one', async () => {
+    const { sessions } = await connect({ exec: async () => res(), runId: 'rep-7' });
+    await vi.waitFor(() => expect(sessions).toHaveLength(1));
+    expect(sessions[0]!.run).toBe('rep-7');
+  });
+
+  it('keeps clientInfo as sent, only capped', async () => {
+    const server = createSandboxMcpServer({
+      exec: async () => res(),
+      info: async () => 'template default',
+      lease: async () => NO_LEASE,
+      record: (r) => (r.event === 'session' ? got.push(r) : undefined),
+    });
+    const got: SessionRecord[] = [];
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await server.connect(a);
+    const client = new Client({ name: 'Claude-Code/2.1.270 (x)', version: 'v'.repeat(300) });
+    await client.connect(b);
+    closers.push(() => client.close());
+    await vi.waitFor(() => expect(got).toHaveLength(1));
+    expect(got[0]!.client!.name).toBe('Claude-Code/2.1.270 (x)');
+    expect(got[0]!.client!.version).toHaveLength(128);
+  });
+
+  it('numbers calls, keeps the JSON-RPC id, and lists each Exec attempt by req_id', async () => {
+    const seen: (string | undefined)[] = [];
+    const exec: Exec = async (_cmd, opts) => {
+      seen.push(opts?.callId);
+      opts?.onAttempt?.({ reqId: 11, start: 1_700_000_000_000, ms: 5, exit: 0, outcome: 'ok' });
+      return res({ reqIds: [11] });
+    };
+    const { client, records, server } = await connect({ exec });
+    await call(client, 'bash', { command: 'true' });
+    await call(client, 'bash', { command: 'true' });
+    expect(records.map((r) => r.n)).toEqual([1, 2]);
+    expect(records.every((r) => r.v === 2 && r.event === 'call')).toBe(true);
+    expect(records.every((r) => r.mcp_session === server.mcpSession)).toBe(true);
+    expect(typeof records[0]!.rpc_id === 'number' || typeof records[0]!.rpc_id === 'string').toBe(
+      true,
+    );
+    expect(records[0]!.rpc_id).not.toEqual(records[1]!.rpc_id);
+    expect(records[0]!.exec).toEqual([
+      { req_id: 11, start: '2023-11-14T22:13:20.000Z', ms: 5, exit: 0, outcome: 'ok' },
+    ]);
+    // The correlation id each Exec carries names this call: the relay's audit joins on it.
+    expect(seen).toEqual([`${server.mcpSession}:1`, `${server.mcpSession}:2`]);
+    expect(records[0]!.meta_tool_use_id).toBeNull();
+  });
+
+  it('records a failed attempt too, and a tool-use id the client happens to send', async () => {
+    const exec: Exec = async (_cmd, opts) => {
+      opts?.onAttempt?.({
+        reqId: 21,
+        start: 1_700_000_000_000,
+        ms: 1,
+        exit: null,
+        outcome: 'machinery',
+      });
+      throw new ExecMachineryError('sandbox failure: boom');
+    };
+    const { client, records } = await connect({ exec });
+    await client.callTool({
+      name: 'bash',
+      arguments: { command: 'x' },
+      _meta: { toolUseId: 'tu_1' },
+    });
+    expect(records[0]).toMatchObject({
+      ok: false,
+      execs: 1,
+      exec: [{ req_id: 21, exit: null, outcome: 'machinery' }],
+      meta_tool_use_id: 'tu_1',
+    });
+  });
+
+  it('never puts the command or its output in a record', async () => {
+    const { client, records, sessions } = await connect({
+      exec: async () => res({ stdout: Buffer.from('SECRET-OUTPUT\n') }),
+    });
+    await call(client, 'bash', { command: 'echo SECRET-CMD' });
+    const all = JSON.stringify([...records, ...sessions]);
+    expect(all).not.toContain('SECRET-CMD');
+    expect(all).not.toContain('SECRET-OUTPUT');
   });
 });
