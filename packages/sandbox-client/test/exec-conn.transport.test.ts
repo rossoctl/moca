@@ -24,6 +24,8 @@ import {
   type ReleaseResponse,
 } from '../src/gen/sandbox/v1/sandbox.js';
 import {
+  CALL_ID_HEADER,
+  CALL_ID_RE,
   CLIENT_CHANNEL_OPTIONS,
   ExecAbortedError,
   ExecMachineryError,
@@ -1669,6 +1671,12 @@ describe("SandboxExecConn: a failed re-mint keeps the first attempt's events (fi
 });
 
 describe('SandboxExecConn: what a client records (TRAJECTORY-JOINER §9)', () => {
+  it('pins the call id key and rule the relay applies (sandbox-relay keeps its own copy)', () => {
+    expect(CALL_ID_HEADER).toBe('x-moca-call-id');
+    expect(CALL_ID_RE.source).toBe('^[A-Za-z0-9._:-]{1,64}$');
+    expect(CALL_ID_RE.flags).toBe('');
+  });
+
   it('sends the call id as metadata with every attempt, and refuses a malformed one unsent', async () => {
     const got: (string | undefined)[] = [];
     const r = await fakeRelay((call, n) => {
