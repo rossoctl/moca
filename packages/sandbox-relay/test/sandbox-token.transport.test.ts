@@ -563,9 +563,15 @@ describe('harness callers are unchanged beside sandbox keys (SBX0 §3.1)', () =>
       [902, 902],
       [903, 903],
     ]);
-    // An unrestricted Abort, under the id it names, and no refusal lines for a harness caller.
+    // An unrestricted Abort, under the id it names, and no refusal lines for a harness caller:
+    // only its Execs' own audit lines (caller=harness, wid = its req_id).
     expect((await abort(r.exec, HARNESS, 12345, 'sbx_node22')).code).toBe(status.OK);
-    expect(r.lines).toEqual([]);
+    const lines = r.lines.map(
+      (l) => JSON.parse(l) as { audit?: string; caller?: string; wid?: number; outcome?: string },
+    );
+    expect(lines.every((l) => l.audit === 'sandbox_exec' && l.caller === 'harness')).toBe(true);
+    expect(lines.map((l) => l.wid).sort()).toEqual([901, 902, 903]);
+    expect(lines.map((l) => l.outcome)).toEqual(['end', 'end', 'end']);
   });
 
   it('writes no refusal lines on a relay without sandbox keys', async () => {

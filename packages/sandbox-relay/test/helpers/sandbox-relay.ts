@@ -306,11 +306,14 @@ export function exec(
     workload?: string;
     /** Exec fields the client sets beyond the defaults (the mode fields, keepalive). */
     fields?: Partial<Exec>;
+    /** Extra gRPC metadata the client sends (e.g. x-moca-call-id). */
+    metadata?: Record<string, string>;
   },
 ) {
   const client = new SandboxExecClient(addr, credentials.createInsecure());
   const md = new Metadata();
   if (opts.token !== undefined) md.set('authorization', `Bearer ${opts.token}`);
+  for (const [k, v] of Object.entries(opts.metadata ?? {})) md.set(k, v);
   const call = client.exec(
     {
       sandboxId: opts.sandboxId ?? 'sbx_default',

@@ -840,7 +840,10 @@ kubectl logs deployment/moca-control-plane -c control-plane -n "$NS" \
 The relay writes the `"audit":"sandbox_exec"` line of §8 per Exec, and `sandbox_abort`,
 `sandbox_release`, `sandbox_lease_control` and `sandbox_workspace_release` (a client's `Release` of
 its workspace at its end, #338) lines, each with its own `ts`, and `sub` and `sbx`
-when the token verified (`packages/sandbox-relay/src/sandbox-caller.ts`, `makeAudit`). Checked
+when the token verified (`packages/sandbox-relay/src/sandbox-caller.ts`, `makeAudit`). A `sandbox_exec`
+line also carries `wid`, the id the worker logs the Exec under (its `req=`), so it joins the worker's
+journal exactly; `call_id`, a client's `x-moca-call-id` when valid; and, on the harness's own Execs,
+`caller: "harness"`. Checked
 against the code:
 
 ```bash

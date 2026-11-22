@@ -61,6 +61,8 @@ import {
 import { failExecStream, grpcError, pumpExec } from './exec-stream.js';
 import {
   SANDBOX_DRAIN_GRACE_S,
+  callIdFrom,
+  finished,
   leaseOpName,
   makeAudit,
   makeSandboxCaller,
@@ -406,7 +408,21 @@ function addExecService(server: Server, relay: Relay, auth: ExecAuth): void {
         kind: ExecKind.EXEC_KIND_COMMAND,
         process: undefined,
       };
-      await pumpExec(call, relay, req.sandboxId, harnessExec, { workload: req.workload });
+      const r = await pumpExec(call, relay, req.sandboxId, harnessExec, { workload: req.workload });
+      // The harness's Execs get the same line (on a relay with sandbox keys), marked caller=harness:
+      // the worker knows them by their req_id unchanged, so wid = req_id. No sub, sbx or command:
+      // the harness token carries no subject, and its commands are Moca Pi's.
+      const callId = callIdFrom(call.metadata);
+      audit.exec(t0, {
+        caller: 'harness',
+        wrk: req.sandboxId,
+        req_id: e.reqId,
+        wid: e.reqId,
+        ...(callId !== undefined ? { call_id: callId } : {}),
+        kind: harnessExec.kind,
+        out_bytes: r.outBytes,
+        ...finished(r, false),
+      });
     },
     abort: (
       call: ServerUnaryCall<AbortRequest, AbortResponse>,
