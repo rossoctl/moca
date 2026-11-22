@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -204,6 +205,54 @@ func TestRunnerLogsTheWorkspaceKeyAndVMOfEveryExec(t *testing.T) {
 	}
 	if strings.Contains(l, "SECRET-VALUE") {
 		t.Fatalf("exec log leaked the command text: %q", l)
+	}
+}
+
+// The always-on line carries the Exec's timing, with the same start_ms and dur_ms as the opt-in
+// exec-timing line, so a per-Exec join needs no SH_EXEC_TIMING.
+func TestRunnerExecLogCarriesTheExecTimingOfTheOptInLine(t *testing.T) {
+	p, lc, _ := testPool(t)
+	lc.setRunFn(func(_ *fakeVM, _ Command, _ Sink) (Result, error) {
+		time.Sleep(5 * time.Millisecond)
+		return Result{}, nil
+	})
+	var lines, timing []string
+	prevE, prevT := execLog, timingLog
+	execLog = func(format string, a ...any) { lines = append(lines, fmt.Sprintf(format, a...)) }
+	timingLog = func(format string, a ...any) { timing = append(timing, fmt.Sprintf(format, a...)) }
+	t.Cleanup(func() { execLog, timingLog = prevE, prevT })
+
+	before := time.Now().UnixMilli()
+	_, _ = Runner{Pool: p, Timing: true}.Run(context.Background(), wexec.Spec{
+		ReqID: 11, Command: "true", WorkspaceKey: "sess-t",
+	}, newFrameSink())
+	after := time.Now().UnixMilli()
+	if len(lines) != 1 || len(timing) != 1 {
+		t.Fatalf("got %d exec and %d timing lines, want 1 and 1: %q %q", len(lines), len(timing), lines, timing)
+	}
+	field := func(l, k string) string {
+		i := strings.Index(l, " "+k+"=")
+		if i < 0 {
+			return ""
+		}
+		v := l[i+len(k)+2:]
+		if j := strings.IndexByte(v, ' '); j >= 0 {
+			v = v[:j]
+		}
+		return v
+	}
+	for _, k := range []string{"start_ms", "dur_ms"} {
+		got, want := field(lines[0], k), field(timing[0], k)
+		if got == "" || got != want {
+			t.Fatalf("exec log %s = %q, want the exec-timing line's %q (%q)", k, got, want, lines[0])
+		}
+	}
+	ms, err := strconv.ParseInt(field(lines[0], "start_ms"), 10, 64)
+	if err != nil || ms < before || ms > after {
+		t.Fatalf("start_ms = %q, want an epoch-ms time in [%d, %d]", field(lines[0], "start_ms"), before, after)
+	}
+	if d, err := strconv.ParseFloat(field(lines[0], "dur_ms"), 64); err != nil || d < 5 {
+		t.Fatalf("dur_ms = %q, want at least the run's 5 ms", field(lines[0], "dur_ms"))
 	}
 }
 
