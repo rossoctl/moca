@@ -89,11 +89,11 @@ describe('every flag is explained in its own usage entry (#875)', () => {
 
   it('would catch a flag left out of its description', () => {
     const broken = SBX_USAGE.replace(
-      '  mocactl sbx ls [--all] [--json]',
-      '  mocactl sbx ls [--all] [--frobnicate] [--json]',
+      '  mocactl sbx ls [--all] [--include-deleted] [--json]',
+      '  mocactl sbx ls [--all] [--include-deleted] [--frobnicate] [--json]',
     );
     expect(unexplained(broken, '  mocactl sbx ')).toEqual({
-      'mocactl sbx ls [--all] [--frobnicate] [--json]': ['--frobnicate'],
+      'mocactl sbx ls [--all] [--include-deleted] [--frobnicate] [--json]': ['--frobnicate'],
     });
   });
 });

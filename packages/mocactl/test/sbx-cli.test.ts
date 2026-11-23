@@ -246,7 +246,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       // A misused flag after a parse that succeeded, with a string flag's value before the word.
       const { io: io2 } = setup();
       expect(await main(['sbx', '--sandbox', SBX, 'ls', '--timeout', '5'], env, io2)).toBe(2);
-      expect(io2.errs.join('\n')).toContain('mocactl sbx ls [--all] [--json]');
+      expect(io2.errs.join('\n')).toContain('mocactl sbx ls [--all] [--include-deleted] [--json]');
       expect(io2.errs.join('\n')).not.toContain('mocactl sbx run');
       // No command, or an unknown one: the whole usage, as before.
       const { io: io3 } = setup();
@@ -1016,7 +1016,54 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(io.errs.join('\n')).toMatch(/no sandbox routes/);
   });
 
-  it('lists sandboxes with state and expiry; --all passes all=1', async () => {
+  // The fixture's sandbox is created at 1_800_000_000 and expires 7 days later; "now" is a day in.
+  const LS_NOW_MS = 1_800_086_400 * 1000;
+
+  it('lists sandboxes with state and a relative expiry; --all passes all=1', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({
+      'GET /v1/sandboxes': () => ({
+        status: 200,
+        body: {
+          sandboxes: [
+            sandbox({ idleLifetimeS: 604_800 }),
+            sandbox({
+              id: 'sbx-old',
+              name: null,
+              state: 'terminated',
+              reason: 'expired',
+              terminatedAt: 1_800_086_400 - 7200,
+            }),
+          ],
+        },
+      }),
+    });
+    const deps = { home, fetchImpl: cp.fetchImpl, now: () => LS_NOW_MS };
+    expect(await sbxMain(['ls'], env, io, deps)).toBe(0);
+    const lines = io.outs.join('').trimEnd().split('\n');
+    expect(lines[0]).toMatch(/^ID\s+NAME\s+TEMPLATE\s+MODE\s+STATE\s+EXPIRES$/);
+    expect(lines[1]).toMatch(
+      new RegExp(`^${SBX}\\s+web\\s+node22\\s+per-exec\\s+ready\\s+in 6 d$`),
+    );
+    expect(lines[2]).toMatch(
+      /^sbx-old\s+-\s+node22\s+per-exec\s+terminated \(expired\)\s+ended 2 h ago$/,
+    );
+    expect(lines[1]!.indexOf('web')).toBe(lines[0]!.indexOf('NAME'));
+    expect(lines[1]!.indexOf('in 6 d')).toBe(lines[0]!.indexOf('EXPIRES'));
+    // No ISO timestamp, and no idle lifetime: that is sbx get's.
+    expect(io.outs.join('')).not.toMatch(/\d{4}-\d\d-\d\dT|\(7 d\)/);
+    await sbxMain(['ls', '--all'], env, io, deps);
+    expect(cp.calls.at(-1)!.path).toBe('/v1/sandboxes?all=1');
+  });
+
+  it('ls prints no header for an empty list', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({ 'GET /v1/sandboxes': () => ({ status: 200, body: { sandboxes: [] } }) });
+    expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    expect(io.outs.join('')).toBe('');
+  });
+
+  it('ls leaves out deleted sandboxes unless --include-deleted, in --json too', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({
       'GET /v1/sandboxes': () => ({
@@ -1024,75 +1071,81 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
         body: {
           sandboxes: [
             sandbox(),
-            sandbox({ id: 'sbx-dead', name: null, state: 'terminated', reason: 'deleted' }),
+            sandbox({
+              id: 'sbx-gone',
+              state: 'terminated',
+              reason: 'deleted',
+              terminatedAt: 1_800_000_100,
+            }),
+            sandbox({
+              id: 'sbx-old',
+              state: 'terminated',
+              reason: 'expired',
+              terminatedAt: 1_800_000_100,
+            }),
           ],
         },
       }),
     });
-    expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
-    const out = io.outs.join('');
-    expect(out).toMatch(new RegExp(`${SBX}\\s+web\\s+node22\\s+per-exec\\s+ready`));
-    expect(out).toMatch(/sbx-dead\s+-\s+node22\s+per-exec\s+terminated \(deleted\)/);
-    expect(out).toContain(new Date(1_800_604_800 * 1000).toISOString());
-    await sbxMain(['ls', '--all'], env, io, { home, fetchImpl: cp.fetchImpl });
-    expect(cp.calls.at(-1)!.path).toBe('/v1/sandboxes?all=1');
+    const deps = { home, fetchImpl: cp.fetchImpl, now: () => LS_NOW_MS };
+    expect(await sbxMain(['ls'], env, io, deps)).toBe(0);
+    expect(io.outs.join('')).not.toContain('sbx-gone');
+    expect(io.outs.join('')).toContain('sbx-old');
+    io.outs.length = 0;
+    expect(await sbxMain(['ls', '--json'], env, io, deps)).toBe(0);
+    expect(JSON.parse(io.outs.join('')).map((s: { id: string }) => s.id)).toEqual([SBX, 'sbx-old']);
+    io.outs.length = 0;
+    expect(await sbxMain(['ls', '--include-deleted'], env, io, deps)).toBe(0);
+    expect(io.outs.join('')).toMatch(
+      /sbx-gone\s+web\s+node22\s+per-exec\s+terminated \(deleted\)\s+ended 23 h ago/,
+    );
+    io.outs.length = 0;
+    expect(await sbxMain(['ls', '--include-deleted', '--json'], env, io, deps)).toBe(0);
+    expect(JSON.parse(io.outs.join(''))).toHaveLength(3);
   });
 
-  it('ls prints no lifetime for a malformed idleLifetimeS (#770)', async () => {
+  it('refuses --include-deleted on any command but ls', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({});
+    expect(
+      await sbxMain(['hosts', '--include-deleted'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(2);
+    expect(io.errs.join('\n')).toContain('--include-deleted only applies to ls');
+    expect(cp.calls).toEqual([]);
+  });
+
+  it('ls --all aligns the owner column whatever the expiry text', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({
       'GET /v1/sandboxes': () => ({
         status: 200,
         body: {
           sandboxes: [
-            sandbox({ idleLifetimeS: 0 }),
-            sandbox({ id: 'sbx-b', idleLifetimeS: '604800' as unknown as number }),
+            sandbox({ owner: 'owner-a' }),
+            sandbox({ id: 'sbx-soon', owner: 'owner-b', expiresAt: 1_800_086_400 + 30 }),
+            sandbox({
+              id: 'sbx-old',
+              owner: 'owner-c',
+              state: 'terminated',
+              reason: 'expired',
+              terminatedAt: 1_800_086_400 - 365 * 86_400,
+            }),
           ],
         },
       }),
     });
-    await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl });
-    expect(io.outs.join('')).not.toMatch(/\(|undefined|NaN/);
-  });
-
-  it('ls --all aligns the owner column with and without the lifetime suffix (#770)', async () => {
-    const { home, env, io } = setup();
-    const cp = fakeCp({
-      'GET /v1/sandboxes': () => ({
-        status: 200,
-        body: {
-          sandboxes: [
-            sandbox({ owner: 'owner-a', idleLifetimeS: 604_800 }),
-            sandbox({ id: 'sbx-old', owner: 'owner-b' }),
-            sandbox({ id: 'sbx-odd', owner: 'owner-c', idleLifetimeS: 3601 }),
-          ],
-        },
-      }),
+    await sbxMain(['ls', '--all'], env, io, {
+      home,
+      fetchImpl: cp.fetchImpl,
+      now: () => LS_NOW_MS,
     });
-    await sbxMain(['ls', '--all'], env, io, { home, fetchImpl: cp.fetchImpl });
-    const lines = io.outs.join('').trimEnd().split('\n');
+    const [header, ...lines] = io.outs.join('').trimEnd().split('\n');
     expect(lines).toHaveLength(3);
-    expect(lines[0]).toContain('(7 d)');
-    expect(lines[2]).toContain('(3601 s)');
+    expect(lines[1]).toContain('in <1 min');
+    expect(lines[2]).toContain('ended 365 d ago');
     const col = lines.map((l, i) => l.indexOf(`owner-${'abc'[i]}`));
     expect(col[0]).toBeGreaterThan(0);
-    expect(new Set(col).size).toBe(1);
-  });
-
-  it('ls appends the idle lifetime to the expiry only when the record carries one (#770)', async () => {
-    const { home, env, io } = setup();
-    const cp = fakeCp({
-      'GET /v1/sandboxes': () => ({
-        status: 200,
-        body: { sandboxes: [sandbox({ idleLifetimeS: 604_800 }), sandbox({ id: 'sbx-old' })] },
-      }),
-    });
-    expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
-    const lines = io.outs.join('').trim().split('\n');
-    const iso = new Date(1_800_604_800 * 1000).toISOString();
-    expect(lines[0]!.endsWith(`${iso} (7 d)`)).toBe(true);
-    expect(lines[1]!.endsWith(iso)).toBe(true);
-    expect(lines[1]).not.toContain('undefined');
+    expect(new Set([...col, header!.indexOf('OWNER')]).size).toBe(1);
   });
 
   it('deletes a sandbox', async () => {
@@ -1515,7 +1568,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       }),
     });
     expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
-    const lines = io.outs.join('').split('\n');
+    const lines = io.outs.join('').split('\n').slice(1);
     expect(lines[0]).toMatch(new RegExp(`^${SBX}\\s+web\\s+node22\\s+per-exec\\s+ready\\s`));
     expect(lines[1]).toMatch(/^sbx-lease\s+l\s+node22\s+lease\+processes\s+ready\s/);
   });
@@ -1903,7 +1956,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     });
     expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
     const out = io.outs.join('');
-    expect(out).toMatch(/node22\s+per-exec\s+terminated\s+\d{4}-/);
+    expect(out).toMatch(/node22\s+per-exec\s+terminated\s+ended /);
     expect(out).not.toMatch(/expired|\(/);
   });
 
@@ -1918,9 +1971,10 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       }),
     });
     expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
-    const [a, b] = io.outs.join('').trimEnd().split('\n');
+    const [h, a, b] = io.outs.join('').trimEnd().split('\n');
     expect(a).not.toContain('\u001b');
     expect(a!.indexOf('node22')).toBe(b!.indexOf('node22'));
+    expect(a!.indexOf('node22')).toBe(h!.indexOf('TEMPLATE'));
   });
 });
 

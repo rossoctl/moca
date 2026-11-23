@@ -47,3 +47,16 @@ export function lifetimeNotTakenText(
     : "the deployment's default lifetime";
   return `sbx: ${id} ends after ${ends} without use: the control plane did not take --lifetime`;
 }
+
+/** A span in its largest whole unit, rounded down: `6 d`, `5 h`, `12 min`, `<1 min`. */
+function spanText(s: number): string {
+  if (s >= 86_400) return `${Math.floor(s / 86_400)} d`;
+  if (s >= 3600) return `${Math.floor(s / 3600)} h`;
+  if (s >= 60) return `${Math.floor(s / 60)} min`;
+  return '<1 min';
+}
+
+/** `in 6 d` for a deadline still ahead, `2 h ago` for one past, both from `nowS`. */
+export function relativeText(epochS: number, nowS: number): string {
+  return epochS >= nowS ? `in ${spanText(epochS - nowS)}` : `${spanText(nowS - epochS)} ago`;
+}

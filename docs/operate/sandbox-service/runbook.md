@@ -775,7 +775,7 @@ machine (status.sh needs `jq` too); the host's commands run over ssh as in §8.
 
 ```bash
 SBX=sbx-…                   # the sandbox id
-mocactl sbx ls --all --json | jq --arg id "$SBX" '.[] | select(.id == $id)
+mocactl sbx ls --all --include-deleted --json | jq --arg id "$SBX" '.[] | select(.id == $id)
   | {id, owner, template, state, created: (.createdAt | todate),
      ended: (if .terminatedAt then (.terminatedAt | todate) else null end)}'
 SUB=github:…                # its owner

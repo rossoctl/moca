@@ -26,7 +26,7 @@ import {
   setModeFailureText,
   type SetModeOutcome,
 } from './mode.js';
-import { afterText, lifetimeNotTakenText, lifetimeText, validLifetime } from './lifetime.js';
+import { afterText, lifetimeNotTakenText, relativeText } from './lifetime.js';
 import { forgetNotices } from './notices.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
@@ -543,30 +543,49 @@ function stateText(s: SbxSandbox): string {
   return s.reason ? `terminated (${s.reason})` : 'terminated';
 }
 
-export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
+/**
+ * `sbx ls`. A deleted sandbox is left out, in the table and in --json alike, unless
+ * `includeDeleted`: it was ended on purpose, so it is noise in a list of what one has. An expired
+ * one stays, since nobody chose to end it. EXPIRES is relative: a live sandbox's deadline, an
+ * ended one's end. The idle lifetime is `sbx get`'s.
+ */
+export async function cmdLs(
+  c: SbxCtx,
+  all: boolean,
+  o: { includeDeleted?: boolean } = {},
+): Promise<number> {
   try {
-    const ss = await c.api.listSandboxes({ all });
+    const ss = (await c.api.listSandboxes({ all })).filter(
+      (s) => o.includeDeleted || !(s.state === 'terminated' && s.reason === 'deleted'),
+    );
     if (c.json) {
       c.io.out(JSON.stringify(ss) + '\n');
       return SBX_EXIT.ok;
     }
+    const nowS = Math.floor((c.now ?? c.rt.now)() / 1000);
+    // Sanitized before padding, so stripped control characters cannot skew the columns.
+    const cell = (v: string, width = 0) => sanitizeRemote(v).padEnd(width);
+    const line = (cols: string[], owner: string) =>
+      [
+        cell(cols[0]!, 30),
+        cell(cols[1]!, 16),
+        cell(cols[2]!, 12),
+        cell(cols[3]!, 15),
+        cell(cols[4]!, 22),
+        // Padded (`ended 365 d ago`) only to align the owner.
+        all ? cell(cols[5]!, 15) : cols[5]!,
+        ...(all ? [cell(owner)] : []),
+      ].join(' ') + '\n';
+    // No header for an empty list, so "nothing" stays empty output.
+    if (ss.length > 0)
+      c.io.out(line(['ID', 'NAME', 'TEMPLATE', 'MODE', 'STATE', 'EXPIRES'], 'OWNER'));
     for (const s of ss) {
-      // Sanitized before padding, so stripped control characters cannot skew the columns.
-      const cell = (v: string, width = 0) => sanitizeRemote(v).padEnd(width);
       const expiry =
-        when(s.expiresAt) +
-        (validLifetime(s.idleLifetimeS) ? ` (${lifetimeText(s.idleLifetimeS)})` : '');
-      const row = [
-        cell(s.id, 30),
-        cell(s.name ?? '-', 16),
-        cell(s.template, 12),
-        cell(s.mode, 15),
-        cell(stateText(s), 22),
-        // Padded (24-character date, 12 for the longest ` (2591999 s)`) only to align the owner.
-        all ? cell(expiry, 36) : expiry,
-        ...(all ? [cell(s.owner)] : []),
-      ].join(' ');
-      c.io.out(row + '\n');
+        s.state === 'terminated'
+          ? `ended ${relativeText(s.terminatedAt ?? s.expiresAt, nowS)}`
+          : // A live record past its deadline is clock skew: the control plane's state wins.
+            relativeText(Math.max(s.expiresAt, nowS), nowS);
+      c.io.out(line([s.id, s.name ?? '-', s.template, s.mode, stateText(s), expiry], s.owner));
     }
     return SBX_EXIT.ok;
   } catch (err) {

@@ -201,7 +201,9 @@ a repository's sandbox, in the order you use it:
                                                  id_* stay behind unless --include-secrets;
                                                  --max-push: refuse a tree over MiB, default 256;
                                                  --max-file: refuse a file over MiB, default 12)
-  mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
+  mocactl sbx ls [--all] [--include-deleted] [--json]
+                                                 your sandboxes (--all: everyone's; admins only;
+                                                 --include-deleted: also those ended by sbx rm)
   mocactl sbx doctor [--sandbox ID] [--json]     check login, sandbox, agent config, exec and recent
                                                  calls (exit 0 when every check passes, else 1;
                                                  --sandbox: the sandbox to check)
@@ -926,6 +928,7 @@ const SBX_OPTIONS = {
   signal: { type: 'string' },
   label: { type: 'string', multiple: true },
   all: { type: 'boolean' },
+  'include-deleted': { type: 'boolean' },
   json: { type: 'boolean' },
   ndjson: { type: 'boolean' },
   verify: { type: 'boolean' },
@@ -1178,6 +1181,10 @@ async function sbxMainWith(
   );
   if (flagMisuse) {
     io.err(`sbx: --${flagMisuse[0]} only applies to ${flagMisuse[1].join(' and ')}\n${usage}`);
+    return SBX_EXIT.usage;
+  }
+  if (values['include-deleted'] !== undefined && command !== 'ls') {
+    io.err(`sbx: --include-deleted only applies to ls\n${usage}`);
     return SBX_EXIT.usage;
   }
   if (values.record !== undefined && NO_RECORD.has(command)) {
@@ -1696,7 +1703,9 @@ async function sbxMainWith(
         ...(deps.execFactory ? { factory: deps.execFactory } : {}),
       });
     case 'ls':
-      return cmdLs(ctx, values.all === true);
+      return cmdLs(ctx, values.all === true, {
+        includeDeleted: values['include-deleted'] === true,
+      });
     case 'get':
       return cmdGet(ctx, id!, deps.execFactory);
     case 'mode':
