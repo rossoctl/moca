@@ -27,6 +27,7 @@ import {
   URL_,
   workspaces,
   type Handler,
+  MADE_UP_NAME,
 } from './helpers/sbx.js';
 
 // The template commands of mocactl (template lifecycle spec §4, §8): `sbx templates` with readiness
@@ -240,7 +241,10 @@ describe('create --template id@build, --seed', () => {
       }),
     });
     expect(await w.run(['create', '--template', `my-python@${BUILD_ID}`])).toBe(0);
-    expect(w.cp.calls.at(-1)!.body).toEqual({ template: `my-python@${BUILD_ID}` });
+    expect(w.cp.calls.at(-1)!.body).toEqual({
+      template: `my-python@${BUILD_ID}`,
+      name: expect.stringMatching(MADE_UP_NAME),
+    });
   });
 
   const seeded = (

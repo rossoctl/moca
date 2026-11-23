@@ -38,6 +38,7 @@ import {
   sandbox,
   tmp,
   withLeaseEvents,
+  MADE_UP_NAME,
 } from './helpers/sbx.js';
 
 afterEach(cleanupTmp);
@@ -79,7 +80,10 @@ describe('mocactl sbx up (SBX0 §6.1)', () => {
   it('uses the default template when none is given (spec §6.1)', async () => {
     const h = harness();
     expect(await h.run(['up'])).toBe(0);
-    expect(h.cp.posts()[0]!.body).toMatchObject({ template: 'default' });
+    expect(h.cp.posts()[0]!.body).toMatchObject({
+      template: 'default',
+      name: expect.stringMatching(MADE_UP_NAME),
+    });
     expect(binding(h.r).template).toBe('default');
   });
 
@@ -817,7 +821,7 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
 
   it('says in its usage that rm refuses while changes are not yet pulled, and takes --force', () => {
     const u = SBX_USAGE.replace(/\s+/g, ' ');
-    expect(u).toContain('mocactl sbx rm [ID] [--keep-config] [--force] [--json]');
+    expect(u).toContain('mocactl sbx rm [SANDBOX] [--keep-config] [--force] [--json]');
     expect(u).toContain('refused while the sandbox has changes not yet pulled, unless --force');
   });
 

@@ -493,3 +493,6 @@ export function withLeaseEvents(factory: ExecFactory, queue: LeaseEvent[][]): Ex
     };
   };
 }
+
+/** A default sandbox name: `adjective-surname` (src/sbx/names.ts). */
+export const MADE_UP_NAME = /^[a-z]+-[a-z]+$/;

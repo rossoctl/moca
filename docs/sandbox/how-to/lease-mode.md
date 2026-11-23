@@ -44,10 +44,10 @@ kept, everything else in the guest is gone.
 ## Check and change the mode
 
 ```bash
-mocactl sbx get [ID]                    # the mode, epoch and idle timeout, and the lease's state
-mocactl sbx mode lease [ID]             # change the mode (keeps the idle timeout unless given)
-mocactl sbx mode per-exec [ID]          # a downgrade to per-exec ends the lease
-mocactl sbx reset [ID]                  # end the lease now: the next command starts a new guest
+mocactl sbx get [SANDBOX]               # the mode, epoch and idle timeout, and the lease's state
+mocactl sbx mode lease [SANDBOX]        # change the mode (keeps the idle timeout unless given)
+mocactl sbx mode per-exec [SANDBOX]     # a downgrade to per-exec ends the lease
+mocactl sbx reset [SANDBOX]             # end the lease now: the next command starts a new guest
 ```
 
 - A worker that cannot be reached takes a mode change at its next command.

@@ -23,6 +23,7 @@ import {
   tmp,
   TOKEN,
   TOKEN_IAT,
+  MADE_UP_NAME,
 } from './helpers/sbx.js';
 
 afterEach(cleanupTmp);
@@ -109,7 +110,11 @@ describe('mocactl sbx create --mode (lease-mode spec §8.1, §8.2)', () => {
   it('create --mode lease sends set_mode with the minted token', async () => {
     const w = world();
     expect(await w.run(['create', '--template', 'node22', '--mode', 'lease'])).toBe(0);
-    expect(w.createBody()).toEqual({ template: 'node22', mode: 'lease' });
+    expect(w.createBody()).toEqual({
+      name: expect.stringMatching(MADE_UP_NAME),
+      template: 'node22',
+      mode: 'lease',
+    });
     // The create answers no set-mode token: one is minted, then sent once, on its own connection.
     expect(w.modeMints()).toBe(1);
     expect(w.lease.calls).toEqual([{ op: 'set_mode', token: 'smt-1' }]);
@@ -200,7 +205,11 @@ describe('mocactl sbx create --mode (lease-mode spec §8.1, §8.2)', () => {
   it('create --mode per-exec needs no TTY and sends no set_mode', async () => {
     const w = world({ tty: false });
     expect(await w.run(['create', '--mode', 'per-exec'])).toBe(0);
-    expect(w.createBody()).toEqual({ template: 'default', mode: 'per-exec' });
+    expect(w.createBody()).toEqual({
+      name: expect.stringMatching(MADE_UP_NAME),
+      template: 'default',
+      mode: 'per-exec',
+    });
     expect(w.modeMints()).toBe(0);
     expect(w.lease.calls).toEqual([]);
     expect(w.conns().opened).toBe(0);
@@ -209,7 +218,12 @@ describe('mocactl sbx create --mode (lease-mode spec §8.1, §8.2)', () => {
   it('--idle-timeout 900 reaches the body', async () => {
     const w = world();
     expect(await w.run(['create', '--mode', 'lease', '--idle-timeout', '900'])).toBe(0);
-    expect(w.createBody()).toEqual({ template: 'default', mode: 'lease', idleTimeoutS: 900 });
+    expect(w.createBody()).toEqual({
+      name: expect.stringMatching(MADE_UP_NAME),
+      template: 'default',
+      mode: 'lease',
+      idleTimeoutS: 900,
+    });
   });
 
   it('--idle-timeout must be a whole number of seconds, and only applies to create and mode', async () => {

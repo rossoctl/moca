@@ -417,7 +417,7 @@ export async function runDoctor(
       name: 'sandbox',
       ok: false,
       detail: 'no sandbox is bound here (no .sbx/sandbox.json)',
-      fix: `${UP} in the repository, or mocactl sbx doctor --sandbox ID`,
+      fix: `${UP} in the repository, or mocactl sbx doctor --sandbox SANDBOX`,
     });
   } else if (login.ok) {
     const s = await sandboxCheck(c, id);

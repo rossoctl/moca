@@ -26,8 +26,10 @@ import {
   setModeFailureText,
   type SetModeOutcome,
 } from './mode.js';
+import { sandboxName } from './names.js';
 import { afterText, lifetimeNotTakenText, relativeText } from './lifetime.js';
 import { forgetNotices } from './notices.js';
+import { SANDBOX_ID_RE } from './state.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
 /**
@@ -58,6 +60,8 @@ export interface SbxCtx {
    */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
+  /** The default sandbox name's pick, 0 to 1 (default Math.random); tests pass a fake. */
+  random?: () => number;
   /**
    * The control-plane URL when it came from `--control-plane-url` or MOCACTL_SBX_URL rather than
    * config.json: `SBX_TOKEN_CMD` then names it, since another shell may have neither.
@@ -404,21 +408,45 @@ export async function cmdTransferTemplate(c: SbxCtx, id: string, owner: string):
 /** How long `sbx create` and `sbx up` wait for a template to become active (§6.4) before giving up. */
 const ACTIVATION_WAIT_MS = 10 * 60_000;
 
+/** ` named eager-hopper`, or nothing for a record with no name (a control plane that dropped it). */
+export const namedText = (s: { name?: string | null }): string =>
+  s.name ? ` named ${sanitizeRemote(s.name)}` : '';
+
+/** Tries at a default name before a `name_conflict` is the user's to see. */
+const NAME_TRIES = 5;
+
 /**
  * Creates a sandbox, waiting while its template activates (template lifecycle spec §6.4): a
  * `409 template_not_active` means the control plane has started the activation (or, with no lease
  * to take, is waiting for a host), so the create is retried after its Retry-After, saying why, until
- * ACTIVATION_WAIT_MS. Any other refusal is thrown.
+ * ACTIVATION_WAIT_MS. With no name given, one is made up (`adjective-surname`), and a
+ * `409 name_conflict` on it is retried with another, up to NAME_TRIES: the user did not pick it, so
+ * a clash is not theirs to fix. A name the user gave stays theirs: its clash is thrown. Any other
+ * refusal is thrown.
  */
 export async function createWaitingForActivation(
   c: SbxCtx,
-  body: { template: string; name?: string; labels?: Record<string, string> },
+  given: { template: string; name?: string; labels?: Record<string, string> },
 ): Promise<SbxSandbox & { buildId?: string | null; templateManifestHash?: string | null }> {
   const start = c.rt.now();
+  const madeUp = given.name === undefined;
+  const named = () => (madeUp ? { ...given, name: sandboxName(c.random) } : given);
+  let body = named();
+  let nameTries = 1;
   for (;;) {
     try {
       return await c.api.createSandbox(body);
     } catch (err) {
+      if (
+        madeUp &&
+        err instanceof ApiError &&
+        err.code === 'name_conflict' &&
+        nameTries < NAME_TRIES
+      ) {
+        nameTries += 1;
+        body = named();
+        continue;
+      }
       if (!(err instanceof ApiError && err.status === 409 && err.code === 'template_not_active'))
         throw err;
       const left = ACTIVATION_WAIT_MS - (c.rt.now() - start);
@@ -449,7 +477,7 @@ export async function cmdCreate(
     const s = await createWaitingForActivation(c, body);
     const id = sanitizeRemote(s.id);
     c.io.err(
-      `created ${id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}${afterText(s)}`,
+      `created ${id}${namedText(s)} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}${afterText(s)}`,
     );
     // A control plane from before modes ignores the body's mode: say so, never a silent per-exec.
     if (body.mode !== undefined && s.mode !== body.mode) {
@@ -544,11 +572,46 @@ function stateText(s: SbxSandbox): string {
 }
 
 /**
- * `sbx ls`. A deleted sandbox is left out, in the table and in --json alike, unless
- * `includeDeleted`: it was ended on purpose, so it is noise in a list of what one has. An expired
- * one stays, since nobody chose to end it. EXPIRES is relative: a live sandbox's deadline, an
- * ended one's end. The idle lifetime is `sbx get`'s.
+ * A sandbox name as the control plane accepts one at create (`sandbox-handlers.ts` NAME_RE).
+ * Checked before the name is looked up, so an argument that is neither an id nor a name (a path,
+ * say) is a usage error with no request made.
  */
+export const SANDBOX_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/**
+ * The id of the caller's live sandbox named `name` (`create --name`/`up --name`), or the exit
+ * code after saying why there is none. The control plane keeps names unique among one owner's
+ * live sandboxes, so one match is the answer; a terminated one of the name is not (it takes no
+ * more commands, and a new one may reuse its name). The match's id is checked as an id typed
+ * would be: it goes into URLs, the flight recorder's file name and Codex's TOML override.
+ */
+export async function resolveSandboxName(c: SbxCtx, name: string): Promise<string | number> {
+  let ss: SbxSandbox[];
+  try {
+    ss = await c.api.listSandboxes();
+  } catch (err) {
+    return failed(c, err);
+  }
+  const live = ss.filter((s) => s.name === name && s.state === 'ready');
+  if (live.length === 1) {
+    const found = live[0]!.id;
+    if (SANDBOX_ID_RE.test(found)) return found;
+    c.io.err(
+      `sbx: the control plane answered '${sanitizeRemote(name)}' with '${sanitizeRemote(found)}', which is not a sandbox id (sbx-…)`,
+    );
+    return SBX_EXIT.failed;
+  }
+  if (live.length === 0) {
+    c.io.err(`sbx: you have no live sandbox named '${sanitizeRemote(name)}' (see mocactl sbx ls)`);
+  } else {
+    const ids = live.map((s) => sanitizeRemote(s.id)).join(', ');
+    c.io.err(
+      `sbx: more than one live sandbox is named '${sanitizeRemote(name)}': ${ids}; use its id`,
+    );
+  }
+  return SBX_EXIT.failed;
+}
+
 /**
  * EXPIRES: a live sandbox's deadline, `in 6 d`; an ended one's end, `ended 2 h ago`, or just
  * `ended` when the record says no end time and its deadline is still ahead (a control plane that
@@ -563,6 +626,12 @@ function expiryText(s: SbxSandbox, nowS: number): string {
   return end === undefined ? 'ended' : `ended ${relativeText(Math.min(end, nowS), nowS)}`;
 }
 
+/**
+ * `sbx ls`. A deleted sandbox is left out, in the table and in --json alike, unless
+ * `includeDeleted`: it was ended on purpose, so it is noise in a list of what one has. An expired
+ * one stays, since nobody chose to end it. EXPIRES is relative: a live sandbox's deadline, an
+ * ended one's end. The idle lifetime is `sbx get`'s.
+ */
 export async function cmdLs(
   c: SbxCtx,
   all: boolean,
