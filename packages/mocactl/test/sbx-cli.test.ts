@@ -655,9 +655,20 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     const cp = fakeCp({});
     expect(await sbxMain(['templates'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(2);
     const err = io.errs.join('');
+    // A pointer for an old script or habit first: bare `templates` once listed the templates.
+    expect(err).toMatch(
+      /^sbx: templates needs a subcommand; to list the templates, use 'mocactl sbx templates ls'\nusage:\n/,
+    );
     expect(err).toContain('mocactl sbx templates ls [--json]');
     expect(err).toContain('mocactl sbx templates create --spec F');
     expect(err).not.toContain('mocactl sbx credentials');
+    expect(io.outs.join('')).toBe('');
+    expect(cp.calls).toEqual([]);
+    io.errs.length = 0;
+    expect(await sbxMain(['templates', '--json'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(
+      2,
+    );
+    expect(io.errs.join('')).toContain("use 'mocactl sbx templates ls'");
     expect(io.outs.join('')).toBe('');
     expect(cp.calls).toEqual([]);
     expect(

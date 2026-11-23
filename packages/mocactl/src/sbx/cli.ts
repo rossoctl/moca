@@ -1348,9 +1348,12 @@ async function sbxMainWith(
     sizes[flag] = n * 2 ** 20;
   }
   const { 'max-push': maxPush, 'max-file': maxFile } = sizes;
-  // Bare `templates` lists its subcommands (`templates ls` lists the templates), as bare `sbx` does.
+  // Bare `templates` lists its subcommands, as bare `sbx` does, first pointing an old script or
+  // habit (bare `templates` once listed the templates) at `templates ls`.
   if (command === 'templates' && arg === undefined) {
-    io.err(usage);
+    io.err(
+      `sbx: templates needs a subcommand; to list the templates, use 'mocactl sbx templates ls'\n${usage}`,
+    );
     return SBX_EXIT.usage;
   }
   // `run` takes everything after the command (after `--`) as CMD; `put` exactly one PATH; rm, token,
