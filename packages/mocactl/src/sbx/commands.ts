@@ -29,6 +29,7 @@ import {
 import { sandboxName } from './names.js';
 import { afterText, lifetimeNotTakenText, lifetimeText, validLifetime } from './lifetime.js';
 import { forgetNotices } from './notices.js';
+import { SANDBOX_ID_RE } from './state.js';
 import { seedSandbox, type SeedResult } from './templates.js';
 
 /**
@@ -568,6 +569,47 @@ async function sendCreatedMode(
 function stateText(s: SbxSandbox): string {
   if (s.state !== 'terminated') return s.state;
   return s.reason ? `terminated (${s.reason})` : 'terminated';
+}
+
+/**
+ * A sandbox name as the control plane accepts one at create (`sandbox-handlers.ts` NAME_RE).
+ * Checked before the name is looked up, so an argument that is neither an id nor a name (a path,
+ * say) is a usage error with no request made.
+ */
+export const SANDBOX_NAME_RE = /^[a-z0-9][a-z0-9-]{0,62}$/;
+
+/**
+ * The id of the caller's live sandbox named `name` (`create --name`/`up --name`), or the exit
+ * code after saying why there is none. The control plane keeps names unique among one owner's
+ * live sandboxes, so one match is the answer; a terminated one of the name is not (it takes no
+ * more commands, and a new one may reuse its name). The match's id is checked as an id typed
+ * would be: it goes into URLs, the flight recorder's file name and Codex's TOML override.
+ */
+export async function resolveSandboxName(c: SbxCtx, name: string): Promise<string | number> {
+  let ss: SbxSandbox[];
+  try {
+    ss = await c.api.listSandboxes();
+  } catch (err) {
+    return failed(c, err);
+  }
+  const live = ss.filter((s) => s.name === name && s.state === 'ready');
+  if (live.length === 1) {
+    const found = live[0]!.id;
+    if (SANDBOX_ID_RE.test(found)) return found;
+    c.io.err(
+      `sbx: the control plane answered '${sanitizeRemote(name)}' with '${sanitizeRemote(found)}', which is not a sandbox id (sbx-…)`,
+    );
+    return SBX_EXIT.failed;
+  }
+  if (live.length === 0) {
+    c.io.err(`sbx: you have no live sandbox named '${sanitizeRemote(name)}' (see mocactl sbx ls)`);
+  } else {
+    const ids = live.map((s) => sanitizeRemote(s.id)).join(', ');
+    c.io.err(
+      `sbx: more than one live sandbox is named '${sanitizeRemote(name)}': ${ids}; use its id`,
+    );
+  }
+  return SBX_EXIT.failed;
 }
 
 export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {

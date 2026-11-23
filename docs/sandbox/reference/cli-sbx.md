@@ -92,9 +92,9 @@ a repository's sandbox, in the order you use it:
                                                  Its shell tool is off, but unified_exec cannot be
                                                  disabled, so local execution is restricted, not
                                                  denied: use Codex's own sandbox_mode as well
-  mocactl sbx mcp [--sandbox ID]                 the stdio MCP server for Claude Code / OpenCode
+  mocactl sbx mcp [--sandbox SANDBOX]            the stdio MCP server for Claude Code / OpenCode
                                                  (--sandbox: the sandbox it serves)
-  mocactl sbx run [--sandbox ID] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
+  mocactl sbx run [--sandbox SANDBOX] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
                                                  (CMD's words are quoted, so they run exactly as typed:
                                                  for pipes, $VARS or globs use stdin or -- sh -c '...';
                                                  exit: the command's code; 124 timed out or killed;
@@ -104,7 +104,7 @@ a repository's sandbox, in the order you use it:
                                                  interrupted; --timeout: S seconds, by default and
                                                  at most the sandbox token's lifetime minus 60 s;
                                                  --sandbox: the sandbox to run it in)
-  mocactl sbx put PATH [--sandbox ID]            write stdin to PATH under /workspace
+  mocactl sbx put PATH [--sandbox SANDBOX]       write stdin to PATH under /workspace
                                                  (a refusal before start: retried, 75, as run's;
                                                  --sandbox: the sandbox to write to)
   mocactl sbx pull [--apply] [-o FILE]           the sandbox's changes as a patch, on stdout or in
@@ -118,10 +118,11 @@ a repository's sandbox, in the order you use it:
                                                  --max-push: refuse a tree over MiB, default 256;
                                                  --max-file: refuse a file over MiB, default 12)
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
-  mocactl sbx doctor [--sandbox ID] [--json]     check login, sandbox, agent config, exec and recent
+  mocactl sbx doctor [--sandbox SANDBOX] [--json]
+                                                 check login, sandbox, agent config, exec and recent
                                                  calls (exit 0 when every check passes, else 1;
                                                  --sandbox: the sandbox to check)
-  mocactl sbx rm [ID] [--keep-config] [--force] [--json]
+  mocactl sbx rm [SANDBOX] [--keep-config] [--force] [--json]
                                                  delete a sandbox (its lease ended first); for the
                                                  bound one, also take back the agent configuration
                                                  sbx up added, and .sbx/ (unless --keep-config)
@@ -154,10 +155,10 @@ a sandbox by hand: create one, its lease and processes, a direct client:
                                                  14d, 90m or seconds; at least 1 h) without use
                                                  (default: the deployment's, 7 d; at most its
                                                  maximum, 30 d by default)
-  mocactl sbx get [ID] [--json]                  a sandbox's mode, epoch and idle timeout, and its
+  mocactl sbx get [SANDBOX] [--json]             a sandbox's mode, epoch and idle timeout, and its
                                                  lease's state (a lease mode the worker has not
                                                  taken yet is sent again)
-  mocactl sbx mode per-exec|lease|lease+processes [ID] [--idle-timeout S]
+  mocactl sbx mode per-exec|lease|lease+processes [SANDBOX] [--idle-timeout S]
                                                  change the sandbox's mode (an upgrade only from a
                                                  terminal; --idle-timeout: the lease's S idle
                                                  seconds, kept unless given); a
@@ -165,32 +166,32 @@ a sandbox by hand: create one, its lease and processes, a direct client:
                                                  command; a downgrade to per-exec ends the lease;
                                                  lease+processes to lease keeps it and stops the
                                                  tracked processes (it prints those it stopped)
-  mocactl sbx reset [ID]                         end the sandbox's lease: the next command starts a
+  mocactl sbx reset [SANDBOX]                    end the sandbox's lease: the next command starts a
                                                  new guest (/tmp, installs outside /workspace and
                                                  background processes are gone)
-  mocactl sbx proc start [--name N] [--cwd D] [ID] -- CMD ...
+  mocactl sbx proc start [--name N] [--cwd D] [SANDBOX] -- CMD ...
                                                  start CMD as a tracked process, which outlives the
                                                  command (lease+processes only; CMD quoted as run's;
                                                  --cwd: D, inside /workspace; --name: N, unique
                                                  among the running ones); prints its id, name and pid
-  mocactl sbx proc ls [ID] [--json]              the tracked processes: id, name, pid, state
+  mocactl sbx proc ls [SANDBOX] [--json]         the tracked processes: id, name, pid, state
                                                  (running, exited(code) or killed(signal)), age and
                                                  memory; an exited one stays until the lease ends
-  mocactl sbx proc logs (NAME|ID) [--tail N] [--raw] [ID]
+  mocactl sbx proc logs (NAME|ID) [--tail N] [--raw] [SANDBOX]
                                                  the last N lines (--tail, default 200) of a tracked
                                                  process's stdout and stderr; on a terminal its
                                                  control sequences are removed (--raw keeps them;
                                                  piped output is always as written)
-  mocactl sbx proc stop (NAME|ID) [--signal S] [ID]
+  mocactl sbx proc stop (NAME|ID) [--signal S] [SANDBOX]
                                                  send signal S (--signal, default TERM), then kill
                                                  what is left after 10 s; prints its final state
                                                  (the process: its name, or its id, p<n> or n; the
-                                                 last ID is the sandbox's)
-  mocactl sbx token [ID] [--renew-every S] [--json]
+                                                 SANDBOX is the sandbox's)
+  mocactl sbx token [SANDBOX] [--renew-every S] [--json]
                                                  print a fresh sandbox token (15 minutes by default);
                                                  --renew-every: a new line every S seconds until stopped
-  mocactl sbx env [ID]                           shell exports for a direct sandbox/v1 client
-  mocactl sbx egress [ID] [--json | --ndjson | --verify]
+  mocactl sbx env [SANDBOX]                      shell exports for a direct sandbox/v1 client
+  mocactl sbx egress [SANDBOX] [--json | --ndjson | --verify]
                                                  what the sandbox reached through its host's egress
                                                  proxy: per host, and whether the log is complete;
                                                  --ndjson prints the log whose sha256 its end record names;
@@ -339,7 +340,8 @@ Every command's sandbox commands are also recorded in the flight recorder,
 the command or its output), per tool call for `sbx mcp`. MOCACTL_SBX_RUN_ID (optional) labels
 them.
 --json: print the result as JSON on stdout, for a script.
-ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
+SANDBOX (or --sandbox SANDBOX) is a sandbox's id or its name (create's or up's --name; a name
+that looks like an id is taken as one), and defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, the one remembered at
 login, or the login's own (a login minted by an operator). `up` skips the bound sandbox's, and
 rebinds, when this machine has a login for the remembered (or login's) one and none for it. The

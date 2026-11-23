@@ -43,6 +43,8 @@ import {
   cmdTransferTemplate,
   cmdUntagTemplate,
   failRefresh,
+  resolveSandboxName,
+  SANDBOX_NAME_RE,
   SBX_EXIT,
   type SbxCtx,
 } from './commands.js';
@@ -177,9 +179,9 @@ a repository's sandbox, in the order you use it:
                                                  Its shell tool is off, but unified_exec cannot be
                                                  disabled, so local execution is restricted, not
                                                  denied: use Codex's own sandbox_mode as well
-  mocactl sbx mcp [--sandbox ID]                 the stdio MCP server for Claude Code / OpenCode
+  mocactl sbx mcp [--sandbox SANDBOX]            the stdio MCP server for Claude Code / OpenCode
                                                  (--sandbox: the sandbox it serves)
-  mocactl sbx run [--sandbox ID] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
+  mocactl sbx run [--sandbox SANDBOX] [--timeout S] [-- CMD ...]   run CMD (or the script on stdin) in /workspace
                                                  (CMD's words are quoted, so they run exactly as typed:
                                                  for pipes, $VARS or globs use stdin or -- sh -c '...';
                                                  exit: the command's code; 124 timed out or killed;
@@ -189,7 +191,7 @@ a repository's sandbox, in the order you use it:
                                                  interrupted; --timeout: S seconds, by default and
                                                  at most the sandbox token's lifetime minus 60 s;
                                                  --sandbox: the sandbox to run it in)
-  mocactl sbx put PATH [--sandbox ID]            write stdin to PATH under /workspace
+  mocactl sbx put PATH [--sandbox SANDBOX]       write stdin to PATH under /workspace
                                                  (a refusal before start: retried, 75, as run's;
                                                  --sandbox: the sandbox to write to)
   mocactl sbx pull [--apply] [-o FILE]           the sandbox's changes as a patch, on stdout or in
@@ -203,10 +205,11 @@ a repository's sandbox, in the order you use it:
                                                  --max-push: refuse a tree over MiB, default 256;
                                                  --max-file: refuse a file over MiB, default 12)
   mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
-  mocactl sbx doctor [--sandbox ID] [--json]     check login, sandbox, agent config, exec and recent
+  mocactl sbx doctor [--sandbox SANDBOX] [--json]
+                                                 check login, sandbox, agent config, exec and recent
                                                  calls (exit 0 when every check passes, else 1;
                                                  --sandbox: the sandbox to check)
-  mocactl sbx rm [ID] [--keep-config] [--force] [--json]
+  mocactl sbx rm [SANDBOX] [--keep-config] [--force] [--json]
                                                  delete a sandbox (its lease ended first); for the
                                                  bound one, also take back the agent configuration
                                                  sbx up added, and .sbx/ (unless --keep-config)
@@ -239,10 +242,10 @@ a sandbox by hand: create one, its lease and processes, a direct client:
                                                  14d, 90m or seconds; at least 1 h) without use
                                                  (default: the deployment's, 7 d; at most its
                                                  maximum, 30 d by default)
-  mocactl sbx get [ID] [--json]                  a sandbox's mode, epoch and idle timeout, and its
+  mocactl sbx get [SANDBOX] [--json]             a sandbox's mode, epoch and idle timeout, and its
                                                  lease's state (a lease mode the worker has not
                                                  taken yet is sent again)
-  mocactl sbx mode per-exec|lease|lease+processes [ID] [--idle-timeout S]
+  mocactl sbx mode per-exec|lease|lease+processes [SANDBOX] [--idle-timeout S]
                                                  change the sandbox's mode (an upgrade only from a
                                                  terminal; --idle-timeout: the lease's S idle
                                                  seconds, kept unless given); a
@@ -250,32 +253,32 @@ a sandbox by hand: create one, its lease and processes, a direct client:
                                                  command; a downgrade to per-exec ends the lease;
                                                  lease+processes to lease keeps it and stops the
                                                  tracked processes (it prints those it stopped)
-  mocactl sbx reset [ID]                         end the sandbox's lease: the next command starts a
+  mocactl sbx reset [SANDBOX]                    end the sandbox's lease: the next command starts a
                                                  new guest (/tmp, installs outside /workspace and
                                                  background processes are gone)
-  mocactl sbx proc start [--name N] [--cwd D] [ID] -- CMD ...
+  mocactl sbx proc start [--name N] [--cwd D] [SANDBOX] -- CMD ...
                                                  start CMD as a tracked process, which outlives the
                                                  command (lease+processes only; CMD quoted as run's;
                                                  --cwd: D, inside /workspace; --name: N, unique
                                                  among the running ones); prints its id, name and pid
-  mocactl sbx proc ls [ID] [--json]              the tracked processes: id, name, pid, state
+  mocactl sbx proc ls [SANDBOX] [--json]         the tracked processes: id, name, pid, state
                                                  (running, exited(code) or killed(signal)), age and
                                                  memory; an exited one stays until the lease ends
-  mocactl sbx proc logs (NAME|ID) [--tail N] [--raw] [ID]
+  mocactl sbx proc logs (NAME|ID) [--tail N] [--raw] [SANDBOX]
                                                  the last N lines (--tail, default 200) of a tracked
                                                  process's stdout and stderr; on a terminal its
                                                  control sequences are removed (--raw keeps them;
                                                  piped output is always as written)
-  mocactl sbx proc stop (NAME|ID) [--signal S] [ID]
+  mocactl sbx proc stop (NAME|ID) [--signal S] [SANDBOX]
                                                  send signal S (--signal, default TERM), then kill
                                                  what is left after 10 s; prints its final state
                                                  (the process: its name, or its id, p<n> or n; the
-                                                 last ID is the sandbox's)
-  mocactl sbx token [ID] [--renew-every S] [--json]
+                                                 SANDBOX is the sandbox's)
+  mocactl sbx token [SANDBOX] [--renew-every S] [--json]
                                                  print a fresh sandbox token (15 minutes by default);
                                                  --renew-every: a new line every S seconds until stopped
-  mocactl sbx env [ID]                           shell exports for a direct sandbox/v1 client
-  mocactl sbx egress [ID] [--json | --ndjson | --verify]
+  mocactl sbx env [SANDBOX]                      shell exports for a direct sandbox/v1 client
+  mocactl sbx egress [SANDBOX] [--json | --ndjson | --verify]
                                                  what the sandbox reached through its host's egress
                                                  proxy: per host, and whether the log is complete;
                                                  --ndjson prints the log whose sha256 its end record names;
@@ -424,7 +427,8 @@ Every command's sandbox commands are also recorded in the flight recorder,
 the command or its output), per tool call for \`sbx mcp\`. MOCACTL_SBX_RUN_ID (optional) labels
 them.
 --json: print the result as JSON on stdout, for a script.
-ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
+SANDBOX (or --sandbox SANDBOX) is a sandbox's id or its name (create's or up's --name; a name
+that looks like an id is taken as one), and defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, the one remembered at
 login, or the login's own (a login minted by an operator). \`up\` skips the bound sandbox's, and
 rebinds, when this machine has a login for the remembered (or login's) one and none for it. The
@@ -521,9 +525,10 @@ function sbxCommandUsage(words: string[], opts: { forError?: boolean } = {}): st
   const body = commandUsage(SBX_USAGE, '  mocactl sbx ', words);
   if (body === undefined) return undefined;
   const notes = [
-    // A sandbox ID (`[ID]`, `--sandbox ID`), not `--id ID` or `--preset ID`.
-    /\[ID\]|--sandbox ID/.test(body)
-      ? 'ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json.'
+    // A sandbox (`[SANDBOX]`, `--sandbox SANDBOX`), not `--id ID` or `--preset ID`.
+    /\[SANDBOX\]|--sandbox SANDBOX/.test(body)
+      ? "SANDBOX (or --sandbox SANDBOX) is a sandbox's id or its name, matched among your live\n" +
+        'sandboxes, and defaults to the sandbox in the nearest .sbx/sandbox.json.'
       : undefined,
     /--json\b/.test(body) ? '--json: print the result as JSON on stdout, for a script.' : undefined,
     words[0] !== undefined && !NO_RECORD.has(words[0])
@@ -783,9 +788,9 @@ const TEMPLATE_ONE_ID = [
  * and retire's only with --wait). */
 const TAKES_BUILD = ['show', 'follow', 'cancel', 'tag', 'activate', 'retire'];
 const TAKES_TIMEOUT = ['follow', 'create', 'build', 'activate', 'retire'];
-/** The commands that act on one sandbox: `[ID]` as an argument (or `--sandbox ID`). */
+/** The commands that act on one sandbox: `[SANDBOX]` as an argument (or `--sandbox SANDBOX`). */
 const TAKES_ID_ARG = new Set(['rm', 'token', 'env', 'get', 'reset', 'egress']);
-/** The commands that act on one sandbox through `--sandbox ID` only. */
+/** The commands that act on one sandbox through `--sandbox SANDBOX` only. */
 const TAKES_SANDBOX_FLAG = new Set([
   'run',
   'put',
@@ -984,7 +989,7 @@ async function sbxMainWith(
       args: argv,
       allowPositionals: true,
       strict: true,
-      // `proc start [ID] -- CMD`: where `--` was tells the ID from the command.
+      // `proc start [SANDBOX] -- CMD`: where `--` was tells the sandbox from the command.
       tokens: true,
       options: SBX_OPTIONS,
     });
@@ -1401,7 +1406,7 @@ async function sbxMainWith(
     if (l === null) return SBX_EXIT.usage;
     upLifetime = l;
   }
-  // `mode MODE [ID]`: the mode is checked before anything else is looked at.
+  // `mode MODE [SANDBOX]`: the mode is checked before anything else is looked at.
   if (command === 'mode') {
     if (arg === undefined) {
       io.err(
@@ -1429,7 +1434,7 @@ async function sbxMainWith(
     proc = r.args;
     procId = r.sandbox;
   }
-  // `[ID]` as an argument: the one after the command, after `mode`'s MODE, or proc's.
+  // `[SANDBOX]` as an argument: the one after the command, after `mode`'s MODE, or proc's.
   const idArg =
     command === 'mode'
       ? extra[0]
@@ -1438,8 +1443,15 @@ async function sbxMainWith(
         : TAKES_ID_ARG.has(command)
           ? arg
           : undefined;
+  // A sandbox named by its name rather than its id (an argument or --sandbox, never the binding,
+  // which holds an id): looked up once the API is open. A name shaped like an id (`sbx-abc`) is
+  // taken as the id.
+  let byName: string | undefined;
   if (TAKES_SANDBOX_FLAG.has(command)) {
     id = idArg ?? values.sandbox;
+    if (id !== undefined && !SANDBOX_ID_RE.test(id) && SANDBOX_NAME_RE.test(id)) {
+      byName = id;
+    }
     if (id === undefined) {
       const bound = readBinding(root ?? deps.cwd ?? process.cwd());
       id = bound?.id;
@@ -1449,13 +1461,13 @@ async function sbxMainWith(
     if (!id && command !== 'doctor') {
       io.err(
         TAKES_ID_ARG.has(command) || command === 'mode' || command === 'proc'
-          ? `sbx: ${command} needs a sandbox id (or a .sbx/sandbox.json in this repository)`
-          : `sbx: ${command} needs --sandbox ID (or a .sbx/sandbox.json in this repository)`,
+          ? `sbx: ${command} needs a sandbox id or name (or a .sbx/sandbox.json in this repository)`
+          : `sbx: ${command} needs --sandbox SANDBOX (an id or name; or a .sbx/sandbox.json in this repository)`,
       );
       return SBX_EXIT.usage;
     }
-    if (id !== undefined && !SANDBOX_ID_RE.test(id)) {
-      io.err(`sbx: '${sanitizeRemote(id)}' is not a sandbox id (sbx-…)`);
+    if (id !== undefined && byName === undefined && !SANDBOX_ID_RE.test(id)) {
+      io.err(`sbx: '${sanitizeRemote(id)}' is not a sandbox id (sbx-…) or name`);
       return SBX_EXIT.usage;
     }
   }
@@ -1630,6 +1642,14 @@ async function sbxMainWith(
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.random ? { random: deps.random } : {}),
   };
+  if (byName !== undefined) {
+    const found = await resolveSandboxName(ctx, byName);
+    if (typeof found === 'number') return found;
+    id = found;
+  }
+  // claude and codex pass an explicit sandbox on to the `sbx mcp` they start: as the id it resolved
+  // to, which codex's TOML can carry only because an id needs no escaping.
+  const sandboxFlag = values.sandbox !== undefined ? id : undefined;
 
   switch (command) {
     case 'login':
@@ -1769,7 +1789,7 @@ async function sbxMainWith(
         ctx,
         positionals.slice(1),
         deps.claude ?? {},
-        values.sandbox,
+        sandboxFlag,
         values['control-plane-url'] !== undefined ? ctx.url : undefined,
         await repoRoot(cwd).then(cortexMode, () => false),
       );
@@ -1783,7 +1803,7 @@ async function sbxMainWith(
         ctx,
         positionals.slice(1),
         deps.codex ?? {},
-        values.sandbox,
+        sandboxFlag,
         values['control-plane-url'] !== undefined ? ctx.url : undefined,
       );
     case 'up':

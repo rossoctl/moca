@@ -99,7 +99,8 @@ export function parseProcArgs(
   const one = (xs: string[]) => (xs[0] !== undefined ? { sandbox: xs[0] } : {});
   switch (s) {
     case 'start': {
-      if (!command?.length) return 'proc start needs a command: mocactl sbx proc start [ID] -- CMD';
+      if (!command?.length)
+        return 'proc start needs a command: mocactl sbx proc start [SANDBOX] -- CMD';
       if (rest.length > 1) return tooMany;
       // The guest's name rule, id-shaped names refused (P5-R33), in the guest's words.
       const bad = v.name !== undefined ? processNameProblem(v.name) : undefined;

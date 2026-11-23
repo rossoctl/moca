@@ -53,7 +53,7 @@ session: `--strict-mcp-config` means Claude Code loads no MCP server but the san
 
 The launcher denies Claude Code's local tools itself, with `--disallowed-tools` and the same
 list `up` writes. That covers directories with no `.claude/settings.json` from `up`, such as
-`mocactl sbx claude --sandbox ID` outside a repository. `--strict-mcp-config` alone limits only
+`mocactl sbx claude --sandbox SANDBOX` outside a repository. `--strict-mcp-config` alone limits only
 the MCP servers, not the built-in tools. In a repository `up --cortex` set up, the launcher
 leaves the local tools to Cortex, as `up` does, and says so when it starts.
 

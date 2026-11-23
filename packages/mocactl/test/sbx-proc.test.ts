@@ -184,7 +184,7 @@ describe('mocactl sbx proc start (spec §7, P5-R31)', () => {
     const n = world();
     expect(await n.run(['proc', 'ls'])).toBe(2);
     expect(n.err()).toContain(
-      'sbx: proc needs a sandbox id (or a .sbx/sandbox.json in this repository)',
+      'sbx: proc needs a sandbox id or name (or a .sbx/sandbox.json in this repository)',
     );
     expect(n.cp.calls).toEqual([]);
   });
@@ -193,7 +193,7 @@ describe('mocactl sbx proc start (spec §7, P5-R31)', () => {
     const w = world();
     expect(await w.run(['proc', 'start', SBX])).toBe(2);
     expect(w.err()).toContain(
-      'sbx: proc start needs a command: mocactl sbx proc start [ID] -- CMD',
+      'sbx: proc start needs a command: mocactl sbx proc start [SANDBOX] -- CMD',
     );
     expect(await w.run(['proc', 'start', SBX, '--'])).toBe(2);
     expect(await w.run(['proc', 'start', 'sleep', '100'])).toBe(2);
@@ -350,11 +350,11 @@ describe('mocactl sbx proc: usage', () => {
     const w = world();
     // `sbx --help` gives proc one line; `sbx proc --help` lists its commands.
     expect(await w.run(['proc', '--help'])).toBe(0);
-    expect(w.out()).toContain('mocactl sbx proc start [--name N] [--cwd D] [ID] -- CMD ...');
-    expect(w.out()).toContain('mocactl sbx proc ls [ID] [--json]');
-    expect(w.out()).toContain('mocactl sbx proc logs (NAME|ID) [--tail N] [--raw] [ID]');
+    expect(w.out()).toContain('mocactl sbx proc start [--name N] [--cwd D] [SANDBOX] -- CMD ...');
+    expect(w.out()).toContain('mocactl sbx proc ls [SANDBOX] [--json]');
+    expect(w.out()).toContain('mocactl sbx proc logs (NAME|ID) [--tail N] [--raw] [SANDBOX]');
     expect(w.out()).toContain('control sequences are removed (--raw keeps them;');
-    expect(w.out()).toContain('mocactl sbx proc stop (NAME|ID) [--signal S] [ID]');
+    expect(w.out()).toContain('mocactl sbx proc stop (NAME|ID) [--signal S] [SANDBOX]');
   });
 
   it('the mode help says a downgrade to lease keeps the lease (plan 5)', async () => {

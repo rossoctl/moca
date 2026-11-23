@@ -204,7 +204,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       const logs = await help('proc', 'logs');
       expect(logs).toContain('mocactl sbx proc logs (NAME|ID)');
       expect(logs).not.toContain('mocactl sbx proc start');
-      expect(logs).toContain('.sbx/sandbox.json'); // its [ID] is the sandbox's
+      expect(logs).toContain('.sbx/sandbox.json'); // its [SANDBOX] is the sandbox's
     });
 
     it('two forms that share one description stay together (templates quota)', async () => {
@@ -223,10 +223,10 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     });
 
     it('a word that is not a subcommand is ignored: run -- CMD, an id', async () => {
-      expect(await help('rm', 'sbx-123')).toContain('mocactl sbx rm [ID]');
+      expect(await help('rm', 'sbx-123')).toContain('mocactl sbx rm [SANDBOX]');
       const { env, io } = setup();
       expect(await main(['sbx', 'run', '--help', '--', 'ls'], env, io)).toBe(0);
-      expect(io.outs.join('')).toContain('mocactl sbx run [--sandbox ID]');
+      expect(io.outs.join('')).toContain('mocactl sbx run [--sandbox SANDBOX]');
       expect(io.outs.join('')).not.toContain('mocactl sbx put');
     });
 

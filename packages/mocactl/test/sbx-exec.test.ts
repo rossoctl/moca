@@ -525,7 +525,7 @@ describe('mocactl sbx run (SBX0 §6.1, §6.5)', () => {
   it('needs a sandbox: --sandbox or a .sbx/sandbox.json (exit 2)', async () => {
     const { home, env, io } = setup();
     expect(await sbxMain(['run', '--', 'ls'], env, io, { home, cwd: tmpdir() })).toBe(2);
-    expect(io.errs.join('\n')).toMatch(/--sandbox ID/);
+    expect(io.errs.join('\n')).toMatch(/--sandbox SANDBOX/);
   });
 
   it('reports a terminated sandbox through the control-plane path, naming why', async () => {
