@@ -18,8 +18,15 @@ export const NOTIFY_STATES: readonly TurnState[] = TURN_STATES.filter(
   (s) => s !== 'queued' && s !== 'running',
 );
 
-/** Paused and failed: the two an away owner can act on. Everything else is opt-in. */
-export const DEFAULT_NOTIFY_STATES: readonly TurnState[] = ['paused', 'failed'];
+/**
+ * The three an away owner can act on. Everything else is opt-in.
+ *
+ * `lost` is in here and not merely allowed: the reaper writes it for a turn nobody ever picked up,
+ * so it is the one state that leaves NO other trace -- no result, no reason, nothing in the session
+ * to find later. Left opt-in, the owner most in need of paging (one whose deployment is not draining
+ * the queue at all) is the one who hears nothing.
+ */
+export const DEFAULT_NOTIFY_STATES: readonly TurnState[] = ['paused', 'failed', 'lost'];
 
 /** At most one of each kind, so one credential name per subject holds one secret. */
 const MAX_SINKS = 2;
@@ -209,6 +216,7 @@ export function renderNotification(events: TurnEvent[], baseUrl?: string): Rende
   // `lost` counts as a failure: the reaper writes it for a turn nobody ever picked up, and it
   // carries no `reason` (turn-store.ts:647), so without this it would reach the phone under a green
   // tick and the generic "N updates" line -- work that silently never ran, reported as finished.
+  // It is in DEFAULT_NOTIFY_STATES, so this is the path a subject who set no `states` takes.
   const failed = events.find((e) => e.state === 'failed' || e.state === 'lost');
   const counts = new Map<TurnState, number>();
   for (const e of events) counts.set(e.state, (counts.get(e.state) ?? 0) + 1);

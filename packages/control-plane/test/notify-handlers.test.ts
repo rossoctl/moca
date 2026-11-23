@@ -33,7 +33,7 @@ describe('PUT /v1/notifications', () => {
     expect(res.status).toBe(200);
     const body = res.body as Record<string, unknown>;
     expect(body.sinks).toEqual([webhook, ntfy]);
-    expect(body.states).toEqual(['paused', 'failed']);
+    expect(body.states).toEqual(['paused', 'failed', 'lost']);
     // 32 bytes of hex: the only time this value is ever readable over the API.
     expect(body.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
 
@@ -145,7 +145,7 @@ describe('GET /v1/notifications', () => {
     const body = res.body as Record<string, unknown>;
     expect(body).toMatchObject({
       sinks: [webhook, ntfy],
-      states: ['paused', 'failed'],
+      states: ['paused', 'failed', 'lost'],
       failures: 0,
       mutedUntil: 0,
       lastDeliveryAt: 0,

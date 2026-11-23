@@ -47,7 +47,8 @@ describe('parseNotifyConfig', () => {
       allow,
     );
     expect(config.sinks).toEqual([webhook, ntfy]); // the token is NOT kept on the sink
-    expect(config.states).toEqual(['paused', 'failed']);
+    // `lost` is a default, not merely allowed: it is the one state that leaves no other trace.
+    expect(config.states).toEqual(['paused', 'failed', 'lost']);
     expect(ntfyToken).toBe('tk_1');
   });
 

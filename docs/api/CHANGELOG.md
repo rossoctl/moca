@@ -31,7 +31,9 @@ authenticated and scoped to the caller's own subject.
   mints a fresh key.
 - `PUT /v1/notifications` stores or replaces it: `sinks` (one `webhook`, one `ntfy`, or both -- a
   sink's `url` must be allowed by the deployment's `MOCA_NOTIFY_ALLOW`) and an optional `states`
-  (defaulting to `[paused, failed]`, drawn from every terminal state but `queued`/`running`). A
+  (defaulting to `[paused, failed, lost]`, drawn from every terminal state but `queued`/`running`;
+  `lost` is a default because the reaper writes it for a turn nobody picked up, leaving no result
+  and no reason behind). A
   `webhook` sink's HMAC signing key is minted here and returned as `webhookSecret` in the response
   body ONLY -- there is no route that reads it back, and a later PUT rotates it, which immediately
   stops the old key verifying. An `ntfy` sink's `token` is stored the same way and likewise never

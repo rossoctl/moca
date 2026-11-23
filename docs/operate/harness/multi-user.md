@@ -242,14 +242,17 @@ a comma-separated `host[:port][/prefix]` allowlist, the only control against a u
 URL reaching your instance metadata service, Redis, or the kube API from inside the control plane.
 A malformed entry refuses to boot, the same contract `SH_MODEL_CATALOG_HOSTS` has. It is re-checked
 on every delivery, not only at the `PUT` that stores a sink, so taking a host back out of the list
-also stops the sinks already saved under it.
+also stops the sinks already saved under it. What the owner then sees: each pass counts as a failed
+delivery, so their cursor stops advancing and after `MOCA_NOTIFY_FAIL_MAX` passes they are muted for
+an hour; `failures` and `mutedUntil` on `GET /v1/notifications` say so, and the way back is a
+re-`PUT` naming a host still on the list.
 
 Each user configures their own sink with `PUT /v1/notifications`:
 
 ```bash
 curl -s -X PUT "$MOCA_URL/v1/notifications" -H "authorization: Bearer $TOKEN" -d '{
   "sinks": [{"kind": "webhook", "url": "https://hooks.example.com/moca"}],
-  "states": ["paused", "failed"]
+  "states": ["paused", "failed", "lost"]
 }'
 ```
 
