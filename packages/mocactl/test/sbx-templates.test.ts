@@ -120,9 +120,38 @@ describe('sbx templates: readiness and tags', () => {
         },
       }),
     });
-    expect(await w.run(['templates'])).toBe(0);
-    expect(w.out()).toContain('my-python        active    Python 3.12  tags default,stable\n');
-    expect(w.out()).toContain('node22           unknown   Node 22  tags default\n');
+    expect(await w.run(['templates', 'ls'])).toBe(0);
+    expect(w.out()).toContain(
+      'ID         READINESS  TAGS            DESCRIPTION\n' +
+        'my-python  active     default,stable  Python 3.12\n' +
+        'node22     unknown    default         Node 22\n',
+    );
+  });
+
+  it('marks a missing readiness or tag set with -, and prints nothing for no templates', async () => {
+    const w = world({
+      'GET /v1/templates': () => ({
+        status: 200,
+        body: {
+          templates: [
+            template({ tags: {} }),
+            template({ id: 'a-much-longer-template-id', readiness: undefined }),
+          ],
+          hosts: [],
+        },
+      }),
+    });
+    expect(await w.run(['templates', 'ls'])).toBe(0);
+    expect(w.out()).toBe(
+      'ID                         READINESS  TAGS     DESCRIPTION\n' +
+        'my-python                  inactive   -        Python 3.12\n' +
+        'a-much-longer-template-id  -          default  Python 3.12\n',
+    );
+    const empty = world({
+      'GET /v1/templates': () => ({ status: 200, body: { templates: [], hosts: [] } }),
+    });
+    expect(await empty.run(['templates', 'ls'])).toBe(0);
+    expect(empty.out()).toBe('');
   });
 });
 
@@ -147,13 +176,23 @@ describe('templates show', () => {
       }),
     });
     expect(await w.run(['templates', 'show', 'my-python'])).toBe(0);
-    expect(w.out()).toContain('my-python  owner the deployment  deployment  registered  active\n');
-    expect(w.out()).toContain(
-      `  ${BUILD_ID}  registered  active (running 3, in use 1)  tags default\n`,
+    const id = (b: string) => b.padEnd(BUILD_ID.length);
+    expect(w.out()).toBe(
+      'template    my-python\n' +
+        'owner       the deployment\n' +
+        'visibility  deployment\n' +
+        'status      registered\n' +
+        'readiness   active\n' +
+        '\n' +
+        `${id('BUILD')}  STATUS      READINESS                      TAGS\n` +
+        `${BUILD_ID}  registered  active (capacity 3, in use 1)  default\n` +
+        `${id(IMPORTED)}  failed      -                              -\n`,
     );
-    expect(w.out()).toContain(`  ${IMPORTED}  failed\n`);
     expect(await w.run(['templates', 'show', 'my-python', '--build', BUILD_ID])).toBe(0);
-    expect(w.out()).toBe(`${BUILD_ID}  registered  inactive  tags default\n`);
+    expect(w.out()).toBe(
+      `${id('BUILD')}  STATUS      READINESS  TAGS\n` +
+        `${BUILD_ID}  registered  inactive   default\n`,
+    );
     expect(await w.run(['templates', 'show', 'my-python', '--build', BUILD_ID, '--json'])).toBe(0);
     expect(JSON.parse(w.out())).toMatchObject({ spec: { seed: 'true' } });
   });
@@ -170,8 +209,8 @@ describe('templates show', () => {
       }),
     });
     expect(await w.run(['templates', 'show', 'my-python'])).toBe(0);
-    expect(w.out()).toContain('registered  unavailable (memory)\n');
-    expect(w.out()).toContain(`  ${BUILD_ID}  registered  unavailable (memory)  tags default\n`);
+    expect(w.out()).toContain('readiness   unavailable (memory)\n');
+    expect(w.out()).toContain(`${BUILD_ID}  registered  unavailable (memory)  default\n`);
   });
 
   it('says where a build waits in its host start line, or that it is in its idle grace', async () => {
@@ -195,12 +234,11 @@ describe('templates show', () => {
       }),
     });
     expect(await w.run(['templates', 'show', 'my-python'])).toBe(0);
+    const graced = `deactivating (graced until ${new Date(1_800_000_600_000).toISOString()})`;
     expect(w.out()).toContain(
-      `  ${BUILD_ID}  registered  activating (queued at 6)  tags default\n`,
+      `${BUILD_ID}  registered  ${'activating (queued at 6)'.padEnd(graced.length)}  default\n`,
     );
-    expect(w.out()).toContain(
-      `  ${OTHER}  registered  deactivating (graced until ${new Date(1_800_000_600_000).toISOString()})\n`,
-    );
+    expect(w.out()).toContain(`${OTHER}  registered  ${graced}  -\n`);
   });
 
   it('reports 404 template_not_found as itself, not as a control plane without sandbox routes', async () => {
@@ -1402,10 +1440,12 @@ describe('templates create, build, follow, cancel', () => {
       }),
     });
     expect(await w.run(['templates', 'show', 'my-python'])).toBe(0);
+    const id = (b: string) => b.padEnd(`b-1 ${BUILD_ID}`.length);
     expect(w.out()).toContain(
-      `  ${HANDLE}  rejected  rule X1.trusted: the gate record is not trusted\n`,
+      `${id('BUILD')}  STATUS      READINESS  TAGS     REASON\n` +
+        `${id(HANDLE)}  rejected    -          -        rule X1.trusted: the gate record is not trusted\n` +
+        `b-1 ${BUILD_ID}  registered  inactive   default  -\n`,
     );
-    expect(w.out()).toContain(`  b-1 ${BUILD_ID}  registered  inactive  tags default\n`);
   });
 
   it('follow: through each status and a 5xx to registered (exit 0); a cancel is 1, with its reason', async () => {

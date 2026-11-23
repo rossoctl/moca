@@ -113,7 +113,7 @@ The trust rules in full (one subject per self-attested record, `X12.self`, `X1.s
 
 ## How users see and use it
 
-- `mocactl sbx templates` lists the templates a user can see: declared ones, deployment-visible
+- `mocactl sbx templates ls` lists the templates a user can see: declared ones, deployment-visible
   ones, and their own private ones, each with its readiness and tags.
 - `mocactl sbx create --template ID` (or `sbx up --template ID`) uses the build the template's
   **`default`** tag names. A template's first registered build takes `default`, and later builds do

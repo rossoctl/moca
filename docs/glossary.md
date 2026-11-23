@@ -149,7 +149,7 @@ KVM hosts running `microvm-worker`; see
 
 ## template, build and tag
 
-A **template** is what a sandbox-service sandbox is made from (`mocactl sbx templates` lists
+A **template** is what a sandbox-service sandbox is made from (`mocactl sbx templates ls` lists
 them). A **build** is one immutable snapshot of a template; a new build of a template does not
 change the sandboxes made from an earlier one. A **tag** names a registered build
 (`ID:TAG`, or `ID@BUILD` for a build itself); `default` is the tag used when none is given, and it

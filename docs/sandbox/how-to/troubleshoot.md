@@ -87,7 +87,7 @@ Other messages:
   `--trust`. Prefer the former: `--trust` takes the default grant without showing you what it is.
 - **Bob reports a missing compiler** (`go: command not found` and the like): the templates carry
   only the Pi toolchain, and anything more installs only on a template with egress, from a host on
-  the allowlist. See `mocactl sbx templates`, and [IBM Bob](connect-agents.md#ibm-bob).
+  the allowlist. See `mocactl sbx templates ls`, and [IBM Bob](connect-agents.md#ibm-bob).
 - **Codex edits files on your laptop instead of in the sandbox**: check you started it with
   `mocactl sbx codex` (or the `-c mcp_servers.sandbox=…` line), and that `/mcp` in the TUI lists
   the `sandbox` tools. Note `mocactl sbx doctor`'s `agent config` check covers Claude Code,

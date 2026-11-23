@@ -255,7 +255,7 @@ the worker's `SANDBOX_TEMPLATE`, so Moca agent sessions naming the template find
 ### 4.5 Use it
 
 ```bash
-mocactl sbx templates
+mocactl sbx templates ls
 mocactl sbx create --template default --name try-default
 mocactl sbx run -- python3 -c 'print(6*7)'
 ```
@@ -757,13 +757,17 @@ templates file that `template-register.sh` wrote holds:
 only the id, the description and the tools.
 
 ```bash
-mocactl sbx templates
+mocactl sbx templates ls
 ```
 
 ```
-default          Moca's sandbox image: bash, git, Python 3, ripgrep
-django-django-11133 SWE-bench django__django-11133 (lite) at its baseline bc348023edb4; seed with: cp -a /opt/testbed-src/. /workspace/
+ID                   READINESS  TAGS     DESCRIPTION
+default              active     default  Moca's sandbox image: bash, git, Python 3, ripgrep
+django-django-11133  active     default  SWE-bench django__django-11133 (lite) at its baseline bc348023edb4; seed with: cp -a /opt/testbed-src/. /workspace/
 ```
+
+(A control plane without the template store sends no readiness or tags, and the table is just
+`ID` and `DESCRIPTION`.)
 
 (A `default` built from an older sample still shows its earlier spelling, "MOCA's": its
 description is part of its record.)
