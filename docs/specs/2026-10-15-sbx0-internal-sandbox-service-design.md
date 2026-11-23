@@ -638,9 +638,10 @@ nothing here changes, and moca does not need Cortex.
   - An attempt's fields: `req_id, start, ms, exit, outcome`; `out_bytes` and `err_bytes` (the
     output it received: stdout as the relay's `sandbox_exec.out_bytes` counts it, then stderr;
     counts only); `grpc_status` (the status the call ended with when not OK, else null); and
-    `wire_code` (the relay's or worker's wire text's code before its first `:`, such as
-    `stale_mode` or `memory-budget`, when that is lowercase letters, digits, `_` and `-`, at most
-    48; else null). Never the wire text after the code.
+    `wire_code` (the relay's or worker's wire text's code, such as `stale_mode` or
+    `memory-budget`: lowercase letters, digits, `_` and `-`, at most 48, followed by `: ` as every
+    code is written, or `timeout` for `timeout:<n>`; else null, so a `host:port` leading a gRPC
+    detail is never taken for one). Never the wire text after the code.
   - Every Exec carries `x-moca-call-id` in its gRPC metadata (`<mcp_session>:<n>` or
     `<invocation>:<k>`, `[A-Za-z0-9._:-]{1,64}`), for the relay's audit line to name. A `req_id`
     matches the relay's `sandbox_exec.req_id`; a token refusal retries the same one, a `stale_mode`

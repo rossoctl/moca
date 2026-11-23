@@ -101,8 +101,12 @@ export interface ExecAttempt {
   wireCode?: string;
 }
 
-/** A wire text's code prefix: lowercase letters, digits, `_` and `-`, at most 48, then `:`. */
-export const WIRE_CODE_RE = /^([a-z][a-z0-9_-]{0,47}):/;
+/**
+ * A wire text's code prefix: lowercase letters, digits, `_` and `-`, at most 48, then `: ` (the
+ * relay and worker write every code as `code: text`). The space rules out a dotless `host:port`
+ * leading a gRPC detail. `timeout:<n>`, the one code without it, is matched whole (TIMEOUT_MESSAGE).
+ */
+export const WIRE_CODE_RE = /^([a-z][a-z0-9_-]{0,47}): /;
 
 /** What one attempt's call carried besides its result, for its ExecAttempt. */
 interface AttemptWire {
@@ -116,12 +120,17 @@ interface AttemptWire {
 function wireFields(
   w: AttemptWire,
 ): Pick<ExecAttempt, 'outBytes' | 'errBytes' | 'grpcStatus' | 'wireCode'> {
-  const code = w.wire === undefined ? null : WIRE_CODE_RE.exec(w.wire);
+  const code =
+    w.wire === undefined
+      ? undefined
+      : TIMEOUT_MESSAGE.test(w.wire)
+        ? 'timeout'
+        : WIRE_CODE_RE.exec(w.wire)?.[1];
   return {
     outBytes: w.outBytes,
     errBytes: w.errBytes,
     ...(w.grpcStatus !== undefined ? { grpcStatus: w.grpcStatus } : {}),
-    ...(code ? { wireCode: code[1]! } : {}),
+    ...(code !== undefined ? { wireCode: code } : {}),
   };
 }
 
@@ -1131,11 +1140,11 @@ export class SandboxExecConn {
       call.on('error', (e: ServiceError) => {
         done();
         if (aborted) return;
+        // The command's outcome arrived; whatever the status says after it is not the command's.
+        if (end) return resolve(result(end));
         if (e.code !== status.OK) wire.grpcStatus = e.code;
         const details = e.details || e.message;
         wire.wire ??= details;
-        // The command's outcome arrived; whatever the status says after it is not the command's.
-        if (end) return resolve(result(end));
         const outcome = outcomeOf(execError ?? details);
         if (outcome) return resolve(outcome);
         if (execError !== undefined) return fail(inStreamFailure(execError, e.code));

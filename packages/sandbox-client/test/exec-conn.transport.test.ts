@@ -1786,23 +1786,43 @@ describe('SandboxExecConn: what a client records (TRAJECTORY-JOINER §9)', () =>
           ? execError('stale_mode: token epoch 1 < stored 2 SECRET')(call, n)
           : n === 3
             ? fail(status.RESOURCE_EXHAUSTED, 'memory-budget: 4096 MiB over SECRET')(call, n)
-            : fail(status.UNAVAILABLE, 'Worker Gone: SECRET')(call, n),
+            : n === 4
+              ? fail(status.UNAVAILABLE, 'Worker Gone: SECRET')(call, n)
+              : fail(status.UNAVAILABLE, 'localhost:8443 connection refused')(call, n),
     );
     const { c } = conn(r.addr);
     const attempts: ExecAttempt[] = [];
     const onAttempt = (a: ExecAttempt) => attempts.push(a);
     await c.exec('x', { onAttempt });
     // n 2 is a stale_mode refusal, retried as n 3 under a fresh req_id: both are attempts.
-    await expect(c.exec('x', { onAttempt })).rejects.toBeInstanceOf(ExecMachineryError);
-    await expect(c.exec('x', { onAttempt })).rejects.toBeInstanceOf(ExecMachineryError);
+    for (let i = 0; i < 3; i++) {
+      await expect(c.exec('x', { onAttempt })).rejects.toBeInstanceOf(ExecMachineryError);
+    }
     expect(attempts.map((a) => [a.outcome, a.grpcStatus, a.wireCode])).toEqual([
       // The fake relay ends an in-stream ExecError with INTERNAL, carrying the same text.
       ['timeout', status.INTERNAL, 'timeout'],
       ['refused_before_start', status.INTERNAL, 'stale_mode'],
       ['template_busy', status.RESOURCE_EXHAUSTED, 'memory-budget'],
       ['machinery', status.UNAVAILABLE, undefined],
+      // A host:port leading a gRPC detail is never taken for a code.
+      ['machinery', status.UNAVAILABLE, undefined],
     ]);
     expect(JSON.stringify(attempts)).not.toContain('SECRET');
+    expect(JSON.stringify(attempts)).not.toContain('8443');
+    expect(JSON.stringify(attempts)).not.toContain('localhost');
+  });
+
+  it("never pairs a command's end with a status that came after it", async () => {
+    const r = await fakeRelay((call, n) => {
+      call.write({ end: { reqId: 0, exitCode: 0, truncated: false } } as ExecEvent);
+      fail(status.INTERNAL, 'stale_mode: late')(call, n);
+    });
+    const { c } = conn(r.addr);
+    const attempts: ExecAttempt[] = [];
+    await c.exec('x', { onAttempt: (a) => attempts.push(a) });
+    expect(attempts.map((a) => [a.exit, a.outcome, a.grpcStatus, a.wireCode])).toEqual([
+      [0, 'ok', undefined, undefined],
+    ]);
   });
 
   it('an observer that throws never fails the Exec', async () => {
