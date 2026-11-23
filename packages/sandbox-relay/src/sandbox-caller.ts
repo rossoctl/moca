@@ -85,10 +85,19 @@ export interface AuditLine {
   audit: 'sandbox_exec';
   /** When the relay received the Exec. */
   ts: string;
+  /** `harness` on the harness's own Execs (MOCA_RELAY_EXEC_TOKEN); absent on a sandbox token's. */
+  caller?: 'harness';
   sub?: string;
   sbx?: string;
   wrk: string;
   req_id: number;
+  /**
+   * The id the WORKER knows this Exec by (its journal's `req=`): a sandbox Exec's `workerReqId`, a
+   * harness Exec's req_id unchanged. Absent when the relay refused the Exec before mapping it.
+   */
+  wid?: number;
+  /** The client's correlation id, from gRPC metadata `x-moca-call-id`, when it is valid (callIdFrom). */
+  call_id?: string;
   /** `unknown(<n>)` for a kind this relay does not know (the worker's form, ruling P5-R22). */
   kind?: ExecKindName | `unknown(${number})`;
   process?: string;
@@ -205,6 +214,21 @@ const AUDIT_WRK_BYTES = 128;
 /** The most of a caller-chosen process id or name an audit line carries, for the same reason. */
 const AUDIT_PROCESS_BYTES = 128;
 
+/** The gRPC metadata key a client may set to correlate its own records with this audit line. */
+export const CALL_ID_METADATA = 'x-moca-call-id';
+/** The same pattern as the client's CALL_ID_RE (sandbox-client exec-conn.ts); the relay doesn't import it. */
+export const CALL_ID_RE = /^[A-Za-z0-9._:-]{1,64}$/;
+
+/**
+ * The client's correlation id, or undefined. Only a value that matches CALL_ID_RE is kept; any other
+ * is dropped, never echoed. It is an opaque label for the audit line: never read for auth or routing.
+ */
+export function callIdFrom(md: { get(key: string): unknown[] } | undefined): string | undefined {
+  const v = md?.get(CALL_ID_METADATA)?.[0];
+  const s = typeof v === 'string' ? v : Buffer.isBuffer(v) ? v.toString('utf8') : undefined;
+  return s !== undefined && CALL_ID_RE.test(s) ? s : undefined;
+}
+
 /** The first `max` bytes of `s` in UTF-8, cut back to a character boundary. */
 function utf8Prefix(s: string, max: number): string {
   const b = Buffer.from(s, 'utf8');
@@ -264,8 +288,9 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
       t0: number,
       l: Omit<
         AuditLine,
-        'audit' | 'ts' | 'ms' | 'cmd' | 'sub' | 'sbx' | 'wrk' | 'kind' | 'process'
+        'audit' | 'ts' | 'ms' | 'cmd' | 'sub' | 'sbx' | 'wrk' | 'kind' | 'process' | 'call_id'
       > & {
+        call_id?: string;
         wrk: string;
         claims?: SandboxTokenClaims;
         command?: string;
@@ -281,9 +306,12 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
         return {
           audit: 'sandbox_exec',
           ts: new Date(t0).toISOString(),
+          ...(l.caller !== undefined ? { caller: l.caller } : {}),
           ...(claims ? { sub: claims.sub, sbx: claims.sbx } : {}),
           wrk: utf8Prefix(l.wrk, AUDIT_WRK_BYTES),
           req_id: l.req_id,
+          ...(l.wid !== undefined ? { wid: l.wid } : {}),
+          ...(l.call_id !== undefined ? { call_id: l.call_id } : {}),
           ...(l.kind !== undefined ? { kind: kind ?? `unknown(${l.kind})` } : {}),
           ...(proc !== undefined ? { process: proc } : {}),
           ms: Math.max(0, Date.now() - t0),
@@ -375,7 +403,7 @@ export type Audit = ReturnType<typeof makeAudit>;
  * own capability check (P5-R37's backstop, for a worker that re-attached without it after the
  * check above) is a refusal like that check's, with the same reason (final review P4).
  */
-function finished(
+export function finished(
   r: PumpResult,
   aborted: boolean,
 ): Pick<AuditLine, 'outcome' | 'exit_code' | 'truncated' | 'reason'> {
@@ -513,6 +541,9 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
   ): Promise<void> {
     // Exactly one line per Exec, whichever path ends it first.
     let logged = false;
+    // Set once the Exec is mapped to the worker's id, so every later line carries it.
+    let auditWid: number | undefined;
+    const callId = callIdFrom(call.metadata);
     const log = (
       l: Pick<AuditLine, 'outcome' | 'exit_code' | 'truncated' | 'reason'>,
       outBytes = 0,
@@ -522,6 +553,8 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
       audit.exec(t0, {
         wrk: sandboxId,
         req_id: e.reqId,
+        ...(auditWid !== undefined ? { wid: auditWid } : {}),
+        ...(callId !== undefined ? { call_id: callId } : {}),
         claims,
         command: e.command,
         kind: e.kind,
@@ -602,6 +635,7 @@ export function makeSandboxCaller(relay: Relay, opts: SandboxCallerOpts) {
       failExecStream(call, grpcError(status.INVALID_ARGUMENT, 'req_id out of range'));
       return;
     }
+    auditWid = wid;
     const entry: { wrk: string; wid: number; aborted?: boolean } = { wrk: sandboxId, wid };
     // Read by the expiry and cancel lines before the drain ends, so they carry the bytes so far.
     const result = newPumpResult();

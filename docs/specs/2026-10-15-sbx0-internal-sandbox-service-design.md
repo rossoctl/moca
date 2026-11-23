@@ -195,11 +195,18 @@ attach side already heartbeats.
 ### 3.5 Audit
 
 One JSON line per `Exec`, to stdout:
-`{audit, ts, sub, sbx, wrk, req_id, ms, outcome, exit_code, truncated, out_bytes, reason, cmd}`.
+`{audit, ts, caller, sub, sbx, wrk, req_id, wid, call_id, ms, outcome, exit_code, truncated, out_bytes, reason, cmd}`.
 
 - `audit` is `"sandbox_exec"`, the marker a log reader selects on.
 - `ts` is when the relay received the Exec. `ms` is the time from then until the line was written.
 - `req_id` is the caller's (§3.6), and `wrk` is the `sandbox_id` the caller asked for.
+- `wid` is the id the worker knows the Exec by (§3.6), the `req=` of the worker's own log lines, so
+  a line joins the worker's record of the same Exec exactly. It is absent when the relay refused the
+  Exec before mapping it. Logging it does not weaken §3.6's rule: a `wid` reveals nothing about the
+  key, and a sandbox still cannot predict another sandbox's.
+- `call_id` is the client's own correlation id, from gRPC metadata `x-moca-call-id`, when it matches
+  `[A-Za-z0-9._:-]{1,64}`. Any other value is dropped and never echoed. It is a label only: the relay
+  never reads it for auth or routing.
 - `out_bytes` counts stdout only. `exit_code` and `truncated` appear only when the worker sent
   `End`, and `reason` only on `refused`.
 
@@ -218,7 +225,9 @@ One JSON line per `Exec`, to stdout:
   §3.6) or `INVALID_ARGUMENT`, with a fixed `reason`.
 
 The lines are written only when the relay has sandbox keys configured, so a MOCA relay's output is
-unchanged. Harness callers' Execs write no line. Command text and output are never logged, and
+unchanged. A harness caller's Exec writes the same line with `caller: "harness"`, no `sub`, `sbx` or `cmd` (its
+token carries no subject, and its commands are Moca Pi's), and `wid` equal to its `req_id`, which the relay
+forwards unchanged. Command text and output are never logged, and
 neither is the token. An operator debug flag (`SH_SANDBOX_AUDIT_COMMANDS=1`, exactly `1`) adds the
 command's first 200 bytes as `cmd`, cut at a UTF-8 character boundary, and only for a token that
 verified. Every line carries the token's `sub` and `sbx` only when it verified. An `UNAUTHENTICATED`

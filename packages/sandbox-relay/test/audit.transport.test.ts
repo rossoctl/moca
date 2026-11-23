@@ -2,7 +2,7 @@ import { Metadata, credentials, status } from '@grpc/grpc-js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Exec, SandboxExecClient, Stream } from '@moca/k8s-sandbox';
 import { makeExecAuth, startRelay } from '../src/main.js';
-import { commandPreview, type AuditLine } from '../src/sandbox-caller.js';
+import { CALL_ID_RE, callIdFrom, commandPreview, type AuditLine } from '../src/sandbox-caller.js';
 import {
   HARNESS,
   K,
@@ -57,8 +57,9 @@ describe('one audit line per sandbox Exec (SBX0 §3.5)', () => {
         sub: 'github:1',
         sbx: 'sbx-aaaa',
         wrk: 'sbx_default',
-        // The CALLER's req_id, never the worker's.
+        // The CALLER's req_id, and beside it the id the worker knows it by (its journal's req=).
         req_id: 7,
+        wid: WID(7),
         kind: 'command',
         ms: expect.any(Number),
         outcome: 'end',
@@ -77,6 +78,7 @@ describe('one audit line per sandbox Exec (SBX0 §3.5)', () => {
       'sbx',
       'wrk',
       'req_id',
+      'wid',
       'kind',
       'ms',
       'outcome',
@@ -87,7 +89,40 @@ describe('one audit line per sandbox Exec (SBX0 §3.5)', () => {
     expect(r.lines).toHaveLength(1);
     expect(r.lines[0]).not.toContain('echo');
     expect(r.lines[0]).not.toContain('hello');
-    expect(r.lines[0]).not.toContain(String(WID(7)));
+  });
+
+  it('carries the wid the worker was sent, so the line joins the worker journal exactly', async () => {
+    const seen: number[] = [];
+    const r = await relay();
+    await worker(r.attach, 'sbx_default', 'auto', 0, (ex) => {
+      seen.push(ex.reqId);
+      return [{ end: { exitCode: 0 } }];
+    });
+    expect((await exec(r.exec, { token: token(), reqId: 41 }).done).code).toBe(status.OK);
+    expect(seen).toEqual([WID(41)]);
+    expect(audit(r.lines)).toEqual([expect.objectContaining({ req_id: 41, wid: seen[0] })]);
+  });
+
+  it('carries a valid x-moca-call-id as call_id, and drops an invalid one without echoing it', async () => {
+    const r = await answering([{ end: { exitCode: 0 } }]);
+    const ok = 'tool-call.7:abc_DEF-9';
+    const bad = 'has space;and ' + 'x'.repeat(80);
+    expect(
+      (await exec(r.exec, { token: token(), reqId: 51, metadata: { 'x-moca-call-id': ok } }).done)
+        .code,
+    ).toBe(status.OK);
+    expect(
+      (await exec(r.exec, { token: token(), reqId: 52, metadata: { 'x-moca-call-id': bad } }).done)
+        .code,
+    ).toBe(status.OK);
+    const lines = audit(r.lines);
+    expect(lines[0]).toEqual(expect.objectContaining({ req_id: 51, call_id: ok }));
+    expect(Object.keys(lines[0]!).indexOf('call_id')).toBe(
+      Object.keys(lines[0]!).indexOf('wid') + 1,
+    );
+    expect(lines[1]).toEqual(expect.objectContaining({ req_id: 52 }));
+    expect(lines[1]).not.toHaveProperty('call_id');
+    expect(r.lines.join('\n')).not.toContain('has space');
   });
 
   it("records the worker's truncation", async () => {
@@ -364,6 +399,19 @@ describe('the command in the audit line (SBX0 §3.5)', () => {
     expect(cmd.endsWith('\uFFFD')).toBe(false);
   });
 
+  it("pins CALL_ID_RE to the client's pattern, and callIdFrom keeps only a matching id", () => {
+    // The client (sandbox-client exec-conn.ts) has the same literal; a change to one must change both.
+    expect(CALL_ID_RE.source).toBe('^[A-Za-z0-9._:-]{1,64}$');
+    const md = (v: unknown) => ({ get: (k: string) => (k === 'x-moca-call-id' ? [v] : []) });
+    expect(callIdFrom(md('a'.repeat(64)))).toBe('a'.repeat(64));
+    expect(callIdFrom(md('a'.repeat(65)))).toBeUndefined();
+    expect(callIdFrom(md(''))).toBeUndefined();
+    expect(callIdFrom(md('run-1:call.2_x'))).toBe('run-1:call.2_x');
+    expect(callIdFrom(md('a b'))).toBeUndefined();
+    expect(callIdFrom(md(Buffer.from('tool-7')))).toBe('tool-7');
+    expect(callIdFrom(undefined)).toBeUndefined();
+  });
+
   it('commandPreview keeps a short command whole, and cuts a long one on a boundary', () => {
     expect(commandPreview('echo hi')).toBe('echo hi');
     expect(commandPreview('x'.repeat(200))).toBe('x'.repeat(200));
@@ -433,11 +481,42 @@ describe('a MOCA relay writes no audit lines (SBX0 §3.5)', () => {
     expect(lines).toEqual([]);
   });
 
-  it('beside sandbox keys: a harness Exec writes no line', async () => {
-    const r = await relay({ MOCA_RELAY_EXEC_TOKEN: HARNESS });
-    await worker(r.attach, 'sbx_default');
-    expect((await exec(r.exec, { token: HARNESS, wsk: 'run-1' }).done).code).toBe(status.OK);
-    expect(r.lines).toEqual([]);
+  it('beside sandbox keys: a harness Exec writes a caller=harness line, with no subject or command', async () => {
+    const r = await relay({ MOCA_RELAY_EXEC_TOKEN: HARNESS, SH_SANDBOX_AUDIT_COMMANDS: '1' });
+    const seen: number[] = [];
+    await worker(r.attach, 'sbx_default', 'auto', 0, (ex) => {
+      seen.push(ex.reqId);
+      return [{ chunk: { data: 'hi' } }, { end: { exitCode: 0 } }];
+    });
+    const res = await exec(r.exec, {
+      token: HARNESS,
+      wsk: 'run-1',
+      reqId: 61,
+      command: 'echo secret-ish',
+      metadata: { 'x-moca-call-id': 'turn-3.call-2' },
+    }).done;
+    expect(res.code).toBe(status.OK);
+    // The harness's req_id reaches the worker unchanged, so wid = req_id.
+    expect(seen).toEqual([61]);
+    const lines = audit(r.lines);
+    expect(lines).toEqual([
+      {
+        audit: 'sandbox_exec',
+        ts: expect.any(String),
+        caller: 'harness',
+        wrk: 'sbx_default',
+        req_id: 61,
+        wid: 61,
+        call_id: 'turn-3.call-2',
+        kind: 'command',
+        ms: expect.any(Number),
+        outcome: 'end',
+        exit_code: 0,
+        truncated: false,
+        out_bytes: 2,
+      },
+    ]);
+    expect(r.lines.join('\n')).not.toContain('secret-ish');
   });
 });
 
