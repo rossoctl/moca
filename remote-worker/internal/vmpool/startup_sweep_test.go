@@ -160,6 +160,23 @@ func TestStartupSweepRemovesAnOldSymlinkNotItsTarget(t *testing.T) {
 	}
 }
 
+// A plain file named as a key is kept, however old, as the janitor keeps every
+// non-directory: no workspace is ever a plain file.
+func TestStartupSweepKeepsAnOldPlainFileNamedAsAKey(t *testing.T) {
+	root := t.TempDir()
+	f := filepath.Join(root, "sess-file")
+	if err := os.WriteFile(f, []byte("not a workspace"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := startupClockNow.Add(-2 * time.Hour)
+	if err := os.Chtimes(f, old, old); err != nil {
+		t.Fatal(err)
+	}
+	startupPool(t, root)
+	waitNoTombstones(t, root)
+	requireExists(t, f, "an old plain file named as a key was removed")
+}
+
 // Tombstones are a previous process's unfinished deletes: removed at startup, whatever
 // their age. Entries no key can name (.lease-state, _probe) are left alone.
 func TestStartupSweepRemovesTombstonesAndKeepsNonKeys(t *testing.T) {
