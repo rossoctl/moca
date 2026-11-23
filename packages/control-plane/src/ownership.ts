@@ -449,6 +449,11 @@ export class OwnershipIndex {
      * allowed, downgraded at a token mint), `mode_not_allowed`.
      */
     reason?: string;
+    /**
+     * What the worker answered a workspace release (#338): released, kept_busy, unknown_key or
+     * unsupported; on a session's, also not_answered or no_worker.
+     */
+    outcome?: string;
     model?: string;
     fromModel?: string;
     /** A sandbox mode change (lease-mode spec §8.1): the old and new mode, and the new epoch. */
@@ -477,6 +482,7 @@ export class OwnershipIndex {
           ...(entry.member ? { member: entry.member } : {}),
           ...(entry.rules ? { rules: entry.rules } : {}),
           ...(entry.reason ? { reason: entry.reason } : {}),
+          ...(entry.outcome ? { outcome: entry.outcome } : {}),
           ...(entry.model ? { model: entry.model } : {}),
           ...(entry.fromModel ? { fromModel: entry.fromModel } : {}),
           ...(entry.fromMode ? { fromMode: entry.fromMode } : {}),

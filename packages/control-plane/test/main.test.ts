@@ -509,6 +509,8 @@ describe('the control plane`s secrets as systemd credentials (deploy/vm)', () =>
       // MI1 §6.1's grant ring, a SEPARATE private key from the session signer below -- and a file
       // like every other secret from S2 on (§6.7), never an env line.
       'MOCA_GRANT_SIGNING_KEY',
+      // The relay control listener's release-only bearer (#338), a file like the rest.
+      'MOCA_RELAY_RELEASE_TOKEN',
       'SH_CREDENTIAL_KEK',
       'SH_EXCHANGE_TOKEN',
       'SH_INSTALLER_TOKEN',
@@ -554,6 +556,37 @@ async function freePort(): Promise<number> {
   await new Promise<void>((resolve) => s.close(() => resolve()));
   return port;
 }
+
+describe('depsFromEnv: the relay release (#338)', () => {
+  const RELEASE = 'r'.repeat(64); // notsecret
+  const URL_ = 'http://sandbox-relay-control:9445';
+  it('wires a releaser only with SH_RELAY_CONTROL_URL', async () => {
+    const off = depsFromEnv({ ...baseEnv, MOCA_RELAY_RELEASE_TOKEN: RELEASE });
+    const on = depsFromEnv({
+      ...baseEnv,
+      SH_RELAY_CONTROL_URL: URL_,
+      MOCA_RELAY_RELEASE_TOKEN: RELEASE,
+    });
+    try {
+      expect('relayRelease' in off).toBe(false);
+      expect(on.relayRelease).toBeDefined();
+    } finally {
+      await off.close?.();
+      await on.close?.();
+    }
+  });
+
+  it('refuses to boot with a release bearer equal to one it accepts', () => {
+    expect(() =>
+      depsFromEnv({
+        ...baseEnv,
+        SH_EXCHANGE_TOKEN: RELEASE,
+        SH_RELAY_CONTROL_URL: URL_,
+        MOCA_RELAY_RELEASE_TOKEN: RELEASE,
+      }),
+    ).toThrow(/MOCA_RELAY_RELEASE_TOKEN must differ/);
+  });
+});
 
 describe('depsFromEnv against a Redis that starts AFTER the control plane (#423, spike finding F2)', () => {
   it('fails readyz fast, keeps reconnecting, and never logs the Redis password', async () => {

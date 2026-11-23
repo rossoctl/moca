@@ -83,6 +83,12 @@ import {
   type EgressStore,
 } from './egress-log.js';
 import type { TokenClaims } from './token.js';
+import {
+  RELEASE_BOUND_MS,
+  RELEASE_SWEEP_CONCURRENCY,
+  withinBound,
+  type ReleaseAnswer,
+} from './relay-release.js';
 
 /**
  * The sandbox resource's handlers (SBX0 spec §5.1), mounted on the `sandbox` route profile only,
@@ -558,6 +564,76 @@ async function recordExpiries(deps: CpDeps, recs: SandboxRecord[], nowS: number)
     for (const r of rs)
       if (!ended.has(r.id)) await sandboxEnded(deps, r, 'janitor', 'expired', nowS);
   }
+}
+
+/**
+ * One ended sandbox's workspace released on its worker (#338), through the relay's control
+ * listener. `releasedAt` is written only on a TERMINAL answer (released, kept_busy, unknown_key,
+ * unsupported), which is audited as `sandbox_workspace_release` with the answer as its outcome.
+ * Anything else (the relay down, no live worker, a timeout, the bound) writes nothing and is
+ * logged only, so the janitor's next sweep sends it again while the record is retained. Never
+ * throws: the release is best-effort.
+ */
+async function releaseSandbox(
+  deps: CpDeps,
+  store: SandboxStore,
+  rec: SandboxRecord,
+  subject: string,
+  signal: AbortSignal,
+): Promise<void> {
+  let answer: ReleaseAnswer;
+  try {
+    answer = await deps.relayRelease!.release(rec.worker, rec.wsk, signal);
+  } catch (err) {
+    console.error(
+      `[control-plane] the release of sandbox ${rec.id}'s workspace on ${rec.worker} was not ` +
+        `answered: ${(err as Error).message} -- the next janitor sweep sends it again`,
+    );
+    return;
+  }
+  await auditBestEffort(deps, 'sandbox_workspace_release', rec.id, {
+    subject,
+    sandboxId: rec.id,
+    decision: 'sandbox_workspace_release',
+    outcome: answer,
+  });
+  try {
+    await store.markReleased(rec.id, seconds(deps));
+  } catch (err) {
+    console.error(
+      `[control-plane] releasedAt not recorded for sandbox ${rec.id}: ${(err as Error).message}` +
+        ' -- the next janitor sweep sends the release again',
+    );
+  }
+}
+
+/**
+ * Releases every ended sandbox in `recs` not yet answered (no `releasedAt`), RELEASE_SWEEP_CONCURRENCY
+ * at a time, within the release bound: what is not sent or not answered by then waits for the next
+ * call. Regardless of provenance: the janitor's sweep is where an expiry is first noticed, and a
+ * delete's own release that went unanswered is retried here too. A no-op without a releaser.
+ */
+async function releaseEnded(
+  deps: CpDeps,
+  store: SandboxStore,
+  recs: SandboxRecord[],
+  nowS: number,
+  subject: string,
+): Promise<void> {
+  if (!deps.relayRelease) return;
+  const due = recs.filter((r) => !isLive(r, nowS) && r.releasedAt === undefined);
+  if (due.length === 0) return;
+  await withinBound(deps.releaseBoundMs ?? RELEASE_BOUND_MS, async (signal) => {
+    let next = 0;
+    const lane = async () => {
+      while (next < due.length && !signal.aborted) {
+        await releaseSandbox(deps, store, due[next++]!, subject, signal);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(RELEASE_SWEEP_CONCURRENCY, due.length) }, lane),
+    );
+  });
 }
 
 /**
@@ -3028,6 +3104,20 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     const outcome = await store.markDeleted(rec.id, now, cfg.retentionS);
     // Retention ran out between the read and the delete: it is gone, as it would read now.
     if (outcome === 'not_found') throw new CpError('sandbox_not_found', 'no such sandbox');
+    // #338: its workspace released on its worker, only now that the record has ended -- a released
+    // key refuses new Execs, so a release before a delete that then failed would strand a live
+    // sandbox. Also after a delete that found it ended already ('already'), when no release was
+    // answered yet. Within the bound, and never this DELETE's failure: unanswered, the janitor's
+    // sweep sends it again.
+    if (rec.releasedAt === undefined) {
+      await releaseEnded(
+        deps,
+        store,
+        [{ ...rec, deletedAt: rec.deletedAt ?? now }],
+        now,
+        ctx.principal!.sub,
+      );
+    }
     if (outcome === 'deleted') {
       await audit(deps, ctx.principal!.sub, rec.id, 'sandbox_deleted');
       // The egress log is kept as long as the record, whose retention now runs from the delete.
@@ -3203,6 +3293,9 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
       if (v.state === 'ready') live.push({ wsk: v.wsk, wrk: v.worker });
       else terminated.push({ wsk: v.wsk, wrk: v.worker, terminatedAt: v.terminatedAt! });
     }
+    // The releases first (#338), regardless of provenance, so a provenance failure below cannot
+    // hold them back; within the release bound, so the janitor's read waits at most that long.
+    await releaseEnded(deps, store, all, now, 'janitor');
     await recordExpiries(deps, all, now);
     await sealEgress(deps, all, now);
     return { status: 200, body: { live, terminated } };

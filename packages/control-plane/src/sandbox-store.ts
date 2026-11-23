@@ -42,6 +42,12 @@ export interface SandboxRecord {
   expiresAt: number;
   /** Set by delete; absent while live or after a plain expiry. */
   deletedAt?: number;
+  /**
+   * When the worker gave a terminal answer to the control plane's release of this ended sandbox's
+   * workspace (#338: released, kept_busy, unknown_key or unsupported). Absent until then, so the
+   * janitor's sweep sends the release again while the record is retained.
+   */
+  releasedAt?: number;
   /** `per-exec` unless the owner picked a lease mode. */
   mode: SandboxModeName;
   /** The owner's lease idle timeout in seconds; 0 = the worker's default. */
@@ -125,6 +131,11 @@ export interface SandboxStore {
     idleLifetimeS: number,
     retentionS: number,
   ): Promise<SandboxRecord | null>;
+  /**
+   * Records `releasedAt` on an ENDED (deleted or expired) record, keeping its retention; a later
+   * call keeps the first time. False for a missing or live one, which nothing releases.
+   */
+  markReleased(id: string, nowS: number): Promise<boolean>;
 }
 
 /** Live: not deleted and not yet expired. Quotas and name uniqueness count only these. */
@@ -223,6 +234,15 @@ export class MemorySandboxStore implements SandboxStore {
     if (!r || !isLive(r, nowS)) return null;
     r.expiresAt = Math.max(r.expiresAt, nowS + idleLifetimeS);
     return strip(r);
+  }
+
+  // No await before the mutation, as setMode.
+  async markReleased(id: string, nowS: number): Promise<boolean> {
+    this.purge(nowS);
+    const r = this.recs.get(id);
+    if (!r || isLive(r, nowS)) return false;
+    r.releasedAt ??= nowS;
+    return true;
   }
 }
 

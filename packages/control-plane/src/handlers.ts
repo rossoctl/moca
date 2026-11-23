@@ -79,6 +79,7 @@ import type { ProvenanceStore } from './provenance.js';
 import type { PresenceReader, TemplateBuild, TemplateCatalog } from './template-catalog.js';
 import type { PolicyStore } from './template-policy.js';
 import type { SandboxStore } from './sandbox-store.js';
+import { RELEASE_BOUND_MS, withinBound, type RelayReleaser } from './relay-release.js';
 import { SANDBOX_HANDLERS, requireActive, resolveForUse } from './sandbox-handlers.js';
 import type { TemplateHost } from './host-config.js';
 import { HOST_HANDLERS, type HostRegistry } from './host-handlers.js';
@@ -271,6 +272,14 @@ export interface CpDeps {
   close?: () => Promise<void>;
   /** The sandbox resource (SBX0 §5); present on the sandbox profile only. */
   sandboxes?: SandboxStore;
+  /**
+   * The relay's control listener (#338, relay-release.ts): releases an ended sandbox's or session's
+   * workspace on its worker. Absent (SH_RELAY_CONTROL_URL unset), nothing is released and no record
+   * changes; idle reclaim on the worker frees the workspace, as before.
+   */
+  relayRelease?: RelayReleaser;
+  /** How long a release may hold up a DELETE or the sweep; RELEASE_BOUND_MS. A test seam. */
+  releaseBoundMs?: number;
   /** Per-sandbox egress logs, beside `sandboxes`; absent, the routes store nothing. */
   egress?: EgressStore;
   /**
@@ -320,6 +329,48 @@ export interface CpDeps {
    * receive grants over the authenticated exchange and never verify them.
    */
   grantVerifyKeys?: Map<string, KeyObject>;
+}
+
+/**
+ * A deleted session's workspace released on its worker (#338), keyed by its session id (the
+ * workspace key every leased turn of it sent; harness select-sandbox.ts). The worker is the
+ * session's `sandboxPod`, else the `sandboxId` its last leased turn ran on (both self-reported into
+ * the runtime hash, read before the cascade); with neither there is nothing to send, and the audit
+ * says so (`no_worker`). One `session_workspace_release` audit line either way, its outcome the
+ * worker's answer or `not_answered`: the session record is gone, so nothing retries it, and the
+ * worker's idle reclaim is the backstop. Never throws, and never holds the DELETE past the bound.
+ */
+async function releaseSessionWorkspace(
+  deps: CpDeps,
+  rec: SessionRecord,
+  runtime: Record<string, string>,
+): Promise<void> {
+  const worker = runtime.sandboxPod || runtime.sandboxId || '';
+  const line = (outcome: string) =>
+    auditBestEffort(deps, 'session_workspace_release', rec.sessionId, {
+      subject: rec.owner,
+      sessionId: rec.sessionId,
+      decision: 'session_workspace_release',
+      outcome,
+      ...(worker ? { sandboxId: worker } : {}),
+    });
+  if (!worker) {
+    await line('no_worker');
+    return;
+  }
+  await withinBound(deps.releaseBoundMs ?? RELEASE_BOUND_MS, async (signal) => {
+    let outcome: string;
+    try {
+      outcome = await deps.relayRelease!.release(worker, rec.sessionId, signal);
+    } catch (err) {
+      console.error(
+        `[control-plane] the release of session ${rec.sessionId}'s workspace on ${worker} was not ` +
+          `answered: ${(err as Error).message} -- idle reclaim on the worker frees it`,
+      );
+      outcome = 'not_answered';
+    }
+    await line(outcome);
+  });
 }
 
 /** `deps.log` with the production default; keeps the field optional on `CpDeps`. */
@@ -1345,7 +1396,13 @@ export const HANDLERS: Record<string, Handler> = {
   deleteSession: async (ctx, deps) => {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
     const inFlight = await turnInFlight(rec.sessionId, deps);
+    // #338: where the session's workspace lives, read BEFORE the cascade deletes the runtime hash.
+    const runtime = deps.relayRelease ? await deps.index.getRuntime(rec.sessionId) : undefined;
     await deps.index.cascadeDelete(rec);
+    // Released only now that the delete has committed: a released key refuses new Execs, so a
+    // release before a delete that then failed would strand a live session. Within the bound, and
+    // never this DELETE's failure.
+    if (runtime) await releaseSessionWorkspace(deps, rec, runtime);
     // Reclaim this session's open async turns and their quota slots (F2): nothing else in the
     // design will ever move an orphaned queued/running turn to terminal, so without this a
     // submit-then-delete cycle burns a slot forever. `deps.turns` is absent on the sandbox profile,

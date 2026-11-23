@@ -46,6 +46,7 @@ import { keyIdFor, makeSigner, parseKeyset, publicKeyFromBase64 } from './token.
 import { resolveVersion } from './version.js';
 import { VaultCredentialStore, vaultTokenSource } from './vault-store.js';
 import { withCredentials } from './systemd-credentials.js';
+import { relayReleaserFromEnv, type RelayReleaser } from './relay-release.js';
 import { parseSandboxTiers } from './sandbox-tiers.js';
 import {
   routeProfileFromEnv,
@@ -295,7 +296,7 @@ export function checkGrantRedemption(
  * (`LoadCredential=`, MI1 §6.7) rather than an env line; everywhere else, as today, from the env.
  */
 // prettier-ignore
-export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN', 'SH_JANITOR_TOKEN', 'SH_INSTALLER_TOKEN', 'SH_TEST_USER_SECRET', 'SH_OIDC_CLIENT_SECRET', 'MOCA_GRANT_SIGNING_KEY'] as const;
+export const CONTROL_PLANE_SECRETS = ['SH_SESSION_TOKEN_PRIVATE_KEY', 'SH_CREDENTIAL_KEK', 'SH_EXCHANGE_TOKEN', 'SH_OPERATOR_INFERENCE_TOKEN', 'SH_JANITOR_TOKEN', 'SH_INSTALLER_TOKEN', 'SH_TEST_USER_SECRET', 'SH_OIDC_CLIENT_SECRET', 'MOCA_GRANT_SIGNING_KEY', 'MOCA_RELAY_RELEASE_TOKEN'] as const;
 
 /** The API, session and refresh token lifetimes, shared by both route profiles. */
 function tokenTtlsFromEnv(
@@ -786,6 +787,9 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   // or redeem a grant must not reach the first request under `multi`.
   const grantRing = grantRingFromEnv(env, verifyKeys);
   checkGrantRedemption(config, grantRing !== undefined, env.MOCA_INFERENCE_ADDR !== undefined);
+  // #338: the relay's control listener, only with SH_RELAY_CONTROL_URL; its bearer must differ
+  // from every bearer this control plane accepts. Before Redis, so a refusal leaves nothing open.
+  const release = releaserFrom(env, config);
   const client = createClient(redisClientOptions(env.REDIS_URL ?? 'redis://127.0.0.1:6379'));
   const sandboxProfile = config.routeProfile === 'sandbox';
   // The sandbox stores, on the sandbox profile and on combined (combined control plane spec §3.5).
@@ -883,7 +887,20 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
     newId: defaultNewId,
     runKubectl: defaultRunKubectl,
     log: defaultAuditLog,
+    ...release,
   };
+}
+
+/** The relay releaser as a spreadable fragment, absent (not undefined) when release is off. */
+function releaserFrom(env: NodeJS.ProcessEnv, config: CpConfig): { relayRelease?: RelayReleaser } {
+  const relayRelease = relayReleaserFromEnv(env, [
+    ...(config.exchangeToken ? [config.exchangeToken] : []),
+    ...(config.sandbox?.janitorToken ? [config.sandbox.janitorToken] : []),
+    ...(config.installerToken ? [config.installerToken] : []),
+    ...(config.sandbox?.egress?.hosts.map((h) => h.token) ?? []),
+    ...(config.templateHosts?.map((h) => h.token) ?? []),
+  ]);
+  return relayRelease ? { relayRelease } : {};
 }
 
 const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);
