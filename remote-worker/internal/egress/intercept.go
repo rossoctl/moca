@@ -131,8 +131,9 @@ func (ic *tlsInterceptor) serve(pc *proxyConn, t target, addrs []netip.Addr, br 
 			}
 			leaf, err := ic.ca.Leaf(t.host)
 			if err != nil {
-				// Handshake failure plus an audit event; never a panic.
-				pc.emit(Event{Host: t.host, Method: http.MethodConnect, Status: http.StatusBadGateway,
+				// Handshake failure plus an audit event; never a panic. 503: the
+				// upstream verified, and the refusal is the proxy's own.
+				pc.emit(Event{Host: t.host, Method: http.MethodConnect, Status: http.StatusServiceUnavailable,
 					DialAddr: c.dial, Decision: DecisionLeafUnavailable}, true)
 			}
 			return leaf, err

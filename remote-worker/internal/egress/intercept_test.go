@@ -111,6 +111,7 @@ type icEnv struct {
 type icOpts struct {
 	untrusted bool
 	mod       func(*Config)
+	leafNow   func() time.Time // the leaf CA's clock; time.Now when nil
 }
 
 func newICEnv(t *testing.T, o icOpts) *icEnv {
@@ -123,7 +124,7 @@ func newICEnv(t *testing.T, o icOpts) *icEnv {
 	e := &icEnv{t: t, pol: &icPolicy{}, guestCA: newTestCA(t, true)}
 	e.up = newICUpstream(t, certRoot)
 	var err error
-	if e.leaf, err = NewLeafCA(e.guestCA.certPEM, e.guestCA.keyPEM, time.Now); err != nil {
+	if e.leaf, err = NewLeafCA(e.guestCA.certPEM, e.guestCA.keyPEM, o.leafNow); err != nil {
 		t.Fatal(err)
 	}
 	e.h = newHarness(t, fmt.Sprintf("up.test:%d", e.up.port), func(c *Config) {
@@ -301,6 +302,29 @@ func TestInterceptSNIMismatchClosed(t *testing.T) {
 		t.Fatal("handshake with a foreign SNI succeeded")
 	}
 	e.h.sink.waitEvent(t, DecisionMisdirected)
+	if e.up.count() != 0 {
+		t.Fatal("request reached upstream")
+	}
+}
+
+func TestInterceptLeafUnavailable503(t *testing.T) {
+	var at atomic.Int64 // the clock once set, after setup: NewLeafCA refuses an expired CA
+	e := newICEnv(t, icOpts{leafNow: func() time.Time {
+		if n := at.Load(); n != 0 {
+			return time.Unix(0, n)
+		}
+		return time.Now()
+	}})
+	e.pol.Set(e.cred("gh", "/", authHdr("Bearer real")))
+	at.Store(e.guestCA.cert.NotAfter.UnixNano())
+	g := e.open()
+	if err := g.tc.Handshake(); err == nil {
+		t.Fatal("handshake succeeded with an expired interception CA")
+	}
+	ev := e.h.sink.waitEvent(t, DecisionLeafUnavailable)
+	if ev.Status != 503 || ev.Method != http.MethodConnect || ev.Host != "up.test" || ev.DialAddr == "" {
+		t.Fatalf("event %+v", ev)
+	}
 	if e.up.count() != 0 {
 		t.Fatal("request reached upstream")
 	}
