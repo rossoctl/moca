@@ -246,7 +246,13 @@ describe('§9.3 test 3 — contract drift', () => {
         Object.values(byMethod).map((op) => (op as { responses?: unknown }).responses),
       );
     const json = JSON.stringify(v1Responses);
-    expect(json).not.toContain('secret');
+    // Word-boundary, not a bare substring: #394's `secretMissing` (a boolean naming a secret's
+    // ABSENCE) and `webhookSecret` (the webhook signing key, shown once BY DESIGN -- the same
+    // show-once contract a refresh token has, not a credential-store read-back) both legitimately
+    // contain "secret" as part of a longer identifier. A literal field named `secret` -- the shape
+    // this check actually guards against -- still matches, since the quotes around a JSON key are
+    // non-word characters.
+    expect(json).not.toMatch(/\bsecret\b/);
     expect(json).not.toContain('anthropicAuthToken');
   });
 

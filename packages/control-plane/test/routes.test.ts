@@ -33,6 +33,10 @@ describe('the route table', () => {
         'POST /v1/sessions/{id}/decision',
         // #392: the owner-scoped event stream over the same transitions.
         'GET /v1/events',
+        // #394: the caller's own owner-notification config.
+        'GET /v1/notifications',
+        'PUT /v1/notifications',
+        'DELETE /v1/notifications',
         'GET /v1/credentials',
         'PUT /v1/credentials/{name}',
         'DELETE /v1/credentials/{name}',

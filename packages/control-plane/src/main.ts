@@ -387,6 +387,9 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     // Where a worker spends an inference grant (MI1 §6.3). Only the harness profile reads it: the
     // sandbox profile returns above and serves no turns.
     inferenceUrl: inferenceUrlFromEnv(env),
+    // #394: empty `allow` is fail-closed -- notifications stay off until a later task reads the
+    // five MOCA_NOTIFY_* env vars here.
+    notify: { allow: [], minIntervalS: 5, perHour: 60, failMax: 10 },
   };
   // Validated at startup even though only the provider uses it: a deployment with
   // SH_TEST_USERS set and no secret must fail to boot, not serve an unguarded login path.
@@ -502,6 +505,8 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
     tenancy: 'single',
     turnRecordTtlSeconds: turnRecordTtlFromEnv(env),
     turnSummaryBytes: countEnv(env, 'MOCA_TURN_SUMMARY_BYTES', 2048),
+    // #394: the sandbox profile mounts no notification routes; an empty allow keeps this inert.
+    notify: { allow: [], minIntervalS: 5, perHour: 60, failMax: 10 },
   };
   checkRefreshConfig(config);
   return config;
