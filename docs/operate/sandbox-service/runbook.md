@@ -505,6 +505,10 @@ shells and no key is ever echoed to a terminal or a shell history.
 
 ```bash
 NS=<namespace>
+# Unset or empty, kubectl silently uses the current context's default namespace, which is the wrong
+# place to patch a Secret or read a ring from.
+[[ -n "$NS" && "$NS" != '<namespace>' ]] ||
+  { echo 'refusing: set NS to the deployment namespace first'; return 2>/dev/null || exit 1; }
 # 1. The new key, prepended to the ring. The current value is kept as the SECOND entry: overwriting
 #    instead of prepending is the mistake that loses every existing credential.
 old="$(kubectl get secret sbx-egress -n "$NS" -o jsonpath='{.data.SH_CREDENTIAL_KEK}' | base64 -d)"
@@ -521,7 +525,7 @@ does not undo this and does not reorder it. A ring entry that is not 32 bytes of
 
 ```bash
 # 2. Watch for reads still landing on the retired key. Both signals are the same event:
-kubectl logs deployment/moca-control-plane -n <namespace> | grep 'NON-PRIMARY KEK'
+kubectl logs deployment/moca-control-plane -n "$NS" | grep 'NON-PRIMARY KEK'
 #    -> names the subject hash and credential, i.e. WHICH credential is still stale
 curl -sS -H @"$HDR" "$CP/metrics" | jq .counters.credential_nonprimary_kek_reads
 #    -> the same signal as a number, without scraping logs: WHETHER any is
@@ -536,12 +540,18 @@ long-running pod look clean while credentials were still stale.
 ```bash
 # 3. Only once nothing has opened under a non-primary key for long enough that every credential has
 #    plausibly been rewritten -- a quiet counter across a full cycle of use, not a quiet hour -- drop
-#    the retired entry, leaving the new key alone. Taken from the LIVE ring's first entry rather than
-#    from $new, so a fresh shell cannot write an empty key, and refused if the ring is not a ring.
+#    the retired entry, leaving the new key alone. The key to keep comes from the LIVE ring rather
+#    than from $new, so a fresh shell cannot write an empty key.
+#
+#    EXACTLY TWO entries, or it refuses. This step keeps the first and drops the rest, so on a ring of
+#    three -- step 1 run twice before step 3 ever ran -- it would discard two keys at once, which is
+#    the unrecoverable loss this section is about. Rotate one key at a time: finish step 3, then start
+#    step 1 again.
 ring="$(kubectl get secret sbx-egress -n "$NS" -o jsonpath='{.data.SH_CREDENTIAL_KEK}' | base64 -d)"
-primary="${ring%%,*}"
-[[ "$ring" == *,* && -n "$primary" ]] ||  # names no value: the ring is key material
-  { echo 'refusing: SH_CREDENTIAL_KEK is not a ring with a non-empty first entry (nothing to drop)'; return 2>/dev/null || exit 1; }
+primary="${ring%%,*}" rest="${ring#*,}"
+# Names no value: the ring is key material. Entry count, not just "has a comma".
+[[ "$ring" == *,* && -n "$primary" && -n "$rest" && "$rest" != *,* ]] ||
+  { echo 'refusing: SH_CREDENTIAL_KEK is not exactly two non-empty entries; rotate one key at a time'; return 2>/dev/null || exit 1; }
 kubectl patch secret sbx-egress -n "$NS" --type=merge \
   -p "{\"data\":{\"SH_CREDENTIAL_KEK\":\"$(printf '%s' "$primary" | base64 | tr -d '\n')\"}}"
 kubectl rollout restart deployment/moca-control-plane -n "$NS"
@@ -586,9 +596,10 @@ the component is not startable on its own:
   sidecar can log in (AppRole) and renew it without the control plane ever holding a long-lived token.
   The sidecar is not in the Component: its auth method is a per-deployment decision.
 
-  **Until something writes that file the pod does not start.** The store reads the sink once,
-  synchronously, at boot, so a missing or empty file fails startup (with the path in the log) rather
-  than coming up and serving 503s — `/run/vault` is an empty in-memory volume until an Agent fills it.
+  **Until something writes that file the pod does not start.** The store also _validates_ the sink at
+  boot with one synchronous read, so a missing or empty file fails startup (with the path in the log)
+  rather than coming up and serving 503s — `/run/vault` is an empty in-memory volume until an Agent
+  fills it.
   A 503 is what you get later, if a file that was readable at boot stops being readable. Expect
   `CrashLoopBackOff` on the first roll after the switch if the sidecar is not in place; check the
   control plane's logs for the token path before suspecting Vault itself.

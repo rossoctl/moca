@@ -42,17 +42,19 @@ spec:
             - name: VAULT_NAMESPACE
               valueFrom:
                 { configMapKeyRef: { name: sbx-settings, key: VAULT_NAMESPACE, optional: true } }
-            # A FILE, never VAULT_TOKEN: vault-store.ts re-reads it on every request, so a Vault Agent
-            # sidecar can log in (AppRole) and renew without the control plane holding a long-lived
-            # token or restarting. Setting both VAULT_TOKEN and VAULT_TOKEN_FILE refuses to start.
+            # A FILE, never VAULT_TOKEN: vault-store.ts VALIDATES the sink at boot and then RE-READS it
+            # per request, so a Vault Agent sidecar can log in (AppRole) and renew without the control
+            # plane holding a long-lived token or restarting. Setting both VAULT_TOKEN and
+            # VAULT_TOKEN_FILE refuses to start.
             #
-            # THIS COMPONENT IS NOT STARTABLE ON ITS OWN. vault-store.ts reads the sink ONCE,
-            # SYNCHRONOUSLY, at boot (`readFileSync`, so an unreadable or empty file fails startup with
-            # its name in the log). Nothing here writes /run/vault/token, so until the deployment adds
-            # something that does, the pod fails to start with ENOENT -- it does NOT come up and serve
-            # 503s. The sidecar is left out deliberately: its auth method is a per-deployment decision
-            # (moca#823), and a half-configured one would crash-loop just as surely. The path below is
-            # this component's contract with whatever fills it; see the runbook.
+            # THIS COMPONENT IS NOT STARTABLE ON ITS OWN. The boot-time validation is a synchronous
+            # read (`readFileSync`), so a missing or empty file fails STARTUP with its name in the log.
+            # Nothing here writes /run/vault/token, so until the deployment adds something that does,
+            # the pod fails to start with ENOENT -- it does NOT come up and serve 503s. (A 503 is the
+            # later case: a sink readable at boot that stops being readable.) The sidecar is left out
+            # deliberately: its auth method is a per-deployment decision (moca#823), and a
+            # half-configured one would crash-loop just as surely. The path below is this component's
+            # contract with whatever fills it; see the runbook.
             - { name: VAULT_TOKEN_FILE, value: /run/vault/token }
           volumeMounts:
             # Writable, unlike /run/credentials: the Agent REWRITES the sink on every renewal. Shared
