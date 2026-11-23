@@ -50,7 +50,7 @@ function connFailed(c: SbxCtx, err: unknown): number {
 }
 
 /**
- * `mocactl sbx mode <mode> [ID] [--idle-timeout S]` (spec §8.1, §8.2). The record is read first: a
+ * `mocactl sbx mode <mode> [SANDBOX] [--idle-timeout S]` (spec §8.1, §8.2). The record is read first: a
  * move to a higher rank is an upgrade, the user's own act at a terminal. The PUT keeps the record's
  * idle timeout unless `--idle-timeout` is given (an omitted one is stored as 0). Then the PUT's
  * set-mode token is sent once (sendSetMode); a worker that cannot be reached is pending, exit 0,
@@ -162,7 +162,7 @@ function pendingByCtrlC(c: SbxCtx, s: SbxSandbox): number {
 }
 
 /**
- * `mocactl sbx reset [ID]` (spec §8.3): ends the live lease, so the next command starts a new
+ * `mocactl sbx reset [SANDBOX]` (spec §8.3): ends the live lease, so the next command starts a new
  * guest. The status is asked first, so a reset of no lease is a no-op; a per-exec sandbox (the
  * token's mode, as `sandbox_info` decides it) has none, and no lease call is made (P4-R9).
  * Ctrl-C is exit 130: the worker may still end the lease.
@@ -211,7 +211,7 @@ const errorCode = (err: unknown): string =>
   err instanceof LeaseControlError || err instanceof ApiError ? err.code : 'failed';
 
 /**
- * `mocactl sbx get [ID] [--json]`: the record's mode, epoch and idle timeout, and the lease as the
+ * `mocactl sbx get [SANDBOX] [--json]`: the record's mode, epoch and idle timeout, and the lease as the
  * worker has it. A per-exec sandbox has no lease to ask about (P4-R9). A lease record whose epoch
  * the worker does not know (a set_mode that was pending) gets its set_mode again, with a mode
  * token minted now (spec §8.2). A failed status is shown, not a failed get.

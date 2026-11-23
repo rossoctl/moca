@@ -817,7 +817,7 @@ describe('mocactl sbx up and rm: the agent configuration (SBX0 §6.3, plan Revie
 
   it('says in its usage that rm refuses while changes are not yet pulled, and takes --force', () => {
     const u = SBX_USAGE.replace(/\s+/g, ' ');
-    expect(u).toContain('mocactl sbx rm [ID] [--keep-config] [--force] [--json]');
+    expect(u).toContain('mocactl sbx rm [SANDBOX] [--keep-config] [--force] [--json]');
     expect(u).toContain('refused while the sandbox has changes not yet pulled, unless --force');
   });
 

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { sbxMain } from '../src/sbx/cli.js';
 import { fakeCp, SBX, setup } from './helpers/sbx.js';
 
-// `mocactl sbx egress [ID] [--json | --ndjson | --verify]`. example.com hosts only.
+// `mocactl sbx egress [SANDBOX] [--json | --ndjson | --verify]`. example.com hosts only.
 const E1 = {
   time: '2026-11-08T12:00:00Z',
   via: 'moca-egress',
