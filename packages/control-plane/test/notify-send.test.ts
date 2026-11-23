@@ -86,13 +86,13 @@ describe('sendWebhook', () => {
 });
 
 describe('sendNtfy', () => {
-  it('POSTs the JSON form to the server ROOT with the topic in the body', async () => {
+  it('POSTs the JSON form to the sink url exactly, with the topic in the body', async () => {
     const f = ok();
     expect(await sendNtfy(deps(f), ntfy, payload(), 'tk_1')).toBe(true);
     const [url, init] = callOf(f);
     // The JSON form, not POST /<topic> with X-Title: a gate summary is arbitrary UTF-8, and the
     // header form would need RFC 2047 encoding.
-    expect(url).toBe('https://ntfy.example.com/');
+    expect(url).toBe(ntfy.url);
     const body = JSON.parse(init.body as string);
     expect(body).toMatchObject({
       topic: 'moca-alice',
@@ -118,6 +118,36 @@ describe('sendNtfy', () => {
     const [, init] = callOf(f);
     expect(new Headers(init.headers).has('authorization')).toBe(false);
     expect(JSON.parse(init.body as string).actions).toBeUndefined();
+  });
+
+  it('keeps an operator path prefix instead of discarding it', async () => {
+    const f = ok();
+    const prefixed = { ...ntfy, url: 'https://ntfy.example.com/moca' };
+    expect(await sendNtfy(deps(f), prefixed, payload(), 'tk_1')).toBe(true);
+    const [url] = callOf(f);
+    expect(url).toBe('https://ntfy.example.com/moca');
+  });
+});
+
+describe('post (redirect handling, both sinks share this)', () => {
+  it('passes redirect: "error" so undici never chases a sink to an unchecked host', async () => {
+    const f = ok();
+    await sendWebhook(deps(f), webhook, payload(), KEY);
+    await sendNtfy(deps(f), ntfy, payload(), 'tk_1');
+    expect(callOf(f, 0)[1].redirect).toBe('error');
+    expect(callOf(f, 1)[1].redirect).toBe('error');
+  });
+
+  it('a sink answering a redirect fails the delivery and never reaches the redirect target', async () => {
+    // undici throws on a 3xx when redirect: 'error' is set, rather than returning a Response: this
+    // is the shape its real fetch takes, and it means `deliver` sees exactly the same TypeError a
+    // network failure would.
+    const redirecting = vi.fn(async () => {
+      throw new TypeError('fetch failed');
+    });
+    expect(await sendWebhook(deps(redirecting), webhook, payload(), KEY)).toBe(false);
+    expect(await sendNtfy(deps(redirecting), ntfy, payload(), 'tk_1')).toBe(false);
+    expect(redirecting).toHaveBeenCalledTimes(2); // the sink's own url only, never a second hop
   });
 });
 

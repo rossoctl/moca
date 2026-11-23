@@ -14,7 +14,12 @@ import type { TurnEvent } from './turn-record.js';
 const DEFAULT_TIMEOUT_MS = 5_000;
 
 export interface NotifyPayload {
-  /** Unique per attempt. A receiver dedupes on it; at-least-once is the contract (ADR-0015). */
+  /**
+   * The batch's head cursor (the newest event's stream id), not a fresh id per attempt: a retry of
+   * the same unadvanced batch -- a crash between `deliver` and `advance`, or two overlapping passes
+   * -- must carry the SAME id, or a receiver that dedupes on it (at-least-once is the contract,
+   * ADR-0015) accepts the duplicate.
+   */
   deliveryId: string;
   /** UNIX SECONDS, not ms: it is signed, and a receiver rejects a stale one by comparing to now. */
   timestamp: number;
@@ -43,6 +48,11 @@ async function post(deps: SendDeps, url: string, init: RequestInit): Promise<boo
       // A sink that accepts the connection and never answers would otherwise hold the sweep for a
       // whole interval. No retry here: the cursor does not advance, so the next pass IS the retry.
       signal: AbortSignal.timeout(deps.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+      // undici follows redirects by default. An allowlisted host that answers 302 to, say, the
+      // instance metadata service would otherwise be chased with nothing re-checking the allowlist
+      // on the new URL -- exactly the SSRF hole `allowsUrl` exists to close. A redirect fails the
+      // delivery instead; the cursor holds, so the next pass is the retry, same as any other failure.
+      redirect: 'error',
     });
     return res.ok;
   } catch {
@@ -87,7 +97,10 @@ export async function sendNtfy(
   token: string | undefined,
 ): Promise<boolean> {
   const { title, message, priority, tags, approveUrl } = payload.summary;
-  return post(deps, new URL('/', sink.url).toString(), {
+  // POST to the stored url exactly, not its origin: `allowsUrl` approved this path (possibly a
+  // prefix the operator chose deliberately), and ntfy's JSON publish form works at whatever base
+  // path the server is mounted on. Discarding the path would defeat that prefix.
+  return post(deps, sink.url, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
