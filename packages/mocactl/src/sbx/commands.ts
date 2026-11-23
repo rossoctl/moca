@@ -26,6 +26,7 @@ import {
   setModeFailureText,
   type SetModeOutcome,
 } from './mode.js';
+import { sandboxName } from './names.js';
 import { afterText, lifetimeNotTakenText, lifetimeText, validLifetime } from './lifetime.js';
 import { forgetNotices } from './notices.js';
 import { seedSandbox, type SeedResult } from './templates.js';
@@ -58,6 +59,8 @@ export interface SbxCtx {
    */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   now?: () => number;
+  /** The default sandbox name's pick, 0 to 1 (default Math.random); tests pass a fake. */
+  random?: () => number;
   /**
    * The control-plane URL when it came from `--control-plane-url` or MOCACTL_SBX_URL rather than
    * config.json: `SBX_TOKEN_CMD` then names it, since another shell may have neither.
@@ -404,21 +407,45 @@ export async function cmdTransferTemplate(c: SbxCtx, id: string, owner: string):
 /** How long `sbx create` and `sbx up` wait for a template to become active (§6.4) before giving up. */
 const ACTIVATION_WAIT_MS = 10 * 60_000;
 
+/** ` named eager-hopper`, or nothing for a record with no name (a control plane that dropped it). */
+export const namedText = (s: { name?: string | null }): string =>
+  s.name ? ` named ${sanitizeRemote(s.name)}` : '';
+
+/** Tries at a default name before a `name_conflict` is the user's to see. */
+const NAME_TRIES = 5;
+
 /**
  * Creates a sandbox, waiting while its template activates (template lifecycle spec §6.4): a
  * `409 template_not_active` means the control plane has started the activation (or, with no lease
  * to take, is waiting for a host), so the create is retried after its Retry-After, saying why, until
- * ACTIVATION_WAIT_MS. Any other refusal is thrown.
+ * ACTIVATION_WAIT_MS. With no name given, one is made up (`adjective-surname`), and a
+ * `409 name_conflict` on it is retried with another, up to NAME_TRIES: the user did not pick it, so
+ * a clash is not theirs to fix. A name the user gave stays theirs: its clash is thrown. Any other
+ * refusal is thrown.
  */
 export async function createWaitingForActivation(
   c: SbxCtx,
-  body: { template: string; name?: string; labels?: Record<string, string> },
+  given: { template: string; name?: string; labels?: Record<string, string> },
 ): Promise<SbxSandbox & { buildId?: string | null; templateManifestHash?: string | null }> {
   const start = c.rt.now();
+  const madeUp = given.name === undefined;
+  const named = () => (madeUp ? { ...given, name: sandboxName(c.random) } : given);
+  let body = named();
+  let nameTries = 1;
   for (;;) {
     try {
       return await c.api.createSandbox(body);
     } catch (err) {
+      if (
+        madeUp &&
+        err instanceof ApiError &&
+        err.code === 'name_conflict' &&
+        nameTries < NAME_TRIES
+      ) {
+        nameTries += 1;
+        body = named();
+        continue;
+      }
       if (!(err instanceof ApiError && err.status === 409 && err.code === 'template_not_active'))
         throw err;
       const left = ACTIVATION_WAIT_MS - (c.rt.now() - start);
@@ -449,7 +476,7 @@ export async function cmdCreate(
     const s = await createWaitingForActivation(c, body);
     const id = sanitizeRemote(s.id);
     c.io.err(
-      `created ${id} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}${afterText(s)}`,
+      `created ${id}${namedText(s)} (${sanitizeRemote(s.template)}), expires ${when(s.expiresAt)}${afterText(s)}`,
     );
     // A control plane from before modes ignores the body's mode: say so, never a silent per-exec.
     if (body.mode !== undefined && s.mode !== body.mode) {

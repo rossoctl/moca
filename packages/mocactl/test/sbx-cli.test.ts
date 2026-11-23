@@ -37,6 +37,7 @@ import {
   TOKEN,
   URL_,
   type Handler,
+  MADE_UP_NAME,
 } from './helpers/sbx.js';
 
 const MOCA_URL = 'https://moca-api.example.invalid';
@@ -902,11 +903,54 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(cp.calls.length).toBe(1);
   });
 
+  const conflict = () => ({
+    status: 409,
+    body: { error: 'name_conflict', message: 'you already have a live sandbox named that' },
+  });
+
+  it('create without --name makes one up, and tries another on name_conflict', async () => {
+    const { home, env, io } = setup();
+    let posts = 0;
+    const cp = fakeCp({
+      'POST /v1/sandboxes': () => (++posts < 3 ? conflict() : { status: 201, body: sandbox() }),
+    });
+    // 0, then 0.5, then 0.999: the first and last of each list, then the middle, then the last.
+    const picks = [0, 0, 0.5, 0.5, 0.999, 0.999];
+    const random = () => picks.shift()!;
+    expect(await sbxMain(['create'], env, io, { home, fetchImpl: cp.fetchImpl, random })).toBe(0);
+    const names = cp.calls.map((c) => (c.body as { name: string }).name);
+    expect(names).toHaveLength(3);
+    expect(names[0]).toBe('admiring-agnesi');
+    for (const n of names) expect(n).toMatch(MADE_UP_NAME);
+    expect(new Set(names).size).toBe(3);
+    expect(io.errs.join('\n')).toContain(`created ${SBX} named web (node22)`);
+  });
+
+  it('create gives up on made-up names after 5 conflicts', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({ 'POST /v1/sandboxes': conflict });
+    expect(await sbxMain(['create'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(1);
+    expect(cp.calls).toHaveLength(5);
+    expect(io.errs.join('\n')).toContain('already have a live sandbox named');
+  });
+
+  it('create --name N sends N, and its name_conflict is not retried', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({ 'POST /v1/sandboxes': conflict });
+    expect(
+      await sbxMain(['create', '--name', 'mine'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(1);
+    expect(cp.calls.map((c) => c.body)).toEqual([{ template: 'default', name: 'mine' }]);
+  });
+
   it('creates from the default template without --template (spec §6.1), and refuses a malformed --label', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({ 'POST /v1/sandboxes': () => ({ status: 201, body: sandbox() }) });
     expect(await sbxMain(['create'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
-    expect(cp.calls[0]!.body).toEqual({ template: 'default' });
+    expect(cp.calls[0]!.body).toEqual({
+      template: 'default',
+      name: expect.stringMatching(MADE_UP_NAME),
+    });
     expect(
       await sbxMain(['create', '--template', 'x', '--label', 'nope'], env, io, {
         home,
@@ -926,9 +970,13 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(
       await sbxMain(['create', '--lifetime', '14d'], env, io, { home, fetchImpl: cp.fetchImpl }),
     ).toBe(0);
-    expect(cp.calls[0]!.body).toEqual({ template: 'default', idleLifetimeS: 1_209_600 });
+    expect(cp.calls[0]!.body).toEqual({
+      template: 'default',
+      name: expect.stringMatching(MADE_UP_NAME),
+      idleLifetimeS: 1_209_600,
+    });
     expect(io.errs.join('\n')).toContain(
-      `created ${SBX} (node22), expires ${new Date(1_800_604_800 * 1000).toISOString()}, after 7 d without use`,
+      `created ${SBX} named web (node22), expires ${new Date(1_800_604_800 * 1000).toISOString()}, after 7 d without use`,
     );
   });
 
