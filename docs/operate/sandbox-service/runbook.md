@@ -1119,6 +1119,14 @@ same applies to a CA rotation.
 The default allowlist (`MOCA_EGRESS_ALLOW`) does not include `api.githubcopilot.com`. Add it to
 `/etc/sbx/moca-egress.env` for the `github-mcp` preset, which otherwise gets `403 destination_denied`.
 
+For sandboxes to drive a Kubernetes or OpenShift cluster's API, two operator-side facts matter: the
+destination must be allowlisted, and the cluster API's CA must be trusted upstream
+(`MOCA_EGRESS_UPSTREAM_CA`), or every request dies as `502 upstream_unverified` before credentials
+are considered. The user-facing procedure — service-account token as a stored credential, plus the
+placeholder kubeconfig that carries it — is in [the credentials
+how-to](../../sandbox/how-to/egress-credentials.md#kubernetes-and-openshift-clusters), with a
+runnable example at `deploy/sbx/examples/ocp-cred-prepare.sh`.
+
 **Turning credential injection off.** Run `install-host.sh --uninstall-egress` on every KVM host
 first, then run `setup.sh` with `SBX_EGRESS_CREDENTIALS=0`. With the cluster off, the lookup route is
 unmounted (404); a host that still has the drop-in treats the 404 as an error and answers
