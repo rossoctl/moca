@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { resolveModelSelection, requireModel, sessionModelFor } from '../src/run-turn';
+import {
+  resolveModelSelection,
+  requireModel,
+  sessionModelFor,
+  ModelConfigError,
+} from '../src/run-turn';
 
 describe('resolveModelSelection', () => {
   it('defaults to anthropic / claude-opus-4-8 when nothing is set', () => {
@@ -49,6 +54,54 @@ describe('requireModel', () => {
     expect(() => requireModel('litellm', 'whatever')).toThrowError(
       /Unknown model provider "litellm".*anthropic/s,
     );
+  });
+
+  it('classifies the sibling config mistakes as ModelConfigError too', () => {
+    // An unknown provider or SH_MODEL_API is the same operator mistake as an unknown id; before
+    // they were plain Errors and /turn answered a bare 500 internal_error for each.
+    expect(() => requireModel('litellm', 'whatever')).toThrowError(ModelConfigError);
+    expect(() =>
+      requireModel('anthropic', 'm', { SH_MODEL_CUSTOM: '1', SH_MODEL_API: 'openai-responses' }),
+    ).toThrowError(ModelConfigError);
+    expect(() =>
+      requireModel('anthropic', 'm', { SH_MODEL_CUSTOM: '1', SH_MODEL_API: 'bogus' }),
+    ).toThrowError(ModelConfigError);
+  });
+
+  it('suggests SH_MODEL_CUSTOM when a custom endpoint is configured', () => {
+    // A gateway id the registry has never heard of is the common case behind this throw; the
+    // hint is the one-line fix (set SH_MODEL_CUSTOM=1), or the detour is a code read.
+    expect(() =>
+      requireModel('anthropic', 'claude-sonnet-9-9', {
+        ANTHROPIC_BASE_URL: 'https://gateway.example',
+      }),
+    ).toThrowError(/set SH_MODEL_CUSTOM=1 to send this id to it as-is/);
+  });
+
+  it('omits the SH_MODEL_CUSTOM hint when no custom endpoint is configured', () => {
+    // Anchored past the registry sentence: the hint (Known ids / Did you mean) follows directly,
+    // with no custom-endpoint sentence in between.
+    expect(() => requireModel('anthropic', 'claude-sonnet-9-9', {})).toThrowError(
+      /^Unknown model "anthropic\/claude-sonnet-9-9" — not in the pi-ai registry\. (Known|Did you mean)/,
+    );
+  });
+
+  it('suppresses the hint when the caller pins the lookup to no custom endpoint', () => {
+    // The api.anthropic.com session path: env names a gateway, but that branch deletes
+    // SH_MODEL_CUSTOM, so suggesting it there suggests a knob that cannot fix the failure.
+    expect(() =>
+      requireModel('anthropic', 'claude-sonnet-9-9', { ANTHROPIC_BASE_URL: 'https://gw' }, false),
+    ).toThrowError(
+      /^Unknown model "anthropic\/claude-sonnet-9-9" — not in the pi-ai registry\. (Known|Did you mean)/,
+    );
+  });
+
+  it('caps the id so the remedy stays inside the 500-char body budget', () => {
+    // SH_MODEL has no length validation; an unbounded id would push the remedy past /turn's
+    // 500-char slice of the message.
+    expect(() =>
+      requireModel('anthropic', 'x'.repeat(400), { ANTHROPIC_BASE_URL: 'https://g.example' }),
+    ).toThrowError(/set SH_MODEL_CUSTOM=1 to send this id to it as-is/);
   });
 });
 

@@ -145,6 +145,17 @@ one compete for the same slot.
 
 After editing `.env`, run `docker compose up -d` again to apply it.
 
+**Model ids on a gateway.** `SH_MODEL` must satisfy two lookups: the gateway's key must be allowed
+to call the id (a 403 `team_model_access_denied` from the gateway means it is not), and — unless
+`SH_MODEL_CUSTOM=1` is set — the id must be in the pi-ai registry the harness ships. A gateway
+often names models the registry has never heard of; set `SH_MODEL_CUSTOM=1` to send `SH_MODEL`
+to `ANTHROPIC_BASE_URL`/`SH_MODEL_BASE_URL` as-is. Also note compose reads your shell's model
+variables (`ANTHROPIC_*`, `OPENAI_*`, `SH_MODEL*`) before this `.env`; unset whatever the shell
+exports when it carries a different gateway —
+`env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u OPENAI_API_KEY -u
+OPENAI_BASE_URL -u SH_MODEL -u SH_MODEL_PROVIDER -u SH_MODEL_API -u SH_MODEL_BASE_URL -u
+SH_MODEL_AUTH -u SH_MODEL_CUSTOM docker compose …`.
+
 ## Using mocactl: the control plane
 
 `mocactl` needs a control plane for login, sessions, credentials and session tokens. It's the
