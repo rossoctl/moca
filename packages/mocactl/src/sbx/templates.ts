@@ -664,7 +664,7 @@ export async function seedSandbox(
   const seed = b?.spec?.seed;
   if (seed === undefined) return `the build of ${sanitizeRemote(id)} names no seed`;
   if (seed === '') return { seed, exitCode: 0, clean: null, head: null };
-  const x = await openExec(c.api, sandbox.id, factory);
+  const x = await openExec(c, sandbox.id, factory);
   // Each Exec's lease events are said as they come (plan-4 M2).
   const exec = noticingExec(c, sandbox.id, x.exec);
   try {

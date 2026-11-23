@@ -205,7 +205,7 @@ export async function cmdProc(
 ): Promise<number> {
   let x: OpenedExec;
   try {
-    x = await openExec(c.api, id, factory, c.signal ? { signal: c.signal } : {});
+    x = await openExec(c, id, factory, c.signal ? { signal: c.signal } : {});
   } catch (err) {
     return procFailed(c, id, a.sub, err, false);
   }

@@ -23,13 +23,14 @@ export type FakeExecAnswer = { lease?: LeaseEvent[] } & (
  * which drive a real SandboxExecConn against it. Only Exec is served.
  */
 export async function fakeExecRelay(answer: (req: ExecRequest, bearer: string) => FakeExecAnswer) {
-  const seen: { req: ExecRequest; bearer: string }[] = [];
+  const seen: { req: ExecRequest; bearer: string; callId?: string }[] = [];
   const server = new Server();
   server.addService(SandboxExecService, {
     exec: (call: ServerWritableStream<ExecRequest, ExecEvent>) => {
       const auth = String(call.metadata.get('authorization')[0] ?? '');
       const bearer = auth.replace(/^Bearer /, '');
-      seen.push({ req: call.request, bearer });
+      const callId = call.metadata.get('x-moca-call-id')[0] as string | undefined;
+      seen.push({ req: call.request, bearer, ...(callId !== undefined ? { callId } : {}) });
       const reqId = call.request.exec?.reqId ?? 0;
       const a = answer(call.request, bearer);
       for (const lease of a.lease ?? []) call.write({ lease } as ExecEvent);

@@ -172,6 +172,8 @@ interface RecordEndpoint {
 }
 
 export interface CallRecorder {
+  /** This record's id on every line: the command's invocation. */
+  readonly invocation: string;
   /** `fetch`, recording each call; the path is relative to `baseUrl`'s path. */
   wrap(fetchImpl: typeof fetch, baseUrl: string): typeof fetch;
   /**
@@ -383,6 +385,7 @@ export function openCallRecord(
   };
 
   return {
+    invocation,
     wrap(fetchImpl, baseUrl) {
       const basePath = new URL(baseUrl).pathname.replace(/\/+$/, '');
       return wrapWith(fetchImpl, (u) => ({

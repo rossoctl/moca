@@ -407,6 +407,10 @@ describe('mocactl sbx doctor (SBX0 §6.1)', () => {
       ok: false,
       error: 'sandbox busy',
     });
+    // Format 2's other lines are not calls: not counted.
+    recordCall(w.paths.stateDir, SBX, { v: 2, event: 'session', ts: ts(1000), ms: 1 });
+    recordCall(w.paths.stateDir, SBX, { v: 2, event: 'exec', ts: ts(1000), ms: 5000, exit: 1 });
+    recordCall(w.paths.stateDir, SBX, { v: 2, event: 'session_end', ts: ts(1000) });
     // Older than a day: not counted.
     recordCall(w.paths.stateDir, SBX, {
       ts: ts(2 * 86_400_000),

@@ -108,7 +108,8 @@ export async function serveSbxMcp(
   };
   /** The connection, opened at the first call; `signal` aborts that opening's requests. */
   const open = (signal?: AbortSignal) =>
-    (conn ??= openExec(c.api, id, factory, {
+    // No execRecord: this server records each call, its Execs listed in the call's line.
+    (conn ??= openExec({ api: c.api }, id, factory, {
       sandboxExpiresAt: s.expiresAt,
       onToken,
       keepalive: () => leased,
@@ -159,6 +160,7 @@ export async function serveSbxMcp(
     mode,
     leaseMode: () => tokenMode,
     record: (r) => recordCall(c.rt.paths.stateDir, id, r),
+    ...(c.execRecord?.run !== undefined ? { runId: c.execRecord.run } : {}),
     expiresAt: () => deadline,
     version: VERSION,
   });
@@ -175,6 +177,19 @@ export async function serveSbxMcp(
   } finally {
     closed = true;
     stopBeat();
+    // Best effort: a SIGKILL or a crash writes none, so a reader takes a missing end as unknown.
+    try {
+      recordCall(c.rt.paths.stateDir, id, {
+        v: 2,
+        event: 'session_end',
+        ts: new Date().toISOString(),
+        mcp_session: served.mcpSession,
+        sbx: id,
+        why: c.signal?.aborted ? 'signal' : 'eof',
+      });
+    } catch {
+      // The flight recorder is diagnostics.
+    }
     c.signal?.removeEventListener('abort', stop);
     if (conn) (await conn.catch(() => undefined))?.close();
   }

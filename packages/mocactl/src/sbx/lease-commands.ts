@@ -111,7 +111,7 @@ export async function cmdMode(
   const stored = `mode ${s.mode} stored (epoch ${s.modeEpoch})`;
   let x;
   try {
-    x = await openExec(c.api, id, o.factory);
+    x = await openExec(c, id, o.factory);
   } catch (err) {
     if (c.signal?.aborted) return pendingByCtrlC(c, s);
     c.io.err(`sbx: ${stored}, but set_mode was not sent`);
@@ -170,7 +170,7 @@ function pendingByCtrlC(c: SbxCtx, s: SbxSandbox): number {
 export async function cmdReset(c: SbxCtx, id: string, factory?: ExecFactory): Promise<number> {
   let x;
   try {
-    x = await openExec(c.api, id, factory);
+    x = await openExec(c, id, factory);
   } catch (err) {
     return connFailed(c, err);
   }
@@ -230,7 +230,7 @@ export async function cmdGet(c: SbxCtx, id: string, factory?: ExecFactory): Prom
   if (modeRank(s.mode) > 0) {
     let x;
     try {
-      x = await openExec(c.api, id, factory, { activity: false });
+      x = await openExec(c, id, factory, { activity: false });
     } catch (err) {
       if (c.signal?.aborted) return SBX_EXIT.interrupted;
       lease = { error: errorCode(err) };

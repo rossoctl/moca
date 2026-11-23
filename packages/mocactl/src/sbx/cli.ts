@@ -2,7 +2,14 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseArgs, type ParseArgsConfig } from 'node:util';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import { MAX_STDIN_BYTES, q, WORKSPACE, type SandboxModeName } from '@moca/sandbox-client';
+import { randomUUID } from 'node:crypto';
+import {
+  CALL_ID_RE,
+  MAX_STDIN_BYTES,
+  q,
+  WORKSPACE,
+  type SandboxModeName,
+} from '@moca/sandbox-client';
 import {
   loadAuth,
   loadConfig,
@@ -411,6 +418,10 @@ admins only:
                                                  changed between its read and its write)
 --record F (every command that calls the API but token, login, logout and credentials): one
 NDJSON line per HTTP attempt appended to F (0600), with no token, host or free text in it.
+Every command's sandbox commands are also recorded in the flight recorder,
+<state dir>/sbx/<id>.log (0600): one line per attempt (req_id, start, ms, exit, outcome; never
+the command or its output), per tool call for \`sbx mcp\`. MOCACTL_SBX_RUN_ID (optional) labels
+them.
 --json: print the result as JSON on stdout, for a script.
 ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, the one remembered at
@@ -1489,7 +1500,8 @@ async function sbxMainWith(
   const flagUrl = values['control-plane-url'] || (env.MOCACTL_SBX_URL ? undefined : boundUrl);
   const fromBinding = !values['control-plane-url'] && flagUrl !== undefined;
   // --record F: every HTTP attempt this command makes, the login's refresh included, so the record
-  // is opened (or refused) before the runtime's clients exist. Exec calls are gRPC, not recorded.
+  // is opened (or refused) before the runtime's clients exist. Exec calls are gRPC: the flight
+  // recorder has them (ctx.execRecord below), never this record.
   if (values.record !== undefined) {
     const r = openCallRecord(values.record, `sbx ${command}`, deps.now);
     if ('error' in r) {
@@ -1510,11 +1522,24 @@ async function sbxMainWith(
     ...(fromBinding ? { urlFrom: '.sbx/sandbox.json' } : {}),
   });
   if (typeof opened === 'number') return opened;
+  // MOCACTL_SBX_RUN_ID: a caller's optional label on this command's records, never required; one
+  // that is not an id is ignored (an agent's tools must not stop over a label), and said once.
+  const runEnv = env.MOCACTL_SBX_RUN_ID;
+  if (runEnv !== undefined && runEnv !== '' && !CALL_ID_RE.test(runEnv)) {
+    io.err(`sbx: MOCACTL_SBX_RUN_ID is not an id (${CALL_ID_RE}); not recorded`);
+  }
+  const run = runEnv && CALL_ID_RE.test(runEnv) ? runEnv : undefined;
   const ctx: SbxCtx = {
     ...opened,
     io,
     json: values.json === true,
     signal: deps.signal,
+    execRecord: {
+      stateDir: opened.rt.paths.stateDir,
+      command: `sbx ${command}`,
+      invocation: record.recorder?.invocation ?? randomUUID(),
+      ...(run !== undefined ? { run } : {}),
+    },
     ...(deps.sleep ? { sleep: deps.sleep } : {}),
     ...(deps.now ? { now: deps.now } : {}),
   };

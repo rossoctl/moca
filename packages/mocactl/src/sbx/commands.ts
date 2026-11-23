@@ -63,6 +63,22 @@ export interface SbxCtx {
    * config.json: `SBX_TOKEN_CMD` then names it, since another shell may have neither.
    */
   explicitUrl?: string;
+  /**
+   * Where this command records each Exec attempt (the flight recorder, format 2): set by the CLI
+   * for every command; `sbx mcp` records per call instead, so it opens its Execs without it.
+   */
+  execRecord?: ExecRecordTarget;
+}
+
+/** A command's Exec records: the flight recorder's directory, and what every line names. */
+export interface ExecRecordTarget {
+  stateDir: string;
+  /** `sbx run`, `sbx push`, …. */
+  command: string;
+  /** This process's id, the same as `--record`'s `invocation` when that is on. */
+  invocation: string;
+  /** MOCACTL_SBX_RUN_ID, when set: optional, never required. */
+  run?: string;
 }
 
 /**
@@ -513,7 +529,7 @@ async function sendCreatedMode(
   id: string,
   factory: ExecFactory | undefined,
 ): Promise<SetModeOutcome> {
-  const x = await openExec(c.api, id, factory);
+  const x = await openExec(c, id, factory);
   try {
     const { setModeToken } = await c.api.mintSandboxModeToken(id);
     return await sendSetMode(x, c.api, id, setModeToken, c.signal);
@@ -727,7 +743,7 @@ async function endOnWorker(
   try {
     const leased = modeRank((await c.api.getSandbox(id, { signal })).mode) > 0;
     // Deleting is not use: the mint does not move the idle deadline.
-    const x = await openExec(c.api, id, factory, { signal, activity: false });
+    const x = await openExec(c, id, factory, { signal, activity: false });
     try {
       if (leased) {
         try {

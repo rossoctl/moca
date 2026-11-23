@@ -292,7 +292,7 @@ async function execChecks(
   let exec: Exec | undefined;
   try {
     // Short, so a hung relay stalls doctor for about 30 s at most, not the 90 s default backstop.
-    x = await openExec(c.api, id, factory, { backstopMarginS: EXEC_BACKSTOP_S });
+    x = await openExec(c, id, factory, { backstopMarginS: EXEC_BACKSTOP_S });
     // Each Exec's lease events are said as they come, on stderr (plan-4 M2).
     exec = noticingExec(c, id, x.exec);
     const t0 = c.rt.now();
@@ -371,7 +371,9 @@ function recorderCheck(c: SbxCtx, id: string): DoctorCheck {
       fix: `check ${c.rt.paths.stateDir}/sbx/${id}.log is a readable file (it may be removed)`,
     };
   }
+  // Calls only: format 2 adds `session`, `session_end` and `exec` lines beside them.
   const recs = all.filter((r) => {
+    if (r.event !== undefined && r.event !== 'call') return false;
     const t = typeof r.ts === 'string' ? Date.parse(r.ts) : Number.NaN;
     return Number.isFinite(t) && t >= since;
   });

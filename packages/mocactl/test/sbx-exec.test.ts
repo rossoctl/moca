@@ -1093,9 +1093,14 @@ describe('mocactl sbx mcp (SBX0 §6.4)', () => {
     expect(x.closed()).toBe(1);
     const recs = readRecords(paths.stateDir, SBX);
     expect(recs).toMatchObject([
-      { tool: 'bash', execs: 1, ok: true },
-      { tool: 'sandbox_info', execs: 0 },
+      { v: 2, event: 'session', sbx: SBX, client: { name: 't', version: '0' }, run: null },
+      { v: 2, event: 'call', tool: 'bash', execs: 1, ok: true, n: 1 },
+      { v: 2, event: 'call', tool: 'sandbox_info', execs: 0, n: 2, exec: [] },
+      { v: 2, event: 'session_end', sbx: SBX, why: 'eof' },
     ]);
+    const session = recs[0]!.mcp_session;
+    expect(session).toMatch(/^ms_[0-9a-f]{32}$/);
+    expect(recs.every((r) => r.mcp_session === session)).toBe(true);
     const file = join(paths.stateDir, 'sbx', `${SBX}.log`);
     // Never command text, command output or a token. Read first, then its mode.
     const raw = readFileSync(file, 'utf8');
@@ -1868,5 +1873,137 @@ describe("a bound sandbox's control plane (R5j)", () => {
       cwd: repoBoundTo(MCP_URL),
     });
     expect(h.seen).toEqual([URL_]);
+  });
+});
+
+describe('the flight recorder, format 2 (TRAJECTORY-JOINER §9)', () => {
+  const cpWithSandbox = () =>
+    fakeCp({
+      [`POST /v1/sandboxes/${SBX}/token`]: () => ({ status: 200, body: TOKEN }),
+      [`GET /v1/sandboxes/${SBX}`]: () => ({ status: 200, body: sandbox() }),
+    });
+  /** The real connection, dialed at a fake relay in plain text. */
+  const realFactory =
+    (addr: string): ExecFactory =>
+    (o) => {
+      const c = new SandboxExecConn({ ...o, addr, tls: false, caPem: undefined });
+      return {
+        exec: c.exec,
+        close: c.close,
+        leaseControl: c.leaseControl,
+        leaseKeepalive: c.leaseKeepalive,
+      };
+    };
+
+  it('`sbx run` writes an exec line per attempt, joined to the relay by req_id and call id', async () => {
+    const { home, env, io, paths } = setup();
+    const relay = await fakeExecRelay(() => ({ stdout: 'SECRET-OUTPUT\n', exitCode: 3 }));
+    try {
+      const code = await sbxMain(
+        ['run', '--sandbox', SBX, '--', 'echo', 'SECRET-CMD'],
+        { ...env, MOCACTL_SBX_RUN_ID: 'rep-7' },
+        io,
+        { home, fetchImpl: mint().fetchImpl, execFactory: realFactory(relay.addr) },
+      );
+      expect(code).toBe(3);
+    } finally {
+      relay.close();
+    }
+    const recs = readRecords(paths.stateDir, SBX);
+    expect(recs).toHaveLength(1);
+    const [line] = recs;
+    expect(line).toMatchObject({
+      v: 2,
+      event: 'exec',
+      sbx: SBX,
+      command: 'sbx run',
+      req_id: relay.seen[0]!.req.exec!.reqId,
+      exit: 3,
+      outcome: 'ok',
+      run: 'rep-7',
+    });
+    expect(line!.start).toMatch(/^\d{4}-\d\d-\d\dT.*Z$/);
+    expect(relay.seen[0]!.callId).toBe(`${String(line!.invocation)}:1`);
+    const raw = readFileSync(join(paths.stateDir, 'sbx', `${SBX}.log`), 'utf8');
+    expect(raw).not.toContain('SECRET-CMD');
+    expect(raw).not.toContain('SECRET-OUTPUT');
+    expect(raw).not.toContain(TOKEN.token);
+  });
+
+  it("shares --record's invocation id, so both records of one command join", async () => {
+    const { home, env, io, paths } = setup();
+    const relay = await fakeExecRelay(() => ({ stdout: 'x\n' }));
+    const rec = join(mkdtempSync(join(tmpdir(), 'rec-')), 'calls.ndjson');
+    try {
+      await sbxMain(['run', '--sandbox', SBX, '--record', rec, '--', 'true'], env, io, {
+        home,
+        fetchImpl: mint().fetchImpl,
+        execFactory: realFactory(relay.addr),
+      });
+    } finally {
+      relay.close();
+    }
+    const httpLines = readFileSync(rec, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    const [exec] = readRecords(paths.stateDir, SBX);
+    expect(exec!.invocation).toBe(httpLines[0].invocation);
+  });
+
+  it('ignores a MOCACTL_SBX_RUN_ID that is not an id, saying so once', async () => {
+    const { home, env, io, paths } = setup();
+    const relay = await fakeExecRelay(() => ({ stdout: 'x\n' }));
+    try {
+      const code = await sbxMain(
+        ['run', '--sandbox', SBX, '--', 'true'],
+        { ...env, MOCACTL_SBX_RUN_ID: 'not an id' },
+        io,
+        { home, fetchImpl: mint().fetchImpl, execFactory: realFactory(relay.addr) },
+      );
+      expect(code).toBe(0);
+    } finally {
+      relay.close();
+    }
+    expect(io.errs.join('')).toMatch(/MOCACTL_SBX_RUN_ID is not an id/);
+    expect(readRecords(paths.stateDir, SBX)[0]!.run).toBeNull();
+  });
+
+  it('`sbx mcp` lists each Exec on its call line, and sends the call id the line names', async () => {
+    const { home, env, io, paths } = setup();
+    const cp = cpWithSandbox();
+    const relay = await fakeExecRelay(() => ({ stdout: 'hi\n' }));
+    try {
+      const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
+      const served = sbxMain(['mcp', '--sandbox', SBX], env, io, {
+        home,
+        fetchImpl: cp.fetchImpl,
+        execFactory: realFactory(relay.addr),
+        mcpTransport: serverSide,
+      });
+      const client = new Client({ name: 'opencode', version: '1.2.3' });
+      await client.connect(clientSide);
+      await client.callTool({ name: 'bash', arguments: { command: 'echo hi' } });
+      await client.close();
+      expect(await served).toBe(0);
+    } finally {
+      relay.close();
+    }
+    const recs = readRecords(paths.stateDir, SBX);
+    const call = recs.find((r) => r.event === 'call')!;
+    const exec = call.exec as { req_id: number; outcome: string; exit: number }[];
+    expect(exec).toHaveLength(1);
+    expect(exec[0]).toMatchObject({
+      req_id: relay.seen[0]!.req.exec!.reqId,
+      exit: 0,
+      outcome: 'ok',
+    });
+    expect(relay.seen[0]!.callId).toBe(`${String(call.mcp_session)}:1`);
+    expect(recs.find((r) => r.event === 'session')!.client).toEqual({
+      name: 'opencode',
+      version: '1.2.3',
+    });
+    // The server's own Execs are on its call lines only: no separate exec lines.
+    expect(recs.filter((r) => r.event === 'exec')).toEqual([]);
   });
 });

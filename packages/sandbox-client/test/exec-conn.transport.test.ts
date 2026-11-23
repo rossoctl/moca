@@ -24,6 +24,8 @@ import {
   type ReleaseResponse,
 } from '../src/gen/sandbox/v1/sandbox.js';
 import {
+  CALL_ID_HEADER,
+  CALL_ID_RE,
   CLIENT_CHANNEL_OPTIONS,
   ExecAbortedError,
   ExecMachineryError,
@@ -197,6 +199,7 @@ describe('SandboxExecConn (SBX0 §6.5)', () => {
       exitCode: 3,
       truncated: false,
       lease: [],
+      reqIds: [r.seen[0]!.req.exec!.reqId],
     });
     const { req, auth } = r.seen[0]!;
     expect(auth).toBe('Bearer stale');
@@ -1664,5 +1667,116 @@ describe("SandboxExecConn: a failed re-mint keeps the first attempt's events (fi
     const e = await c.exec('x').catch((x: unknown) => x);
     expect(e).toBe(boom);
     expect(e).not.toHaveProperty('lease');
+  });
+});
+
+describe('SandboxExecConn: what a client records (TRAJECTORY-JOINER §9)', () => {
+  it('pins the call id key and rule the relay applies (sandbox-relay keeps its own copy)', () => {
+    expect(CALL_ID_HEADER).toBe('x-moca-call-id');
+    expect(CALL_ID_RE.source).toBe('^[A-Za-z0-9._:-]{1,64}$');
+    expect(CALL_ID_RE.flags).toBe('');
+  });
+
+  it('sends the call id as metadata with every attempt, and refuses a malformed one unsent', async () => {
+    const got: (string | undefined)[] = [];
+    const r = await fakeRelay((call, n) => {
+      got.push(call.metadata.get('x-moca-call-id')[0] as string | undefined);
+      return n === 1
+        ? fail(status.UNAUTHENTICATED, 'exec authentication failed')(call, n)
+        : ok(call, n);
+    });
+    const { c } = conn(r.addr);
+    await c.exec('x', { callId: 'ms_ab12:7' });
+    expect(got).toEqual(['ms_ab12:7', 'ms_ab12:7']);
+    await expect(c.exec('x', { callId: 'bad id' })).rejects.toBeInstanceOf(RangeError);
+    await expect(c.exec('x', { callId: 'a'.repeat(65) })).rejects.toBeInstanceOf(RangeError);
+    expect(r.seen).toHaveLength(2);
+  });
+
+  it('sends no call id when none is given', async () => {
+    const got: unknown[] = [];
+    const r = await fakeRelay((call, n) => {
+      got.push(call.metadata.get('x-moca-call-id'));
+      ok(call, n);
+    });
+    const { c } = conn(r.addr);
+    await c.exec('x');
+    expect(got).toEqual([[]]);
+  });
+
+  it('tells onAttempt of each attempt: a token refusal, then the run, under one req_id', async () => {
+    const r = await fakeRelay((call, n) =>
+      n === 1 ? fail(status.UNAUTHENTICATED, 'exec authentication failed')(call, n) : ok(call, n),
+    );
+    const { c } = conn(r.addr);
+    const attempts: unknown[] = [];
+    const res = await c.exec('x', { onAttempt: (a) => attempts.push(a) });
+    const id = r.seen[0]!.req.exec!.reqId;
+    expect(res.reqIds).toEqual([id]);
+    expect(attempts).toEqual([
+      { reqId: id, start: NOW_S * 1000, ms: 0, exit: null, outcome: 'refused_before_start' },
+      { reqId: id, start: NOW_S * 1000, ms: 0, exit: 3, outcome: 'ok' },
+    ]);
+  });
+
+  it('a stale_mode refusal retries under a fresh req_id: both are on the result', async () => {
+    const r = await fakeRelay((call, n) =>
+      n === 1 ? execError('stale_mode: token epoch 1 < stored 2')(call, n) : ok(call, n),
+    );
+    const { c } = conn(r.addr);
+    const attempts: { reqId: number; outcome: string }[] = [];
+    const res = await c.exec('x', { onAttempt: (a) => attempts.push(a) });
+    const [first, second] = r.seen.map((s) => s.req.exec!.reqId);
+    expect(first).not.toBe(second);
+    expect(res.reqIds).toEqual([first, second]);
+    expect(attempts.map((a) => [a.reqId, a.outcome])).toEqual([
+      [first, 'refused_before_start'],
+      [second, 'ok'],
+    ]);
+  });
+
+  it('reports a timeout and a machinery failure as their outcomes, with no exit for either', async () => {
+    const r = await fakeRelay((call, n) =>
+      n === 1 ? execError('timeout:5')(call, n) : execError('vm boot failed')(call, n),
+    );
+    const { c } = conn(r.addr);
+    const attempts: { exit: number | null; outcome: string }[] = [];
+    const res = await c.exec('x', { onAttempt: (a) => attempts.push(a) });
+    expect(res.timedOutS).toBe(5);
+    await expect(c.exec('x', { onAttempt: (a) => attempts.push(a) })).rejects.toBeInstanceOf(
+      ExecMachineryError,
+    );
+    expect(attempts.map((a) => [a.exit, a.outcome])).toEqual([
+      [null, 'timeout'],
+      [null, 'machinery'],
+    ]);
+  });
+
+  it('an observer that throws never fails the Exec', async () => {
+    const r = await fakeRelay(ok);
+    const { c } = conn(r.addr);
+    const res = await c.exec('x', {
+      onAttempt: () => {
+        throw new Error('disk full');
+      },
+    });
+    expect(res.exitCode).toBe(3);
+  });
+
+  it('passes the call id and observer through a process call', async () => {
+    const got: unknown[] = [];
+    const r = await fakeRelay((call) => {
+      got.push(call.metadata.get('x-moca-call-id')[0]);
+      call.write(chunk('{"processes":[]}'));
+      call.write({ end: { reqId: 0, exitCode: 0, truncated: false } } as ExecEvent);
+      call.end();
+    });
+    const { c } = conn(r.addr);
+    const attempts: unknown[] = [];
+    await c
+      .process('list', {}, { callId: 'ms_1:2', onAttempt: (a) => attempts.push(a) })
+      .catch(() => undefined);
+    expect(got).toEqual(['ms_1:2']);
+    expect(attempts).toHaveLength(1);
   });
 });

@@ -3,6 +3,7 @@ import {
   ExecMachineryError,
   SandboxExecConn,
   type Exec,
+  type ExecAttempt,
   type ExecConnOptions,
   type LeaseOpName,
   type LeaseStatusView,
@@ -16,7 +17,8 @@ import { ApiError } from '../api/errors.js';
 import { describeError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
 import type { SandboxApiClient, SbxToken } from './api.js';
-import { failed, type SbxCtx } from './commands.js';
+import { failed, type ExecRecordTarget, type SbxCtx } from './commands.js';
+import { recordCall } from './recorder.js';
 
 /**
  * A connection's lease calls (spec §8.3), as `SandboxExecConn` has them: an abort of `signal`
@@ -252,7 +254,7 @@ export interface OpenedExec {
  * readably (an `ApiError`, which `execFailed` reports as the control plane's answer).
  */
 export async function openExec(
-  api: SandboxApiClient,
+  ctx: { api: SandboxApiClient; execRecord?: ExecRecordTarget },
   id: string,
   factory: ExecFactory = realFactory,
   o: {
@@ -270,6 +272,7 @@ export async function openExec(
     activity?: boolean;
   } = {},
 ): Promise<OpenedExec> {
+  const api = ctx.api;
   const t = sandboxTokenFn(api, id, Date.now, o.onToken);
   const first = await t.first(o.signal, o.activity ?? true);
   let sandboxExpiresAt = o.sandboxExpiresAt;
@@ -292,12 +295,19 @@ export async function openExec(
     ...(sandboxExpiresAt ? { sandboxExpiresAt } : {}),
     ...(o.keepalive !== undefined ? { keepalive: o.keepalive } : {}),
   });
+  const tag = execTagger(ctx.execRecord, id);
+  const exec: Exec = tag ? (command, opts) => c.exec(command, tag(opts)) : c.exec;
+  const process: ProcessCall = c.process
+    ? tag
+      ? (op, args, opts) => c.process!(op, args, tag(opts))
+      : c.process
+    : noProcess;
   return {
-    exec: c.exec,
+    exec,
     close: c.close,
     leaseControl: c.leaseControl,
     leaseKeepalive: c.leaseKeepalive,
-    process: c.process ?? noProcess,
+    process,
     release: c.release ?? noRelease,
     remint: async (signal?: AbortSignal) => {
       await t.force(signal);
@@ -305,6 +315,40 @@ export async function openExec(
     token: first,
     lifetimeS: grantOf(first).lifetimeS,
   };
+}
+
+/**
+ * The flight recorder's `exec` line (format 2) for each attempt of a command's Execs, and each
+ * Exec's correlation id (`<invocation>:<k>`, sent as CALL_ID_HEADER): undefined when the command
+ * records none. Never the command, its output or a token.
+ */
+function execTagger(r: ExecRecordTarget | undefined, sandboxId: string) {
+  if (!r) return undefined;
+  let k = 0;
+  return <T extends { callId?: string; onAttempt?: (a: ExecAttempt) => void }>(
+    opts: T | undefined,
+  ): T =>
+    ({
+      ...opts,
+      callId: opts?.callId ?? `${r.invocation}:${++k}`,
+      onAttempt: (a: ExecAttempt) => {
+        recordCall(r.stateDir, sandboxId, {
+          v: 2,
+          event: 'exec',
+          ts: new Date(a.start).toISOString(),
+          sbx: sandboxId,
+          command: r.command,
+          invocation: r.invocation,
+          req_id: a.reqId,
+          start: new Date(a.start).toISOString(),
+          ms: a.ms,
+          exit: a.exit,
+          outcome: a.outcome,
+          run: r.run ?? null,
+        });
+        opts?.onAttempt?.(a);
+      },
+    }) as T;
 }
 
 /** `sbx run`'s exit for a sandbox failure: neither the command's code nor its timeout. */
