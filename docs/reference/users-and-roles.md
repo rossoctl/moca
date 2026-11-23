@@ -122,6 +122,13 @@ only the admin role matters there, and `mocactl sbx admin subjects` does not dri
 control plane, so call the API directly. A refusal is `403 not_enrolled`, and its message names the
 caller's own subject for the operator to enroll.
 
+A **test user on `combined`** is a case of its own. `mocactl sbx login --test-user N` logs it in
+(the login is open there, as on `harness`), but the sandbox routes still check enrollment, so the
+subject must also be in `SH_ALLOWED_SUBJECTS` — which admits `test:<n>`, unlike `/v1/subjects` — or
+in `SH_ADMIN_SUBJECTS`. Without one of those the login succeeds and `mocactl sbx up` answers
+`403 not_enrolled` naming `test:<n>`. On the `sandbox` profile there is nothing to configure: the
+control plane refuses to boot with `SH_TEST_USERS` set at all (ADR-0045).
+
 ## When a user leaves
 
 Remove the subject from the settings, or unenroll it through the API; the commands are in

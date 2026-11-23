@@ -328,6 +328,118 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(io.errs.join('\n')).not.toMatch(/is changing from/);
   });
 
+  describe('sbx login --test-user N (ADR-0045)', () => {
+    const COMBINED = { profile: 'combined', execEndpoint: 'sbx-exec.example.invalid:443' };
+    const SECRET = 's'.repeat(32); // notsecret
+
+    it('logs in with no browser, stores it in sbx-auth.json, and remembers the URL', async () => {
+      const { home, paths, io } = setup({ loggedIn: false });
+      const cp = fakeCp({
+        'GET /v1/discovery': () => ({ status: 200, body: COMBINED }),
+        'POST /v1/auth/test-token': () => ({ status: 200, body: loginBody('api-t', 'test:7') }),
+      });
+      expect(
+        await sbxMain(
+          ['login', '--test-user', '7', '--control-plane-url', URL_],
+          { HOME: home, MOCA_TEST_USER_SECRET: SECRET },
+          io,
+          { home, fetchImpl: cp.fetchImpl },
+        ),
+      ).toBe(0);
+      expect(loadAuth(sbxPaths(paths), URL_)?.apiToken).toBe('api-t');
+      expect(existsSync(paths.authFile)).toBe(false); // MOCA's auth.json is not touched
+      expect(loadConfig(paths).config.sbxControlPlaneUrl).toBe(URL_);
+      // No device code was printed: that is the whole point of the flag.
+      expect(io.errs.join('\n')).not.toContain('ABCD-EFGH');
+      const token = cp.calls.find((c) => c.path === '/v1/auth/test-token');
+      expect(token?.body).toMatchObject({ index: 7, secret: SECRET });
+      // The secret travels in the body, never in a URL a proxy log would keep.
+      expect(cp.calls.every((c) => !c.path.includes(SECRET))).toBe(true);
+    });
+
+    it('refuses a sandbox-profile control plane before sending the secret', async () => {
+      const { home, paths, io } = setup({ loggedIn: false });
+      const cp = fakeCp({ 'GET /v1/discovery': () => ({ status: 200, body: SBX_DISCOVERY }) });
+      expect(
+        await sbxMain(
+          ['login', '--test-user', '1'],
+          { HOME: home, MOCACTL_SBX_URL: URL_, MOCA_TEST_USER_SECRET: SECRET },
+          io,
+          { home, fetchImpl: cp.fetchImpl },
+        ),
+      ).toBe(2);
+      expect(io.errs.join('\n')).toContain('serves no test users');
+      expect(cp.calls.some((c) => c.path === '/v1/auth/test-token')).toBe(false);
+      expect(loadAuth(sbxPaths(paths), URL_)).toBeNull();
+    });
+
+    it('needs the secret in the environment, and asks no control plane without it', async () => {
+      const { home, io } = setup({ loggedIn: false });
+      const cp = fakeCp({ 'GET /v1/discovery': () => ({ status: 200, body: COMBINED }) });
+      expect(
+        await sbxMain(['login', '--test-user', '1'], { HOME: home, MOCACTL_SBX_URL: URL_ }, io, {
+          home,
+          fetchImpl: cp.fetchImpl,
+        }),
+      ).toBe(2);
+      expect(io.errs.join('\n')).toContain('MOCA_TEST_USER_SECRET');
+      expect(cp.calls).toEqual([]);
+    });
+
+    it('names the two misconfigurations: test users off, and a secret that does not match', async () => {
+      for (const [reply, says] of [
+        [{ status: 404, body: { error: 'not_found' } }, 'has no test users'],
+        [{ status: 401, body: { error: 'unauthorized' } }, 'secret was refused'],
+      ] as const) {
+        const { home, io } = setup({ loggedIn: false });
+        const cp = fakeCp({
+          'GET /v1/discovery': () => ({ status: 200, body: COMBINED }),
+          'POST /v1/auth/test-token': () => reply,
+        });
+        expect(
+          await sbxMain(
+            ['login', '--test-user', '1'],
+            { HOME: home, MOCACTL_SBX_URL: URL_, MOCA_TEST_USER_SECRET: SECRET },
+            io,
+            { home, fetchImpl: cp.fetchImpl },
+          ),
+          says,
+        ).toBe(1);
+        expect(io.errs.join('\n'), says).toContain(says);
+      }
+    });
+
+    it('refuses an index that is not a whole number from 1, before any network call', async () => {
+      // `--test-user=<v>`, not two words: node's parseArgs rejects a leading dash itself, with its
+      // own message, so the `=` form is what puts every value in front of the check below.
+      for (const raw of ['0', 'abc', '-1', '1.5', '']) {
+        const { home, io } = setup({ loggedIn: false });
+        const cp = fakeCp({});
+        expect(
+          await sbxMain(
+            ['login', `--test-user=${raw}`],
+            { HOME: home, MOCACTL_SBX_URL: URL_, MOCA_TEST_USER_SECRET: SECRET },
+            io,
+            { home, fetchImpl: cp.fetchImpl },
+          ),
+          raw,
+        ).toBe(2);
+        expect(io.errs.join('\n'), raw).toContain('--test-user needs a whole number from 1');
+        expect(cp.calls, raw).toEqual([]);
+      }
+    });
+
+    it('applies to login only', async () => {
+      const { home, io } = setup();
+      expect(
+        await sbxMain(['ls', '--test-user', '1'], { HOME: home, MOCACTL_SBX_URL: URL_ }, io, {
+          home,
+        }),
+      ).toBe(2);
+      expect(io.errs.join('\n')).toContain('--test-user only applies to login');
+    });
+  });
+
   describe('sbx login --control-plane-url remembers the URL even when the login fails', () => {
     const NEW = 'https://sbx-new.example.com';
     const OLD = 'https://sbx-old.example.com';

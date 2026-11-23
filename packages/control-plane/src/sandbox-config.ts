@@ -301,8 +301,15 @@ export function isEnrolled(
 /**
  * Who may use the sandbox routes and the template writes: the allow list, plus admins, plus a
  * subject the members store enrolls (`storeEnrolled`), on `sandbox` and on `combined` (combined
- * spec §3.2). A test user (`test:<n>`) is never on it: SH_ALLOWED_SUBJECTS admits only `github:`
- * subjects. Always true on `harness`, which mounts none of those routes.
+ * spec §3.2). Always true on `harness`, which mounts none of those routes.
+ *
+ * A test user (`test:<n>`) is not enrolled by default and cannot be enrolled through the API --
+ * `/v1/subjects` validates with MEMBER_SUBJECT_RE, which admits `github:`/`oidc:` only. But
+ * SH_ALLOWED_SUBJECTS validates with SUBJECT_RE (above), which DOES admit `test:<n>`, and
+ * SH_ADMIN_SUBJECTS is not format-checked at all, so on a `combined` dev stack an operator can
+ * deliberately put a test subject on either list and it passes here. That is what makes
+ * `mocactl sbx login --test-user N` useful; it cannot happen on `sandbox`, where SH_TEST_USERS
+ * refuses to boot (main.ts, ADR-0045).
  */
 export function isEnrolledForSandbox(
   subject: string,

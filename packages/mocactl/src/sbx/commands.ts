@@ -253,16 +253,106 @@ export async function cmdLogin(
     rememberOnce();
     const end = deviceLoginEnd(c.io, err, { prefix: 'sbx', again: 'mocactl sbx login' });
     if (end !== undefined) return end;
-    // A refusal `fail` words for itself (not enrolled, a token code) keeps its words; any other
-    // failure, an API error or not (a proxy's 200 page that is not JSON), names the control plane
-    // tried and what came back (#700), at `fail`'s exit codes.
-    const ownWords =
-      err instanceof ApiError && (err.code === 'not_enrolled' || TOKEN_CODES.has(err.code));
-    if (!ownWords) {
-      c.io.err(`sbx: login failed: ${describeLoginError(err, c.url)}`);
-      return err instanceof ApiError && err.status === 0 ? SBX_EXIT.unreachable : SBX_EXIT.failed;
+    return loginFailed(c, err);
+  }
+}
+
+/**
+ * The exit for a login that failed for a reason not specific to the device flow, shared by both
+ * login paths. A refusal `fail` words for itself (not enrolled, a token code) keeps its words; any
+ * other failure, an API error or not (a proxy's 200 page that is not JSON), names the control plane
+ * tried and what came back (#700), at `fail`'s exit codes.
+ */
+function loginFailed(c: SbxCtx, err: unknown): number {
+  const ownWords =
+    err instanceof ApiError && (err.code === 'not_enrolled' || TOKEN_CODES.has(err.code));
+  if (!ownWords) {
+    c.io.err(`sbx: login failed: ${describeLoginError(err, c.url)}`);
+    return err instanceof ApiError && err.status === 0 ? SBX_EXIT.unreachable : SBX_EXIT.failed;
+  }
+  return failed(c, err);
+}
+
+/**
+ * `mocactl sbx login --test-user N` (ADR-0045): the sandbox service's half of
+ * `mocactl login --test-user`, so a multi-user `sbx` test needs no human at a browser. The secret
+ * comes from MOCA_TEST_USER_SECRET in the environment, never a flag, for the reason `headless.ts`
+ * gives: a flag would put it in the shell history and in every `ps` listing of the machine running
+ * the test.
+ *
+ * COMBINED ONLY, and that is a property of the server, not a policy chosen here:
+ * `POST /v1/auth/test-token` is declared `profiles: HARNESS` (control-plane `routes.ts`), which
+ * `mountsOn` also mounts on `combined`, while the `sandbox` profile neither mounts it nor boots
+ * with SH_TEST_USERS at all (control-plane `main.ts`, ADR-0045). So a `sandbox` control plane is
+ * refused here rather than being sent a secret it can only 404.
+ *
+ * A login is not yet a usable sandbox: on `combined` the sandbox routes check enrollment, so the
+ * operator must also have the subject in SH_ALLOWED_SUBJECTS (or SH_ADMIN_SUBJECTS). That refusal
+ * arrives later, from `sbx up`, as `not_enrolled` naming the subject.
+ */
+export async function cmdLoginTestUser(
+  c: SbxCtx,
+  index: number,
+  env: NodeJS.ProcessEnv,
+  remember: boolean,
+): Promise<number> {
+  if (!c.rt.cp) return SBX_EXIT.usage;
+  // Checked before discovery: no reason to ask a control plane anything when the secret that the
+  // request needs is not here.
+  const secret = env.MOCA_TEST_USER_SECRET ?? '';
+  if (secret === '') {
+    c.io.err(
+      'sbx: --test-user needs the shared secret in MOCA_TEST_USER_SECRET ' +
+        "(the control plane's SH_TEST_USER_SECRET)",
+    );
+    return SBX_EXIT.usage;
+  }
+  let remembered = false;
+  const rememberOnce = (): void => {
+    if (!remember || remembered) return;
+    remembered = true;
+    rememberUrl(c);
+  };
+  try {
+    const d: SbxDiscovery = await c.api.sandboxDiscovery().catch((err: unknown) => {
+      if (err instanceof ApiError && err.status === 404) return {};
+      throw err;
+    });
+    if (d.profile !== 'combined') {
+      c.io.err(
+        d.profile === 'sandbox'
+          ? `sbx: ${c.url} serves no test users: only a combined control plane does (a sandbox-profile one admits enrolled github:/oidc: subjects only, ADR-0045)`
+          : `sbx: ${c.url} is not the sandbox service (its /v1/discovery has no sandbox profile)`,
+      );
+      return SBX_EXIT.usage;
     }
-    return failed(c, err);
+    rememberOnce();
+    const login = await c.api.testUserToken(index, secret);
+    setAuth(c.rt, toCachedAuth(login, c.url));
+    c.io.err(
+      `logged in to the sandbox service as ${sanitizeRemote(login.displayName ?? login.subject)}`,
+    );
+    return SBX_EXIT.ok;
+  } catch (err) {
+    rememberOnce();
+    // The two misconfigurations worth naming, as `cmdLoginTestUser` in headless.ts names them: say
+    // the fix, and name only settings. 404 is also the ONLY way to learn the feature is off --
+    // /v1/discovery does not advertise test users, so the profile gate above cannot tell.
+    if (err instanceof ApiError && err.status === 404) {
+      c.io.err(
+        'sbx: login failed: this control plane has no test users ' +
+          '(set SH_TEST_USERS on it to enable them)',
+      );
+      return SBX_EXIT.failed;
+    }
+    if (err instanceof ApiError && err.code === 'unauthorized') {
+      c.io.err(
+        'sbx: login failed: the test-user secret was refused ' +
+          "(MOCA_TEST_USER_SECRET must match the control plane's SH_TEST_USER_SECRET)",
+      );
+      return SBX_EXIT.failed;
+    }
+    return loginFailed(c, err);
   }
 }
 

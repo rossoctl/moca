@@ -61,6 +61,27 @@ describe('who may call what on the combined profile', () => {
     }
   });
 
+  // ADR-0045 + `mocactl sbx login --test-user N`: a test user is not enrolled by DEFAULT, which is
+  // what the case above asserts -- but SH_ALLOWED_SUBJECTS validates with SUBJECT_RE, which admits
+  // `test:<n>`, so an operator may put one on the list on purpose. This pins that, because it is
+  // the only thing that makes a test-user login on `combined` able to reach a sandbox at all.
+  it('lets an operator enrol a test user on purpose, by allow list or by admin role', async () => {
+    const base = makeDeps().config.sandbox!;
+    const d = makeDeps({
+      config: {
+        routeProfile: 'combined',
+        sandbox: { ...base, allowedSubjects: [alice.sub, tester.sub] },
+      },
+    });
+    expect(isEnrolledForSandbox(tester.sub, [], d.config)).toBe(true);
+    expect(await outcome(() => HANDLERS.listSandboxes!(ctx({ principal: tester }), d))).not.toBe(
+      'not_enrolled',
+    );
+    // The other way in: SH_ADMIN_SUBJECTS=test:N, which adminSubjectsFromEnv does not format-check.
+    const noList = combined();
+    expect(isEnrolledForSandbox(tester.sub, ['admin'], noList.config)).toBe(true);
+  });
+
   it('refuses every template write to them, and leaves the reads open', async () => {
     const d = combined();
     const writes = [

@@ -8,6 +8,7 @@ import { UnavailableCredentialStore, type CredentialStore } from '../src/credent
 import { configFromEnv, depsFromEnv } from '../src/main.js';
 import { RedisSandboxStore } from '../src/sandbox-redis.js';
 import { parseTemplates, routeProfileFromEnv } from '../src/sandbox-config.js';
+import { MEMBER_SUBJECT_RE } from '../src/identity.js';
 
 const KEY = generateKeyPairSync('ed25519')
   .privateKey.export({ format: 'pem', type: 'pkcs8' })
@@ -57,6 +58,23 @@ describe('the combined profile config (combined control plane spec §3.5)', () =
     // One template list for sessions and sandboxes.
     expect(c.sessionTemplates?.map((t) => t.id)).toEqual(['default', 'node22']);
     expect(c.sandbox?.templates.map((t) => t.id)).toEqual(['default', 'node22']);
+  });
+
+  // ADR-0045 + `mocactl sbx login --test-user N`: SH_ALLOWED_SUBJECTS validates with SUBJECT_RE,
+  // which admits `test:<n>` -- so an operator CAN enrol a test user on a combined dev stack on
+  // purpose. Pinned because a test-user login reaches a sandbox only this way (or via
+  // SH_ADMIN_SUBJECTS), and because `/v1/subjects` refuses the same subject (MEMBER_SUBJECT_RE).
+  it('admits a test subject on the allow list, which the subjects API does not', () => {
+    // Also the one assertion that `combined` BOOTS with test users: only `sandbox` refuses to.
+    const c = configFromEnv(
+      cenv({
+        SH_ALLOWED_SUBJECTS: 'github:1, test:7',
+        SH_TEST_USERS: '10',
+        SH_TEST_USER_SECRET: 's'.repeat(32), // notsecret
+      }),
+    );
+    expect(c.sandbox?.allowedSubjects).toEqual(['github:1', 'test:7']);
+    expect(MEMBER_SUBJECT_RE.test('test:7')).toBe(false);
   });
 
   it('reads the installer bearer, as the sandbox profile does (#938)', () => {
