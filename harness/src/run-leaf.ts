@@ -38,6 +38,7 @@ import {
   resolveModelSelection,
   requireModel,
   applyModelGateway,
+  sharedSessionStore,
   oauthAuthStorage,
   seedOrigin,
   seedWorkspace,
@@ -64,8 +65,11 @@ import type { GateCapture } from './request-approval-tool.js';
 import {
   computeGateState,
   decideSeed,
+  gatePromptNote,
+  gateShortCircuit,
   validateDecision,
   type Decision,
+  type GateDecision,
   GATE_DECISION_ENTRY_TYPE,
 } from './gate.js';
 import { requestApprovalExtension } from './request-approval-tool.js';
@@ -166,6 +170,11 @@ export interface LeafEnvelope {
   };
   item: LeafItem; // inputs inline (was inputsRef)
   decision?: Decision; // resume/approve only (was decisionRef)
+  /**
+   * Ask for a human gate on a prompt or solve leaf (#393). A converge leaf keeps using
+   * `item.require_approval`, which predates this and means the same thing for that kind.
+   */
+  requireApproval?: boolean;
   model?: string;
   provider?: string;
   workspaceRef?: string; // derived from the worktree in P2 when repoUrl+ref are given
@@ -325,7 +334,8 @@ export type SolveCapture = {
   patch?: string;
   baseline?: string;
   usage?: LeafUsage;
-} & BudgetCapture;
+} & BudgetCapture &
+  GateCapture;
 export type ProduceSolveDeps = {
   resolvePromotedConfig?: typeof resolvePromotedConfig;
   overlayConfig?: typeof overlayConfig;
@@ -337,6 +347,9 @@ export type ProduceSolve = (
   capture: SolveCapture,
   deps?: ProduceSolveDeps,
   signal?: AbortSignal,
+  /** The caller's gate plan (#393): the continuation to run instead of the problem statement, if
+   * any, and the id the next `request_approval` call takes. Absent ⇒ ungated, as before. */
+  gate?: { continuation?: string; nextGateId: number },
 ) => Promise<void>;
 
 /**
@@ -571,6 +584,10 @@ export async function runSolveLeaf(
   if (emptyRef) return emptyRef;
   const noWorkload = nonPromptWorkloadFailure(env);
   if (noWorkload) return noWorkload;
+  // BEFORE produce, which is what leases (design §1). `leafSessionId`, because that is the id
+  // `realProduceSolve` opens this leaf's Pi session under -- and so the key its gate entries are on.
+  const plan = await planLeafGate(env, config, leafSessionId(env));
+  if (plan.kind === 'result') return plan.result;
   const capture: SolveCapture = {};
   const produce = deps?.produceSolve ?? realProduceSolve;
   // Forward only the overlay-related slice of deps; undefined when none set so existing 3-arg
@@ -584,7 +601,10 @@ export async function runSolveLeaf(
         }
       : undefined;
   try {
-    await produce(env, config, capture, produceDeps, signal);
+    await produce(env, config, capture, produceDeps, signal, {
+      ...(plan.continuation ? { continuation: plan.continuation } : {}),
+      nextGateId: plan.nextGateId,
+    });
   } catch (err) {
     const noCapacity = noCapacityFailure(err);
     if (noCapacity) return noCapacity;
@@ -599,6 +619,16 @@ export async function runSolveLeaf(
   // returned as `solved` is a partial patch with nothing saying it was cut short.
   const stopped = stopFailure(signal, capture);
   if (stopped) return stopped;
+  // Ahead of the patch, for the reason the `stopped` check is: a parked leaf's worktree is a
+  // half-finished edit, and `solved` with a partial diff is the one answer nobody can act on.
+  if (capture.gate) {
+    return {
+      status: 'paused',
+      gateId: capture.gate.gateId,
+      gate: { summary: capture.gate.summary, proposed_action: capture.gate.proposed_action },
+    };
+  }
+  if (capture.aborted) return { status: 'aborted' };
   const patch = capture.patch ?? '';
   return {
     status: 'solved',
@@ -607,6 +637,95 @@ export async function runSolveLeaf(
     // Only with a baseline: a descriptor whose `baseline` is missing describes a patch nobody can
     // reapply, and the sha and diffstat are computable from `patch` anyway.
     ...(capture.baseline ? { workspace: describePatch(capture.baseline, patch) } : {}),
+  };
+}
+
+type LeafGatePlan =
+  | { kind: 'result'; result: LeafResult }
+  | { kind: 'run'; continuation?: string; nextGateId: number };
+
+/**
+ * One entry appended durably outside a running turn: the decision that resolved a gate.
+ *
+ * `sessionId` is the id the LEAF'S OWN Pi session is opened under, which is not `env.sessionId` for
+ * every kind -- see `planLeafGate`.
+ */
+async function appendGateDecision(
+  sessionId: string,
+  config: TurnConfig | undefined,
+  record: GateDecision,
+): Promise<void> {
+  const store = sharedSessionStore(config?.redisUrl ?? 'redis://localhost:6379');
+  const backend = new BufferedRedisBackend(store);
+  const sm = await SessionManager.openFromCheckpoint(
+    sessionId,
+    backend,
+    config?.cwd ?? process.cwd(),
+  );
+  sm.appendCustomEntry(GATE_DECISION_ENTRY_TYPE, record);
+  await backend.flush();
+}
+
+/**
+ * The gate front-end for the prompt and solve kinds (design §1), BEFORE either leases a sandbox: a
+ * parked or aborted leaf must hold nothing. `kind: 'result'` is the leaf's answer; `kind: 'run'`
+ * carries the continuation prompt to use instead of the leaf's own (absent on a fresh run) and the
+ * id the next `request_approval` call takes.
+ *
+ * Reads the durable session ONLY for a leaf that is gated or carries a decision: an ungated prompt
+ * leaf is the common case and pays nothing for this. The cost is that a stale pending gate does not
+ * park an ungated turn of the same session -- which is the point of #393, where the gate belongs to
+ * the turn that asked for one.
+ *
+ * `sessionId` is the id the leaf's own Pi session is opened under, and the two kinds disagree: a
+ * prompt leaf's turn runs under the RAW `env.sessionId`, a solve leaf's under `leafSessionId(env)`.
+ * Reading the wrong one finds no pending gate whenever `toSessionId` rewrites the id -- a `tenant`,
+ * or any character outside `[A-Za-z0-9._-]`, as in the documented `run-1/item-1` -- so a re-POSTed
+ * decision would run the leaf's fresh prompt instead of the continuation: an `approve` that asks
+ * for approval again, an `abort` that does not abort.
+ */
+async function planLeafGate(
+  env: LeafEnvelope,
+  config: TurnConfig | undefined,
+  sessionId: string,
+): Promise<LeafGatePlan> {
+  if (!env.requireApproval && !env.decision) return { kind: 'run', nextGateId: 0 };
+  const store = sharedSessionStore(config?.redisUrl ?? 'redis://localhost:6379');
+  const state = computeGateState((await store.read(sessionId)).map((r) => r.entry));
+  const dv = env.decision ? validateDecision(env.decision) : null;
+  const decision = dv && dv.ok ? dv.value : null;
+
+  const short = gateShortCircuit(state, decision);
+  if (short?.kind === 'paused') {
+    return {
+      kind: 'result',
+      result: {
+        status: 'paused',
+        gateId: short.gate.gateId,
+        gate: { summary: short.gate.summary, proposed_action: short.gate.proposed_action },
+      },
+    };
+  }
+  if (short?.kind === 'abort') {
+    if (short.record) await appendGateDecision(sessionId, config, short.record);
+    return { kind: 'result', result: { status: 'aborted' } };
+  }
+  // '' is the sentinel for "the caller builds its own fresh prompt": every kind's fresh prompt is
+  // different (and the prompt leaf's needs a sandbox path), so only the CONTINUATION comes from here.
+  // `false`: neither kind registers submit_verdict, so a continuation naming it would steer the
+  // model at a tool it does not have.
+  const seed = decideSeed(state, decision, '', false);
+  if (seed.kind !== 'seed') throw new Error('unreachable: gateShortCircuit missed a short circuit');
+  if (seed.record) await appendGateDecision(sessionId, config, seed.record);
+  return {
+    kind: 'run',
+    // Only an invocation CARRYING a decision runs a continuation. Without the `decision` guard, a
+    // session that answered an earlier gate re-derives that decision's continuation for every later
+    // turn -- so a FRESH gated prompt or solve would run "Human decision: APPROVED..." instead of
+    // its own prompt plus the steer, never call request_approval, and bypass its gate silently.
+    // Unlike the verdict kind, these two get a new prompt per turn; replaying is only ever a resume.
+    ...(decision && seed.prompt ? { continuation: seed.prompt } : {}),
+    nextGateId: state.nextGateId,
   };
 }
 
@@ -630,6 +749,12 @@ async function runPromptLeaf(
     provider: env.provider ?? config?.provider,
   });
   const exec = deps?.executeTurn ?? executeTurn;
+
+  // BEFORE the lease (design §1): a parked or aborted leaf must hold no sandbox. The RAW id, which
+  // is what this kind passes to `executeTurn` below -- `sid` is only the lease/result key.
+  const plan = await planLeafGate(env, config, env.sessionId);
+  if (plan.kind === 'result') return plan.result;
+  const gateCapture: GateCapture = {};
 
   // Lease a pool sandbox the way the verdict and solve paths do, then hand it to the turn, so a
   // prompt leaf's tool calls land in the sandbox it actually holds a lease on — including a remote
@@ -824,11 +949,16 @@ async function runPromptLeaf(
             : {}),
         }
       : undefined;
+    // A resumed gate seeds the human's decision INSTEAD of the leaf's own prompt, which the model
+    // already has in its session; a fresh gated run gets the prompt plus the steer toward the tool.
+    const userPrompt =
+      plan.continuation ??
+      (env.requireApproval ? `${env.prompt}\n\n${gatePromptNote()}` : env.prompt);
     const r: TurnResult = await exec({
       prompt:
         contextPath && selected
-          ? `${env.prompt}\n\n${contextNote(contextPath, contextMode(env), selected.podCwd)}`
-          : env.prompt,
+          ? `${userPrompt}\n\n${contextNote(contextPath, contextMode(env), selected.podCwd)}`
+          : userPrompt,
       sessionId: env.sessionId,
       config: leafTurnConfig(config, { untemplated: workload !== undefined }),
       createIfAbsent: true,
@@ -839,6 +969,20 @@ async function runPromptLeaf(
       // here: it comes back as `r.budgetExceeded`.
       ...(signal ? { signal } : {}),
       ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
+      // Registered for a leaf carrying a DECISION too, not only for one that asked for the gate
+      // itself: the reject continuation tells the model it "may call request_approval again", and a
+      // sync caller may re-POST `decision` without repeating `requireApproval`. Without this that
+      // resumed leaf is steered at a tool it does not have -- the same failure `verdictTool` exists
+      // to prevent, one level out. Costs nothing on the ungated path: `planLeafGate` already read
+      // the session for any invocation carrying a decision.
+      //
+      // `!!env.decision` and not `!== undefined`, to match `planLeafGate`'s own `!env.decision`
+      // exactly: a JSON `decision: null` is NOT carrying a decision, and registering the tool for
+      // one would hand the model a `nextGateId` of 0 on a session that never got read -- appending
+      // its request as gate 0 on a session that already has gates.
+      ...(env.requireApproval || !!env.decision
+        ? { gate: { capture: gateCapture, nextGateId: plan.nextGateId } }
+        : {}),
     });
     // The signal decides WHICH stop this was, so it is read before `stopReason`: a deadline abort is
     // `failed: budget` and a cancel is `aborted`, and both arrive here as `stopReason: 'aborted'`.
@@ -847,6 +991,20 @@ async function runPromptLeaf(
     if (r.stopReason === 'aborted') return { status: 'aborted' };
     if (r.stopReason === 'error')
       return { status: 'failed', reason: 'error', message: r.errorMessage };
+    // Gate outcome ahead of the response, as the verdict path puts it ahead of the verdict: a leaf
+    // that parked produced no answer, and reporting `responded` with the model's pre-gate chatter
+    // would read as a finished turn.
+    if (gateCapture.gate) {
+      return {
+        status: 'paused',
+        gateId: gateCapture.gate.gateId,
+        gate: {
+          summary: gateCapture.gate.summary,
+          proposed_action: gateCapture.gate.proposed_action,
+        },
+      };
+    }
+    if (gateCapture.aborted) return { status: 'aborted' };
     if (!selected || !template) return { status: 'responded', text: r.response, usage: r.usage };
     // A templated session's end state, taken in the session's workspace while the lease is still
     // held (spec §5.1). A failed capture is `{ error }` and never fails the leaf.
@@ -939,7 +1097,7 @@ export function contextNote(path: string, mode: ContextMode, scratch: string): s
 // Real solve runner: lease a sandbox, converge the per-leaf worktree, run the agent with ONLY the
 // sandbox tools (no verdict/gate extensions), then capture the staged diff. Mirrors realProduceVerdict's
 // session/pool wiring. Exercised by the Kind smoke, not unit tests.
-export const realProduceSolve: ProduceSolve = async (env, config, capture, deps, signal) => {
+export const realProduceSolve: ProduceSolve = async (env, config, capture, deps, signal, gate) => {
   const cwd = config?.cwd ?? process.cwd();
   const { provider, modelId } = resolveModelSelection({
     model: env.model ?? config?.model,
@@ -1054,6 +1212,14 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps,
         // unreachable from here. The baseline is the spend already on the resumed branch, as
         // run-turn.ts computes it -- a retry must not fail on its predecessor's tokens.
         ...budgetVoters(sessionManager, config, capture),
+        // #393: a gated solve leaf. `nextGateId` comes from the caller's plan, which read the same
+        // durable entries this session was opened from. A leaf carrying a DECISION gets the tool
+        // too, for the reason runPromptLeaf's own registration gives: the reject continuation
+        // invites another `request_approval`, so the tool has to be there to call.
+        // `!!env.decision`, as in runPromptLeaf and for the same reason: a `null` decision is not one.
+        ...((env.requireApproval || !!env.decision) && gate
+          ? [requestApprovalExtension(capture, sessionManager, gate.nextGateId)]
+          : []),
       ],
       ...(attached ? { promotedConfig: attached.promotedConfig } : {}),
     });
@@ -1076,13 +1242,20 @@ export const realProduceSolve: ProduceSolve = async (env, config, capture, deps,
     if (signal) wireAbort(signal, session);
 
     try {
-      const prompt = swebench
+      const fresh = swebench
         ? buildSwebenchSolvePrompt(
             env.problemStatement!,
             workspaceRef,
             `${swebenchVenvDir(sid)}/bin/python`,
           )
         : buildSolvePrompt(env.problemStatement!, workspaceRef);
+      // A resume runs the continuation, not the problem statement again; a fresh gated run gets the
+      // steer toward request_approval appended (design §1).
+      const prompt = gate?.continuation
+        ? gate.continuation
+        : env.requireApproval
+          ? `${fresh}\n\n${gatePromptNote()}`
+          : fresh;
       await session.prompt(prompt);
       // A stopped leaf captures NOTHING, for the same reason the capacity check below runs before
       // the diff: the patch of a worktree cut off mid-edit is a partial answer that reads as a whole
@@ -1172,6 +1345,24 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
     }
   }
 
+  // Gate front-end, part 1 (#393 §1): the answers that need no prompt, so a parked or aborted leaf
+  // leases no sandbox and converges no worktree. Beside the verdict fast-path above, which skips the
+  // lease for the same reason. The seed half stays below the converge -- it needs workspaceRef.
+  const gateState = computeGateState(prior.map((p) => p.entry));
+  const dv = env.decision ? validateDecision(env.decision) : null;
+  const decision = dv && dv.ok ? dv.value : null;
+  const short = gateShortCircuit(gateState, decision);
+  if (short) {
+    if (short.kind === 'paused') {
+      capture.gate = short.gate;
+    } else {
+      if (short.record) sessionManager.appendCustomEntry(GATE_DECISION_ENTRY_TYPE, short.record);
+      capture.aborted = true;
+    }
+    await backend.flush();
+    return;
+  }
+
   // --- P2: choose a sandbox pod (pool lease) before building the prompt/session. Placed after the
   // verdict fast-path so a recovered verdict does not lease a pod. Returns null ⇒ no sandbox
   // configured (local tools). Throws SandboxPoolSaturatedError when a configured pool is full.
@@ -1219,22 +1410,12 @@ export const realProduceVerdict: ProduceVerdict = async (item, env, config, capt
       }, verdictTimings.heartbeatMs);
     }
 
-    // Gate front-end (design §3): decide whether to pause, abort, or seed a prompt.
-    const gateState = computeGateState(prior.map((p) => p.entry));
-    const dv = env.decision ? validateDecision(env.decision) : null;
-    const decision = dv && dv.ok ? dv.value : null;
+    // Gate front-end, part 2: only the seed is left. `gateShortCircuit` above already returned for
+    // `paused` and `abort`, so this call can produce nothing else -- the throw is a tripwire on that
+    // invariant, not a path a caller can reach.
     const seed = decideSeed(gateState, decision, buildLeafPrompt(item, workspaceRef));
-
-    if (seed.kind === 'abort') {
-      if (seed.record) sessionManager.appendCustomEntry(GATE_DECISION_ENTRY_TYPE, seed.record);
-      capture.aborted = true;
-      await backend.flush();
-      return;
-    }
-    if (seed.kind === 'paused') {
-      capture.gate = seed.gate;
-      await backend.flush();
-      return;
+    if (seed.kind !== 'seed') {
+      throw new Error(`unreachable: gate short-circuit missed '${seed.kind}'`);
     }
     if (seed.record) sessionManager.appendCustomEntry(GATE_DECISION_ENTRY_TYPE, seed.record);
 

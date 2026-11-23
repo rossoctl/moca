@@ -196,6 +196,9 @@ services:
       # variable that is not listed here. Unset = 50 and `single`, which is what this stack runs.
       MOCA_ASYNC_QUEUED_PER_OWNER:
       MOCA_TENANCY:
+      # Seconds a turn may sit paused at a human gate before the sweep answers it (#393). Unset = 0
+      # = never, so a gate waits for a person.
+      MOCA_GATE_DEADLINE_S:
       # The result TTL the turn record's own TTL is derived from (+1 h margin).
       LEAF_RESULT_TTL_SECONDS:
     volumes:

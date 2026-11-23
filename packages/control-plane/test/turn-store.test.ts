@@ -76,6 +76,63 @@ it('reaches a turn that has NO index entry through the owner set', async () => {
   expect(await store.countOpen('github:1234')).toBe(0);
 });
 
+// The gate index (#393 §3). Its members are added by `toTerminal` on `paused` alone, so every case
+// below finalizes a real record rather than writing the zset directly.
+const gateStore = () => {
+  const { redis } = fakeRedis();
+  const store = new TurnStore(redis, { resultTtlSeconds, ttlMarginSeconds });
+  const pause = async (turnId: string, gateDeadlineS?: number) => {
+    await store.create(rec({ turnId, ...(gateDeadlineS ? { gateDeadlineS } : {}) }));
+    await store.finalize(turnId, 'paused', 1_000);
+  };
+  return { store, pause };
+};
+
+it('indexes a paused turn with a deadline, and nothing else', async () => {
+  const { store, pause } = gateStore();
+  await pause('t-dl', 60);
+  await pause('t-nodl');
+  await store.create(rec({ turnId: 't-done', gateDeadlineS: 60 }));
+  await store.finalize('t-done', 'responded', 1_000);
+  expect(await store.dueGates(1_000 + 60_000)).toEqual(['t-dl']);
+});
+
+it('does not report a gate before its deadline', async () => {
+  const { pause, store } = gateStore();
+  await pause('t-dl', 60);
+  expect(await store.dueGates(1_000 + 59_999)).toEqual([]);
+});
+
+it('claimGate is a CAS: exactly one caller wins', async () => {
+  const { pause, store } = gateStore();
+  await pause('t-dl', 60);
+  const [a, b] = await Promise.all([store.claimGate('t-dl'), store.claimGate('t-dl')]);
+  expect([a, b].filter(Boolean)).toHaveLength(1);
+  expect(await store.dueGates(1_000 + 60_000)).toEqual([]);
+});
+
+it('reports due gates oldest first', async () => {
+  const { pause, store } = gateStore();
+  await pause('t-late', 600);
+  await pause('t-soon', 60);
+  expect(await store.dueGates(1_000 + 600_000)).toEqual(['t-soon', 't-late']);
+});
+
+it('reports the OLDEST gates when more are due than the limit', async () => {
+  // The sweep pages: taking the newest `limit` instead would starve the gates that waited longest,
+  // which are the ones a deadline exists for.
+  const { pause, store } = gateStore();
+  for (const s of [600, 60, 300]) await pause(`t-${s}`, s);
+  expect(await store.dueGates(1_000 + 600_000, 2)).toEqual(['t-60', 't-300']);
+});
+
+it('deleting the session clears its gates', async () => {
+  const { pause, store } = gateStore();
+  await pause('t-dl', 60);
+  await store.deleteSessionTurns('s-1', 'github:1234');
+  expect(await store.dueGates(1_000 + 60_000)).toEqual([]);
+});
+
 // Fake-only: `XADD MAXLEN ~` is APPROXIMATE in real Redis, so an exact bound asserted against it
 // would be a flake. The fake trims exactly, which is what makes the bound observable at all.
 it('bounds the owner event log to EVENTS_MAXLEN', async () => {

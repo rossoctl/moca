@@ -61,6 +61,17 @@ describe('buildConvergeScript', () => {
     // skip the append the overlay actually needs.
     expect(s).toContain('grep -qxF .sh-config');
   });
+  it('reuses a surviving leaf and keeps its original baseline (#393 §4)', () => {
+    // What makes a gate survivable: a decision can land an hour after the pause, on a sandbox that
+    // was reclaimed in between. The resume re-runs this script unconditionally, so a vanished
+    // workspace is rebuilt (the self-healing assertions above) and a SURVIVING one is reused --
+    // keeping the baseline the first half of the turn was pinned to, which is the commit the
+    // captured patch has to apply against. Re-writing `.base` on a re-converge would silently
+    // rebase the diff onto whatever the model committed while it waited.
+    expect(s).toContain('[ -d "$LEAF" ] ||');
+    expect(s.match(/>"\$LEAF\.base"/g)).toHaveLength(1);
+    expect(s.indexOf('[ -d "$LEAF" ] ||')).toBeLessThan(s.indexOf('>"$LEAF.base"'));
+  });
   it('writes the info/exclude entry inside the flock, before any worktree add', () => {
     // The flock serializes writers of the shared repo at /workspace/repo. The info/exclude line
     // belongs to that same shared repo, so a concurrent two-leaf converge mustn't append the

@@ -162,6 +162,14 @@ spec:
             - name: MOCA_TENANCY
               valueFrom:
                 { configMapKeyRef: { name: moca-settings, key: MOCA_TENANCY, optional: true } }
+            # Seconds a turn may sit paused at a human gate before the sweep answers it (#393).
+            # `optional` for the same reason, and unset = 0 = never.
+            - name: MOCA_GATE_DEADLINE_S
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: MOCA_GATE_DEADLINE_S, optional: true },
+                }
             # The turn record's TTL is derived from this (+1 h margin), so raising it on the worker
             # without setting it here leaves records expiring before the results they explain.
             - name: LEAF_RESULT_TTL_SECONDS

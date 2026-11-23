@@ -15,6 +15,19 @@ import { StubIdentity } from './stub-identity.js';
 /** Fixed epoch ms, so nothing in these suites depends on the wall clock. */
 export const NOW_MS = 1_757_000_000_000;
 
+/**
+ * A paused leaf result EXACTLY as the harness stores one: `toResultRecord`
+ * (`harness/src/leaf-result-store.ts`) nests the gate id under `gate`, and nothing writes a
+ * top-level `gateId`. One helper rather than a literal per suite, because a fixture that invented
+ * the top-level shape is what let `pausedGateId` read `null` for every real paused turn with every
+ * test green.
+ */
+export const pausedResult = (gateId: number, summary = 's', proposedAction = 'p'): string =>
+  JSON.stringify({
+    status: 'paused',
+    gate: { gateId, summary, proposed_action: proposedAction },
+  });
+
 export type TestDeps = CpDeps & {
   publicKeyBase64: string;
   /** The fake's audit-stream map, for asserting what was audited. */
@@ -66,6 +79,7 @@ export function makeDeps(
     bundleSubjectBytes: 16 * 1024 * 1024,
     bundleTotalBytes: 64 * 1024 * 1024,
     asyncQueuedPerOwner: 50,
+    gateDeadlineS: 0,
     tenancy: 'single',
     turnRecordTtlSeconds: 86_400 + 3_600,
     turnSummaryBytes: 2048,

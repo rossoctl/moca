@@ -117,9 +117,19 @@ describe('continuationPrompt', () => {
     expect(p).toContain('fix the query');
     expect(p.toLowerCase()).toContain('revise');
   });
+  it('names no submit_verdict for a leaf that has no such tool (#393 §1)', () => {
+    // A prompt or solve leaf registers request_approval alone, so the verdict wording would tell
+    // the model to call a tool that is not in its stack.
+    for (const action of ['approve', 'reject'] as const) {
+      const p = continuationPrompt(action, 'f', false);
+      expect(p).not.toContain('submit_verdict');
+      expect(p).toContain('f');
+    }
+    expect(continuationPrompt('reject', 'f', false)).toContain('request_approval');
+  });
 });
 
-import { decideSeed } from '../src/gate';
+import { decideSeed, gateShortCircuit, type Decision } from '../src/gate';
 
 const FRESH = 'FRESH_PROMPT';
 function state(entries: unknown[]) {
@@ -181,10 +191,72 @@ describe('decideSeed', () => {
       expect(r.record).toBeNull();
     }
   });
+  it('passes verdictTool through to both continuations', () => {
+    const pending = decideSeed(
+      state([reqEntry(0)]),
+      { gateId: 0, action: 'approve' },
+      FRESH,
+      false,
+    );
+    const rederived = decideSeed(state([reqEntry(0), decEntry(0, 'approve')]), null, FRESH, false);
+    for (const r of [pending, rederived]) {
+      expect(r.kind).toBe('seed');
+      if (r.kind === 'seed') expect(r.prompt).not.toContain('submit_verdict');
+    }
+  });
   it('already-aborted session (no pending, last decision abort) → terminal abort, record null', () => {
     expect(decideSeed(state([reqEntry(0), decEntry(0, 'abort')]), null, FRESH)).toEqual({
       kind: 'abort',
       record: null,
     });
+  });
+});
+
+describe('gateShortCircuit', () => {
+  it('pending gate + no decision → paused', () => {
+    expect(gateShortCircuit(state([reqEntry(0)]), null)).toEqual({
+      kind: 'paused',
+      gate: { gateId: 0, summary: 's0', proposed_action: 'a0' },
+    });
+  });
+  it('pending gate + gateId mismatch → paused', () => {
+    expect(gateShortCircuit(state([reqEntry(1)]), { gateId: 0, action: 'approve' })?.kind).toBe(
+      'paused',
+    );
+  });
+  it('pending gate + matching abort → abort, carrying the entry to append', () => {
+    expect(
+      gateShortCircuit(state([reqEntry(0)]), { gateId: 0, action: 'abort', feedback: 'no' }),
+    ).toEqual({ kind: 'abort', record: { gateId: 0, action: 'abort', feedback: 'no' } });
+  });
+  it('approve or reject → null, the caller runs the turn', () => {
+    expect(gateShortCircuit(state([reqEntry(0)]), { gateId: 0, action: 'approve' })).toBeNull();
+    expect(gateShortCircuit(state([reqEntry(0)]), { gateId: 0, action: 'reject' })).toBeNull();
+  });
+  it('no gate at all → null', () => {
+    expect(gateShortCircuit(state([]), null)).toBeNull();
+  });
+  it('already-aborted session → abort, record null', () => {
+    expect(gateShortCircuit(state([reqEntry(0), decEntry(0, 'abort')]), null)).toEqual({
+      kind: 'abort',
+      record: null,
+    });
+  });
+  it('already-decided gate (double resume) → null, so the caller seeds the continuation', () => {
+    expect(
+      gateShortCircuit(state([reqEntry(0), decEntry(0, 'approve')]), {
+        gateId: 0,
+        action: 'approve',
+      }),
+    ).toBeNull();
+  });
+  it('gives the same answer decideSeed does', () => {
+    // The refactor's whole contract: decideSeed delegates, so the two can never disagree.
+    const pending = state([reqEntry(0)]);
+    expect(decideSeed(pending, null, FRESH)).toEqual(gateShortCircuit(pending, null));
+    const abort: Decision = { gateId: 0, action: 'abort' };
+    expect(decideSeed(pending, abort, FRESH)).toEqual(gateShortCircuit(pending, abort));
+    const aborted = state([reqEntry(0), decEntry(0, 'abort')]);
+    expect(decideSeed(aborted, null, FRESH)).toEqual(gateShortCircuit(aborted, null));
   });
 });

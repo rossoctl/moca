@@ -317,6 +317,16 @@ export const ROUTES: readonly RouteSpec[] = [
     operationId: 'submitTurn',
   },
   {
+    // #393: resolving a gate is a POST of the DECISION alone -- the envelope comes from the paused
+    // record, so no `bodyRequired: false` here either.
+    method: 'POST',
+    path: '/v1/sessions/{id}/decision',
+    auth: 'api',
+    sessionScoped: true,
+    profiles: HARNESS,
+    operationId: 'decideGate',
+  },
+  {
     method: 'GET',
     path: '/v1/sessions/{id}/turns/{turnId}',
     auth: 'api',

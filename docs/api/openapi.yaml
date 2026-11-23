@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.35.0
+  version: 1.37.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -149,6 +149,8 @@ components:
             - async_quota_exhausted
             - workload_runs_unavailable
             - turn_not_cancellable
+            - gate_not_pending
+            - gate_pending
             - turn_not_claimable
             - turn_not_found
             - credential_required
@@ -309,6 +311,33 @@ components:
         attempts: { type: integer }
         reason: { type: string, description: the terminal reason, when there is one }
         gate: { type: string, description: the gate the turn is waiting on, when there is one }
+    GateDecision:
+      type: object
+      required: [gateId, action]
+      additionalProperties: false
+      properties:
+        gateId:
+          type: integer
+          minimum: 0
+          description: |
+            the gate being answered, as the paused turn's `result.gate.gateId` reports it. Sent rather
+            than inferred so a decision cannot land on a gate the caller never saw: a mismatch is
+            `409 gate_not_pending`.
+        action:
+          type: string
+          enum: [approve, reject, abort]
+          description: |
+            `approve` lets the leaf carry out the action it proposed, `reject` returns the feedback
+            and lets it try something else, `abort` ends the leaf with `status: "aborted"`.
+        feedback:
+          type: string
+          maxLength: 4096
+          description: |
+            a note for the model, carried into the resumed turn's prompt. Bounded because it is
+            prompt text the owner is billed for and the session stores for good.
+
+            The server's bound is 4096 BYTES, not characters: `maxLength` above counts characters,
+            so multi-byte text is refused (`400 invalid_request`) before it reaches that many.
     TurnStatus:
       type: object
       required: [turnId, state, attempts]
@@ -334,6 +363,12 @@ components:
             present and `true` only on a `running` turn a `DELETE` has asked to stop (#391): the
             request is in flight and the worker has not yet reported. The turn reaches `cancelled`
             on its own; absent otherwise.
+        resumeOf:
+          type: string
+          description: |
+            the `paused` turn whose gate this turn answers (#393); absent on every other turn. A
+            paused turn is terminal and never reopened, so a decision always produces a new turn --
+            this is the link back to the one that asked.
         result:
           type: object
           description: |
@@ -2042,6 +2077,46 @@ paths:
                 problemStatement: { type: string, description: a SWE-bench style task }
                 repoUrl: { type: string }
                 ref: { type: string }
+                requireApproval:
+                  type: boolean
+                  description: |
+                    gate this turn on a human decision (#393). The leaf's first action is a
+                    `request_approval` call, after which the turn ends `paused` with a `gate` on its
+                    result; resolve it with `POST /v1/sessions/{id}/decision`, which resumes the work
+                    as a NEW turn linked by `resumeOf`. Applies to the `prompt` and `solve` kinds; a
+                    `converge` leaf carries the same request on `item.require_approval`, and sending
+                    this field with one is `400 invalid_request` rather than an ignored flag.
+
+                    ONE open gate per session: a gated submission is `409 gate_pending` while the
+                    session has a paused turn whose gate is unanswered, AND while an earlier gated
+                    turn of the session is still `queued` or `running` -- including the resume a
+                    decision created, which can pause at a gate of its own. The gate lives in the
+                    session's own durable state, so a second gated turn would park on the open gate
+                    and take the decision meant for the first. Ungated turns are never refused by
+                    this and may run alongside a gated one.
+
+                    A RETRY of the gated submission itself is not a second gated turn: on the same
+                    `idempotencyKey` as the running gated turn it replays `202` with that turn's id,
+                    like any other key replay. Once that turn is `paused` the key has been released,
+                    so the retry is refused `gate_pending` -- answer the gate instead of resending.
+                gateDeadlineS:
+                  type: integer
+                  minimum: 1
+                  description: |
+                    seconds this turn's gate may stay unanswered before the control plane answers it
+                    itself (#393). A CEILING only: the deployment's `MOCA_GATE_DEADLINE_S` and the
+                    turn record's own TTL also bound it, and the tightest wins. Absent, and with no
+                    deployment ceiling, a gate waits indefinitely.
+
+                    Only on a GATED submission: sent on a turn that asks for no gate it is
+                    `400 invalid_request`, because nothing would ever read it.
+                onTimeout:
+                  type: string
+                  enum: [abort, reject]
+                  description: |
+                    what the deadline decides when it expires; defaults to `abort`. There is no
+                    `approve`: an unanswered gate is never read as consent. Ignored without a
+                    deadline in force, and `400 invalid_request` on a turn that asks for no gate.
                 idempotencyKey:
                   type: string
                   maxLength: 128
@@ -2090,6 +2165,17 @@ paths:
               schema: { $ref: '#/components/schemas/Error' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: |
+            `gate_pending`: this submission asks for a gate and the session already has one open, or
+            has an earlier gated turn still running that will open one. One open gate per session
+            (#393) -- the message names that turn. Answer a paused gate with
+            `POST /v1/sessions/{id}/decision`, wait for a running one, or submit this turn without
+            `requireApproval`. A retry on the same `idempotencyKey` as the still-running gated turn
+            replays `202` with its id rather than hitting this.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '429':
           description: |
             `async_quota_exhausted`: the caller already holds `MOCA_ASYNC_QUEUED_PER_OWNER`
@@ -2102,6 +2188,56 @@ paths:
           description: |
             `workload_runs_unavailable` for a submission naming a `workloadId`, refused at submission
             so it stays synchronous rather than becoming a dead letter.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+  /v1/sessions/{id}/decision:
+    post:
+      operationId: decideGate
+      summary: Resolve a pending human gate
+      description: |
+        Answer the gate the session's paused turn is waiting on (#393). The body is the DECISION
+        alone: the resumed turn's envelope -- prompt, model, credential name, sandbox tier, caps --
+        is copied from the paused record, so resolving a gate cannot change what the turn runs.
+
+        Answers `202` with a NEW turn id, linked to the paused one by `resumeOf`. A paused turn is
+        terminal and is never reopened, so the gate's answer is always a fresh turn; poll it with
+        `GET /v1/sessions/{id}/turns/{turnId}` as for any other. `approve` continues the work,
+        `reject` sends the feedback back and lets the model try again, `abort` ends the leaf.
+
+        Idempotent per gate: re-sending the same decision while its resume is still live answers
+        `202` with that same turn id. Everything else -- no paused turn, a `gateId` that is not the
+        pending one, a gate already answered by a human or by the deadline sweep -- is `409
+        gate_not_pending`, and the caller's move in all three cases is to re-read the turn.
+      security: [{ sessionToken: [] }]
+      parameters: [{ $ref: '#/components/parameters/sessionId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GateDecision' }
+      responses:
+        '202':
+          description: accepted; the resume turn's id
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionId, turnId]
+                properties:
+                  sessionId: { type: string }
+                  turnId: { type: string }
+        '400':
+          description: '`invalid_json` or `invalid_request`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: |
+            `gate_not_pending`: no turn of this session is paused at a gate, the `gateId` is not the
+            pending one, or the gate has already been answered.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

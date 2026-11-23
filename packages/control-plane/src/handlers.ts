@@ -185,6 +185,12 @@ export interface CpConfig {
    */
   asyncQueuedPerOwner: number;
   /**
+   * `MOCA_GATE_DEADLINE_S`, default 0 = never (#393 §3): the deployment ceiling on how long a turn
+   * may sit paused at a gate before the sweep answers it with the turn's `onTimeout`. Off by
+   * default because expiring a gate SPENDS the owner's decision for them -- a deployment opts in.
+   */
+  gateDeadlineS: number;
+  /**
    * `MOCA_TENANCY` (async spec §9). Async submission is refused by name under `multi` until M2:
    * M1 resolves the credential from the turn record at dequeue, which MI1 S2's interim allows under
    * `single` only.
