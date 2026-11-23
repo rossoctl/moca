@@ -40,7 +40,9 @@ authenticated and scoped to the caller's own subject.
   `X-Moca-Signature: sha256=<hex>`, an HMAC-SHA256 over `<timestamp>.<rawBody>` with the sink's own
   key, plus `X-Moca-Delivery` and `X-Moca-Timestamp`. `X-Moca-Delivery` is the batch's head cursor,
   not a fresh id per attempt, so a retry of the same unadvanced batch carries the same id and a
-  receiver can dedupe on it (at-least-once is the contract, ADR-0015). An `ntfy` sink is posted to
+  receiver can dedupe on it (at-least-once is the contract, ADR-0015). A retry whose batch GREW in
+  the meantime carries a new id, so dedupe does not cover that case and a receiver can see an event
+  twice. An `ntfy` sink is posted to
   its server's JSON publish endpoint, with its token as a bearer header when one was given.
 - The feature is off end to end until the deployment sets `MOCA_NOTIFY_ALLOW`: a `PUT` refuses
   every sink with `invalid_request` naming the unset variable, and the sweep that would deliver

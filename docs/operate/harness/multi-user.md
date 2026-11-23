@@ -240,7 +240,9 @@ file by hand. What stays behind on each profile is in
 Off until the operator sets `MOCA_NOTIFY_ALLOW` ([#394](https://github.com/rossoctl/moca/issues/394)):
 a comma-separated `host[:port][/prefix]` allowlist, the only control against a user-supplied sink
 URL reaching your instance metadata service, Redis, or the kube API from inside the control plane.
-A malformed entry refuses to boot, the same contract `SH_MODEL_CATALOG_HOSTS` has.
+A malformed entry refuses to boot, the same contract `SH_MODEL_CATALOG_HOSTS` has. It is re-checked
+on every delivery, not only at the `PUT` that stores a sink, so taking a host back out of the list
+also stops the sinks already saved under it.
 
 Each user configures their own sink with `PUT /v1/notifications`:
 

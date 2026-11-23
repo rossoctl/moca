@@ -19,6 +19,12 @@ export interface NotifyPayload {
    * the same unadvanced batch -- a crash between `deliver` and `advance`, or two overlapping passes
    * -- must carry the SAME id, or a receiver that dedupes on it (at-least-once is the contract,
    * ADR-0015) accepts the duplicate.
+   *
+   * Dedupe therefore holds for a retry of an IDENTICAL batch. If events arrive between the failed
+   * attempt and the retry the batch grows, its head moves, and the receiver sees a new id carrying
+   * events it already handled -- one duplicate. Deliberately not fixed by keying on the batch's
+   * START cursor, which is stable across a growing batch: a deduping receiver would then drop the
+   * grown retry and the events added to it would never be delivered. Duplicates beat losses.
    */
   deliveryId: string;
   /** UNIX SECONDS, not ms: it is signed, and a receiver rejects a stale one by comparing to now. */

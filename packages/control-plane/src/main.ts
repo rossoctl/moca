@@ -956,8 +956,8 @@ if (isMainModule) {
   // with MOCA_GATE_DEADLINE_S unset, so the sweep cannot be gated on the config value. Costs one
   // ZRANGEBYSCORE per 30 s when no gate is open.
   startGateSweep(deps);
-  // #394: pushes paused and finished turns to the owner's sinks. Returns immediately when
-  // MOCA_NOTIFY_ALLOW is unset, so an un-opted deployment pays one ZRANGE per 10 s.
+  // #394: pushes paused and finished turns to the owner's sinks. With MOCA_NOTIFY_ALLOW unset the
+  // pass returns before it reads the owner index, so an un-opted deployment pays nothing per tick.
   startNotifySweep(deps);
   // The Redis schema version (#509): written if absent, and the process exits on a newer one once
   // Redis answers. In the background, because this server starts before Redis and waits for it.
