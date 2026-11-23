@@ -143,9 +143,12 @@
 #                           leaving it to the worker's idle reclaim. Its release-only bearer,
 #                           MOCA_RELAY_RELEASE_TOKEN, is generated once and kept in the Secret
 #                           moca-relay-release, apart from every other Secret, and is in both pods'
-#                           hashes. Unset or 0 changes nothing (a re-run is byte-identical: no Secret,
-#                           no listener, the relay's hash, Services and NetworkPolicies as before);
-#                           turning it off later leaves moca-relay-release in place
+#                           hashes. Unset or 0: no Secret and no listener, and the relay, its hash,
+#                           Services and NetworkPolicies are as before. The control plane's
+#                           credentials volume names moca-relay-release as an optional source
+#                           (mounted only when the Secret exists) whatever the switch, a one-time
+#                           change that rolls the control plane with the release that brings it.
+#                           Turning it off later leaves moca-relay-release in place
 #   SBX_PROFILE             optional; sandbox (default) or combined. combined renders
 #                           deploy/k8s/overlays/ocp-combined instead of ocp-sbx: one control plane on
 #                           the combined route profile serving Moca Pi sessions (the supervisor and its

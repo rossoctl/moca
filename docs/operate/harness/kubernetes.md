@@ -1442,8 +1442,8 @@ default). With `SH_RELAY_RELEASE_CONTROL=1` the control plane releases it at the
 instead: through the relay's control listener (`base/relay-release-control`: the relay's
 `MOCA_RELAY_CONTROL_ADDR`, the `sandbox-relay-control` Service on 9445, and a NetworkPolicy that
 admits the control plane alone), to the sandbox the session last ran on (its `sandboxPod`, else its
-last `sandboxId`), after the delete has committed. It is best-effort, within 5 s, and never fails
-the delete; a worker that predates release answers `release_unsupported`, and the decision log
+last `sandboxId`), after the delete has committed. It is best-effort, within 5 s, and the delete neither waits for
+it nor fails for it; a worker that predates release answers `release_unsupported`, and the decision log
 records every outcome as `session_workspace_release` (`no_worker` when the session never ran on
 one). Idle reclaim stays the backstop.
 
@@ -1455,4 +1455,6 @@ It is sticky like `SH_WORKLOAD_SANDBOXES`; only `1` and empty are accepted, and 
 refuses it. The listener's bearer is generated once into `moca-relay-release` (section 5), apart
 from `moca-mu1`; its digest is on both pod templates, so rotating it (delete the key and re-run)
 rolls the relay and the control plane. Empty turns the listener off and leaves the Secret, the
-Service and the two NetworkPolicies in place, inert.
+Service and the two NetworkPolicies in place, inert. Whatever the switch, the control plane's
+credentials volume names `moca-relay-release` as an optional source (mounted only when the Secret
+exists), so the first run of the release that brings it rolls the control plane once.

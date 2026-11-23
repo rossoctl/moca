@@ -53,7 +53,10 @@
 # the control plane releases a deleted session's workspace on its worker at once instead of leaving
 # it to the worker's idle reclaim; its release-only bearer, MOCA_RELAY_RELEASE_TOKEN, is generated
 # once into a Secret of its own, moca-relay-release, and its digest rolls the relay and the control
-# plane when it changes; off when unset or empty, and then the stack renders exactly as before;
+# plane when it changes; off when unset or empty, and then the relay, its Services and
+# NetworkPolicies render as before, though the control plane's credentials volume names
+# moca-relay-release as an optional source whatever the switch (a one-time change that rolls the
+# control plane with the release that brings it);
 # turning it off leaves the Secret, the sandbox-relay-control Service and its two NetworkPolicies,
 # inert, in place; #338),
 # SH_SOURCE_ONLY=1 (define the functions and stop, for tests).

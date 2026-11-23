@@ -314,7 +314,9 @@ not, through a second listener on the relay:
   call, `via: "control"`.
 
 The control plane (`SH_RELAY_CONTROL_URL`) sends a release, best-effort and within a short bound
-(5 s) that never fails or delays the request it runs in:
+(5 s). A DELETE never waits for it: the release starts after the delete commits and runs in the
+background, every error caught. The janitor's sweep waits for its releases up to the bound, never
+longer, and never fails for them:
 
 1. **At a sandbox's delete**, after the record is marked deleted. A released key refuses new Execs,
    so a release sent before a delete that then failed would strand a live sandbox.
@@ -328,7 +330,10 @@ The control plane (`SH_RELAY_CONTROL_URL`) sends a release, best-effort and with
    is sent and the audit says so (`no_worker`).
 
 A sandbox record gains `releasedAt` only on a terminal answer, so a transport failure leaves it
-unset and the next sweep sends the release again while the record is retained. The janitor's own
+unset and the next sweep sends the release again while the record is retained. A sender first
+claims the release atomically, for a minute, so a DELETE and a concurrent sweep (or two DELETEs)
+send it once; an unanswered release drops its claim, and a crashed sender's lapses. A sandbox's
+release is audited after `releasedAt` is written, so a failed write is not audited twice. The janitor's own
 removal (§8.3) is unchanged and still covers what a release did not reach.
 
 ## 4. Identity

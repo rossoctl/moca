@@ -107,6 +107,12 @@ running, and reattach when the relay comes back; Execs running through the old r
 setting (templates, subjects, quotas, lifetimes) rolls the control plane alone, and running Execs
 carry on.
 
+**The release listener's optional source.** From the release that adds `SBX_RELEASE_CONTROL`, the
+control plane's credentials volume names `moca-relay-release` as an optional source (mounted only
+when the Secret exists), with the switch on or off. The first `setup.sh` run of that release
+therefore rolls the control plane once, even with nothing else changed; the relay, its Services and
+NetworkPolicies are unchanged while the switch is off ([the release listener](#the-release-listener)).
+
 **Moving to idle lifetimes (#770).** The first run of this `setup.sh` on an existing deployment
 changes every worker's idle from 216 h to 768 h at the defaults, and starts idle lifetimes: the control plane counts
 idle time only when `SH_SANDBOX_MAX_LIFETIME_SECONDS` is set, and keeps the old absolute lifetime
@@ -674,8 +680,9 @@ Exec ends, and refuses new Execs on it. The control plane sends the release
   run (every 15 minutes), and a delete whose release went unanswered is retried there too;
 - on the combined profile, at a session's delete, to the worker the session last ran on.
 
-Each is best-effort and bounded (5 s): it never fails or delays a DELETE or the janitor's read
-beyond that. The worker's answer (`released`, `kept_busy`, `unknown_key`, or `unsupported` for a
+Each is best-effort and bounded (5 s). A DELETE does not wait for it at all (it runs after the
+delete commits); the janitor's read waits at most the bound. Neither ever fails for it, and a
+release is sent once even when a DELETE and a janitor run race (an atomic claim). The worker's answer (`released`, `kept_busy`, `unknown_key`, or `unsupported` for a
 worker that predates release) is written to the sandbox record and audited as
 `sandbox_workspace_release`; anything else (the relay down, the worker detached) is logged and
 retried by the next janitor run while the record is retained. A session's is audited as

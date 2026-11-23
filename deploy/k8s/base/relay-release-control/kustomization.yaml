@@ -2,7 +2,9 @@
 # workspace on its worker through the relay. A Component, not part of the base: a setup script's
 # generated overlay lists it only behind its switch (deploy/sbx/setup.sh SBX_RELEASE_CONTROL=1,
 # deploy/k8s/setup.sh SH_RELAY_RELEASE_CONTROL=1), and every object of the feature is here, so a
-# stack without it renders the relay, its Services and its NetworkPolicies exactly as before.
+# stack without it renders the relay, its Services and its NetworkPolicies exactly as before. (The
+# control plane's credentials volume names moca-relay-release as an optional source in every
+# overlay, with or without it: a one-time change that rolls the control plane once.)
 #
 #   control.yaml               the listener's Service (sandbox-relay-control, 9445) and two
 #                              NetworkPolicies: the control plane's pods alone may reach 9445, and
