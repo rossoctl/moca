@@ -64,6 +64,10 @@ async function sweepOne(
   if (cfg.mutedUntil > now) return false;
   if (now - cfg.lastDeliveryAt < deps.config.notify.minIntervalS * 1000) return false;
 
+  // shortcut: no `gap` detection. A cursor held through a long mute while the owner's stream passes
+  // EVENTS_MAXLEN (500) silently skips the trimmed events instead of reporting them; `GET
+  // /v1/events` answers a `gap` frame for exactly this case. Upgrade by checking for one here and
+  // widening the summary (or the cursor advance) accordingly.
   const events = await turns.readEvents(subject, cfg.cursor, limit);
   if (events.length === 0) return false;
   const head = events[events.length - 1]!.cursor ?? cfg.cursor;
@@ -97,7 +101,10 @@ async function sweepOne(
     { fetchImpl: deps.fetchImpl ?? fetch },
     cfg.sinks,
     {
-      deliveryId: deps.newId(),
+      // The batch's head cursor, not deps.newId(): a retry of this same unadvanced batch (a crash
+      // right after this call, or two overlapping passes) must carry the SAME id, or the dedupe
+      // advice in notify-send.ts's NotifyPayload comment is not true.
+      deliveryId: head,
       timestamp: Math.floor(now / 1000),
       summary: renderNotification(matching, deps.config.notify.baseUrl),
       events: matching,
@@ -147,7 +154,10 @@ function hourWindow(c: StoredNotifyConfig, now: number): { hourStart: number; ho
 /** Armed from main.ts, exactly as startGateSweep is. `unref` so it never holds the process open. */
 export function startNotifySweep(deps: CpDeps, intervalMs = NOTIFY_SWEEP_INTERVAL_MS): () => void {
   const timer = setInterval(() => {
-    void sweepNotifications(deps);
+    // Nothing may reject out of a setInterval callback on Node 22: the default for an unhandled
+    // rejection is to terminate the process, so a Redis blip would restart the control plane every
+    // tick instead of just costing one skipped pass.
+    void sweepNotifications(deps).catch((err) => console.error('[notify-sweep]', err));
   }, intervalMs);
   timer.unref();
   return () => clearInterval(timer);

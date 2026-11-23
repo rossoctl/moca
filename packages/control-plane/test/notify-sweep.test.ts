@@ -184,6 +184,20 @@ describe('sweepNotifications', () => {
     expect(JSON.stringify(call)).not.toContain(minted.webhookSecret as string);
   });
 
+  it('two deliveries of the same unadvanced batch carry the same x-moca-delivery', async () => {
+    await configure();
+    await emit(ev());
+    sent.mockImplementation(async () => new Response('', { status: 500 })); // holds the cursor
+    expect(await sweepNotifications(deps)).toBe(0);
+    now += 60_000;
+    expect(await sweepNotifications(deps)).toBe(0);
+    const ids = sent.mock.calls.map((call) =>
+      new Headers((call[1] as RequestInit).headers).get('x-moca-delivery'),
+    );
+    expect(ids[0]).toBe(ids[1]);
+    expect(ids[0]).toBeTruthy();
+  });
+
   // #394's acceptance criterion is "a gate reaches a phone within 30 s". deploy/compose has no
   // Docker daemon available here to time a real push (see the task report), so this proves the
   // same bound deterministically: one NOTIFY_SWEEP_INTERVAL_MS (10 s) tick of the armed timer is
@@ -202,6 +216,26 @@ describe('sweepNotifications', () => {
       }
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('a tick whose owners() rejects logs the error, with no unhandled rejection', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+    try {
+      deps.notify = {
+        owners: () => Promise.reject(new Error('redis down')),
+      } as unknown as NotifyStore;
+      const stop = startNotifySweep(deps);
+      try {
+        await vi.advanceTimersByTimeAsync(NOTIFY_SWEEP_INTERVAL_MS);
+        expect(errSpy).toHaveBeenCalledWith('[notify-sweep]', expect.any(Error));
+      } finally {
+        stop();
+      }
+    } finally {
+      vi.useRealTimers();
+      errSpy.mockRestore();
     }
   });
 });
