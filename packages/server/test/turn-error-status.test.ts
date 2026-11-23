@@ -7,6 +7,7 @@ import {
   BundleNotFoundError,
   BundleFormatError,
   ModelConfigError,
+  requireModel,
 } from '@moca/harness/run-turn';
 import {
   turnErrorStatus,
@@ -15,7 +16,7 @@ import {
   turnErrorMessage,
   clientErrorText,
   HOST_REFUSAL_MESSAGE,
-  logTurnCapacity,
+  logTurnRefusal,
 } from '../src/server.js';
 
 // /turn now leases a sandbox from the pool (it used to run tool calls in the harness process), so
@@ -197,18 +198,16 @@ describe("a deployment model config the harness can't resolve", () => {
   });
 
   it('keeps the SH_MODEL_CUSTOM remedy inside the 500-char body budget', () => {
-    // The known-ids list is long; the body slices the message to 500 chars, so the remedy must
-    // come before the list or the one actionable sentence is the part that gets cut.
-    const err = new ModelConfigError(
-      'Unknown model "anthropic/claude-sonnet-9-9" — not in the pi-ai registry. ' +
-        'A custom endpoint is configured; set SH_MODEL_CUSTOM=1 to send this id to it as-is. ' +
-        'Known "anthropic" ids include: ' +
-        'claude-sonnet-4-6, '.repeat(40) +
-        '…',
-    );
-    const message = turnErrorMessage(400, err).message ?? '';
-    expect(message.length).toBe(500);
-    expect(message).toMatch(/set SH_MODEL_CUSTOM=1 to send this id to it as-is/);
+    // SH_MODEL has no length limit, and the known-ids list is long: the id is capped and the
+    // remedy precedes the list, or the slice cuts the one actionable sentence.
+    let err: unknown;
+    try {
+      requireModel('anthropic', 'x'.repeat(400), { ANTHROPIC_BASE_URL: 'https://gw.example' });
+    } catch (e) {
+      err = e;
+    }
+    expect(turnErrorStatus(err)).toBe(400);
+    expect(turnErrorMessage(400, err).message).toContain('set SH_MODEL_CUSTOM=1');
   });
 });
 
@@ -231,11 +230,11 @@ describe('a config bundle in a format this harness does not read (#510)', () => 
   });
 });
 
-describe('logTurnCapacity', () => {
+describe('logTurnRefusal', () => {
   it('logs one line naming the 503 cause, the session and the reason, on one line', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      logTurnCapacity('turn', 'sess-1', new SandboxPoolEmptyError('app=sandbox', 'container'));
+      logTurnRefusal('turn', 503, 'sess-1', new SandboxPoolEmptyError('app=sandbox', 'container'));
       expect(warn).toHaveBeenCalledTimes(1);
       const line = String(warn.mock.calls[0][0]);
       expect(line).toContain('[turn] 503 SandboxPoolEmptyError for session sess-1:');
@@ -249,7 +248,7 @@ describe('logTurnCapacity', () => {
   it('keeps a multi-line or hostile session id on one line', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      logTurnCapacity('turn:sse', 'a\nb', new SandboxPoolSaturatedError('app=sandbox'));
+      logTurnRefusal('turn:sse', 503, 'a\nb', new SandboxPoolSaturatedError('app=sandbox'));
       expect(String(warn.mock.calls[0][0])).not.toContain('\n');
     } finally {
       warn.mockRestore();

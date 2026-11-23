@@ -417,10 +417,10 @@ async function handleTurn(req: IncomingMessage, res: ServerResponse): Promise<vo
   } catch (err) {
     const status = turnErrorStatus(err);
     // A 500's text never reaches the body (see turnErrorCode), so the server log is the only place
-    // it exists. A 503 is logged as one line naming its cause (logTurnCapacity); 400/404/410/422
+    // it exists. A 400 or 503 is logged as one line naming its cause (logTurnRefusal); 404/410/422
     // carry their cause in the body and are not logged.
     if (status === 500) console.error('[turn] unclassified error:', err);
-    else if (status === 503) logTurnCapacity('turn', sessionId, err);
+    else if (status === 400 || status === 503) logTurnRefusal('turn', status, sessionId, err);
     res.writeHead(status, turnErrorHeaders(status, err)).end(
       JSON.stringify({
         error: turnErrorCode(status),
@@ -473,18 +473,25 @@ const NO_CAPACITY = new Set([
 ]);
 
 /**
- * One log line for a /turn that answered 503, naming the cause. A 503 is an expected capacity
- * signal, so it was never logged, and the reasons it covers are not alike: a full pool clears by
- * waiting, but an empty TIER (no worker of it attached) never does, and the client sees the same
- * "no capacity, retry" for both (a session could retry an empty tier for minutes with nothing in
- * any log saying why). The log keeps each class's own text, the host's admission arithmetic of a
- * mid-turn refusal included (operators read it); forLog keeps it on one line.
+ * One log line for a /turn that answered 400 or 503, naming the cause. A 400 is the model config,
+ * which only the operator can fix, so this line is where the operator sees it. A 503 is an
+ * expected capacity signal, so it was never logged, and the reasons it covers are not alike: a
+ * full pool clears by waiting, but an empty TIER (no worker of it attached) never does, and the
+ * client sees the same "no capacity, retry" for both (a session could retry an empty tier for
+ * minutes with nothing in any log saying why). The log keeps each class's own text, the host's
+ * admission arithmetic of a mid-turn refusal included (operators read it); forLog keeps it on one
+ * line.
  */
-export function logTurnCapacity(where: string, sessionId: string | undefined, err: unknown): void {
+export function logTurnRefusal(
+  where: string,
+  status: number,
+  sessionId: string | undefined,
+  err: unknown,
+): void {
   const name = err instanceof Error ? err.name : 'unknown';
   const message = err instanceof Error ? err.message : String(err);
   console.warn(
-    `[${where}] 503 ${name}${sessionId ? ` for session ${forLog(sessionId)}` : ''}: ${forLog(message)}`,
+    `[${where}] ${status} ${name}${sessionId ? ` for session ${forLog(sessionId)}` : ''}: ${forLog(message)}`,
   );
 }
 
@@ -708,7 +715,7 @@ async function handleTurnStream(
       // still returns real 404 JSON, byte-identical to the sync path (§3.4 regime 2).
       const status = turnErrorStatus(err);
       if (status === 500) console.error('[turn:sse] unclassified error:', err);
-      else if (status === 503) logTurnCapacity('turn:sse', sessionId, err);
+      else if (status === 400 || status === 503) logTurnRefusal('turn:sse', status, sessionId, err);
       res.writeHead(status, turnErrorHeaders(status, err)).end(
         JSON.stringify({
           error: turnErrorCode(status),
@@ -844,7 +851,8 @@ async function handleDetachableTurn(
     // the body below; the text exists only in the server log.
     const status = turnErrorStatus(err);
     if (status === 500) console.error('[turn:detach] unclassified error:', err);
-    else if (status === 503) logTurnCapacity('turn:detach', auth.sessionId, err);
+    else if (status === 400 || status === 503)
+      logTurnRefusal('turn:detach', status, auth.sessionId, err);
     const message = status === 500 ? turnErrorCode(status) : clientErrorText(err);
     const end = await endTurn({
       type: 'error',

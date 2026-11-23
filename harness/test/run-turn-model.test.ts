@@ -66,6 +66,10 @@ describe('requireModel', () => {
     expect(() =>
       requireModel('anthropic', 'm', { SH_MODEL_CUSTOM: '1', SH_MODEL_API: 'bogus' }),
     ).toThrowError(ModelConfigError);
+    // SH_MODEL_CUSTOM=1 with no endpoint: the next step for an operator who follows the hint.
+    expect(() => requireModel('anthropic', 'm', { SH_MODEL_CUSTOM: '1' })).toThrowError(
+      ModelConfigError,
+    );
   });
 
   it('suggests SH_MODEL_CUSTOM when a custom endpoint is configured', () => {
@@ -86,22 +90,41 @@ describe('requireModel', () => {
     );
   });
 
-  it('suppresses the hint when the caller pins the lookup to no custom endpoint', () => {
-    // The api.anthropic.com session path: env names a gateway, but that branch deletes
-    // SH_MODEL_CUSTOM, so suggesting it there suggests a knob that cannot fix the failure.
+  it('omits the SH_MODEL_CUSTOM hint when the endpoint is api.anthropic.com', () => {
+    // Anthropic serves only registry ids, so the knob cannot fix the miss: whether the endpoint
+    // comes from the env or from the caller (a turn config's credential endpoint).
+    const miss =
+      /^Unknown model "anthropic\/claude-sonnet-9-9" — not in the pi-ai registry\. (Known|Did you mean)/;
     expect(() =>
-      requireModel('anthropic', 'claude-sonnet-9-9', { ANTHROPIC_BASE_URL: 'https://gw' }, false),
-    ).toThrowError(
-      /^Unknown model "anthropic\/claude-sonnet-9-9" — not in the pi-ai registry\. (Known|Did you mean)/,
-    );
+      requireModel('anthropic', 'claude-sonnet-9-9', {
+        ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+      }),
+    ).toThrowError(miss);
+    expect(() =>
+      requireModel(
+        'anthropic',
+        'claude-sonnet-9-9',
+        { ANTHROPIC_BASE_URL: 'https://gw.example' },
+        'https://api.anthropic.com/',
+      ),
+    ).toThrowError(miss);
   });
 
-  it('caps the id so the remedy stays inside the 500-char body budget', () => {
-    // SH_MODEL has no length validation; an unbounded id would push the remedy past /turn's
-    // 500-char slice of the message.
-    expect(() =>
-      requireModel('anthropic', 'x'.repeat(400), { ANTHROPIC_BASE_URL: 'https://g.example' }),
-    ).toThrowError(/set SH_MODEL_CUSTOM=1 to send this id to it as-is/);
+  it('keeps an SH_MODEL_HEADERS error a plain Error, so its echoed value stays off the wire', () => {
+    const env = {
+      SH_MODEL_CUSTOM: '1',
+      SH_MODEL_API: 'openai-completions',
+      SH_MODEL_BASE_URL: 'https://gw.example',
+      SH_MODEL_HEADERS: '{"Authorization": "Bearer s3cret"',
+    };
+    let err: unknown;
+    try {
+      requireModel('openai', 'm', env);
+    } catch (e) {
+      err = e;
+    }
+    expect((err as Error).message).toMatch(/^SH_MODEL_HEADERS/);
+    expect(err).not.toBeInstanceOf(ModelConfigError);
   });
 });
 

@@ -167,9 +167,9 @@ paths:
             arrived whole) · session_mismatch (the token names another session) ·
             subject_conflict (X-SH-Subject contradicts the token) · credential_required ·
             credential_ambiguous · endpoint_unresolved (the control-plane exchange refused the
-            caller's credential or its endpoint) · model_config_invalid (the deployment's
-            SH_MODEL/SH_MODEL_PROVIDER/SH_MODEL_API names an id, provider or protocol this
-            harness cannot resolve; the message names the fix)
+            caller's credential or its endpoint) · model_config_invalid (the model config
+            names an id, provider or protocol this harness cannot resolve, or SH_MODEL_CUSTOM=1
+            has no endpoint; the message names the fix)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
