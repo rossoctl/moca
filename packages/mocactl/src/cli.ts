@@ -292,6 +292,9 @@ const OPTIONS = {
   version: { type: 'boolean', short: 'V' },
 } satisfies ParseArgsConfig['options'];
 
+/** The flags bare `mocactl` takes: help, version, and the URLs every command takes. */
+const BARE_FLAGS = new Set(['help', 'version', 'control-plane-url', 'harness-url']);
+
 async function mainWith(
   argv: string[],
   env: NodeJS.ProcessEnv,
@@ -340,6 +343,13 @@ async function mainWith(
     const tuiFlag = (['setup', 'no-animation'] as const).find((f) => values[f] !== undefined);
     if (tuiFlag) {
       io.err(`--${tuiFlag} only applies to \`mocactl harness\`\n${usageFor(['harness'])}`);
+      return 2;
+    }
+    // Any other flag but the URLs every command takes belongs to a command that was not typed:
+    // refused, as it was before the summary, so a mistyped command is not silently accepted.
+    const stray = Object.keys(values).find((f) => !BARE_FLAGS.has(f));
+    if (stray) {
+      io.err(`--${stray} needs a command\n${SUMMARY}`);
       return 2;
     }
     io.out(SUMMARY + '\n');

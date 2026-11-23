@@ -50,6 +50,29 @@ describe('main', () => {
     for (const c of commands) expect(SUMMARY).toMatch(new RegExp(`^ {2}${c} `, 'm'));
   });
 
+  it('refuses a command-only flag on bare mocactl, as before the summary', async () => {
+    for (const argv of [
+      ['--all'],
+      ['--json'],
+      ['--record', 'F'],
+      ['--config', 'd'],
+      ['--tag', 't'],
+    ]) {
+      const o = io();
+      const build = vi.fn(fakeBuild);
+      expect(await main(argv, {}, o, { buildRuntime: build })).toBe(2);
+      expect(o.errs.join('\n')).toContain(`${argv[0]} needs a command`);
+      expect(o.outs).toEqual([]);
+      expect(build).not.toHaveBeenCalled();
+    }
+    // The URLs every command takes are not refused: bare mocactl still prints the summary.
+    const o = io();
+    expect(
+      await main(['--control-plane-url', 'http://cp'], {}, o, { buildRuntime: fakeBuild }),
+    ).toBe(0);
+    expect(o.outs.join('')).toContain(SUMMARY);
+  });
+
   it('points --setup and --no-animation without harness at mocactl harness', async () => {
     for (const argv of [['--setup'], ['--no-animation'], ['sessions', '--setup']]) {
       const o = io();
