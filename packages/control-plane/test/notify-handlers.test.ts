@@ -7,7 +7,9 @@ import { NotifyStore } from '../src/notify-store.js';
 import { NOTIFY_NTFY_CRED, NOTIFY_WEBHOOK_CRED } from '../src/notify-handlers.js';
 import { alice, bob, codeOf, ctx, makeDeps } from './helpers/deps.js';
 
-const ALLOW = ['hooks.example.com/moca', 'ntfy.example.com'].map(parseDestination);
+const ALLOW = ['hooks.example.com/moca', 'ntfy.example.com', 'ntfy.other.example'].map(
+  parseDestination,
+);
 const webhook = { kind: 'webhook', url: 'https://hooks.example.com/moca' };
 const ntfy = { kind: 'ntfy', url: 'https://ntfy.example.com', topic: 'moca-alice' };
 
@@ -60,6 +62,30 @@ describe('PUT /v1/notifications', () => {
     );
     // Not resending the token must not silently un-authenticate the ntfy sink.
     expect((await deps.credentials.get(alice.sub, NOTIFY_NTFY_CRED))?.secret.token).toBe('tk_1');
+  });
+
+  it('refuses a re-PUT that MOVES the ntfy sink without resending the token', async () => {
+    const first = (await put({ sinks: [webhook, { ...ntfy, token: 'tk_1' }] })).body as Record<
+      string,
+      unknown
+    >;
+    const moved = { kind: 'ntfy', url: 'https://ntfy.other.example', topic: 'moca-alice' };
+    // Carrying the token over would post the old server's token to the new one -- a self-hosted
+    // ntfy's token to ntfy.sh. Both hosts are operator-allowlisted; only one was authorized.
+    expect(await codeOf(() => put({ sinks: [webhook, moved] }))).toBe('invalid_request');
+    // Nothing was applied, in particular the webhook key was NOT rotated: the check runs before
+    // every write, so a 400 does not leave the caller holding a secret that no longer verifies.
+    expect((await deps.notify!.get(alice.sub))?.sinks).toEqual([webhook, ntfy]);
+    expect((await deps.credentials.get(alice.sub, NOTIFY_NTFY_CRED))?.secret.token).toBe('tk_1');
+    expect((await deps.credentials.get(alice.sub, NOTIFY_WEBHOOK_CRED))?.secret.key).toBe(
+      first.webhookSecret,
+    );
+
+    // Resending it is the way through, and it rebinds the credential to the new host.
+    expect((await put({ sinks: [{ ...moved, token: 'tk_2' }] })).status).toBe(200);
+    const cred = await deps.credentials.get(alice.sub, NOTIFY_NTFY_CRED);
+    expect(cred?.secret.token).toBe('tk_2');
+    expect(cred?.descriptor.destination.hosts).toEqual(['ntfy.other.example']);
   });
 
   it('mints no secret when there is no webhook sink', async () => {

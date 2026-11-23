@@ -87,6 +87,27 @@ export const NOTIFY_HANDLERS: Record<string, Handler> = {
     const { notify, turns } = service(deps);
     const { config, ntfyToken } = parseNotifyConfig(ctx.body, deps.config.notify.allow);
 
+    // An ntfy token is stored against the host it was authorized for (`destination.hosts`, the
+    // binding the credential store exists to enforce), but the sender reads it by NAME only. So a
+    // re-PUT that MOVES the sink and omits `token` would post the old server's token to the new one
+    // -- a self-hosted ntfy's token to ntfy.sh. Refused here, where the caller can fix it by
+    // resending: dropping the token instead would silently turn an authenticated topic into a
+    // failing one, and `GET` has no field that would tell them which happened.
+    //
+    // Before every write, so a refusal leaves nothing half-applied -- in particular it must precede
+    // the webhook put, which ROTATES the signing key the caller would not be given on a 400.
+    const ntfySink = config.sinks.find((s) => s.kind === 'ntfy');
+    if (ntfySink && ntfyToken === undefined) {
+      const stored = await deps.credentials.get(p.sub, NOTIFY_NTFY_CRED);
+      const host = new URL(ntfySink.url).hostname;
+      if (stored && !stored.descriptor.destination.hosts.includes(host)) {
+        throw new CpError(
+          'invalid_request',
+          `this subject's ntfy token was authorized for another host; resend 'token' for '${host}'`,
+        );
+      }
+    }
+
     let webhookSecret: string | undefined;
     if (config.sinks.some((s) => s.kind === 'webhook')) {
       webhookSecret = randomBytes(SECRET_BYTES).toString('hex');
