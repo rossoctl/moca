@@ -576,15 +576,48 @@ describe('depsFromEnv: the relay release (#338)', () => {
     }
   });
 
-  it('refuses to boot with a release bearer equal to one it accepts', () => {
-    expect(() =>
+  it.each([
+    ['SH_EXCHANGE_TOKEN', { SH_EXCHANGE_TOKEN: RELEASE }],
+    ['SH_OPERATOR_INFERENCE_TOKEN', { SH_OPERATOR_INFERENCE_TOKEN: RELEASE }],
+    ['SH_TEST_USER_SECRET', { SH_TEST_USERS: '1', SH_TEST_USER_SECRET: RELEASE }],
+  ])('refuses to boot with a release bearer equal to %s', (_name, over) => {
+    let msg = '';
+    try {
       depsFromEnv({
         ...baseEnv,
-        SH_EXCHANGE_TOKEN: RELEASE,
+        ...over,
         SH_RELAY_CONTROL_URL: URL_,
         MOCA_RELAY_RELEASE_TOKEN: RELEASE,
-      }),
-    ).toThrow(/MOCA_RELAY_RELEASE_TOKEN must differ/);
+      });
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(
+      /MOCA_RELAY_RELEASE_TOKEN must differ from every other control-plane secret/,
+    );
+    expect(msg).not.toContain(RELEASE);
+  });
+
+  it('compares against every one of CONTROL_PLANE_SECRETS but itself', async () => {
+    // Each secret in turn equal to the release bearer, through the same env depsFromEnv reads.
+    for (const name of CONTROL_PLANE_SECRETS.filter((n) => n !== 'MOCA_RELAY_RELEASE_TOKEN')) {
+      const env: NodeJS.ProcessEnv = {
+        ...baseEnv,
+        SH_RELAY_CONTROL_URL: URL_,
+        MOCA_RELAY_RELEASE_TOKEN: RELEASE,
+      };
+      env[name] = RELEASE;
+      let msg = '';
+      let deps: ReturnType<typeof depsFromEnv> | undefined;
+      try {
+        deps = depsFromEnv(env);
+      } catch (e) {
+        msg = (e as Error).message;
+      }
+      await deps?.close?.();
+      // A secret whose own boot check refuses the value first refuses the boot all the same.
+      expect(msg, name).not.toBe('');
+    }
   });
 });
 

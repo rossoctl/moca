@@ -891,12 +891,17 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   };
 }
 
-/** The relay releaser as a spreadable fragment, absent (not undefined) when release is off. */
+/**
+ * The relay releaser as a spreadable fragment, absent (not undefined) when release is off. Its
+ * bearer must differ from every other secret this control plane holds: each of CONTROL_PLANE_SECRETS
+ * but itself (so a secret added there is covered without a change here), and every egress and
+ * template host bearer from the config.
+ */
 function releaserFrom(env: NodeJS.ProcessEnv, config: CpConfig): { relayRelease?: RelayReleaser } {
   const relayRelease = relayReleaserFromEnv(env, [
-    ...(config.exchangeToken ? [config.exchangeToken] : []),
-    ...(config.sandbox?.janitorToken ? [config.sandbox.janitorToken] : []),
-    ...(config.installerToken ? [config.installerToken] : []),
+    ...CONTROL_PLANE_SECRETS.filter((n) => n !== 'MOCA_RELAY_RELEASE_TOKEN')
+      .map((n) => env[n])
+      .filter((v): v is string => !!v),
     ...(config.sandbox?.egress?.hosts.map((h) => h.token) ?? []),
     ...(config.templateHosts?.map((h) => h.token) ?? []),
   ]);
