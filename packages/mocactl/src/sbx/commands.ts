@@ -549,6 +549,20 @@ function stateText(s: SbxSandbox): string {
  * one stays, since nobody chose to end it. EXPIRES is relative: a live sandbox's deadline, an
  * ended one's end. The idle lifetime is `sbx get`'s.
  */
+/**
+ * EXPIRES: a live sandbox's deadline, `in 6 d`; an ended one's end, `ended 2 h ago`, or just
+ * `ended` when the record says no end time and its deadline is still ahead (a control plane that
+ * leaves terminatedAt null), rather than a time it cannot know.
+ */
+function expiryText(s: SbxSandbox, nowS: number): string {
+  if (s.state !== 'terminated') {
+    // A live record past its deadline is clock skew: the control plane's state wins.
+    return relativeText(Math.max(s.expiresAt, nowS), nowS);
+  }
+  const end = s.terminatedAt ?? (s.expiresAt <= nowS ? s.expiresAt : undefined);
+  return end === undefined ? 'ended' : `ended ${relativeText(Math.min(end, nowS), nowS)}`;
+}
+
 export async function cmdLs(
   c: SbxCtx,
   all: boolean,
@@ -563,30 +577,36 @@ export async function cmdLs(
       return SBX_EXIT.ok;
     }
     const nowS = Math.floor((c.now ?? c.rt.now)() / 1000);
-    // Sanitized before padding, so stripped control characters cannot skew the columns.
-    const cell = (v: string, width = 0) => sanitizeRemote(v).padEnd(width);
-    const line = (cols: string[], owner: string) =>
-      [
-        cell(cols[0]!, 30),
-        cell(cols[1]!, 16),
-        cell(cols[2]!, 12),
-        cell(cols[3]!, 15),
-        cell(cols[4]!, 22),
-        // Padded (`ended 365 d ago`) only to align the owner.
-        all ? cell(cols[5]!, 15) : cols[5]!,
-        ...(all ? [cell(owner)] : []),
-      ].join(' ') + '\n';
     // No header for an empty list, so "nothing" stays empty output.
-    if (ss.length > 0)
-      c.io.out(line(['ID', 'NAME', 'TEMPLATE', 'MODE', 'STATE', 'EXPIRES'], 'OWNER'));
-    for (const s of ss) {
-      const expiry =
-        s.state === 'terminated'
-          ? `ended ${relativeText(s.terminatedAt ?? s.expiresAt, nowS)}`
-          : // A live record past its deadline is clock skew: the control plane's state wins.
-            relativeText(Math.max(s.expiresAt, nowS), nowS);
-      c.io.out(line([s.id, s.name ?? '-', s.template, s.mode, stateText(s), expiry], s.owner));
-    }
+    if (ss.length === 0) return SBX_EXIT.ok;
+    const header = [
+      'ID',
+      'NAME',
+      'TEMPLATE',
+      'MODE',
+      'STATE',
+      'EXPIRES',
+      ...(all ? ['OWNER'] : []),
+    ];
+    // Sanitized before measuring, so stripped control characters cannot skew the columns.
+    const rows = ss.map((s) =>
+      [
+        s.id,
+        s.name ?? '-',
+        s.template,
+        s.mode,
+        stateText(s),
+        expiryText(s, nowS),
+        ...(all ? [s.owner] : []),
+      ].map(sanitizeRemote),
+    );
+    // Each column as wide as its widest cell, so a long name or template id cannot shift the
+    // columns after it; the last is not padded, so no line ends in spaces.
+    const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));
+    const line = (cells: string[]) =>
+      cells.map((v, i) => (i < cells.length - 1 ? v.padEnd(widths[i]!) : v)).join('  ') + '\n';
+    c.io.out(line(header));
+    for (const r of rows) c.io.out(line(r));
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);

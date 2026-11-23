@@ -1114,6 +1114,41 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     expect(cp.calls).toEqual([]);
   });
 
+  it('ls widens a column for a long name or template id, so every column still lines up', async () => {
+    const { home, env, io } = setup();
+    const long = 'a-name-well-over-sixteen-characters';
+    const cp = fakeCp({
+      'GET /v1/sandboxes': () => ({
+        status: 200,
+        body: {
+          sandboxes: [
+            sandbox({ name: long, template: 'python312-slim-bookworm' }),
+            sandbox({ id: 'sbx-b' }),
+          ],
+        },
+      }),
+    });
+    await sbxMain(['ls', '--all'], env, io, {
+      home,
+      fetchImpl: cp.fetchImpl,
+      now: () => LS_NOW_MS,
+    });
+    const lines = io.outs.join('').trimEnd().split('\n');
+    expect(lines).toHaveLength(3);
+    for (const [col, cells] of [
+      ['NAME', [long, 'web']],
+      ['TEMPLATE', ['python312-slim-bookworm', 'node22']],
+      ['MODE', ['per-exec', 'per-exec']],
+      ['EXPIRES', ['in 6 d', 'in 6 d']],
+      ['OWNER', ['github:1', 'github:1']],
+    ] as const) {
+      const at = lines[0]!.indexOf(col);
+      expect(lines[1]!.indexOf(cells[0], 30)).toBe(at);
+      expect(lines[2]!.indexOf(cells[1], 30)).toBe(at);
+    }
+    for (const l of lines) expect(l).not.toMatch(/ $/);
+  });
+
   it('ls --all aligns the owner column whatever the expiry text', async () => {
     const { home, env, io } = setup();
     const cp = fakeCp({
@@ -1956,8 +1991,9 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     });
     expect(await sbxMain(['ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
     const out = io.outs.join('');
-    expect(out).toMatch(/node22\s+per-exec\s+terminated\s+ended /);
-    expect(out).not.toMatch(/expired|\(/);
+    // No terminatedAt and a deadline still ahead: it ended, but when is not known.
+    expect(out).toMatch(/node22\s+per-exec\s+terminated\s+ended\n/);
+    expect(out).not.toMatch(/expired|\(|ended in/);
   });
 
   it('sanitizes before padding, so the columns still line up', async () => {
