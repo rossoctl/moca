@@ -45,5 +45,12 @@ spec:
                   optional: true
                   items:
                     - { key: SH_OIDC_CLIENT_SECRET, path: SH_OIDC_CLIENT_SECRET }
+              # The relay control listener's release bearer (#338), optional like the oidc source: only a
+              # stack with the listener on (base/relay-release-control) has the Secret moca-relay-release.
+              - secret:
+                  name: moca-relay-release
+                  optional: true
+                  items:
+                    - { key: MOCA_RELAY_RELEASE_TOKEN, path: MOCA_RELAY_RELEASE_TOKEN }
               - secret: { name: sbx-egress, optional: true }
               - secret: { name: sbx-template-hosts }

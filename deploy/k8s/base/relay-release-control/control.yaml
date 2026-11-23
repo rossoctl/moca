@@ -1,0 +1,35 @@
+# The relay's control listener (kustomization.yaml): reached by the control plane alone.
+apiVersion: v1
+kind: Service
+metadata: { name: sandbox-relay-control, namespace: moca }
+spec:
+  selector: { app: sandbox-relay }
+  ports:
+    - { name: control, port: 9445, targetPort: control }
+---
+# Additive (policies union): the control plane's pods may reach the control listener, and nothing
+# else gains anything on the relay.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: sandbox-relay-control, namespace: moca }
+spec:
+  podSelector: { matchLabels: { app: sandbox-relay } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: moca-control-plane } }
+      ports:
+        - { protocol: TCP, port: 9445 }
+---
+# Its egress half: the control plane may reach the relay's control listener, and only that port.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: moca-control-plane-to-relay-control, namespace: moca }
+spec:
+  podSelector: { matchLabels: { app: moca-control-plane } }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: sandbox-relay } }
+      ports:
+        - { protocol: TCP, port: 9445 }

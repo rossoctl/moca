@@ -1,0 +1,13 @@
+# Where the control plane sends a release (kustomization.yaml): the listener's Service, in the
+# control plane's own namespace. Its bearer is already a file in /run/credentials: every overlay's
+# credentials volume names moca-relay-release as an optional source.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-control-plane, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - { name: SH_RELAY_CONTROL_URL, value: 'http://sandbox-relay-control:9445' }

@@ -1,0 +1,25 @@
+# The control listener on (kustomization.yaml). The release bearer is a FILE, never an env value
+# (MI1 §6.7): CREDENTIALS_DIRECTORY points the relay at it, and nothing else of the relay's moves
+# there, so its other tokens keep their env wiring.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: sandbox-relay, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox-relay
+          env:
+            - { name: MOCA_RELAY_CONTROL_ADDR, value: '0.0.0.0:9445' }
+            - { name: CREDENTIALS_DIRECTORY, value: /run/credentials }
+          ports:
+            - { name: control, containerPort: 9445 }
+          volumeMounts:
+            - { name: release-token, mountPath: /run/credentials, readOnly: true }
+      volumes:
+        - name: release-token
+          secret:
+            secretName: moca-relay-release
+            defaultMode: 256 # 0400
+            items:
+              - { key: MOCA_RELAY_RELEASE_TOKEN, path: MOCA_RELAY_RELEASE_TOKEN }
