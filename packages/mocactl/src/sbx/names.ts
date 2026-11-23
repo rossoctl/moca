@@ -1,8 +1,8 @@
 /**
  * Default sandbox names: `adjective-surname`, as Docker names containers, with a hyphen since the
  * control plane takes only `^[a-z0-9][a-z0-9-]{0,62}$`. The surnames are notable scientists and
- * engineers. About 100 x 200 pairs: a clash among one user's few live sandboxes is rare, and the
- * create retries with another pair when one happens (createWaitingForActivation).
+ * engineers. 108 x 235 = 25,380 pairs: a clash among one user's few live sandboxes is rare, and
+ * the create retries with another pair when one happens (createWaitingForActivation).
  */
 
 // prettier-ignore
