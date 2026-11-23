@@ -68,6 +68,23 @@ describe('PUT /v1/notifications', () => {
     expect(await deps.credentials.get(alice.sub, NOTIFY_WEBHOOK_CRED)).toBeFalsy();
   });
 
+  it('a re-PUT that drops webhook for ntfy-only deletes the orphaned webhook secret', async () => {
+    await put({ sinks: [webhook, { ...ntfy, token: 'tk_1' }] });
+    expect(await deps.credentials.get(alice.sub, NOTIFY_WEBHOOK_CRED)).toBeTruthy();
+    await put({ sinks: [ntfy] });
+    expect(await deps.credentials.get(alice.sub, NOTIFY_WEBHOOK_CRED)).toBeFalsy();
+    // The ntfy token the caller did not resend is still alone, not touched by the cleanup.
+    expect((await deps.credentials.get(alice.sub, NOTIFY_NTFY_CRED))?.secret.token).toBe('tk_1');
+  });
+
+  it('a re-PUT that drops ntfy for webhook-only deletes the orphaned ntfy token', async () => {
+    await put({ sinks: [webhook, { ...ntfy, token: 'tk_1' }] });
+    expect(await deps.credentials.get(alice.sub, NOTIFY_NTFY_CRED)).toBeTruthy();
+    await put({ sinks: [webhook] });
+    expect(await deps.credentials.get(alice.sub, NOTIFY_NTFY_CRED)).toBeFalsy();
+    expect(await deps.credentials.get(alice.sub, NOTIFY_WEBHOOK_CRED)).toBeTruthy();
+  });
+
   it('refuses a url outside the operator allowlist, and refuses everything when it is empty', async () => {
     expect(await codeOf(() => put({ sinks: [{ ...webhook, url: 'https://evil.test/x' }] }))).toBe(
       'invalid_request',

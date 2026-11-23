@@ -133,6 +133,17 @@ export const NOTIFY_HANDLERS: Record<string, Handler> = {
     // Friday evening is not paged for every turn they already watched finish.
     const cursor = await turns.lastEventId(p.sub);
     await notify.put(p.sub, config, cursor, deps.now());
+    // A kind absent from the NEW config gets its credential deleted, same principle as
+    // deleteNotifications: "a key with no config is a secret nobody can see, use or rotate". After
+    // the config write, not before -- a crash here leaves a readable config whose secret for a
+    // dropped kind lingers one extra beat, rather than a config write that could still fail after
+    // the secret it depended on was already gone.
+    if (!config.sinks.some((s) => s.kind === 'webhook')) {
+      await deps.credentials.delete(p.sub, NOTIFY_WEBHOOK_CRED);
+    }
+    if (!config.sinks.some((s) => s.kind === 'ntfy')) {
+      await deps.credentials.delete(p.sub, NOTIFY_NTFY_CRED);
+    }
     // 'notify_configured' is not in OwnershipIndex.audit's (string) union because there is none --
     // `decision` is a plain string there, so no widening is needed.
     await auditBestEffort(deps, 'putNotifications', `sinks=${config.sinks.length}`, {
