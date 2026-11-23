@@ -165,11 +165,13 @@ export type LeaseControlOutcome =
  * One audit line per Release (#338), marker `sandbox_workspace_release` (`sandbox_release` is the
  * drain grace's). `released`, `kept_busy` and `unknown_key` are the worker's outcomes; the rest as
  * LeaseControlOutcome's, `unsupported` being a worker without RELEASE_CAPABILITY or one that
- * answered `release_unsupported:`.
+ * answered `release_unsupported:`. `via: 'control'` marks a release the control plane sent on the
+ * control listener (control-listener.ts), which carries no sandbox token, so no `sub` or `sbx`.
  */
 export interface ReleaseAuditLine {
   audit: 'sandbox_workspace_release';
   ts: string;
+  via?: 'control';
   sub?: string;
   sbx?: string;
   wrk: string;
@@ -375,6 +377,7 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
       emit(() => ({
         audit: 'sandbox_workspace_release',
         ts: new Date(t0).toISOString(),
+        ...(l.via !== undefined ? { via: l.via } : {}),
         ...(l.claims ? { sub: l.claims.sub, sbx: l.claims.sbx } : {}),
         wrk: utf8Prefix(l.wrk, AUDIT_WRK_BYTES),
         ms: Math.max(0, Date.now() - t0),
