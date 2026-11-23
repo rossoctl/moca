@@ -129,7 +129,15 @@ export class NotifyStore {
     return this.guard(() => this.redis.zRange(NOTIFY_OWNERS_KEY, '-inf', '+inf', { BY: 'SCORE' }));
   }
 
-  /** The sweep's write-back. Touches the six bookkeeping fields and nothing else. */
+  /**
+   * The sweep's write-back. Touches the six bookkeeping fields and nothing else.
+   *
+   * shortcut: a DELETE landing between a sweep's `get` and this `advance` re-creates a partial hash
+   * with no `v`/`sinks` -- `hSet` on a key Redis just emptied makes a new one -- that nothing sweeps
+   * (no `v` means `get` reads it as absent) or cleans (no TTL, by design: see notifyConfigKey).
+   * Harmless because a later PUT overwrites it outright; upgrade to a `WATCH`/transaction around the
+   * sweep's read-modify-write if an orphaned hash per removed subject ever needs to not exist at all.
+   */
   async advance(subject: string, next: NotifyProgress): Promise<void> {
     await this.guard(() => this.redis.hSet(notifyConfigKey(subject), fields(next)));
   }

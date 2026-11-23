@@ -2497,7 +2497,9 @@ paths:
         attacker-chosen host. A webhook signing key is minted on every PUT that keeps or adds a
         webhook sink and returned EXACTLY ONCE, in this response -- rotated by any later PUT and
         never retrievable again. An ntfy sink's `token` is write-only and optional: omitting it on a
-        re-PUT leaves a previously stored token in place rather than clearing it.
+        re-PUT leaves a previously stored token in place rather than clearing it. A push with a
+        `paused` event links to an approval page that 404s until the login-gated approval page
+        (#467/B8b) lands.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true

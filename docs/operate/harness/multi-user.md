@@ -274,7 +274,7 @@ captured body cannot be replayed later under a fresh header.
 Two deployment-wide limits, beyond the allowlist:
 
 - `MOCA_NOTIFY_MIN_INTERVAL_S` (default `5`) and `MOCA_NOTIFY_PER_HOUR` (default `60`) bound how
-  often one subject is paged; past the hourly cap the subject is muted for the rest of the rolling
+  often one subject is paged; past the hourly cap the subject is muted for the rest of the fixed
   window rather than paged with an hour-old backlog.
 - `MOCA_NOTIFY_FAIL_MAX` (default `10`) mutes a subject for an hour after that many _consecutive_
   failed deliveries to their sink (a wrong URL, a dead receiver). Re-`PUT`ting the config is the

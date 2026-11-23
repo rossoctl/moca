@@ -191,6 +191,9 @@ export interface Rendered {
  * The gate SUMMARY is available with no extra read because #392 carries it on the event
  * (`leaf-job-runner.ts:315` puts `result.gate.summary` there). `proposed_action` is NOT on the
  * event, so a notification cannot offer it -- the approval page reads the gate itself.
+ *
+ * Only the FIRST `paused` event in the batch (`events.find`) contributes its gate text and approve
+ * link; a second paused turn coalesced into the same batch shows up only in the title's count.
  */
 export function renderNotification(events: TurnEvent[], baseUrl?: string): Rendered {
   const paused = events.find((e) => e.state === 'paused');

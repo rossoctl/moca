@@ -38,11 +38,15 @@ authenticated and scoped to the caller's own subject.
   204, same as removing nothing.
 - A background sweep (not a route) delivers: `POST` to a `webhook` sink carries
   `X-Moca-Signature: sha256=<hex>`, an HMAC-SHA256 over `<timestamp>.<rawBody>` with the sink's own
-  key, plus `X-Moca-Delivery` and `X-Moca-Timestamp`. An `ntfy` sink is posted to its server's JSON
-  publish endpoint, with its token as a bearer header when one was given.
+  key, plus `X-Moca-Delivery` and `X-Moca-Timestamp`. `X-Moca-Delivery` is the batch's head cursor,
+  not a fresh id per attempt, so a retry of the same unadvanced batch carries the same id and a
+  receiver can dedupe on it (at-least-once is the contract, ADR-0015). An `ntfy` sink is posted to
+  its server's JSON publish endpoint, with its token as a bearer header when one was given.
 - The feature is off end to end until the deployment sets `MOCA_NOTIFY_ALLOW`: a `PUT` refuses
   every sink with `invalid_request` naming the unset variable, and the sweep that would deliver
   never starts reading streams.
+- A push with a gate on it links to an approval page that 404s until the login-gated approval page
+  ([#467/B8b](https://github.com/rossoctl/moca/issues/467)) lands.
 
 ## 1.37.0
 
