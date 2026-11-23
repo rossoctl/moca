@@ -85,17 +85,22 @@ function intEnv(env: NodeJS.ProcessEnv, name: string, def: number): number {
  * An optional absolute http(s) URL, trailing slashes dropped. A malformed value fails STARTUP: a
  * control plane advertising a harness URL no client can use would fail every user's first turn.
  */
-function urlEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
+function urlEnv(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  protocols: readonly string[] = ['http:', 'https:'],
+): string | undefined {
   const v = env[name];
   if (!v) return undefined;
+  const label = protocols.length === 1 ? protocols[0]!.replace(':', '') : 'http(s)';
   let u: URL;
   try {
     u = new URL(v);
   } catch {
-    throw new Error(`${name} must be an absolute http(s) URL, got "${v}"`);
+    throw new Error(`${name} must be an absolute ${label} URL, got "${v}"`);
   }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:')
-    throw new Error(`${name} must be an absolute http(s) URL, got "${v}"`);
+  if (!protocols.includes(u.protocol))
+    throw new Error(`${name} must be an absolute ${label} URL, got "${v}"`);
   let end = v.length;
   // A loop, not /\/+$/: that regex is quadratic on a long run of slashes (CodeQL js/polynomial-redos).
   while (end > 0 && v.charCodeAt(end - 1) === 0x2f) end--;
@@ -122,6 +127,17 @@ function countEnv(env: NodeJS.ProcessEnv, name: string, def: number): number {
   if (!/^(0|[1-9][0-9]*)$/.test(v))
     throw new Error(`${name} must be a non-negative integer, got "${v}"`);
   return Number(v);
+}
+
+/**
+ * Like countEnv, but 0 refuses to boot: unlike the async quota, 0 reads as "unlimited" to an
+ * operator for these two notification settings, and taking it literally would silently mute every
+ * owner forever.
+ */
+function positiveCountEnv(env: NodeJS.ProcessEnv, name: string, def: number): number {
+  const n = countEnv(env, name, def);
+  if (n === 0) throw new Error(`${name} must not be 0: 0 would mute every subject permanently`);
+  return n;
 }
 
 function turnRecordTtlFromEnv(env: NodeJS.ProcessEnv): number {
@@ -221,14 +237,17 @@ function notifyFromEnv(env: NodeJS.ProcessEnv): CpConfig['notify'] {
         );
       }
     });
+  // https: only, and validated rather than merely trimmed: a scheme-less typo would otherwise ship
+  // as a non-navigable link inside every notification. Unset = no link, which is correct for a
+  // deployment the phone cannot reach.
+  const baseUrl = urlEnv(env, 'MOCA_NOTIFY_BASE_URL', ['https:']);
   return {
     allow,
-    // The public base url the approval deep link is built on. Unset = no link in the notification,
-    // which is correct for a deployment the phone cannot reach.
-    ...(env.MOCA_NOTIFY_BASE_URL ? { baseUrl: env.MOCA_NOTIFY_BASE_URL.replace(/\/+$/, '') } : {}),
+    ...(baseUrl ? { baseUrl } : {}),
+    // 0 is meaningful here: no minimum spacing between deliveries.
     minIntervalS: countEnv(env, 'MOCA_NOTIFY_MIN_INTERVAL_S', 5),
-    perHour: countEnv(env, 'MOCA_NOTIFY_PER_HOUR', 60),
-    failMax: countEnv(env, 'MOCA_NOTIFY_FAIL_MAX', 10),
+    perHour: positiveCountEnv(env, 'MOCA_NOTIFY_PER_HOUR', 60),
+    failMax: positiveCountEnv(env, 'MOCA_NOTIFY_FAIL_MAX', 10),
   };
 }
 

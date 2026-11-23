@@ -254,6 +254,14 @@ describe('configFromEnv', () => {
     ).toBe('https://moca.example');
   });
 
+  it('refuses to boot on a MOCA_NOTIFY_BASE_URL that is not an absolute https URL', () => {
+    for (const bad of ['moca.example.com', 'http://moca.example.com', 'ftp://moca.example.com']) {
+      expect(() => configFromEnv({ ...baseEnv, MOCA_NOTIFY_BASE_URL: bad }), bad).toThrow(
+        /MOCA_NOTIFY_BASE_URL must be an absolute https URL/,
+      );
+    }
+  });
+
   it('defaults the notification rate limits to 5s / 60 per hour / 10 failures', () => {
     expect(configFromEnv(baseEnv).notify).toMatchObject({
       minIntervalS: 5,
@@ -268,6 +276,18 @@ describe('configFromEnv', () => {
         MOCA_NOTIFY_FAIL_MAX: '3',
       }).notify,
     ).toMatchObject({ minIntervalS: 30, perHour: 12, failMax: 3 });
+  });
+
+  it('allows MOCA_NOTIFY_MIN_INTERVAL_S of 0 (no minimum spacing), but refuses 0 for the other two', () => {
+    expect(configFromEnv({ ...baseEnv, MOCA_NOTIFY_MIN_INTERVAL_S: '0' }).notify.minIntervalS).toBe(
+      0,
+    );
+    expect(() => configFromEnv({ ...baseEnv, MOCA_NOTIFY_PER_HOUR: '0' })).toThrow(
+      /MOCA_NOTIFY_PER_HOUR must not be 0/,
+    );
+    expect(() => configFromEnv({ ...baseEnv, MOCA_NOTIFY_FAIL_MAX: '0' })).toThrow(
+      /MOCA_NOTIFY_FAIL_MAX must not be 0/,
+    );
   });
 
   it('reads SH_SANDBOX_TIERS, and refuses to boot on a tier list it cannot serve', () => {
