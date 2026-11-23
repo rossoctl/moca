@@ -26,14 +26,18 @@ authenticated and scoped to the caller's own subject.
 
 - `GET /v1/notifications` reads the caller's own config: `sinks`, `states`, the sweep's `cursor`,
   `lastDeliveryAt`, `failures`, `mutedUntil`, and `secretMissing` when a webhook sink has no signing
-  key to deliver with.
+  key to deliver with. That sink is then skipped rather than retried -- no retry can mint a key --
+  so a second, working sink keeps receiving; `secretMissing` is the only signal, and re-`PUT`ting
+  mints a fresh key.
 - `PUT /v1/notifications` stores or replaces it: `sinks` (one `webhook`, one `ntfy`, or both -- a
   sink's `url` must be allowed by the deployment's `MOCA_NOTIFY_ALLOW`) and an optional `states`
   (defaulting to `[paused, failed]`, drawn from every terminal state but `queued`/`running`). A
   `webhook` sink's HMAC signing key is minted here and returned as `webhookSecret` in the response
   body ONLY -- there is no route that reads it back, and a later PUT rotates it, which immediately
   stops the old key verifying. An `ntfy` sink's `token` is stored the same way and likewise never
-  echoed.
+  echoed; omitting it on a re-PUT keeps the stored one, but a re-PUT that also moves the sink to a
+  different HOST is refused (`invalid_request`) rather than sending a token authorized for one
+  server to another. Resend `token` to move an authenticated sink.
 - `DELETE /v1/notifications` removes the config and both stored secrets; a second `DELETE` is a
   204, same as removing nothing.
 - A background sweep (not a route) delivers: `POST` to a `webhook` sink carries

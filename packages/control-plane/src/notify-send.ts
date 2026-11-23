@@ -129,9 +129,9 @@ export async function sendNtfy(
  * Every sink, then one verdict. All sinks are attempted even after one fails: a dead webhook must
  * not silence the push that actually reaches the phone.
  *
- * shortcut: the verdict is all-or-nothing, so a permanently broken webhook holds the cursor and the
- * ntfy sink is pushed the same events again next pass. Upgrade to a per-sink cursor if a deployment
- * ever runs more than one sink per kind; with at most two, re-pushing beats the bookkeeping.
+ * shortcut: the verdict is all-or-nothing for sinks that were ATTEMPTED, so one sink's transport
+ * failure re-pushes the batch to the other next pass. Upgrade to a per-sink cursor if that
+ * duplicate ever matters more than the bookkeeping; with at most two sinks it does not.
  */
 export async function deliver(
   deps: SendDeps,
@@ -139,8 +139,17 @@ export async function deliver(
   payload: NotifyPayload,
   secrets: { webhookKey?: string; ntfyToken?: string },
 ): Promise<boolean> {
+  // A webhook with no signing key can never be sent to -- `sendWebhook` refuses to send unsigned --
+  // so it is excluded from the verdict rather than failing it. Counted as a failure it would hold
+  // the cursor, and the ntfy sink that DOES reach the phone would be re-pushed the same batch every
+  // pass until `failMax` muted the subject. `secretMissing` on `GET /v1/notifications` is this
+  // sink's signal, and re-PUTting resets the cursor to now anyway, so holding it buys it nothing.
+  const sendable = sinks.filter((s) => s.kind !== 'webhook' || secrets.webhookKey !== undefined);
+  // Nothing can be sent at all: a plain failure, so the cursor holds and `failures` says so. Not
+  // `every()` over the empty array, which would report success and drop the batch silently.
+  if (sendable.length === 0) return false;
   const results = await Promise.all(
-    sinks.map((s) =>
+    sendable.map((s) =>
       s.kind === 'webhook'
         ? sendWebhook(deps, s, payload, secrets.webhookKey)
         : sendNtfy(deps, s, payload, secrets.ntfyToken),

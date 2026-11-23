@@ -264,7 +264,10 @@ curl -s -X PUT "$MOCA_URL/v1/notifications" -H "authorization: Bearer $TOKEN" -d
 ```
 
 ntfy publishes anonymously unless `token` is given -- on a public server the topic name alone is
-the password, so pick one that is hard to guess. `GET /v1/notifications` reads the config back
+the password, so pick one that is hard to guess. A re-`PUT` that omits `token` keeps the stored
+one, but one that also points the sink at a **different host** is refused: the token was authorized
+for the old server and is not sent to the new one. Resend `token` when you move an authenticated
+sink (a self-hosted ntfy to `ntfy.sh`, say). `GET /v1/notifications` reads the config back
 (never the secret); `DELETE /v1/notifications` removes it and both stored secrets.
 
 A webhook receiver verifies a delivery by recomputing

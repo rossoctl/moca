@@ -168,4 +168,21 @@ describe('deliver', () => {
     // Both were still attempted: one dead sink must not silence the other.
     expect(half).toHaveBeenCalledTimes(2);
   });
+
+  it('a webhook with no signing key does not hold the batch back from the ntfy sink', async () => {
+    // The `secretMissing` state. No retry can fix it, so counting it as a failure would hold the
+    // cursor and re-push this same batch to the phone every pass until the subject was muted.
+    const f = ok();
+    expect(await deliver(deps(f), [webhook, ntfy], payload(), { ntfyToken: 'tk' })).toBe(true);
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(callOf(f)[0]).toContain('ntfy');
+  });
+
+  it('fails when NOTHING could be sent, rather than reporting an empty success', async () => {
+    // A webhook alone with no key: `every()` over the attempted-sink list would be vacuously true
+    // and drop the batch silently. The cursor must hold and `failures` must say so.
+    const f = ok();
+    expect(await deliver(deps(f), [webhook], payload(), {})).toBe(false);
+    expect(f).not.toHaveBeenCalled();
+  });
 });
