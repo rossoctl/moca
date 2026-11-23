@@ -246,13 +246,17 @@ describe('§9.3 test 3 — contract drift', () => {
         Object.values(byMethod).map((op) => (op as { responses?: unknown }).responses),
       );
     const json = JSON.stringify(v1Responses);
-    // Word-boundary, not a bare substring: #394's `secretMissing` (a boolean naming a secret's
-    // ABSENCE) and `webhookSecret` (the webhook signing key, shown once BY DESIGN -- the same
-    // show-once contract a refresh token has, not a credential-store read-back) both legitimately
-    // contain "secret" as part of a longer identifier. A literal field named `secret` -- the shape
-    // this check actually guards against -- still matches, since the quotes around a JSON key are
-    // non-word characters.
-    expect(json).not.toMatch(/\bsecret\b/);
+    // Property NAMES, not a substring of the whole blob: `/\bsecret\b/` misses snake_case,
+    // since `\b` does not fire before `_` and `client_secret` would slip through. Two field
+    // names legitimately contain "secret" without returning a credential-store value:
+    // #394's `secretMissing` (a boolean naming a secret's ABSENCE) and `webhookSecret` (the
+    // webhook signing key, shown once BY DESIGN -- the same show-once contract a refresh
+    // token has). Anything else named like a secret is a leak.
+    const showOnce = new Set(['secretMissing', 'webhookSecret']);
+    const leaky = [...json.matchAll(/"([^"]+)":/g)]
+      .map((m) => m[1])
+      .filter((name) => /secret/i.test(name) && !showOnce.has(name));
+    expect(leaky, 'response schema names a secret-bearing field').toEqual([]);
     expect(json).not.toContain('anthropicAuthToken');
   });
 

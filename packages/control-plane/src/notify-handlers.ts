@@ -9,8 +9,9 @@ import type { TurnStore } from './turn-store.js';
 
 /**
  * `GET`/`PUT`/`DELETE /v1/notifications` (#394), spread into HANDLERS by handlers.ts. Only TYPES
- * come from handlers.ts -- a runtime import back would be a module cycle, the same arrangement
- * turn-handlers.ts and sandbox-handlers.ts use.
+ * and plain utility functions come from handlers.ts (never runtime-cycle participants) -- a
+ * circular runtime import would be a module cycle, the same arrangement turn-handlers.ts and
+ * sandbox-handlers.ts use.
  *
  * NOT session-scoped: the config belongs to the caller's SUBJECT, so there is no path id to own and
  * no filter for a handler to get wrong. Every handler reads `principal.sub` and nothing else, which
