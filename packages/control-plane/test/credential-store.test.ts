@@ -439,3 +439,28 @@ describe('InMemoryCredentialStore', () => {
     expect(await store.get('github:1', 'nope')).toBeNull();
   });
 });
+
+describe('the hmac-sha256 kind (#394)', () => {
+  it('takes one `key` field and declares the signature header it travels in', () => {
+    const spec = kindSpec('hmac-sha256');
+    expect(spec.secretFields).toEqual(['key']);
+    expect(spec.defaultBinding).toEqual({ header: 'X-Moca-Signature', format: 'sha256={hmac}' });
+  });
+
+  it('round-trips through the in-memory store under the control-plane consumer', async () => {
+    const store = new InMemoryCredentialStore();
+    await store.put('github:1234', {
+      descriptor: {
+        name: 'notify-webhook',
+        kind: 'hmac-sha256',
+        consumer: 'control-plane',
+        destination: { hosts: ['hooks.example.com'] },
+        binding: kindSpec('hmac-sha256').defaultBinding,
+        endpoint: null,
+      },
+      secret: { key: 'ab'.repeat(32) },
+    });
+    expect((await store.get('github:1234', 'notify-webhook'))?.secret.key).toBe('ab'.repeat(32));
+    expect((await store.list('github:1234')).map((d) => d.kind)).toContain('hmac-sha256');
+  });
+});
