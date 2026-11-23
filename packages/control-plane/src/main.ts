@@ -62,6 +62,9 @@ import { RedisTurnQueue } from './turn-queue.js';
 import { startGateSweep } from './gate-sweep.js';
 import { guardSchemaVersion } from './schema-version.js';
 import type { ResultRedisLike } from './turn-result.js';
+import { parseDestination } from './egress-destination.js';
+import { NotifyStore } from './notify-store.js';
+import { startNotifySweep } from './notify-sweep.js';
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const v = env[name];
@@ -195,6 +198,38 @@ function catalogHostsEnv(env: NodeJS.ProcessEnv): string[] {
     out.push(h);
   }
   return out;
+}
+
+/**
+ * `MOCA_NOTIFY_ALLOW`: the destinations a subject's notification sink may point at (#394).
+ * Comma-separated `host[:port][/prefix]`, parsed by the same `parseDestination` the egress
+ * allowlist uses. UNSET MEANS NOTIFICATIONS ARE OFF, and `PUT /v1/notifications` says so by name:
+ * this is the only SSRF control on a user-supplied URL the control plane fetches, so it is
+ * fail-closed. A malformed entry refuses to boot.
+ */
+function notifyFromEnv(env: NodeJS.ProcessEnv): CpConfig['notify'] {
+  const allow = (env.MOCA_NOTIFY_ALLOW ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s !== '')
+    .map((entry) => {
+      try {
+        return parseDestination(entry);
+      } catch (err) {
+        throw new Error(
+          `MOCA_NOTIFY_ALLOW entries must be host[:port][/prefix], got "${entry}": ${String(err)}`,
+        );
+      }
+    });
+  return {
+    allow,
+    // The public base url the approval deep link is built on. Unset = no link in the notification,
+    // which is correct for a deployment the phone cannot reach.
+    ...(env.MOCA_NOTIFY_BASE_URL ? { baseUrl: env.MOCA_NOTIFY_BASE_URL.replace(/\/+$/, '') } : {}),
+    minIntervalS: countEnv(env, 'MOCA_NOTIFY_MIN_INTERVAL_S', 5),
+    perHour: countEnv(env, 'MOCA_NOTIFY_PER_HOUR', 60),
+    failMax: countEnv(env, 'MOCA_NOTIFY_FAIL_MAX', 10),
+  };
 }
 
 export function portFromEnv(env: NodeJS.ProcessEnv): number {
@@ -387,9 +422,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     // Where a worker spends an inference grant (MI1 §6.3). Only the harness profile reads it: the
     // sandbox profile returns above and serves no turns.
     inferenceUrl: inferenceUrlFromEnv(env),
-    // #394: empty `allow` is fail-closed -- notifications stay off until a later task reads the
-    // five MOCA_NOTIFY_* env vars here.
-    notify: { allow: [], minIntervalS: 5, perHour: 60, failMax: 10 },
+    // #394: notifications stay off (fail-closed) until MOCA_NOTIFY_ALLOW is set.
+    notify: notifyFromEnv(env),
   };
   // Validated at startup even though only the provider uses it: a deployment with
   // SH_TEST_USERS set and no secret must fail to boot, not serve an unguarded login path.
@@ -505,8 +539,9 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
     tenancy: 'single',
     turnRecordTtlSeconds: turnRecordTtlFromEnv(env),
     turnSummaryBytes: countEnv(env, 'MOCA_TURN_SUMMARY_BYTES', 2048),
-    // #394: the sandbox profile mounts no notification routes; an empty allow keeps this inert.
-    notify: { allow: [], minIntervalS: 5, perHour: 60, failMax: 10 },
+    // #394: the sandbox profile mounts no notification routes, but still reads the env so a
+    // misconfigured allowlist fails the boot rather than being silently ignored.
+    notify: notifyFromEnv(env),
   };
   checkRefreshConfig(config);
   return config;
@@ -832,6 +867,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
       ttlMarginSeconds: TURN_RECORD_TTL_MARGIN_SECONDS,
     }),
     turnQueue: new RedisTurnQueue(client as unknown as CpRedisLike),
+    notify: new NotifyStore(client as unknown as CpRedisLike),
     // The leaf result store's reader (§4.4). The same client, narrowed to one method: the control
     // plane reads this key and never writes it -- the worker writes it, the cascade deletes it.
     leafResults: client as unknown as ResultRedisLike,
@@ -901,6 +937,9 @@ if (isMainModule) {
   // with MOCA_GATE_DEADLINE_S unset, so the sweep cannot be gated on the config value. Costs one
   // ZRANGEBYSCORE per 30 s when no gate is open.
   startGateSweep(deps);
+  // #394: pushes paused and finished turns to the owner's sinks. Returns immediately when
+  // MOCA_NOTIFY_ALLOW is unset, so an un-opted deployment pays one ZRANGE per 10 s.
+  startNotifySweep(deps);
   // The Redis schema version (#509): written if absent, and the process exits on a newer one once
   // Redis answers. In the background, because this server starts before Redis and waits for it.
   void guardSchemaVersion({
