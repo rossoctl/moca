@@ -100,8 +100,13 @@ async function turnOnSession(
  *
  * shortcut: a stalled claimant and a crashed one are indistinguishable without a lease, and §5.1
  * rules out the Lua/WATCH/MULTI that would make claim-plus-record one step; upgrade when the key
- * can carry one (a TTL shorter than the record's, or a `claimedAt` plus a grace), which tells the
- * two apart and lets an unreadable holder be treated as live without the wedge -- issue #989.
+ * carries a `claimedAt`, so an age past a grace that outlives the slowest turn means crashed and
+ * anything younger means live -- which lets an unreadable holder be treated as live without the
+ * wedge. NOT a TTL that is allowed to expire: that hands the key to the next submission while the
+ * turn it names can still be running, which is the duplicate fan-out §4.3 exists to prevent and
+ * nothing downstream refuses (`gate_pending` guards a gated submission, not a decision, and an
+ * ordinary turn has only this claim). A TTL helps only if its remaining value is read as that same
+ * age clock and never fires, which is `claimedAt` the long way round -- issue #989.
  */
 async function claimKey(
   turns: TurnStore,

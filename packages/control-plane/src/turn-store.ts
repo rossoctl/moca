@@ -175,6 +175,16 @@ export class TurnStore {
   }
 
   /**
+   * Who holds `key` right now, WITHOUT claiming it (#393). The decision route's replay check: the
+   * claim itself cannot answer it, because claiming an unheld key takes it.
+   */
+  async idempotencyHolder(owner: string, key: string): Promise<string | null> {
+    const k = idempotencyKeyKey(this.tag(owner), key);
+    const held = await this.guard(() => this.redis.hGetAll(k));
+    return held.turnId ?? null;
+  }
+
+  /**
    * Release `key` ONLY while `expected` still holds it, answering whether it was released. This is
    * the ONLY release: there is no blind `del` of a claim, because no caller can know it still holds
    * one. The compare is the point -- a submission that steps over a terminal holder
@@ -188,16 +198,6 @@ export class TurnStore {
    * residual window is between this read and its delete; a caller that loses it is still caught by
    * re-reading the holder after its second claim, which is why claimKey does both.
    */
-  /**
-   * Who holds `key` right now, WITHOUT claiming it (#393). The decision route's replay check: the
-   * claim itself cannot answer it, because claiming an unheld key takes it.
-   */
-  async idempotencyHolder(owner: string, key: string): Promise<string | null> {
-    const k = idempotencyKeyKey(this.tag(owner), key);
-    const held = await this.guard(() => this.redis.hGetAll(k));
-    return held.turnId ?? null;
-  }
-
   async releaseIdempotencyKeyIf(owner: string, key: string, expected: string): Promise<boolean> {
     const k = idempotencyKeyKey(this.tag(owner), key);
     const held = await this.guard(() => this.redis.hGetAll(k));
