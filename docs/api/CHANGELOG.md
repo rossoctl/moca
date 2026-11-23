@@ -39,7 +39,9 @@ authenticated and scoped to the caller's own subject.
   stops the old key verifying. An `ntfy` sink's `token` is stored the same way and likewise never
   echoed; omitting it on a re-PUT keeps the stored one, but a re-PUT that also moves the sink to a
   different HOST is refused (`invalid_request`) rather than sending a token authorized for one
-  server to another. Resend `token` to move an authenticated sink.
+  server to another. Resend `token` to move an authenticated sink, or `DELETE` the config first to
+  move it anonymously. The sweep enforces the same binding when it delivers, so a stored token is
+  never attached to a host it was not authorized for even if the two somehow disagree.
 - `DELETE /v1/notifications` removes the config and both stored secrets; a second `DELETE` is a
   204, same as removing nothing.
 - A background sweep (not a route) delivers: `POST` to a `webhook` sink carries
@@ -52,7 +54,10 @@ authenticated and scoped to the caller's own subject.
   its server's JSON publish endpoint, with its token as a bearer header when one was given.
 - The feature is off end to end until the deployment sets `MOCA_NOTIFY_ALLOW`: a `PUT` refuses
   every sink with `invalid_request` naming the unset variable, and the sweep that would deliver
-  never starts reading streams.
+  never starts reading streams. The list is re-checked on every delivery, not only at the `PUT`, so
+  taking a host back out stops the sinks already stored under it; that sink is skipped and a
+  co-sink on a still-listed host keeps receiving, and only a subject left with no listed sink sees
+  `failures` climb.
 - A push with a gate on it links to an approval page that 404s until the login-gated approval page
   ([#467/B8b](https://github.com/rossoctl/moca/issues/467)) lands.
 

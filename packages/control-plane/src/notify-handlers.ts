@@ -4,6 +4,7 @@ import { CpError } from './errors.js';
 import { auditBestEffort } from './handler-util.js';
 import { requirePrincipal, type CpDeps, type Handler } from './handlers.js';
 import { parseNotifyConfig } from './notify-config.js';
+import type { NotifySecrets } from './notify-send.js';
 import type { NotifyStore } from './notify-store.js';
 import type { TurnStore } from './turn-store.js';
 
@@ -41,17 +42,20 @@ function service(deps: CpDeps): { notify: NotifyStore; turns: TurnStore } {
  * is not, so sealing here would mean plumbing the ring through the boot contract. `/v1` still
  * exposes no read-back path for a credential's secret -- only this module and the sweep read them.
  */
-export async function readNotifySecrets(
-  deps: CpDeps,
-  subject: string,
-): Promise<{ webhookKey?: string; ntfyToken?: string }> {
+export async function readNotifySecrets(deps: CpDeps, subject: string): Promise<NotifySecrets> {
   const [hook, push] = await Promise.all([
     deps.credentials.get(subject, NOTIFY_WEBHOOK_CRED),
     deps.credentials.get(subject, NOTIFY_NTFY_CRED),
   ]);
   return {
     ...(hook?.secret.key ? { webhookKey: hook.secret.key } : {}),
-    ...(push?.secret.token ? { ntfyToken: push.secret.token } : {}),
+    // The token AND the hosts it was authorized for, so `deliver` can hold the credential store's
+    // destination binding at the SENDER too. Reading the secret by name alone is what let a token
+    // follow a moved sink; the PUT now refuses to store that mismatch, and this is the same
+    // invariant one layer down, where a torn write or a hand-edited hash cannot step around it.
+    ...(push?.secret.token
+      ? { ntfyToken: push.secret.token, ntfyHosts: push.descriptor.destination.hosts }
+      : {}),
   };
 }
 
@@ -101,9 +105,13 @@ export const NOTIFY_HANDLERS: Record<string, Handler> = {
       const stored = await deps.credentials.get(p.sub, NOTIFY_NTFY_CRED);
       const host = new URL(ntfySink.url).hostname;
       if (stored && !stored.descriptor.destination.hosts.includes(host)) {
+        // Both ways out are named: a subject who wants the sink on the new host ANONYMOUSLY cannot
+        // get there by omitting `token` -- that is this very branch -- so "resend it" alone would be
+        // the opposite of what they are asking for.
         throw new CpError(
           'invalid_request',
-          `this subject's ntfy token was authorized for another host; resend 'token' for '${host}'`,
+          `this subject's ntfy token was authorized for another host; resend 'token' for '${host}', ` +
+            'or DELETE /v1/notifications first to move the sink without one',
         );
       }
     }

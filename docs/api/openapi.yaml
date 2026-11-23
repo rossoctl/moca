@@ -2502,8 +2502,11 @@ paths:
         re-PUT leaves a previously stored token in place rather than clearing it -- unless the sink's
         HOST also changed, which is refused (400 `invalid_request`), because a stored token is
         authorized for the host it was sent with and must not follow the sink to another server.
-        Resend `token` to move an authenticated sink. A push with a `paused` event links to an
-        approval page that 404s until the login-gated approval page (#467/B8b) lands.
+        Resend `token` to move an authenticated sink, or DELETE this config first to move it
+        anonymously. The sender holds the same binding: a token is never attached to a host outside
+        the `destination.hosts` it was stored with, so a sink that disagrees is skipped rather than
+        posted to. A push with a `paused` event links to an approval page that 404s until the
+        login-gated approval page (#467/B8b) lands.
       security: [{ sessionToken: [] }]
       requestBody:
         required: true

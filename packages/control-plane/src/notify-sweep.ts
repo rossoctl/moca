@@ -103,15 +103,22 @@ async function sweepOne(
 
   // The allowlist is re-checked at SEND time, not only at the PUT that stored the sink: an operator
   // who takes a host OUT of MOCA_NOTIFY_ALLOW must stop this process posting to the sinks saved
-  // while it was in, and there is no route an admin can use to edit another subject's config. A
-  // now-disallowed sink counts as a failed delivery rather than a silent skip -- the cursor holds and
-  // `failures`/`mutedUntil` on GET /v1/notifications is what tells the subject to re-PUT.
-  const allowed = cfg.sinks.every((s) => allowsUrl(s.url, deps.config.notify.allow));
+  // while it was in, and there is no route an admin can use to edit another subject's config.
+  //
+  // A now-disallowed sink is DROPPED, not counted as a failed delivery, for the same reason
+  // `deliver` drops a webhook with no signing key: no retry re-adds the host to the allowlist, so
+  // failing on it would hold the cursor and starve the still-allowed co-sink -- the owner's phone --
+  // until `failMax` muted the subject over a sink they cannot fix from their side either. With no
+  // allowed sink left it IS a failure, which is the single-sink case the operator docs describe:
+  // the cursor holds and `failures`/`mutedUntil` on GET /v1/notifications tells the subject to
+  // re-PUT. A subject who keeps a working co-sink is told nothing, deliberately: the operator who
+  // narrowed the list is the only one who can widen it again, and `GET` does not expose it.
+  const sinks = cfg.sinks.filter((s) => allowsUrl(s.url, deps.config.notify.allow));
   const sentOk =
-    allowed &&
+    sinks.length > 0 &&
     (await deliver(
       { fetchImpl: deps.fetchImpl ?? fetch },
-      cfg.sinks,
+      sinks,
       {
         // The batch's head cursor, not deps.newId(): a retry of this same unadvanced batch (a crash
         // right after this call, or two overlapping passes) must carry the SAME id, or the dedupe

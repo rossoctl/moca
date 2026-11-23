@@ -125,9 +125,42 @@ export async function sendNtfy(
   });
 }
 
+export interface NotifySecrets {
+  webhookKey?: string;
+  ntfyToken?: string;
+  /** The hosts the ntfy token was authorized for: its credential's `destination.hosts`. */
+  ntfyHosts?: string[];
+}
+
+/**
+ * A sink this process must NOT post to, as against one that merely failed. Both are permanent for
+ * this batch -- no retry mints a key or re-binds a token -- so `deliver` drops these rather than
+ * failing on them; the reasoning for that is on `deliver`.
+ */
+function unsendable(s: NotifySink, secrets: NotifySecrets): boolean {
+  // No signing key: `sendWebhook` refuses to send unsigned, so nothing would be attempted anyway.
+  // `secretMissing` on `GET /v1/notifications` is this sink's signal.
+  if (s.kind === 'webhook') return secrets.webhookKey === undefined;
+  // An ntfy token is authorized for the host it was stored with (`destination.hosts`, the binding
+  // the credential store exists to enforce). `putNotifications` refuses to store a config that
+  // moves the sink off it, so the two disagreeing here means something stepped around that: a torn
+  // PUT whose credential write landed and whose config write did not, or a hand-edited hash -- the
+  // same reason the allowlist is re-checked at send time instead of trusted from Redis. The sink is
+  // dropped rather than posted to the other host, and never sent anonymously instead, which would
+  // un-authenticate a topic the subject chose to protect.
+  if (secrets.ntfyToken === undefined) return false;
+  const host = URL.parse(s.url)?.hostname;
+  return host === undefined || !(secrets.ntfyHosts ?? []).includes(host);
+}
+
 /**
  * Every sink, then one verdict. All sinks are attempted even after one fails: a dead webhook must
  * not silence the push that actually reaches the phone.
+ *
+ * A sink that can never be sent to is dropped BEFORE the verdict, not failed. Counted as a failure
+ * it would hold the cursor, and the sink that does reach the phone would be re-pushed the same
+ * batch every pass until `failMax` muted the subject -- and no retry fixes any of these cases, so
+ * holding the cursor buys them nothing. Re-PUTting resets the cursor to now in any case.
  *
  * shortcut: the verdict is all-or-nothing for sinks that were ATTEMPTED, so one sink's transport
  * failure re-pushes the batch to the other next pass. Upgrade to a per-sink cursor if that
@@ -137,14 +170,9 @@ export async function deliver(
   deps: SendDeps,
   sinks: NotifySink[],
   payload: NotifyPayload,
-  secrets: { webhookKey?: string; ntfyToken?: string },
+  secrets: NotifySecrets,
 ): Promise<boolean> {
-  // A webhook with no signing key can never be sent to -- `sendWebhook` refuses to send unsigned --
-  // so it is excluded from the verdict rather than failing it. Counted as a failure it would hold
-  // the cursor, and the ntfy sink that DOES reach the phone would be re-pushed the same batch every
-  // pass until `failMax` muted the subject. `secretMissing` on `GET /v1/notifications` is this
-  // sink's signal, and re-PUTting resets the cursor to now anyway, so holding it buys it nothing.
-  const sendable = sinks.filter((s) => s.kind !== 'webhook' || secrets.webhookKey !== undefined);
+  const sendable = sinks.filter((s) => !unsendable(s, secrets));
   // Nothing can be sent at all: a plain failure, so the cursor holds and `failures` says so. Not
   // `every()` over the empty array, which would report success and drop the batch silently.
   if (sendable.length === 0) return false;

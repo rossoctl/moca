@@ -8,6 +8,9 @@ import type { TurnEvent } from '../src/turn-record.js';
 const KEY = 'ab'.repeat(32);
 const webhook = { kind: 'webhook' as const, url: 'https://hooks.example.com/moca' };
 const ntfy = { kind: 'ntfy' as const, url: 'https://ntfy.example.com', topic: 'moca-alice' };
+// A token never travels without the hosts it was authorized for -- `readNotifySecrets` reads both
+// from the one credential -- so every fixture that has one carries them, as production does.
+const TOKEN = { ntfyToken: 'tk', ntfyHosts: ['ntfy.example.com'] };
 
 const events: TurnEvent[] = [
   {
@@ -154,9 +157,9 @@ describe('post (redirect handling, both sinks share this)', () => {
 describe('deliver', () => {
   it('sends to every sink and succeeds only when all of them accept', async () => {
     const f = ok();
-    expect(
-      await deliver(deps(f), [webhook, ntfy], payload(), { webhookKey: KEY, ntfyToken: 'tk' }),
-    ).toBe(true);
+    expect(await deliver(deps(f), [webhook, ntfy], payload(), { webhookKey: KEY, ...TOKEN })).toBe(
+      true,
+    );
     expect(f).toHaveBeenCalledTimes(2);
 
     const half = vi.fn(async (u: unknown) =>
@@ -173,9 +176,29 @@ describe('deliver', () => {
     // The `secretMissing` state. No retry can fix it, so counting it as a failure would hold the
     // cursor and re-push this same batch to the phone every pass until the subject was muted.
     const f = ok();
-    expect(await deliver(deps(f), [webhook, ntfy], payload(), { ntfyToken: 'tk' })).toBe(true);
+    expect(await deliver(deps(f), [webhook, ntfy], payload(), TOKEN)).toBe(true);
     expect(f).toHaveBeenCalledTimes(1);
     expect(callOf(f)[0]).toContain('ntfy');
+  });
+
+  it('never attaches an ntfy token to a host it was not authorized for', async () => {
+    // The state a torn PUT leaves: the credential write landed for host B, the config write did not,
+    // so the stored sink still names host A. PUT refuses to STORE this, and the sender refuses to
+    // act on it -- the token must not reach A, and sending anonymously instead would silently
+    // un-authenticate a topic the subject chose to protect.
+    const f = ok();
+    const moved = { ...ntfy, url: 'https://ntfy.other.example' };
+    expect(await deliver(deps(f), [webhook, moved], payload(), { webhookKey: KEY, ...TOKEN })).toBe(
+      true,
+    );
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(callOf(f)[0]).toBe(webhook.url);
+    // Alone, it is the whole delivery: a failure, so the cursor holds rather than dropping the batch.
+    expect(await deliver(deps(ok()), [moved], payload(), TOKEN)).toBe(false);
+    // An ANONYMOUS topic has no binding to cross, which is the common self-hosted case.
+    const anon = ok();
+    expect(await deliver(deps(anon), [moved], payload(), {})).toBe(true);
+    expect(anon).toHaveBeenCalledTimes(1);
   });
 
   it('fails when NOTHING could be sent, rather than reporting an empty success', async () => {

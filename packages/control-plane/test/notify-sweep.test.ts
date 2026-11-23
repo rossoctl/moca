@@ -178,10 +178,27 @@ describe('sweepNotifications', () => {
 
     expect(await sweepNotifications(deps)).toBe(0);
     expect(sent).not.toHaveBeenCalled();
-    // Counted as a failure, not silently skipped: the cursor holds and GET says why.
+    // Their only sink, so nothing could be sent at all: a failure, which is what holds the cursor
+    // and puts `failures`/`mutedUntil` on GET for the subject to act on.
     const cfg = await deps.notify!.get(alice.sub);
     expect(cfg?.failures).toBe(1);
     expect(cfg?.cursor).toBe(before);
+  });
+
+  it('keeps delivering to an allowed co-sink when the OTHER sink host leaves the allowlist', async () => {
+    const push = { kind: 'ntfy', url: 'https://ntfy.example.com', topic: 'moca-alice' };
+    await configure({ sinks: [webhook, push] });
+    await emit(ev());
+    // No retry re-adds a host to the operator's allowlist, so failing the whole delivery would
+    // starve the phone -- and mute the subject -- over a sink neither of them can fix from here.
+    deps.config.notify.allow = [parseDestination('ntfy.example.com')];
+
+    expect(await sweepNotifications(deps)).toBe(1);
+    expect(sent).toHaveBeenCalledTimes(1);
+    expect(sent.mock.calls[0]![0]).toBe(push.url);
+    const cfg = await deps.notify!.get(alice.sub);
+    expect(cfg?.failures).toBe(0);
+    expect(cfg?.cursor).toBe(await deps.turns!.lastEventId(alice.sub));
   });
 
   it('one owner failure does not stop the pass', async () => {

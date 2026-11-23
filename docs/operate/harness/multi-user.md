@@ -242,10 +242,14 @@ a comma-separated `host[:port][/prefix]` allowlist, the only control against a u
 URL reaching your instance metadata service, Redis, or the kube API from inside the control plane.
 A malformed entry refuses to boot, the same contract `SH_MODEL_CATALOG_HOSTS` has. It is re-checked
 on every delivery, not only at the `PUT` that stores a sink, so taking a host back out of the list
-also stops the sinks already saved under it. What the owner then sees: each pass counts as a failed
-delivery, so their cursor stops advancing and after `MOCA_NOTIFY_FAIL_MAX` passes they are muted for
-an hour; `failures` and `mutedUntil` on `GET /v1/notifications` say so, and the way back is a
-re-`PUT` naming a host still on the list.
+also stops the sinks already saved under it. What the owner then sees: that sink is skipped and
+their other sink, if its host is still listed, keeps being delivered to. With no listed sink left
+the delivery fails, so their cursor stops advancing and after `MOCA_NOTIFY_FAIL_MAX` passes they are
+muted for an hour; `failures` and `mutedUntil` on `GET /v1/notifications` say so, and the way back is
+a re-`PUT` naming a host still on the list -- which also mints a **new** `webhookSecret`, so install
+that at the receiver before counting the mute as over, or every delivery fails verification and the
+subject is muted again. An owner left with one working sink is told nothing: `GET` does not expose
+the allowlist, and only the operator who narrowed it can widen it again.
 
 Each user configures their own sink with `PUT /v1/notifications`:
 
@@ -270,7 +274,9 @@ ntfy publishes anonymously unless `token` is given -- on a public server the top
 the password, so pick one that is hard to guess. A re-`PUT` that omits `token` keeps the stored
 one, but one that also points the sink at a **different host** is refused: the token was authorized
 for the old server and is not sent to the new one. Resend `token` when you move an authenticated
-sink (a self-hosted ntfy to `ntfy.sh`, say). `GET /v1/notifications` reads the config back
+sink (a self-hosted ntfy to `ntfy.sh`, say), or `DELETE /v1/notifications` first if you want the
+sink on the new host **anonymously** -- omitting `token` keeps the old one rather than clearing it,
+so it is the refusal above and not a way to drop it. `GET /v1/notifications` reads the config back
 (never the secret); `DELETE /v1/notifications` removes it and both stored secrets.
 
 A webhook receiver verifies a delivery by recomputing
