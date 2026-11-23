@@ -151,10 +151,7 @@ to call the id (a 403 `team_model_access_denied` from the gateway means it is no
 often names models the registry has never heard of; set `SH_MODEL_CUSTOM=1` to send `SH_MODEL`
 to `ANTHROPIC_BASE_URL`/`SH_MODEL_BASE_URL` as-is. Also note compose reads your shell's model
 variables (`ANTHROPIC_*`, `OPENAI_*`, `SH_MODEL*`) before this `.env`; unset whatever the shell
-exports when it carries a different gateway —
-`env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_BASE_URL -u OPENAI_API_KEY -u
-OPENAI_BASE_URL -u SH_MODEL -u SH_MODEL_PROVIDER -u SH_MODEL_API -u SH_MODEL_BASE_URL -u
-SH_MODEL_AUTH -u SH_MODEL_CUSTOM docker compose …`.
+exports when it carries a different gateway.
 
 ## Using mocactl: the control plane
 

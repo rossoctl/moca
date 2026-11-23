@@ -168,12 +168,8 @@ paths:
             subject_conflict (X-SH-Subject contradicts the token) · credential_required ·
             credential_ambiguous · endpoint_unresolved (the control-plane exchange refused the
             caller's credential or its endpoint) · model_config_invalid (the deployment's
-            SH_MODEL/SH_MODEL_PROVIDER/SH_MODEL_API names something this harness cannot resolve:
-            an id outside the pi-ai registry, an unknown provider, or an unknown or unimplemented
-            protocol. The message names the fix — the dash-form twin, SH_MODEL_CUSTOM=1 for an id
-            a custom endpoint does know, or a valid provider/protocol. Like every pre-first-frame
-            status, on the streaming route this arrives as an in-stream error frame instead once
-            the first-frame flush deadline has passed)
+            SH_MODEL/SH_MODEL_PROVIDER/SH_MODEL_API names an id, provider or protocol this
+            harness cannot resolve; the message names the fix)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
