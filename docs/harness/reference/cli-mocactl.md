@@ -8,9 +8,10 @@
 
 ## Usage
 
-The block below is `mocactl --help`, generated from `USAGE` in `packages/mocactl/src/cli.ts`; a
-test fails when the two disagree. `mocactl COMMAND --help` prints only that command's syntax. To
-update the block after changing the help text:
+`mocactl` and `mocactl --help` print a summary: what mocactl is and its commands, one line each.
+The block below is every command's syntax, generated from `USAGE` in
+`packages/mocactl/src/cli.ts`; a test fails when the two disagree. `mocactl COMMAND --help` prints
+only that command's part of it. To update the block after changing the help text:
 
 ```bash
 UPDATE_MOCACTL_REFERENCE=1 pnpm -C packages/mocactl exec vitest run test/mocactl-reference.test.ts
@@ -20,7 +21,7 @@ UPDATE_MOCACTL_REFERENCE=1 pnpm -C packages/mocactl exec vitest run test/mocactl
 
 ```text
 usage:
-  mocactl [--setup] [--no-animation]             interactive terminal UI (--setup: run the first-start
+  mocactl harness [--setup] [--no-animation]     interactive terminal UI (--setup: run the first-start
                                                  setup again: the server form, then login and
                                                  credential, each skipped when already done;
                                                  --no-animation: a still spinner)
@@ -177,7 +178,7 @@ reachable?` instead; `auth token` exits 3 (login required) or 4; `logout` while 
 
 | Command                                                                                                                           | What it does and calls                                                                                                                                                                                                                                                                                                                                                                                                   |
 | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `mocactl [--setup] [--no-animation]`                                                                                              | The interactive UI. `--setup` re-runs onboarding. Exits 2 when stdin is not a terminal                                                                                                                                                                                                                                                                                                                                   |
+| `mocactl harness [--setup] [--no-animation]`                                                                                      | The interactive UI. `--setup` re-runs onboarding. Exits 2 when stdin is not a terminal                                                                                                                                                                                                                                                                                                                                   |
 | `mocactl login`                                                                                                                   | GitHub device-flow login (`POST /v1/auth/device`, then polls `/v1/auth/device/token`). Prints the code to stderr                                                                                                                                                                                                                                                                                                         |
 | `mocactl logout [--all]`                                                                                                          | Ends this login on the server (`POST /v1/auth/revoke`); `--all` ends all of yours (`/v1/auth/revoke-all`). The local file is cleared anyway                                                                                                                                                                                                                                                                              |
 | `mocactl auth token [--json]`                                                                                                     | Prints a valid API token for scripts, refreshing if needed. `--json`: `{"token","expiresAt","subject"}`                                                                                                                                                                                                                                                                                                                  |

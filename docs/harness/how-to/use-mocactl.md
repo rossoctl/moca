@@ -14,8 +14,8 @@ streamed reply on the Docker Compose trial.
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rossoctl/moca/main/scripts/install-mocactl.sh | sh
 export SH_CONTROL_PLANE_URL=https://moca.example.com   # your moca server; the only URL mocactl needs
-mocactl            # interactive; the first run walks you through setup
-mocactl --setup    # re-run setup on a configured machine
+mocactl harness           # interactive; the first run walks you through setup
+mocactl harness --setup   # re-run setup on a configured machine
 ```
 
 It installs `~/.local/bin/mocactl` (a symlink to `mocactl.mjs` beside it) from the latest release, after checking its SHA-256, and prints

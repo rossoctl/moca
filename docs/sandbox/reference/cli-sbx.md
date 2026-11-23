@@ -4,8 +4,9 @@ sidebar_position: 1
 
 # `mocactl sbx` reference
 
-Every `mocactl sbx` command, flag, environment variable and exit code, as the CLI prints them with
-`mocactl sbx --help`. `mocactl sbx COMMAND --help` prints one command's entries.
+Every `mocactl sbx` command, flag, environment variable and exit code. `mocactl sbx --help` lists
+the commands one line each, with no flags; `mocactl sbx COMMAND --help` prints that command's
+entries below in full.
 
 The block below is generated from the CLI's source (`SBX_ABOUT` and `SBX_USAGE` in
 `packages/mocactl/src/sbx/cli.ts`), and a test fails when the two disagree. To update it after
@@ -30,17 +31,15 @@ in sync: `mocactl sbx push` sends later local edits, and `mocactl sbx pull --app
 agent's edits here as a patch. /workspace is kept between commands; the sandbox ends after a period
 without use (7 days by default). Without a repository, `mocactl sbx create` makes one (from the
 default template, or `--template ID`), and `run` and `put` use it by ID; `proc` needs one
-made with `--mode lease+processes`. (A bare `mocactl` session's tools run in a sandbox of moca's
-own server, SH_CONTROL_PLANE_URL: these commands do not see it.)
+made with `--mode lease+processes`. (A `mocactl harness` session's tools run in a sandbox of
+moca's own server, SH_CONTROL_PLANE_URL: these commands do not see it.)
 
 usage (the sandbox service):
 a repository's sandbox, in the order you use it:
   mocactl sbx login [--control-plane-url URL] [--no-browser]
                                                  log in with the GitHub device flow
-                                                 (--control-plane-url: the sandbox service's URL,
-                                                 remembered for later commands; in a local
-                                                 terminal: copies the code, opens the browser;
-                                                 --no-browser: only prints the URL and the code)
+                                                 (--control-plane-url: the sandbox service's URL;
+                                                 --no-browser: only print the sign-in URL and code)
   mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--max-file MiB]
                  [--no-agent-config] [--cortex] [--lifetime DURATION]
                                                  in a git repository: create or reuse its sandbox,

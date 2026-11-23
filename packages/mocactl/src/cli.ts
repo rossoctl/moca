@@ -42,8 +42,48 @@ import {
 import { versionLine } from './version.js';
 import { commandUsage, typedWords } from './core/usage.js';
 
+/**
+ * Bare `mocactl` and `mocactl --help`: what mocactl is, and its commands one line each. Each
+ * command's details are `mocactl COMMAND --help` (cut from USAGE) or `mocactl sbx --help`.
+ */
+export const SUMMARY = `mocactl provides a harness service and a sandbox service.
+
+The sandbox service (\`mocactl sbx\`) creates and manages remote VMs that hold a copy of your code
+repository, and patches Claude Code and other agents to work on that copy instead of your local
+machine. The harness service (\`mocactl harness\`) goes one step further, running the agent
+remotely.
+
+usage: mocactl COMMAND [ARGS...]
+
+the sandbox service:
+  sbx            remote VMs holding your repository, for your agent: login, up, pull, rm, ...
+
+the harness service:
+  harness        the interactive terminal UI: chat with an agent running remotely
+  run            run one turn and print its reply
+  sessions       list or delete your sessions
+  spawn          fork a detached subagent
+  subagents      list spawned subagents and their state
+  watch          follow subagents' state changes until they finish
+  get            write a subagent's result files
+  promote        upload a directory's Claude Code skills and commands as a config bundle
+  bundles        list or delete your promoted config bundles
+  workloads      create, list, get or delete workloads (contexts for subagents)
+  credentials    list, add or delete your credentials
+
+login and setup (the harness service; \`mocactl sbx login\` is the sandbox service's):
+  login          log in with the GitHub device flow
+  logout         end this login
+  auth token     print a valid API token
+  doctor         check the setup; one fix per failure
+
+  --version      print this build's version
+
+Run \`mocactl COMMAND --help\` for a command's details (\`mocactl sbx --help\` for the sandbox
+service's commands).`;
+
 export const USAGE = `usage:
-  mocactl [--setup] [--no-animation]             interactive terminal UI (--setup: run the first-start
+  mocactl harness [--setup] [--no-animation]     interactive terminal UI (--setup: run the first-start
                                                  setup again: the server form, then login and
                                                  credential, each skipped when already done;
                                                  --no-animation: a still spinner)
@@ -151,7 +191,7 @@ const CREDENTIAL_FLAGS = ['kind', 'consumer', 'host', 'endpoint'] as const;
  */
 export function usageFor(words: string[]): string {
   const own = commandUsage(USAGE, '  mocactl ', words);
-  if (own === undefined) return USAGE;
+  if (own === undefined) return SUMMARY;
   const notes = USAGE.slice(USAGE.lastIndexOf('\nflags for every command') + 1);
   // The --json note only for a command that takes --json, as `mocactl sbx COMMAND --help` does.
   const everyCommand = /--json\b/.test(own) ? notes : notes.replace(/\n--json:[^\n]*$/, '');
@@ -295,6 +335,16 @@ async function mainWith(
     io.out(help + '\n');
     return 0;
   }
+  if (positionals.length === 0) {
+    // Bare `mocactl`: what it is and its commands. The interactive UI is `mocactl harness`.
+    const tuiFlag = (['setup', 'no-animation'] as const).find((f) => values[f] !== undefined);
+    if (tuiFlag) {
+      io.err(`--${tuiFlag} only applies to \`mocactl harness\`\n${usageFor(['harness'])}`);
+      return 2;
+    }
+    io.out(SUMMARY + '\n');
+    return 0;
+  }
 
   // --record F: every HTTP attempt `run` makes, to the control plane and the harness, the login's
   // refresh included, so the record is opened (or refused) before the runtime's clients exist.
@@ -343,6 +393,11 @@ async function mainWith(
   }
   if (values.config !== undefined && command !== 'run' && command !== 'spawn') {
     io.err(`--config only applies to \`mocactl run\` and \`mocactl spawn\`\n${help}`);
+    return 2;
+  }
+  const tuiFlag = (['setup', 'no-animation'] as const).find((f) => values[f] !== undefined);
+  if (tuiFlag && command !== 'harness') {
+    io.err(`--${tuiFlag} only applies to \`mocactl harness\`\n${help}`);
     return 2;
   }
   if (values.all !== undefined && command !== 'logout') {
@@ -718,7 +773,8 @@ async function mainWith(
     case '__spawn-worker': {
       return runSpawnWorker(rt);
     }
-    case undefined:
+    case 'harness':
+      if (rest.length > 0) return usage(io, help);
       if (!deps.startInteractive) {
         io.err('interactive mode is not wired yet');
         return 2;

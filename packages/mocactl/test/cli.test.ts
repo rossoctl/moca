@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
-import { USAGE, main } from '../src/cli.js';
+import { SUMMARY, USAGE, main } from '../src/cli.js';
 import type { Io } from '../src/headless.js';
 import type { Runtime } from '../src/runtime.js';
 import { ApiError } from '../src/api/errors.js';
@@ -28,10 +28,36 @@ const fakeBuild = (..._args: unknown[]) =>
   ({ endpoints: {}, config: {}, auth: null }) as unknown as Runtime;
 
 describe('main', () => {
-  it('prints usage for --help', async () => {
-    const o = io();
-    expect(await main(['--help'], {}, o, { buildRuntime: fakeBuild })).toBe(0);
-    expect(o.outs.join('')).toContain(USAGE);
+  it('prints the summary for --help and for bare mocactl, reading no config', async () => {
+    for (const argv of [['--help'], []]) {
+      const o = io();
+      const build = vi.fn(fakeBuild);
+      const start = vi.fn((..._args: unknown[]) => Promise.resolve(0));
+      expect(await main(argv, {}, o, { buildRuntime: build, startInteractive: start })).toBe(0);
+      const out = o.outs.join('');
+      expect(out).toContain(SUMMARY);
+      expect(out).toMatch(/^mocactl provides a harness service and a sandbox service/);
+      expect(out).not.toContain('--endpoint URL'); // one line per command, not every flag
+      expect(build).not.toHaveBeenCalled();
+      expect(start).not.toHaveBeenCalled();
+    }
+  });
+
+  it('lists every top-level command of USAGE in the summary', () => {
+    const commands = new Set(
+      [...USAGE.matchAll(/^ {2}mocactl ([a-z][a-z-]*)/gm)].map((m) => m[1]!),
+    );
+    for (const c of commands) expect(SUMMARY).toMatch(new RegExp(`^ {2}${c} `, 'm'));
+  });
+
+  it('points --setup and --no-animation without harness at mocactl harness', async () => {
+    for (const argv of [['--setup'], ['--no-animation'], ['sessions', '--setup']]) {
+      const o = io();
+      const start = vi.fn((..._args: unknown[]) => Promise.resolve(0));
+      expect(await main(argv, {}, o, { buildRuntime: fakeBuild, startInteractive: start })).toBe(2);
+      expect(o.errs.join('\n')).toContain('only applies to `mocactl harness`');
+      expect(start).not.toHaveBeenCalled();
+    }
   });
 
   it('COMMAND --help prints only that command, with the flags every command takes', async () => {
@@ -56,8 +82,9 @@ describe('main', () => {
     const run = await help('run', 'hello');
     expect(run).toContain('mocactl run "prompt" --record F');
     expect(run).not.toContain('mocactl spawn');
-    // Nothing named: the whole usage.
-    expect(await help('nonsense')).toContain(USAGE);
+    // Nothing named: the summary.
+    expect(await help('nonsense')).toContain(SUMMARY);
+    expect(await help('harness')).toContain('mocactl harness [--setup] [--no-animation]');
   });
 
   it("a usage error shows the failed command's help, not every command's", async () => {
@@ -170,19 +197,29 @@ describe('main', () => {
     });
   });
 
-  it('hands the no-command case to startInteractive', async () => {
+  it('hands mocactl harness to startInteractive', async () => {
     const start = vi.fn((..._args: unknown[]) => Promise.resolve(0));
     expect(
-      await main(['--setup'], {}, io(), { buildRuntime: fakeBuild, startInteractive: start }),
+      await main(['harness', '--setup'], {}, io(), {
+        buildRuntime: fakeBuild,
+        startInteractive: start,
+      }),
     ).toBe(0);
     expect(start.mock.calls[0][1]).toEqual({ setup: true, noAnimation: false });
+    expect(
+      await main(['harness', 'extra'], {}, io(), {
+        buildRuntime: fakeBuild,
+        startInteractive: start,
+      }),
+    ).toBe(2);
+    expect(start).toHaveBeenCalledTimes(1);
   });
 
   it('refuses the interactive UI without a terminal, pointing at run', async () => {
     const start = vi.fn((..._args: unknown[]) => Promise.resolve(0));
     const o = io();
     expect(
-      await main([], {}, o, {
+      await main(['harness'], {}, o, {
         buildRuntime: fakeBuild,
         startInteractive: start,
         stdinIsTTY: false,

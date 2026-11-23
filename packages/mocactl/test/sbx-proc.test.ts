@@ -348,13 +348,18 @@ describe('mocactl sbx proc: usage', () => {
 
   it('the help lists the proc commands', async () => {
     const w = world();
-    expect(await w.run(['--help'])).toBe(0);
+    // `sbx --help` gives proc one line; `sbx proc --help` lists its commands.
+    expect(await w.run(['proc', '--help'])).toBe(0);
     expect(w.out()).toContain('mocactl sbx proc start [--name N] [--cwd D] [ID] -- CMD ...');
     expect(w.out()).toContain('mocactl sbx proc ls [ID] [--json]');
     expect(w.out()).toContain('mocactl sbx proc logs (NAME|ID) [--tail N] [--raw] [ID]');
     expect(w.out()).toContain('control sequences are removed (--raw keeps them;');
     expect(w.out()).toContain('mocactl sbx proc stop (NAME|ID) [--signal S] [ID]');
-    // A downgrade to lease keeps the lease (plan 5): the mode line no longer says it ends.
+  });
+
+  it('the mode help says a downgrade to lease keeps the lease (plan 5)', async () => {
+    const w = world();
+    expect(await w.run(['mode', '--help'])).toBe(0);
     expect(w.out()).not.toContain('command; a downgrade ends the lease');
     expect(w.out()).toContain('a downgrade to per-exec ends the lease;');
     expect(w.out()).toContain('lease+processes to lease keeps it and stops the');
