@@ -3,7 +3,9 @@ import { HANDLERS } from '../src/handlers.js';
 import { CONTROL_PLANE_SECRETS } from '../src/main.js';
 import {
   httpRelayReleaser,
-  relayReleaserFromEnv,
+  releaseUrl,
+  releaserOf,
+  relayReleaseFromEnv,
   withinBound,
   type ReleaseAnswer,
   type RelayReleaser,
@@ -68,34 +70,34 @@ const decisions = (d: TestDeps, decision: string) =>
 const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => {});
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
-describe('relayReleaserFromEnv (#338)', () => {
+describe('relayReleaseFromEnv (#338)', () => {
   it('is off without SH_RELAY_CONTROL_URL, whatever else is set', () => {
-    expect(relayReleaserFromEnv({})).toBeUndefined();
-    expect(relayReleaserFromEnv({ MOCA_RELAY_RELEASE_TOKEN: TOKEN })).toBeUndefined();
-    expect(relayReleaserFromEnv({ SH_RELAY_CONTROL_URL: ' ' })).toBeUndefined();
+    expect(relayReleaseFromEnv({})).toBeUndefined();
+    expect(relayReleaseFromEnv({ MOCA_RELAY_RELEASE_TOKEN: TOKEN })).toBeUndefined();
+    expect(relayReleaseFromEnv({ SH_RELAY_CONTROL_URL: ' ' })).toBeUndefined();
   });
 
   it('refuses a URL without the bearer, a short bearer, a bad URL, and a bearer it shares', () => {
     const url = 'http://sandbox-relay-control:9445';
-    expect(() => relayReleaserFromEnv({ SH_RELAY_CONTROL_URL: url })).toThrow(
+    expect(() => relayReleaseFromEnv({ SH_RELAY_CONTROL_URL: url })).toThrow(
       /needs MOCA_RELAY_RELEASE_TOKEN/,
     );
     expect(() =>
-      relayReleaserFromEnv({ SH_RELAY_CONTROL_URL: url, MOCA_RELAY_RELEASE_TOKEN: 'short' }),
+      relayReleaseFromEnv({ SH_RELAY_CONTROL_URL: url, MOCA_RELAY_RELEASE_TOKEN: 'short' }),
     ).toThrow(/at least 32 characters/);
     expect(() =>
-      relayReleaserFromEnv({ SH_RELAY_CONTROL_URL: 'relay:9445', MOCA_RELAY_RELEASE_TOKEN: TOKEN }),
+      relayReleaseFromEnv({ SH_RELAY_CONTROL_URL: 'relay:9445', MOCA_RELAY_RELEASE_TOKEN: TOKEN }),
     ).toThrow(/absolute http\(s\) URL/);
     let msg = '';
     try {
-      relayReleaserFromEnv({ SH_RELAY_CONTROL_URL: url, MOCA_RELAY_RELEASE_TOKEN: TOKEN }, [TOKEN]);
+      relayReleaseFromEnv({ SH_RELAY_CONTROL_URL: url, MOCA_RELAY_RELEASE_TOKEN: TOKEN }, [TOKEN]);
     } catch (e) {
       msg = (e as Error).message;
     }
     expect(msg).toMatch(/must differ from every other control-plane secret/);
     expect(msg).not.toContain(TOKEN);
     expect(
-      relayReleaserFromEnv({ SH_RELAY_CONTROL_URL: url, MOCA_RELAY_RELEASE_TOKEN: TOKEN }, ['x']),
+      relayReleaseFromEnv({ SH_RELAY_CONTROL_URL: url, MOCA_RELAY_RELEASE_TOKEN: TOKEN }, ['x']),
     ).toBeDefined();
   });
 
@@ -121,7 +123,7 @@ describe('httpRelayReleaser (#338)', () => {
     ['release_unsupported', 'unsupported'],
   ])('maps 200 {outcome: %s} to the terminal answer %s', async (outcome, want) => {
     const { f, seen } = answering(200, { outcome });
-    const r = httpRelayReleaser('http://relay:9445/', TOKEN, f);
+    const r = httpRelayReleaser({ url: 'http://relay:9445/', token: TOKEN }, f);
     expect(await r.release('sbx_default', 'sbx-1', new AbortController().signal)).toBe(want);
     expect(seen[0]!.url).toBe('http://relay:9445/v1/release');
     expect(seen[0]!.init.method).toBe('POST');
@@ -141,12 +143,43 @@ describe('httpRelayReleaser (#338)', () => {
   ])('rejects anything else (%i %j): not an answer', async (status, body) => {
     const { f } = answering(status, body);
     await expect(
-      httpRelayReleaser('http://relay:9445', TOKEN, f).release(
+      httpRelayReleaser({ url: 'http://relay:9445', token: TOKEN }, f).release(
         'w',
         'k',
         new AbortController().signal,
       ),
     ).rejects.toThrow(/the relay answered/);
+  });
+});
+
+describe('releaseUrl and releaserOf (#338)', () => {
+  it('trims any number of trailing slashes, and only those, without a backtracking regex', () => {
+    expect(releaseUrl('http://relay:9445')).toBe('http://relay:9445/v1/release');
+    expect(releaseUrl('http://relay:9445/')).toBe('http://relay:9445/v1/release');
+    expect(releaseUrl('http://relay:9445///')).toBe('http://relay:9445/v1/release');
+    expect(releaseUrl('http://relay:9445/base//')).toBe('http://relay:9445/base/v1/release');
+    // Many slashes stay linear: a regex like /\/+$/ can backtrack on these.
+    const many = `http://relay:9445${'/'.repeat(100_000)}x`;
+    const t0 = Date.now();
+    expect(releaseUrl(many)).toBe(`${many}/v1/release`);
+    expect(Date.now() - t0).toBeLessThan(200);
+  });
+
+  it("uses an injected releaser, else the config's listener, else none", async () => {
+    const injected = fakeReleaser().releaser;
+    expect(releaserOf({ relayRelease: injected, config: {} })).toBe(injected);
+    expect(releaserOf({ config: {} })).toBeUndefined();
+    const seen: string[] = [];
+    const f = (async (url: string) => {
+      seen.push(url);
+      return new Response(JSON.stringify({ outcome: 'released' }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const r = releaserOf({
+      fetchImpl: f,
+      config: { relayRelease: { url: 'http://relay:9445/', token: TOKEN } },
+    });
+    expect(await r!.release('w', 'k', new AbortController().signal)).toBe('released');
+    expect(seen).toEqual(['http://relay:9445/v1/release']);
   });
 });
 

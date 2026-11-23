@@ -53,18 +53,35 @@ const ANSWERS: Record<string, ReleaseAnswer> = {
   release_unsupported: 'unsupported',
 };
 
-/** The relay's control listener at `baseUrl`, authorized by `token`. */
+/** Where a release goes and the bearer it carries (CpConfig.relayRelease). */
+export interface RelayReleaseTarget {
+  /** The control listener's base URL, as SH_RELAY_CONTROL_URL gives it. */
+  url: string;
+  token: string;
+}
+
+/** `s` without its trailing slashes. A loop, not a regex: `/\/+$/` backtracks on many slashes. */
+function trimTrailingSlashes(s: string): string {
+  let end = s.length;
+  while (end > 0 && s[end - 1] === '/') end--;
+  return s.slice(0, end);
+}
+
+/** The release route under the listener's base URL, however many trailing slashes it has. */
+export function releaseUrl(baseUrl: string): string {
+  return `${trimTrailingSlashes(baseUrl)}/v1/release`;
+}
+
+/** The relay's control listener at `target.url`, authorized by `target.token`. */
 export function httpRelayReleaser(
-  baseUrl: string,
-  token: string,
+  target: RelayReleaseTarget,
   fetchImpl: typeof fetch = fetch,
 ): RelayReleaser {
-  const url = `${baseUrl.replace(/\/+$/, '')}/v1/release`;
   return {
     async release(worker, workspaceKey, signal) {
-      const res = await fetchImpl(url, {
+      const res = await fetchImpl(releaseUrl(target.url), {
         method: 'POST',
-        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${target.token}`, 'content-type': 'application/json' },
         body: JSON.stringify({ worker, workspaceKey }),
         signal,
       });
@@ -83,17 +100,19 @@ export function httpRelayReleaser(
 }
 
 /**
- * The releaser, or undefined when SH_RELAY_CONTROL_URL is unset (release off: nothing is sent and
- * no record changes). Set, it must be an absolute http(s) URL, and MOCA_RELAY_RELEASE_TOKEN must be
- * present, at least 32 characters, and differ from every bearer in `others` (the control plane's
- * own: a janitor or host token that also released workspaces would erase the separation the
- * release bearer exists for), or the control plane does not boot. Errors name variables only.
+ * The release settings, or undefined when SH_RELAY_CONTROL_URL is unset (release off: nothing is
+ * sent and no record changes). Read into the config by configFromEnv, as every other control-plane
+ * secret is (the janitor's, the installer's, the operator inference token), and used at the request
+ * that needs it (releaserOf). Set, the URL must be an absolute http(s) URL, and
+ * MOCA_RELAY_RELEASE_TOKEN must be present, at least 32 characters, and differ from every bearer in
+ * `others` (the control plane's own: a janitor or host token that also released workspaces would
+ * erase the separation the release bearer exists for), or the control plane does not boot. Errors
+ * name variables only.
  */
-export function relayReleaserFromEnv(
+export function relayReleaseFromEnv(
   env: NodeJS.ProcessEnv,
   others: readonly string[] = [],
-  fetchImpl?: typeof fetch,
-): RelayReleaser | undefined {
+): RelayReleaseTarget | undefined {
   const raw = env.SH_RELAY_CONTROL_URL?.trim();
   if (!raw) return undefined;
   let u: URL;
@@ -117,7 +136,21 @@ export function relayReleaserFromEnv(
       'MOCA_RELAY_RELEASE_TOKEN must differ from every other control-plane secret and bearer',
     );
   }
-  return httpRelayReleaser(raw, token, fetchImpl);
+  return { url: raw, token };
+}
+
+/**
+ * The releaser a request uses: the injected one (tests), else the relay's control listener from
+ * the config, else none (release off).
+ */
+export function releaserOf(deps: {
+  relayRelease?: RelayReleaser;
+  fetchImpl?: typeof fetch;
+  config: { relayRelease?: RelayReleaseTarget };
+}): RelayReleaser | undefined {
+  if (deps.relayRelease) return deps.relayRelease;
+  const target = deps.config.relayRelease;
+  return target ? httpRelayReleaser(target, deps.fetchImpl) : undefined;
 }
 
 /**

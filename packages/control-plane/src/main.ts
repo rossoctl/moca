@@ -46,7 +46,7 @@ import { keyIdFor, makeSigner, parseKeyset, publicKeyFromBase64 } from './token.
 import { resolveVersion } from './version.js';
 import { VaultCredentialStore, vaultTokenSource } from './vault-store.js';
 import { withCredentials } from './systemd-credentials.js';
-import { relayReleaserFromEnv, type RelayReleaser } from './relay-release.js';
+import { relayReleaseFromEnv } from './relay-release.js';
 import { parseSandboxTiers } from './sandbox-tiers.js';
 import {
   routeProfileFromEnv,
@@ -337,6 +337,11 @@ function grantTtlsFromEnv(env: NodeJS.ProcessEnv): Pick<CpConfig, 'grantTtlS' | 
 }
 
 export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
+  // #338: the relay's control listener, on every profile; checked here, at boot, like the rest.
+  return withRelayRelease(env, profileConfigFromEnv(env));
+}
+
+function profileConfigFromEnv(env: NodeJS.ProcessEnv): CpConfig {
   required(env, 'SH_SESSION_TOKEN_PRIVATE_KEY');
   // Before SH_IDENTITY_PROVIDER is read here or in identityProviderFromEnv: a misspelled name
   // would otherwise leave it unset and serve github (#723).
@@ -787,9 +792,6 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
   // or redeem a grant must not reach the first request under `multi`.
   const grantRing = grantRingFromEnv(env, verifyKeys);
   checkGrantRedemption(config, grantRing !== undefined, env.MOCA_INFERENCE_ADDR !== undefined);
-  // #338: the relay's control listener, only with SH_RELAY_CONTROL_URL; its bearer must differ
-  // from every bearer this control plane accepts. Before Redis, so a refusal leaves nothing open.
-  const release = releaserFrom(env, config);
   const client = createClient(redisClientOptions(env.REDIS_URL ?? 'redis://127.0.0.1:6379'));
   const sandboxProfile = config.routeProfile === 'sandbox';
   // The sandbox stores, on the sandbox profile and on combined (combined control plane spec §3.5).
@@ -887,25 +889,24 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
     newId: defaultNewId,
     runKubectl: defaultRunKubectl,
     log: defaultAuditLog,
-    ...release,
   };
 }
 
 /**
- * The relay releaser as a spreadable fragment, absent (not undefined) when release is off. Its
- * bearer must differ from every other secret this control plane holds: each of CONTROL_PLANE_SECRETS
- * but itself (so a secret added there is covered without a change here), and every egress and
- * template host bearer from the config.
+ * The relay control listener's settings (#338), into the config beside the other secrets, on every
+ * profile; absent without SH_RELAY_CONTROL_URL. Its bearer must differ from every other secret this
+ * control plane holds: each of CONTROL_PLANE_SECRETS but itself (so a secret added there is covered
+ * without a change here), and every egress and template host bearer from the config.
  */
-function releaserFrom(env: NodeJS.ProcessEnv, config: CpConfig): { relayRelease?: RelayReleaser } {
-  const relayRelease = relayReleaserFromEnv(env, [
+function withRelayRelease(env: NodeJS.ProcessEnv, config: CpConfig): CpConfig {
+  const relayRelease = relayReleaseFromEnv(env, [
     ...CONTROL_PLANE_SECRETS.filter((n) => n !== 'MOCA_RELAY_RELEASE_TOKEN')
       .map((n) => env[n])
       .filter((v): v is string => !!v),
     ...(config.sandbox?.egress?.hosts.map((h) => h.token) ?? []),
     ...(config.templateHosts?.map((h) => h.token) ?? []),
   ]);
-  return relayRelease ? { relayRelease } : {};
+  return relayRelease ? { ...config, relayRelease } : config;
 }
 
 const isMainModule = process.argv[1] === fileURLToPath(import.meta.url);

@@ -82,8 +82,10 @@ import type { SandboxStore } from './sandbox-store.js';
 import {
   RELEASE_BOUND_MS,
   inBackground,
+  releaserOf,
   withinBound,
   type RelayReleaser,
+  type RelayReleaseTarget,
 } from './relay-release.js';
 import { SANDBOX_HANDLERS, requireActive, resolveForUse } from './sandbox-handlers.js';
 import type { TemplateHost } from './host-config.js';
@@ -119,6 +121,12 @@ export interface CpConfig {
   routeProfile?: RouteProfile;
   /** The template hosts (SH_TEMPLATE_HOSTS, template lifecycle spec §6.1); absent or empty: none. */
   templateHosts?: TemplateHost[];
+  /**
+   * The relay's control listener and its release-only bearer (#338, relay-release.ts), from
+   * SH_RELAY_CONTROL_URL and MOCA_RELAY_RELEASE_TOKEN. Absent, nothing is released and no record
+   * changes; idle reclaim on the worker frees the workspace, as before.
+   */
+  relayRelease?: RelayReleaseTarget;
   /**
    * How many reverse proxies in front of the control plane append to X-Forwarded-For
    * (`SH_TRUSTED_PROXY_HOPS`); absent or 0 means none, and the socket peer is the source.
@@ -278,9 +286,8 @@ export interface CpDeps {
   /** The sandbox resource (SBX0 §5); present on the sandbox profile only. */
   sandboxes?: SandboxStore;
   /**
-   * The relay's control listener (#338, relay-release.ts): releases an ended sandbox's or session's
-   * workspace on its worker. Absent (SH_RELAY_CONTROL_URL unset), nothing is released and no record
-   * changes; idle reclaim on the worker frees the workspace, as before.
+   * A releaser to use instead of the relay's control listener (`config.relayRelease`, #338): a
+   * test seam. Production leaves it absent and releaserOf builds the listener's from the config.
    */
   relayRelease?: RelayReleaser;
   /** How long a release may hold up a DELETE or the sweep; RELEASE_BOUND_MS. A test seam. */
@@ -366,7 +373,7 @@ async function releaseSessionWorkspace(
   await withinBound(deps.releaseBoundMs ?? RELEASE_BOUND_MS, async (signal) => {
     let outcome: string;
     try {
-      outcome = await deps.relayRelease!.release(worker, rec.sessionId, signal);
+      outcome = await releaserOf(deps)!.release(worker, rec.sessionId, signal);
     } catch (err) {
       console.error(
         `[control-plane] the release of session ${rec.sessionId}'s workspace on ${worker} was not ` +
@@ -1402,7 +1409,7 @@ export const HANDLERS: Record<string, Handler> = {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
     const inFlight = await turnInFlight(rec.sessionId, deps);
     // #338: where the session's workspace lives, read BEFORE the cascade deletes the runtime hash.
-    const runtime = deps.relayRelease ? await deps.index.getRuntime(rec.sessionId) : undefined;
+    const runtime = releaserOf(deps) ? await deps.index.getRuntime(rec.sessionId) : undefined;
     await deps.index.cascadeDelete(rec);
     // Released only now that the delete has committed: a released key refuses new Execs, so a
     // release before a delete that then failed would strand a live session. In the background,

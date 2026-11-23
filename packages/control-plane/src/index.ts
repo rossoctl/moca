@@ -105,7 +105,9 @@ export { credentialValue, withCredentials } from './systemd-credentials.js';
 export {
   RELEASE_BOUND_MS,
   httpRelayReleaser,
-  relayReleaserFromEnv,
+  relayReleaseFromEnv,
+  releaserOf,
+  type RelayReleaseTarget,
   type ReleaseAnswer,
   type RelayReleaser,
 } from './relay-release.js';

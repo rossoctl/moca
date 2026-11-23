@@ -88,6 +88,7 @@ import {
   RELEASE_CLAIM_TTL_S,
   RELEASE_SWEEP_CONCURRENCY,
   inBackground,
+  releaserOf,
   withinBound,
   type ReleaseAnswer,
 } from './relay-release.js';
@@ -600,7 +601,7 @@ async function releaseSandbox(
   }
   let answer: ReleaseAnswer;
   try {
-    answer = await deps.relayRelease!.release(rec.worker, rec.wsk, signal);
+    answer = await releaserOf(deps)!.release(rec.worker, rec.wsk, signal);
   } catch (err) {
     console.error(
       `[control-plane] the release of sandbox ${rec.id}'s workspace on ${rec.worker} was not ` +
@@ -640,7 +641,7 @@ async function releaseEnded(
   nowS: number,
   subject: string,
 ): Promise<void> {
-  if (!deps.relayRelease) return;
+  if (!releaserOf(deps)) return;
   const due = recs.filter((r) => !isLive(r, nowS) && r.releasedAt === undefined);
   if (due.length === 0) return;
   await withinBound(deps.releaseBoundMs ?? RELEASE_BOUND_MS, async (signal) => {
@@ -3129,7 +3130,7 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     // sandbox. Also after a delete that found it ended already ('already'), when no release was
     // answered yet. In the background, never awaited: it neither fails nor delays this DELETE, it
     // has its own bound, and unanswered, the janitor's sweep sends it again.
-    if (rec.releasedAt === undefined && deps.relayRelease) {
+    if (rec.releasedAt === undefined && releaserOf(deps)) {
       const ended = { ...rec, deletedAt: rec.deletedAt ?? now };
       const sub = ctx.principal!.sub;
       inBackground(`the release of sandbox ${rec.id}'s workspace`, () =>

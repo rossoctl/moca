@@ -560,7 +560,7 @@ async function freePort(): Promise<number> {
 describe('depsFromEnv: the relay release (#338)', () => {
   const RELEASE = 'r'.repeat(64); // notsecret
   const URL_ = 'http://sandbox-relay-control:9445';
-  it('wires a releaser only with SH_RELAY_CONTROL_URL', async () => {
+  it('configures the release only with SH_RELAY_CONTROL_URL', async () => {
     const off = depsFromEnv({ ...baseEnv, MOCA_RELAY_RELEASE_TOKEN: RELEASE });
     const on = depsFromEnv({
       ...baseEnv,
@@ -568,8 +568,8 @@ describe('depsFromEnv: the relay release (#338)', () => {
       MOCA_RELAY_RELEASE_TOKEN: RELEASE,
     });
     try {
-      expect('relayRelease' in off).toBe(false);
-      expect(on.relayRelease).toBeDefined();
+      expect('relayRelease' in off.config).toBe(false);
+      expect(on.config.relayRelease).toEqual({ url: URL_, token: RELEASE });
     } finally {
       await off.close?.();
       await on.close?.();
