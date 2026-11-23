@@ -308,15 +308,15 @@ func TestInterceptSNIMismatchClosed(t *testing.T) {
 }
 
 func TestInterceptLeafUnavailable503(t *testing.T) {
-	var expired atomic.Bool // set after setup: NewLeafCA refuses an expired CA
+	var at atomic.Int64 // the clock once set, after setup: NewLeafCA refuses an expired CA
 	e := newICEnv(t, icOpts{leafNow: func() time.Time {
-		if expired.Load() {
-			return time.Now().Add(49 * time.Hour) // past newTestCA's NotAfter
+		if n := at.Load(); n != 0 {
+			return time.Unix(0, n)
 		}
 		return time.Now()
 	}})
 	e.pol.Set(e.cred("gh", "/", authHdr("Bearer real")))
-	expired.Store(true)
+	at.Store(e.guestCA.cert.NotAfter.UnixNano())
 	g := e.open()
 	if err := g.tc.Handshake(); err == nil {
 		t.Fatal("handshake succeeded with an expired interception CA")
