@@ -220,6 +220,56 @@ describe('configFromEnv', () => {
     }
   });
 
+  // #394: the notification allowlist is the ONLY SSRF control on a URL the control plane fetches
+  // for a user, so its boot contract is tested like SH_MODEL_CATALOG_HOSTS above: off unless the
+  // operator opts in, and a refusal to start rather than a surprise at first delivery.
+  it('leaves MOCA_NOTIFY_ALLOW empty when unset, so notifications are off by default', () => {
+    expect(configFromEnv(baseEnv).notify.allow).toEqual([]);
+    expect(configFromEnv({ ...baseEnv, MOCA_NOTIFY_ALLOW: '' }).notify.allow).toEqual([]);
+    expect(configFromEnv({ ...baseEnv, MOCA_NOTIFY_ALLOW: ' , ' }).notify.allow).toEqual([]);
+  });
+
+  it('parses MOCA_NOTIFY_ALLOW with the egress destination parser', () => {
+    expect(
+      configFromEnv({ ...baseEnv, MOCA_NOTIFY_ALLOW: ' ntfy.sh , Hooks.example:8443/moca ' }).notify
+        .allow,
+    ).toEqual([
+      { host: 'ntfy.sh', port: 443, pathPrefix: '/' },
+      { host: 'hooks.example', port: 8443, pathPrefix: '/moca' },
+    ]);
+  });
+
+  it('refuses to boot on a MOCA_NOTIFY_ALLOW entry that is not host[:port][/prefix]', () => {
+    for (const bad of ['https://ntfy.sh', 'ntfy.sh:0', 'ntfy sh', 'a:1:2', 'ntfy.sh/a/../b']) {
+      expect(() => configFromEnv({ ...baseEnv, MOCA_NOTIFY_ALLOW: bad }), bad).toThrow(
+        /MOCA_NOTIFY_ALLOW/,
+      );
+    }
+  });
+
+  it('trims trailing slashes off MOCA_NOTIFY_BASE_URL, and omits it when unset', () => {
+    expect(configFromEnv(baseEnv).notify.baseUrl).toBeUndefined();
+    expect(
+      configFromEnv({ ...baseEnv, MOCA_NOTIFY_BASE_URL: 'https://moca.example//' }).notify.baseUrl,
+    ).toBe('https://moca.example');
+  });
+
+  it('defaults the notification rate limits to 5s / 60 per hour / 10 failures', () => {
+    expect(configFromEnv(baseEnv).notify).toMatchObject({
+      minIntervalS: 5,
+      perHour: 60,
+      failMax: 10,
+    });
+    expect(
+      configFromEnv({
+        ...baseEnv,
+        MOCA_NOTIFY_MIN_INTERVAL_S: '30',
+        MOCA_NOTIFY_PER_HOUR: '12',
+        MOCA_NOTIFY_FAIL_MAX: '3',
+      }).notify,
+    ).toMatchObject({ minIntervalS: 30, perHour: 12, failMax: 3 });
+  });
+
   it('reads SH_SANDBOX_TIERS, and refuses to boot on a tier list it cannot serve', () => {
     const base = baseEnv;
     expect(configFromEnv(base).sandboxTiers).toBeNull();
