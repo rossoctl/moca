@@ -156,4 +156,20 @@ describe('renderNotification', () => {
   it('omits the link when the deployment set no base url', () => {
     expect(renderNotification([ev({ state: 'paused', gate: 'g' })]).approveUrl).toBeUndefined();
   });
+
+  it('clips a long gate summary, which is model output and otherwise unbounded', () => {
+    // ntfy rejects a body past its message-size limit (4 KiB on ntfy.sh) and a rejected delivery
+    // holds the cursor, so an unclipped summary would retry forever and mute the subject for good.
+    const r = renderNotification([ev({ state: 'paused', gate: 'x'.repeat(10_000) })]);
+    expect(r.message.length).toBeLessThan(1_100);
+    expect(r.message.endsWith('…[truncated]')).toBe(true);
+  });
+
+  it('reads `lost` as a failure, not as a success', () => {
+    // The reaper writes `lost` for a turn nobody ever picked up, with no reason. Under the old
+    // green-tick default it reached the phone looking like work that finished.
+    const r = renderNotification([ev({ state: 'lost' })]);
+    expect(r.message).toBe('lost');
+    expect(r.tags).toEqual(['x']);
+  });
 });

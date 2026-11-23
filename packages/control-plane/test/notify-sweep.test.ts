@@ -168,6 +168,22 @@ describe('sweepNotifications', () => {
     expect(sent).not.toHaveBeenCalled();
   });
 
+  it('stops posting to a sink whose host left MOCA_NOTIFY_ALLOW after it was stored', async () => {
+    await configure();
+    await emit(ev());
+    const before = (await deps.notify!.get(alice.sub))!.cursor;
+    // The operator narrowed the allowlist; the stored webhook host is no longer on it. No route lets
+    // an admin edit another subject's config, so the send-time check is the only thing that stops it.
+    deps.config.notify.allow = [parseDestination('ntfy.example.com')];
+
+    expect(await sweepNotifications(deps)).toBe(0);
+    expect(sent).not.toHaveBeenCalled();
+    // Counted as a failure, not silently skipped: the cursor holds and GET says why.
+    const cfg = await deps.notify!.get(alice.sub);
+    expect(cfg?.failures).toBe(1);
+    expect(cfg?.cursor).toBe(before);
+  });
+
   it('one owner failure does not stop the pass', async () => {
     await configure();
     await emit(ev());

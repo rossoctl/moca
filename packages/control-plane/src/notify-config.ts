@@ -1,6 +1,7 @@
 import { CpError } from './errors.js';
 import type { Destination } from './egress-destination.js';
 import { TURN_STATES, type TurnEvent, type TurnState } from './turn-record.js';
+import { clip } from './turn-result.js';
 
 /**
  * The #394 notifier's pure core: validation, the egress allowlist test and rendering. No Redis and
@@ -24,6 +25,14 @@ export const DEFAULT_NOTIFY_STATES: readonly TurnState[] = ['paused', 'failed'];
 const MAX_SINKS = 2;
 const NTFY_TOPIC_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_TOKEN_CHARS = 512;
+
+/**
+ * The message is the GATE's summary, which is model output: `harness/src/gate.ts` checks that it is
+ * a string and nothing more. ntfy rejects a body over its message-size limit (4 KiB on ntfy.sh), and
+ * a rejected delivery holds the cursor -- so one long summary would retry forever and the subject
+ * would never be told anything again. Clipped here, in the one place both sinks read from.
+ */
+const MESSAGE_BYTES = 1024;
 
 export interface NotifySink {
   kind: 'webhook' | 'ntfy';
@@ -197,7 +206,10 @@ export interface Rendered {
  */
 export function renderNotification(events: TurnEvent[], baseUrl?: string): Rendered {
   const paused = events.find((e) => e.state === 'paused');
-  const failed = events.find((e) => e.state === 'failed');
+  // `lost` counts as a failure: the reaper writes it for a turn nobody ever picked up, and it
+  // carries no `reason` (turn-store.ts:647), so without this it would reach the phone under a green
+  // tick and the generic "N updates" line -- work that silently never ran, reported as finished.
+  const failed = events.find((e) => e.state === 'failed' || e.state === 'lost');
   const counts = new Map<TurnState, number>();
   for (const e of events) counts.set(e.state, (counts.get(e.state) ?? 0) + 1);
 
@@ -207,15 +219,20 @@ export function renderNotification(events: TurnEvent[], baseUrl?: string): Rende
       : `moca: ${NOTIFY_STATES.filter((s) => counts.has(s))
           .map((s) => `${counts.get(s)} ${s}`)
           .join(', ')}`;
-  const message = paused?.gate ?? (failed?.reason ? `failed: ${failed.reason}` : '');
+  // The state names itself, so a `lost` with no reason still says `lost` rather than falling through
+  // to the generic count.
+  const message =
+    paused?.gate ?? (failed ? `${failed.state}${failed.reason ? `: ${failed.reason}` : ''}` : '');
 
   const link = paused && baseUrl ? approveUrl(baseUrl, paused) : undefined;
   return {
     title,
-    message:
+    message: clip(
       message !== ''
         ? message
         : `${events.length} update${events.length === 1 ? '' : 's'} on your subagents`,
+      MESSAGE_BYTES,
+    ),
     priority: paused ? 4 : 3,
     tags: paused ? ['warning'] : failed ? ['x'] : ['white_check_mark'],
     ...(link ? { approveUrl: link } : {}),

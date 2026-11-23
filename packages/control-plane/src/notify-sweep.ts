@@ -1,5 +1,5 @@
 import type { CpDeps } from './handlers.js';
-import { renderNotification } from './notify-config.js';
+import { allowsUrl, renderNotification } from './notify-config.js';
 // `notify-handlers.js` imports TYPES from handlers.js only, like turn-handlers.js, so reaching it
 // from here cannot re-enter the handlers cycle. Keep it that way.
 import { readNotifySecrets } from './notify-handlers.js';
@@ -70,7 +70,11 @@ async function sweepOne(
   // widening the summary (or the cursor advance) accordingly.
   const events = await turns.readEvents(subject, cfg.cursor, limit);
   if (events.length === 0) return false;
-  const head = events[events.length - 1]!.cursor ?? cfg.cursor;
+  // `cursor` is optional on TurnEvent only because a WRITER has no stream id yet; `decodeTurnEvent`
+  // always sets it from the entry id, so a read event has one. Asserted rather than defaulted to
+  // `cfg.cursor`: that default would write the cursor back unchanged and re-deliver this same batch
+  // on every pass -- a quiet loop in place of a loud bug.
+  const head = events[events.length - 1]!.cursor!;
   const matching = events.filter((e) => cfg.states.includes(e.state));
 
   // Nothing wanted in this batch: advance anyway. A subject who asked for `paused` only must not
@@ -97,20 +101,28 @@ async function sweepOne(
     return false;
   }
 
-  const sentOk = await deliver(
-    { fetchImpl: deps.fetchImpl ?? fetch },
-    cfg.sinks,
-    {
-      // The batch's head cursor, not deps.newId(): a retry of this same unadvanced batch (a crash
-      // right after this call, or two overlapping passes) must carry the SAME id, or the dedupe
-      // advice in notify-send.ts's NotifyPayload comment is not true.
-      deliveryId: head,
-      timestamp: Math.floor(now / 1000),
-      summary: renderNotification(matching, deps.config.notify.baseUrl),
-      events: matching,
-    },
-    await readNotifySecrets(deps, subject),
-  );
+  // The allowlist is re-checked at SEND time, not only at the PUT that stored the sink: an operator
+  // who takes a host OUT of MOCA_NOTIFY_ALLOW must stop this process posting to the sinks saved
+  // while it was in, and there is no route an admin can use to edit another subject's config. A
+  // now-disallowed sink counts as a failed delivery rather than a silent skip -- the cursor holds and
+  // `failures`/`mutedUntil` on GET /v1/notifications is what tells the subject to re-PUT.
+  const allowed = cfg.sinks.every((s) => allowsUrl(s.url, deps.config.notify.allow));
+  const sentOk =
+    allowed &&
+    (await deliver(
+      { fetchImpl: deps.fetchImpl ?? fetch },
+      cfg.sinks,
+      {
+        // The batch's head cursor, not deps.newId(): a retry of this same unadvanced batch (a crash
+        // right after this call, or two overlapping passes) must carry the SAME id, or the dedupe
+        // advice in notify-send.ts's NotifyPayload comment is not true.
+        deliveryId: head,
+        timestamp: Math.floor(now / 1000),
+        summary: renderNotification(matching, deps.config.notify.baseUrl),
+        events: matching,
+      },
+      await readNotifySecrets(deps, subject),
+    ));
 
   if (!sentOk) {
     const failures = cfg.failures + 1;
