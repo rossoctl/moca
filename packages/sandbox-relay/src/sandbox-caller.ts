@@ -172,6 +172,8 @@ export interface ReleaseAuditLine {
   audit: 'sandbox_workspace_release';
   ts: string;
   via?: 'control';
+  /** On a throttled refused-bearer line: the refusals since the last line that it stands for. */
+  suppressed?: number;
   sub?: string;
   sbx?: string;
   wrk: string;
@@ -378,6 +380,7 @@ export function makeAudit(write: ((line: string) => void) | undefined, withComma
         audit: 'sandbox_workspace_release',
         ts: new Date(t0).toISOString(),
         ...(l.via !== undefined ? { via: l.via } : {}),
+        ...(l.suppressed !== undefined ? { suppressed: l.suppressed } : {}),
         ...(l.claims ? { sub: l.claims.sub, sbx: l.claims.sbx } : {}),
         wrk: utf8Prefix(l.wrk, AUDIT_WRK_BYTES),
         ms: Math.max(0, Date.now() - t0),

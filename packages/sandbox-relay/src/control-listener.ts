@@ -130,7 +130,16 @@ export interface ControlListenerOpts {
   timeoutMs?: number;
   /** Where the audit lines go. Defaults to stdout. */
   log?: (line: string) => void;
+  /** At most one refused-bearer line per this many ms. Defaults to REFUSED_LOG_INTERVAL_MS. */
+  refusedLogIntervalMs?: number;
 }
+
+/**
+ * Refused-bearer lines, at most one per minute: anyone who can reach the port can send bad bearers
+ * as fast as it likes, and each would otherwise be a line. The next line counts the refusals it
+ * stood for (`suppressed`), so none goes unrecorded; the bearer itself is never logged.
+ */
+export const REFUSED_LOG_INTERVAL_MS = 60_000;
 
 /** One answer: the HTTP status, the JSON body, and the audit line's outcome and reason. */
 interface Answer {
@@ -235,22 +244,27 @@ function send(
   res.end(text);
 }
 
-/** The body, at most MAX_CONTROL_BODY_BYTES; undefined past that, or on a request that broke off. */
-function readBody(req: IncomingMessage): Promise<string | undefined> {
+/**
+ * The body, at most MAX_CONTROL_BODY_BYTES; `too_large` past that (the rest is not kept, and the
+ * caller answers 413 before closing), `broken` on a request that broke off.
+ */
+function readBody(req: IncomingMessage): Promise<string | 'too_large' | 'broken'> {
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let n = 0;
+    let over = false;
     req.on('data', (c: Buffer) => {
+      if (over) return;
       n += c.length;
       if (n > MAX_CONTROL_BODY_BYTES) {
-        resolve(undefined);
-        req.destroy();
+        over = true;
+        resolve('too_large');
         return;
       }
       chunks.push(c);
     });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    req.on('error', () => resolve(undefined));
+    req.on('error', () => resolve('broken'));
   });
 }
 
@@ -276,13 +290,17 @@ function parseRelease(text: string): { worker: string; workspaceKey: string } | 
  * 401 a missing or wrong bearer; 400 a malformed body; 413 a body over the ceiling; 404 any other
  * path; 405 another method; 503 `busy` (the in-flight cap, or the worker's own) or `unavailable`
  * (no live worker, a disconnect); 504 the worker's silence past the timeout; 403 a workload
- * sandbox's worker; 502 a worker that refused the release. One audit line per authorized call,
- * and per refused bearer; the bearer itself is never logged.
+ * sandbox's worker; 502 a worker that refused the release. One audit line per authorized call;
+ * refused bearers at most one line per REFUSED_LOG_INTERVAL_MS, counting the rest; the bearer
+ * itself is never logged.
  */
 export function buildControlServer(relay: Relay, opts: ControlListenerOpts): HttpServer {
   const audit = makeAudit(opts.log ?? ((l: string) => console.log(l)), false);
   const timeoutMs = opts.timeoutMs ?? RELEASE_TIMEOUT_MS;
   let inflight = 0;
+  const refusedEveryMs = opts.refusedLogIntervalMs ?? REFUSED_LOG_INTERVAL_MS;
+  let refusedLoggedAt = -Infinity;
+  let refusedSuppressed = 0;
   return createServer((req, res) => {
     const t0 = Date.now();
     const path = (req.url ?? '').split('?')[0];
@@ -295,19 +313,35 @@ export function buildControlServer(relay: Relay, opts: ControlListenerOpts): Htt
       return;
     }
     if (!opts.validate(bearer(req))) {
-      audit.release(t0, {
-        via: 'control',
-        wrk: '',
-        outcome: 'refused',
-        reason: 'release authentication failed',
-      });
+      if (t0 - refusedLoggedAt >= refusedEveryMs) {
+        audit.release(t0, {
+          via: 'control',
+          wrk: '',
+          outcome: 'refused',
+          reason: 'release authentication failed',
+          ...(refusedSuppressed > 0 ? { suppressed: refusedSuppressed } : {}),
+        });
+        refusedLoggedAt = t0;
+        refusedSuppressed = 0;
+      } else {
+        refusedSuppressed++;
+      }
       send(res, 401, { error: 'unauthorized' });
       return;
     }
     void (async () => {
       const text = await readBody(req);
-      if (text === undefined) {
-        send(res, 413, { error: 'invalid_request', message: 'the body is too large' });
+      if (text === 'broken') return;
+      if (text === 'too_large') {
+        // Answered first, then the connection closed: destroyed before the answer, the caller
+        // would see a reset rather than the 413.
+        res.on('finish', () => req.destroy());
+        send(
+          res,
+          413,
+          { error: 'invalid_request', message: 'the body is too large' },
+          { connection: 'close' },
+        );
         return;
       }
       const parsed = parseRelease(text);

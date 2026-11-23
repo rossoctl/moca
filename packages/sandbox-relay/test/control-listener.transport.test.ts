@@ -5,9 +5,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ReleaseOutcome } from '@moca/k8s-sandbox';
 import {
   CONTROL_RELEASE_MAX_INFLIGHT,
+  MAX_CONTROL_BODY_BYTES,
   RELEASE_PATH,
+  buildControlServer,
+  listenControl,
   makeReleaseTokenValidator,
 } from '../src/control-listener.js';
+import { createRelay } from '../src/relay.js';
 import { makeDefaultValidateToken, makeExecAuth, startRelay } from '../src/main.js';
 import { RELEASE_CAPABILITY } from '../src/relay.js';
 import {
@@ -170,6 +174,44 @@ describe('control listener: the release bearer alone (#338)', () => {
       status: 405,
       body: { error: 'method_not_allowed' },
     });
+  });
+
+  it('answers 413 to a body over the ceiling, before closing: never a reset', async () => {
+    const r = await controlRelay();
+    const big = JSON.stringify({
+      worker: 'sbx_default',
+      workspaceKey: 'k'.repeat(MAX_CONTROL_BODY_BYTES * 2),
+    });
+    expect(await post(r.control!, {}, RELEASE, { raw: big })).toEqual({
+      status: 413,
+      body: { error: 'invalid_request', message: 'the body is too large' },
+    });
+  });
+
+  it('throttles refused-bearer lines, counting the refusals each next line stands for', async () => {
+    const lines: string[] = [];
+    const relay = createRelay({ records, validateToken: () => true });
+    const server = buildControlServer(relay, {
+      validate: makeReleaseTokenValidator({ MOCA_RELAY_RELEASE_TOKEN: RELEASE }).validate,
+      log: (l) => lines.push(l),
+      refusedLogIntervalMs: 300,
+    });
+    const port = await listenControl(server, '127.0.0.1:0');
+    closers.push(() => new Promise<void>((res) => server.close(() => res())));
+    const base = `http://127.0.0.1:${port}`;
+    const bad = 'x'.repeat(64);
+    for (let i = 0; i < 5; i++) expect((await post(base, REQ, bad)).status).toBe(401);
+    const refused = () =>
+      lines
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+        .filter((l) => l.outcome === 'refused');
+    expect(refused()).toHaveLength(1);
+    expect(refused()[0]).not.toHaveProperty('suppressed');
+    await new Promise((res) => setTimeout(res, 350));
+    expect((await post(base, REQ, bad)).status).toBe(401);
+    expect(refused()).toHaveLength(2);
+    expect(refused()[1]).toMatchObject({ suppressed: 4, reason: 'release authentication failed' });
+    expect(lines.join('\n')).not.toContain(bad);
   });
 
   it('refuses a malformed body with 400', async () => {
