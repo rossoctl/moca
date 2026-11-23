@@ -223,26 +223,56 @@ describe('sweepGates (#393, design §3)', () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const paused = await pausedTurn();
-      deps.turnQueue.fails.add('t-id-1');
-      await deps.turns.create(
-        rec({
-          turnId: 't-human',
-          createdAt: deps.nowOf(),
-          resumeOf: paused.turnId,
-          idempotencyKey: 's-1:gate:0',
-        }),
-      );
-      await deps.turns.finalize('t-human', 'done', deps.nowOf());
+      // DURING the window, not before it: the answer has to arrive after this pass read the gate as
+      // unresumed, or the pre-`submitResume` check catches it and there is no failure to guard.
+      const enqueue = vi
+        .spyOn(deps.turnQueue, 'enqueue')
+        .mockImplementation(async (turnId: string) => {
+          await deps.turns.create(
+            rec({
+              turnId: 't-human',
+              createdAt: deps.nowOf(),
+              resumeOf: paused.turnId,
+              idempotencyKey: 's-1:gate:0',
+            }),
+          );
+          // Finished, which releases the gate-keyed key: `resumeOf` is all that is left to read.
+          await deps.turns.finalize('t-human', 'done', deps.nowOf());
+          throw new Error(`enqueue refused ${turnId}`);
+        });
       expect(await sweepGates(deps)).toBe(0);
+      expect(enqueue).toHaveBeenCalledTimes(1);
       expect(await deps.turns.dueGates(deps.nowOf())).toEqual([]);
       // A later pass therefore has nothing to retry, which is the point.
-      deps.turnQueue.fails.clear();
       expect(await sweepGates(deps)).toBe(0);
       expect(deps.turnQueue.ids).toEqual([]);
       expect(logged).toHaveBeenCalledTimes(1);
     } finally {
       logged.mockRestore();
     }
+  });
+
+  it('does not resume a gate whose member was STRANDED by an answered resume', async () => {
+    // `submitResume` claims the gate only after its enqueue, so a crash or a Redis error in between
+    // leaves the member on a gate that was answered. By the time a later pass reads it that resume
+    // has finished, and `toTerminal` released the gate-keyed idempotency key -- so the key no longer
+    // converges this pass onto it and a second resume would run the continuation twice.
+    const paused = await pausedTurn();
+    await deps.turns.create(
+      rec({
+        turnId: 't-orphan',
+        createdAt: deps.nowOf(),
+        resumeOf: paused.turnId,
+        idempotencyKey: 's-1:gate:0',
+      }),
+    );
+    // Finished, which is what releases the key: the only durable evidence left is `resumeOf`.
+    await deps.turns.finalize('t-orphan', 'done', deps.nowOf());
+    expect(await deps.turns.idempotencyHolder(paused.owner, 's-1:gate:0')).toBeNull();
+    expect(await sweepGates(deps)).toBe(0);
+    expect(deps.turnQueue.ids).toEqual([]);
+    // The stale member is taken out rather than handed back: the gate IS answered.
+    expect(await deps.turns.dueGates(deps.nowOf())).toEqual([]);
   });
 
   it('does not count a resume a human created', async () => {

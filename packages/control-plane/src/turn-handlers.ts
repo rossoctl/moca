@@ -342,9 +342,23 @@ export const TURN_HANDLERS: Record<string, Handler> = {
     // A gated turn still `queued` or `running` holds the gate too, which is why this asks
     // `findGateHolder` rather than reading `paused` alone: the first turn is unpaused for the whole
     // of its run, and a `paused`-only read admitted a second gated turn through all of it.
+    //
+    // Hoisted above the guard, because the guard has to know it: a RETRY of the gated submission
+    // that opened the gate is not a second gated turn.
+    const idempotencyKey = parsed.idempotencyKey ?? rec.sessionId;
     if (asksForGate(parsed.envelope)) {
       const holder = await turns.findGateHolder(rec.sessionId);
-      if (holder) {
+      // A holder on THIS key that is still running is the client's own submission coming back -- it
+      // lost the 202 (or never set a key, so the key is the session id, which is a plain retry). It
+      // falls through to `claimKey`, which answers with that same turn and enqueues nothing: the
+      // `202` with the existing turn id openapi promises for a live key. Refusing instead left a
+      // client unable to tell "succeeded, here is your turn" from "rejected".
+      //
+      // A PAUSED holder is refused even on its own key, and the order of these two tests is the
+      // reason: `paused` is terminal, so `toTerminal` has already released the key, and falling
+      // through would win it fresh and open the second gated turn this guard exists to prevent.
+      // The retry's answer there is the 409's own instruction -- answer the gate, do not resubmit.
+      if (holder && (holder.paused || holder.turn.idempotencyKey !== idempotencyKey)) {
         await refusal(deps, rec, 'gate_pending');
         throw new CpError(
           'gate_pending',
@@ -384,7 +398,6 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       );
     }
 
-    const idempotencyKey = parsed.idempotencyKey ?? rec.sessionId;
     const claim = await claimKey(turns, rec.owner, idempotencyKey, candidate);
     if (!claim.fresh) {
       // A resubmission on a live key returns the EXISTING turn and enqueues nothing (§4.3): a client

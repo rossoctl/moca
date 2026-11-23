@@ -315,6 +315,36 @@ describe('one open gate per session (#393)', () => {
     ).toBe(202);
   });
 
+  it('replays a RETRY of the gated submission that opened the gate', async () => {
+    // The gate guard runs before the idempotency claim, so it saw a client re-sending a 202 it never
+    // received as a second gated turn and refused it -- leaving that client unable to tell
+    // "succeeded, here is your turn" from "rejected", against the 202-on-a-live-key the API promises.
+    // No `idempotencyKey` here on purpose: the default is the session id, so this is the plain retry.
+    const d = turnDeps();
+    const sid = await session(d);
+    const first = await submit(d, sid, GATED_PROMPT);
+    const retry = await submit(d, sid, GATED_PROMPT);
+    expect(retry.status).toBe(202);
+    expect(retry.body).toEqual(first.body);
+    // Replayed, not re-run: one queue entry for the two submissions.
+    expect(d.turnQueue.ids).toEqual([(first.body as { turnId: string }).turnId]);
+    // And a retry on a DIFFERENT key is still a second gated turn, which is what the guard is for.
+    expect(await codeOf(() => submit(d, sid, { ...GATED_PROMPT, idempotencyKey: 'k2' }))).toBe(
+      'gate_pending',
+    );
+  });
+
+  it('refuses a same-key retry once that turn is PAUSED', async () => {
+    // `paused` is terminal, so its idempotency key has already been released -- a fall-through would
+    // win the key fresh and open the second gated turn the guard exists to prevent. The retry's
+    // answer here is the refusal's own instruction: answer the gate, do not resubmit.
+    const d = turnDeps();
+    const sid = await session(d);
+    await paused(d, sid);
+    expect(await codeOf(() => submit(d, sid, GATED_PROMPT))).toBe('gate_pending');
+    expect(d.turnQueue.ids).toEqual([]);
+  });
+
   it('400s on requireApproval sent with a converge submission', async () => {
     // Dropped silently until now, which ran an UNGATED turn for a caller who asked for a gate.
     const d = turnDeps();

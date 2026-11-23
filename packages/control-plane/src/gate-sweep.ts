@@ -52,6 +52,18 @@ export async function sweepGates(deps: CpDeps, limit = SWEEP_LIMIT): Promise<num
       // Claimed as late as possible: everything above is a read, and a claim that is not followed by
       // a submission strands the gate.
       if (!(await turns.claimGate(turnId))) continue;
+      // The member can be STALE: `submitResume` claims the gate only after its enqueue, so a crash
+      // or a Redis error in between leaves the member behind on a gate that was in fact answered.
+      // `toTerminal` then releases the gate-keyed idempotency key when that resume finishes, so the
+      // key no longer converges us onto it and this pass would build a SECOND resume from the same
+      // paused turn -- the continuation running twice, double spend for one decision.
+      //
+      // The same question the catch block below asks, and for the same reason it asks it; the
+      // difference is that this path has no exception to notice. `resumeOf` is what makes it
+      // answerable: it is durable, unlike the key. Nothing to hand back -- the claim above took the
+      // stale member out, which is exactly where an answered gate belongs.
+      const already = await turns.findPausedBySession(paused.sessionId);
+      if (already?.paused.turnId === paused.turnId && already.resumed) continue;
       let created: boolean;
       try {
         ({ created } = await submitResume(deps, paused, {

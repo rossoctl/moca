@@ -2094,6 +2094,11 @@ paths:
                     session's own durable state, so a second gated turn would park on the open gate
                     and take the decision meant for the first. Ungated turns are never refused by
                     this and may run alongside a gated one.
+
+                    A RETRY of the gated submission itself is not a second gated turn: on the same
+                    `idempotencyKey` as the running gated turn it replays `202` with that turn's id,
+                    like any other key replay. Once that turn is `paused` the key has been released,
+                    so the retry is refused `gate_pending` -- answer the gate instead of resending.
                 gateDeadlineS:
                   type: integer
                   minimum: 1
@@ -2166,7 +2171,8 @@ paths:
             has an earlier gated turn still running that will open one. One open gate per session
             (#393) -- the message names that turn. Answer a paused gate with
             `POST /v1/sessions/{id}/decision`, wait for a running one, or submit this turn without
-            `requireApproval`.
+            `requireApproval`. A retry on the same `idempotencyKey` as the still-running gated turn
+            replays `202` with its id rather than hitting this.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
