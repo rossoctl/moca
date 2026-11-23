@@ -101,7 +101,7 @@ async function turnOnSession(
  * shortcut: a stalled claimant and a crashed one are indistinguishable without a lease, and §5.1
  * rules out the Lua/WATCH/MULTI that would make claim-plus-record one step; upgrade when the key
  * can carry one (a TTL shorter than the record's, or a `claimedAt` plus a grace), which tells the
- * two apart and lets an unreadable holder be treated as live without the wedge.
+ * two apart and lets an unreadable holder be treated as live without the wedge -- issue #989.
  */
 async function claimKey(
   turns: TurnStore,
