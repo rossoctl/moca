@@ -18,6 +18,32 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
+## 1.38.0
+
+Push notifications for a subject's paused and finished subagents
+([#394](https://github.com/rossoctl/moca/issues/394)). Additive: three new routes, each
+authenticated and scoped to the caller's own subject.
+
+- `GET /v1/notifications` reads the caller's own config: `sinks`, `states`, the sweep's `cursor`,
+  `lastDeliveryAt`, `failures`, `mutedUntil`, and `secretMissing` when a webhook sink has no signing
+  key to deliver with.
+- `PUT /v1/notifications` stores or replaces it: `sinks` (one `webhook`, one `ntfy`, or both -- a
+  sink's `url` must be allowed by the deployment's `MOCA_NOTIFY_ALLOW`) and an optional `states`
+  (defaulting to `[paused, failed]`, drawn from every terminal state but `queued`/`running`). A
+  `webhook` sink's HMAC signing key is minted here and returned as `webhookSecret` in the response
+  body ONLY -- there is no route that reads it back, and a later PUT rotates it, which immediately
+  stops the old key verifying. An `ntfy` sink's `token` is stored the same way and likewise never
+  echoed.
+- `DELETE /v1/notifications` removes the config and both stored secrets; a second `DELETE` is a
+  204, same as removing nothing.
+- A background sweep (not a route) delivers: `POST` to a `webhook` sink carries
+  `X-Moca-Signature: sha256=<hex>`, an HMAC-SHA256 over `<timestamp>.<rawBody>` with the sink's own
+  key, plus `X-Moca-Delivery` and `X-Moca-Timestamp`. An `ntfy` sink is posted to its server's JSON
+  publish endpoint, with its token as a bearer header when one was given.
+- The feature is off end to end until the deployment sets `MOCA_NOTIFY_ALLOW`: a `PUT` refuses
+  every sink with `invalid_request` naming the unset variable, and the sweep that would deliver
+  never starts reading streams.
+
 ## 1.37.0
 
 A gate can be given a deadline ([#393](https://github.com/rossoctl/moca/issues/393)). Additive: two

@@ -235,6 +235,55 @@ Removal means closing the network path. The only cleanup the demos document is d
 file by hand. What stays behind on each profile is in
 [Users, enrollment and roles](../../reference/users-and-roles.md#when-a-user-leaves).
 
+## 7. Get notified when a subagent pauses or finishes
+
+Off until the operator sets `MOCA_NOTIFY_ALLOW` ([#394](https://github.com/rossoctl/moca/issues/394)):
+a comma-separated `host[:port][/prefix]` allowlist, the only control against a user-supplied sink
+URL reaching your instance metadata service, Redis, or the kube API from inside the control plane.
+A malformed entry refuses to boot, the same contract `SH_MODEL_CATALOG_HOSTS` has.
+
+Each user configures their own sink with `PUT /v1/notifications`:
+
+```bash
+curl -s -X PUT "$MOCA_URL/v1/notifications" -H "authorization: Bearer $TOKEN" -d '{
+  "sinks": [{"kind": "webhook", "url": "https://hooks.example.com/moca"}],
+  "states": ["paused", "failed"]
+}'
+```
+
+The response's `webhookSecret` is shown **exactly once**, at the PUT that mints it; there is no
+route that reads it back, and a later PUT rotates it. An `ntfy` sink takes `topic` instead of (and
+`token` alongside) a signing key:
+
+```bash
+curl -s -X PUT "$MOCA_URL/v1/notifications" -H "authorization: Bearer $TOKEN" -d '{
+  "sinks": [{"kind": "ntfy", "url": "https://ntfy.sh", "topic": "my-moca-abc123"}]
+}'
+```
+
+ntfy publishes anonymously unless `token` is given -- on a public server the topic name alone is
+the password, so pick one that is hard to guess. `GET /v1/notifications` reads the config back
+(never the secret); `DELETE /v1/notifications` removes it and both stored secrets.
+
+A webhook receiver verifies a delivery by recomputing
+`HMAC-SHA256(key, "<timestamp>.<rawBody>")` over the exact bytes received, comparing it to the hex
+in `X-Moca-Signature: sha256=<hex>` with a constant-time compare (`timingSafeEqual`), and rejecting
+a `X-Moca-Timestamp` more than a few minutes old -- the timestamp is inside the signed string so a
+captured body cannot be replayed later under a fresh header.
+
+Two deployment-wide limits, beyond the allowlist:
+
+- `MOCA_NOTIFY_MIN_INTERVAL_S` (default `5`) and `MOCA_NOTIFY_PER_HOUR` (default `60`) bound how
+  often one subject is paged; past the hourly cap the subject is muted for the rest of the rolling
+  window rather than paged with an hour-old backlog.
+- `MOCA_NOTIFY_FAIL_MAX` (default `10`) mutes a subject for an hour after that many _consecutive_
+  failed deliveries to their sink (a wrong URL, a dead receiver). Re-`PUT`ting the config is the
+  documented way back from either kind of mute.
+
+A push with a gate on it links to an approval page the push itself cannot carry a credential to --
+**that page 404s until [#467/B8b](https://github.com/rossoctl/moca/issues/467) lands**; until then,
+answer the gate from `mocactl` or the TUI as usual.
+
 ## What this does not give you
 
 - **Ownership holds at the API only.** Redis and port 8081 are unauthenticated.
