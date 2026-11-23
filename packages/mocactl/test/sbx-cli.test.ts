@@ -183,7 +183,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     it('credentials --help: every credentials form, and nothing else', async () => {
       const out = await help('credentials');
       for (const form of [
-        'credentials ls',
+        'credentials ls|list',
         'credentials add NAME',
         'credentials presets',
         'credentials delete NAME',
@@ -215,11 +215,13 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       expect(out).not.toContain('mocactl sbx quota [--json]');
     });
 
-    it('a subcommand narrows too: credentials ls is its own entry', async () => {
-      const list = await help('credentials', 'ls');
-      expect(list).toContain('mocactl sbx credentials ls [--json]');
-      expect(list).not.toContain('mocactl sbx credentials add');
-      expect(list).not.toContain('mocactl sbx credentials delete');
+    it('a subcommand narrows too, by either of its names: credentials ls and list', async () => {
+      for (const sub of ['ls', 'list']) {
+        const list = await help('credentials', sub);
+        expect(list).toContain('mocactl sbx credentials ls|list [--json]');
+        expect(list).not.toContain('mocactl sbx credentials add');
+        expect(list).not.toContain('mocactl sbx credentials delete');
+      }
     });
 
     it('a word that is not a subcommand is ignored: run -- CMD, an id', async () => {
@@ -236,7 +238,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       expect(await main(['sbx', 'credentials', 'ls', '--jsn'], env, io)).toBe(2);
       const err = io.errs.join('\n');
       expect(err).toMatch(/--jsn/);
-      expect(err).toContain('mocactl sbx credentials ls [--json]');
+      expect(err).toContain('mocactl sbx credentials ls|list [--json]');
       expect(err).not.toContain('mocactl sbx credentials add');
       expect(err).not.toContain('mocactl sbx up');
       // The error is the exit code: no list of the others, no Ctrl-C.

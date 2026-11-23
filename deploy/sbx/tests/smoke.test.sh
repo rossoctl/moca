@@ -150,11 +150,12 @@ credentials)
     rm -f "$MOCK_DIR/cred-${args[1]}"
     # MOCK_CRED_STALE=1: the proxy keeps serving the credential after its delete (a broken revocation).
     [[ "${MOCK_CRED_STALE:-}" != 1 ]] || : >"$MOCK_DIR/cred-stale-${args[1]}" ;;
-  # `credentials [list] [--json]`: the names this user owns, in cmdCredentials' JSON shape. The
+  # `credentials ls|list [--json]`: the names this user owns, in cmdCredentials' JSON shape (bare
+  # `credentials` is a usage error, as in mocactl, so a caller on the old bare form fails here). The
   # cleanup reads this to tell a credential that is not there from a delete that failed.
   # MOCK_CRED_LIST_FAIL=1: the listing itself fails (a refused connection, an expired session, a
   # proxy error page), which the cleanup must not read as "nothing is stored".
-  list | --json | '')
+  ls | list)
     [[ "${MOCK_CRED_LIST_FAIL:-}" != 1 ]] || { echo 'sbx: connection reset' >&2; exit 1; }
     sep='' out='{"credentials":['
     for f in "$MOCK_DIR"/cred-*.owner; do
@@ -164,6 +165,8 @@ credentials)
       out+="$sep{\"name\":\"$nm\",\"kind\":\"bearer\",\"consumer\":\"header\",\"hosts\":[\"api.github.com\"],\"endpoint\":null}"; sep=,
     done
     echo "$out]}" ;;
+  # Bare `credentials` (or with only --json) is mocactl's usage error, exit 2.
+  '' | --json) echo "sbx: credentials needs a subcommand; to list the credentials, use 'mocactl sbx credentials ls'" >&2; exit 2 ;;
   *) echo "mock mocactl: unexpected: credentials ${args[*]}" >&2; exit 99 ;;
   esac ;;
 --help) echo 'An sbx sandbox is a copy of a local git repository on the sandbox service, ...'; echo

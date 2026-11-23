@@ -364,7 +364,7 @@ describe('mocactl sbx credentials list and delete', () => {
     expect(out).not.toContain(PAT);
   });
 
-  it('accepts `credentials list`, the old name, as ls; refuses extra arguments', async () => {
+  it('lists with `credentials list` as with `ls`; both refuse extra arguments', async () => {
     const r = run(['credentials', 'list'], {
       'GET /v1/credentials': () => ({ status: 200, body: listed }),
     });
