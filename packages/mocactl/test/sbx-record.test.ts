@@ -14,6 +14,7 @@ import {
   tmp,
   TOKEN,
   URL_,
+  MADE_UP_NAME,
 } from './helpers/sbx.js';
 
 // `mocactl sbx … --record F`: one NDJSON line per HTTP attempt, with no token, host or free text.
@@ -194,7 +195,10 @@ describe('mocactl sbx --record F', () => {
       refreshToken: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
       subject: 'github:1',
     });
-    expect(l[1]!.request).toEqual({ template: 'node22' });
+    expect(l[1]!.request).toEqual({
+      template: 'node22',
+      name: expect.stringMatching(MADE_UP_NAME),
+    });
     const created = l[1]!.answer as Record<string, unknown>;
     expect(created).toMatchObject({ id: SBX, template: 'node22', note: sha(TOKEN.token) });
     expect((created.nested as { any: string }[])[0]!.any).toMatch(/^sha256:/);

@@ -19,7 +19,13 @@ import {
   type AgentopExec,
 } from './agentop.js';
 import type { SbxSandbox } from './api.js';
-import { createWaitingForActivation, failed, SBX_EXIT, type SbxCtx } from './commands.js';
+import {
+  createWaitingForActivation,
+  failed,
+  namedText,
+  SBX_EXIT,
+  type SbxCtx,
+} from './commands.js';
 import {
   execFailed,
   openExec,
@@ -307,7 +313,7 @@ async function findOrCreate(
       labels: { project: rid },
       ...(f.idleLifetimeS !== undefined ? { idleLifetimeS: f.idleLifetimeS } : {}),
     });
-    c.io.err(`created ${sanitizeRemote(s.id)} (${sanitizeRemote(s.template)})`);
+    c.io.err(`created ${sanitizeRemote(s.id)}${namedText(s)} (${sanitizeRemote(s.template)})`);
     const notTaken = lifetimeNotTakenText(sanitizeRemote(s.id), f.idleLifetimeS, s);
     if (notTaken) c.io.err(notTaken);
     return { sandbox: s, reused: false };

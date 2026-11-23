@@ -59,7 +59,8 @@ a repository's sandbox, in the order you use it:
                                                  created; matched by bare id, so ID:TAG or
                                                  ID@BUILD never reuses one; --name: a new
                                                  sandbox's name, as sbx create's (a second live
-                                                 one of the name is refused); --include-secrets:
+                                                 one of the name is refused; default: a made-up
+                                                 adjective-surname); --include-secrets:
                                                  push .env*, *.pem, *.key and id_* files too;
                                                  --max-push: refuse a tree over MiB, default 256;
                                                  --max-file: refuse a file over MiB, default 12;
@@ -137,8 +138,10 @@ a sandbox by hand: create one, its lease and processes, a direct client:
                                                  template, at a TAG or one BUILD (default: default,
                                                  at its default tag); --name: a name sbx ls shows
                                                  (a-z, 0-9 and -, not first; at most 63; unique
-                                                 among your live sandboxes); --label: a key=value
-                                                 label (repeatable, at most 16);
+                                                 among your live sandboxes; default: a made-up
+                                                 adjective-surname, such as eager-hopper);
+                                                 --label: a key=value label (repeatable, at
+                                                 most 16);
                                                  --seed: run the served build's seed, then check
                                                  /workspace is a clean tree (its HEAD becomes the
                                                  baseline pull and rm measure changes from);
