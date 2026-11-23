@@ -27,7 +27,9 @@ type Runner struct {
 
 // execLog is the per-Exec audit line: which workspace (the session id), which kind and which VM. Always on --
 // it is the evidence that a session's commands ran in microVMs (#369) -- and deliberately without
-// the command, which can carry secrets. A variable so tests can capture it.
+// the command, which can carry secrets. It also carries the Exec's start_ms and dur_ms, with the same
+// values as the opt-in exec-timing line, so per-Exec timing needs no SH_EXEC_TIMING. A variable so
+// tests can capture it.
 var execLog = log.Printf
 
 func (r Runner) Run(ctx context.Context, s wexec.Spec, sink wexec.Sink) (int32, error) {
@@ -64,15 +66,17 @@ func (r Runner) Run(ctx context.Context, s wexec.Spec, sink wexec.Sink) (int32, 
 		res, err = r.Pool.ExecPhased(ctx, s.WorkspaceKey, e, &sinkAdapter{sink: sink}, &ph)
 	}
 	logPhases(&ph)
+	dur := time.Since(start)
 	if r.Timing {
-		logExecTiming(s.ReqID, s.WorkspaceKey, start, time.Since(start), &ph, res.ExitCode, err)
+		logExecTiming(s.ReqID, s.WorkspaceKey, start, dur, &ph, res.ExitCode, err)
 	}
 	logKind := e.Kind.String()
 	if kerr != nil {
 		logKind = s.Kind // an unknown kind is logged as the session spelled it, never as a command
 	}
-	execLog("vmpool: exec req=%d workspace_key=%q kind=%s vm=%s cold=%q exit=%d err=%v",
-		s.ReqID, s.WorkspaceKey, logKind, ph.VMID, string(ph.Cold), res.ExitCode, err)
+	execLog("vmpool: exec req=%d workspace_key=%q kind=%s vm=%s cold=%q exit=%d err=%v start_ms=%d dur_ms=%.1f",
+		s.ReqID, s.WorkspaceKey, logKind, ph.VMID, string(ph.Cold), res.ExitCode, err,
+		start.UnixMilli(), float64(dur.Microseconds())/1000)
 
 	// Report dropped bytes even on a failure path: an aborted exec still delivered
 	// whatever the guest had already sent, and declaring that untruncated is a false

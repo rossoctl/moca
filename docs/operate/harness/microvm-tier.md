@@ -455,8 +455,10 @@ On a tiered host, an unauthenticated `/turn` like these runs in the default tier
 `SH_SANDBOX_DEFAULT_TIER=microvm`, so the microvm-worker journal below shows nothing. Use
 `p4-turn-smoke.sh --auth` instead: it creates its sessions with `sandboxTier=microvm` (below).
 
-**The evidence:** one journal line per Exec. It names the session's workspace and the VM that ran
-it, never the command:
+**The evidence:** one journal line per Exec, always on. It names the session's workspace, the kind,
+the VM that ran it and the Exec's start (`start_ms`, epoch ms) and duration (`dur_ms`), never the
+command. `start_ms` and `dur_ms` have the same values as the opt-in `exec-timing` line
+(`SH_EXEC_TIMING=1`), which adds the phases and the VM's CPU:
 
 ```bash
 sudo journalctl -u microvm-worker | grep 'vmpool: exec' | grep "workspace_key=\"$S\""
@@ -464,8 +466,8 @@ sudo ls /srv/workspaces/   # one directory per session
 ```
 
 ```
-vmpool: exec req=… workspace_key="<session id>" vm=vm-5 cold="first-exec" exit=0 err=<nil>
-vmpool: exec req=… workspace_key="<session id>" vm=vm-6 cold="exhausted" exit=0 err=<nil>
+vmpool: exec req=… workspace_key="<session id>" kind=command vm=vm-5 cold="first-exec" exit=0 err=<nil> start_ms=… dur_ms=…
+vmpool: exec req=… workspace_key="<session id>" kind=command vm=vm-6 cold="exhausted" exit=0 err=<nil> start_ms=… dur_ms=…
 ```
 
 **A model with a direct Anthropic key:** a host with no gateway can use the public API with
