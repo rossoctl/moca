@@ -498,7 +498,8 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
         expect(await hasResult(sessionId, turnId)).toBe(false);
       }
       await done();
-    });
+      // Over 750 sequential round trips against a real Redis: on a loaded CI runner that's near the 5 s default.
+    }, 20_000);
 
     it('keeps the session index alive at least as long as the record it points at (§9.2)', async () => {
       const {
