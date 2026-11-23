@@ -1,6 +1,8 @@
+import type { ExecConnOptions } from '@moca/sandbox-client';
 import { afterEach, describe, expect, it } from 'vitest';
 import { sbxMain } from '../src/sbx/cli.js';
-import { cleanupTmp, fakeCp, sandbox, SBX, setup, TOKEN } from './helpers/sbx.js';
+import type { ExecFactory } from '../src/sbx/exec.js';
+import { cleanupTmp, fakeCp, NO_LEASE, sandbox, SBX, setup, TOKEN } from './helpers/sbx.js';
 
 afterEach(cleanupTmp);
 
@@ -51,6 +53,57 @@ describe('a sandbox named by its name rather than its id', () => {
     expect(cp.calls.some((c) => c.path === `/v1/sandboxes/${SBX}/token`)).toBe(true);
   });
 
+  it('run --sandbox NAME runs on the named sandbox: its token, minted for its id', async () => {
+    const { home, env, io } = setup();
+    const cp = world();
+    const opened: ExecConnOptions[] = [];
+    const sent: string[] = [];
+    const execFactory: ExecFactory = (o) => {
+      opened.push(o);
+      return {
+        exec: async (command: string) => {
+          await o.token({ force: false, minValidS: 60, activity: true });
+          sent.push(command);
+          return {
+            stdout: Buffer.from(''),
+            stderr: Buffer.from(''),
+            exitCode: 0,
+            truncated: false,
+            lease: [],
+          };
+        },
+        close: () => undefined,
+        ...NO_LEASE,
+      } as unknown as ReturnType<ExecFactory>;
+    };
+    const argv = ['run', '--sandbox', 'web', '--', 'true'];
+    expect(await sbxMain(argv, env, io, { home, fetchImpl: cp.fetchImpl, execFactory })).toBe(0);
+    expect(sent).toEqual(["'true'"]);
+    expect(opened[0]).toMatchObject({ sandboxId: TOKEN.wrk, workspaceKey: TOKEN.wsk });
+    expect(cp.calls.some((c) => c.path === `/v1/sandboxes/${SBX}/token`)).toBe(true);
+    expect(cp.calls.some((c) => c.path.includes('/web'))).toBe(false);
+  });
+
+  it('a match whose id is not a sandbox id is refused, never used (a buggy or hostile control plane)', async () => {
+    for (const bad of ['sbx-x"]}', '../sbx-1', 'SBX-ABC']) {
+      const { home, env, io } = setup();
+      const cp = fakeCp({
+        'GET /v1/sandboxes': () => ({
+          status: 200,
+          body: { sandboxes: [sandbox({ id: bad, name: 'web' })] },
+        }),
+      });
+      expect(await sbxMain(['token', 'web'], env, io, { home, fetchImpl: cp.fetchImpl }), bad).toBe(
+        1,
+      );
+      expect(io.errs.join('\n'), bad).toContain('which is not a sandbox id');
+      expect(
+        cp.calls.map((c) => `${c.method} ${c.path}`),
+        bad,
+      ).toEqual(['GET /v1/sandboxes']);
+    }
+  });
+
   it('an id is used as given: no listing', async () => {
     const { home, env, io } = setup();
     const cp = world();
@@ -91,7 +144,7 @@ describe('a sandbox named by its name rather than its id', () => {
     expect(cp.calls.filter((c) => c.path.startsWith('/v1/sandboxes'))).toEqual([]);
   });
 
-  it('mode MODE NAME and proc ls NAME take a name in the ID position', async () => {
+  it('every id-position command looks a name up: an unknown one is exit 1, nothing else asked', async () => {
     for (const argv of [
       ['mode', 'per-exec', 'nope'],
       ['proc', 'ls', 'nope'],

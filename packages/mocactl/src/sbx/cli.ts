@@ -523,7 +523,8 @@ function sbxCommandUsage(words: string[], opts: { forError?: boolean } = {}): st
   const notes = [
     // A sandbox ID (`[ID]`, `--sandbox ID`), not `--id ID` or `--preset ID`.
     /\[ID\]|--sandbox ID/.test(body)
-      ? 'ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json.'
+      ? 'ID (or --sandbox ID) may be a sandbox name instead, matched among your live sandboxes,\n' +
+        'and defaults to the sandbox in the nearest .sbx/sandbox.json.'
       : undefined,
     /--json\b/.test(body) ? '--json: print the result as JSON on stdout, for a script.' : undefined,
     words[0] !== undefined && !NO_RECORD.has(words[0])
@@ -1457,7 +1458,7 @@ async function sbxMainWith(
       io.err(
         TAKES_ID_ARG.has(command) || command === 'mode' || command === 'proc'
           ? `sbx: ${command} needs a sandbox id or name (or a .sbx/sandbox.json in this repository)`
-          : `sbx: ${command} needs --sandbox ID (or a .sbx/sandbox.json in this repository)`,
+          : `sbx: ${command} needs --sandbox ID or NAME (or a .sbx/sandbox.json in this repository)`,
       );
       return SBX_EXIT.usage;
     }
