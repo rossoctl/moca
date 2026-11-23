@@ -77,8 +77,8 @@ async function turnOnSession(
 
 /**
  * Claim `key`, stepping over a holder whose turn is already terminal. One retry, not a loop: the
- * only way the second claim loses is another submission winning the key in between, and that
- * submission's turn is by definition non-terminal, so returning its id is the right answer anyway.
+ * second claim loses only to another submission winning the key in between, and returning that
+ * submission's id is the right answer anyway.
  *
  * The release is CONDITIONAL on the stale holder we actually read, and that compare is what keeps
  * one key to one turn. Two submissions can both read the same terminal holder; the first then
@@ -86,6 +86,22 @@ async function turnOnSession(
  * that live claim and create a SECOND record and queue entry for one key -- exactly the duplicate
  * fan-out idempotency exists to prevent (§4.3). Comparing means the loser's release is a no-op, so
  * its second claim loses too and it returns the winner's id, the same answer a live holder gives.
+ *
+ * What the compare does NOT cover is a holder whose record is UNREADABLE rather than terminal. A
+ * claim is not atomic with the record it names -- `claimIdempotencyKey` writes the key, `create`
+ * writes the record a round trip later -- so a holder stalled between the two reads exactly like one
+ * whose record expired, and the stepover below releases a LIVE claim. Both submissions then create
+ * and enqueue a turn for one key. On a gate key the two resumes carry the same decision, and the
+ * second leaf finds the gate already decided and re-derives the same continuation (`decideSeed`'s
+ * no-pending-gate branch), so one human approval runs twice. The other reading is no better on its
+ * own: treat an unreadable holder as live and a crash between a claim and its create wedges the key
+ * with no record and no release -- and the default key is the session id, so every later turn of
+ * that session would be answered with the ghost's id.
+ *
+ * shortcut: a stalled claimant and a crashed one are indistinguishable without a lease, and §5.1
+ * rules out the Lua/WATCH/MULTI that would make claim-plus-record one step; upgrade when the key
+ * can carry one (a TTL shorter than the record's, or a `claimedAt` plus a grace), which tells the
+ * two apart and lets an unreadable holder be treated as live without the wedge.
  */
 async function claimKey(
   turns: TurnStore,
@@ -97,8 +113,9 @@ async function claimKey(
   if (held === turnId) return { turnId, fresh: true };
   const existing = await turns.get(held);
   if (existing && !isTerminalState(existing.state)) return { turnId: held, fresh: false };
-  // The holder finished (or its record is gone): the key is stale, so release THAT holder and take
-  // it. The second claim re-reads the holder, so losing the compare and losing the claim converge.
+  // The holder finished (or its record is gone -- see the window in the doc above): the key is
+  // stale, so release THAT holder and take it. The second claim re-reads the holder, so losing the
+  // compare and losing the claim converge.
   await turns.releaseIdempotencyKeyIf(owner, key, held);
   const second = await turns.claimIdempotencyKey(owner, key, turnId);
   return { turnId: second, fresh: second === turnId };
