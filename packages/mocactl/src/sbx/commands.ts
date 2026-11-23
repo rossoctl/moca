@@ -306,23 +306,52 @@ export async function cmdLogout(c: SbxCtx): Promise<number> {
 
 const when = (epochS: number) => new Date(epochS * 1000).toISOString();
 
+/**
+ * A table: the header, then the rows (cells already sanitized), each column as wide as its widest
+ * cell so a long value cannot shift the columns after it, two spaces apart; the last column is not
+ * padded, so no line ends in spaces.
+ */
+export function columns(header: string[], rows: string[][]): string {
+  const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));
+  const line = (cells: string[]) =>
+    cells.map((v, i) => (i < cells.length - 1 ? v.padEnd(widths[i]!) : v)).join('  ') + '\n';
+  return [header, ...rows].map(line).join('');
+}
+
 export async function cmdTemplates(c: SbxCtx): Promise<number> {
   try {
     const ts = await c.api.listTemplates();
-    if (c.json) c.io.out(JSON.stringify(ts) + '\n');
-    else {
-      for (const t of ts) {
-        // Readiness and tags (template lifecycle spec §4) when the control plane sends them; an
-        // older one sends neither, and the line is as before.
-        const ready =
-          typeof t.readiness === 'string' ? `${sanitizeRemote(t.readiness).padEnd(9)} ` : '';
-        const tags = t.tags ? Object.keys(t.tags).sort().map(sanitizeRemote) : [];
-        c.io.out(
-          `${sanitizeRemote(t.id).padEnd(16)} ${ready}${sanitizeRemote(t.description)}` +
-            `${tags.length ? `  tags ${tags.join(',')}` : ''}\n`,
-        );
-      }
+    if (c.json) {
+      c.io.out(JSON.stringify(ts) + '\n');
+      return SBX_EXIT.ok;
     }
+    // No header for an empty list, so "nothing" stays empty output.
+    if (ts.length === 0) return SBX_EXIT.ok;
+    // READINESS and TAGS (template lifecycle spec §4) when the control plane sends them; an older
+    // one sends neither, and the table is ID and DESCRIPTION. DESCRIPTION, free text, comes last.
+    const withReadiness = ts.some((t) => typeof t.readiness === 'string');
+    const withTags = ts.some((t) => t.tags !== undefined);
+    const header = [
+      'ID',
+      ...(withReadiness ? ['READINESS'] : []),
+      ...(withTags ? ['TAGS'] : []),
+      'DESCRIPTION',
+    ];
+    const rows = ts.map((t) =>
+      [
+        t.id,
+        ...(withReadiness ? [typeof t.readiness === 'string' ? t.readiness : '-'] : []),
+        ...(withTags
+          ? [
+              Object.keys(t.tags ?? {})
+                .sort()
+                .join(',') || '-',
+            ]
+          : []),
+        t.description,
+      ].map(sanitizeRemote),
+    );
+    c.io.out(columns(header, rows));
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);
@@ -669,13 +698,7 @@ export async function cmdLs(
         ...(all ? [s.owner] : []),
       ].map(sanitizeRemote),
     );
-    // Each column as wide as its widest cell, so a long name or template id cannot shift the
-    // columns after it; the last is not padded, so no line ends in spaces.
-    const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));
-    const line = (cells: string[]) =>
-      cells.map((v, i) => (i < cells.length - 1 ? v.padEnd(widths[i]!) : v)).join('  ') + '\n';
-    c.io.out(line(header));
-    for (const r of rows) c.io.out(line(r));
+    c.io.out(columns(header, rows));
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);

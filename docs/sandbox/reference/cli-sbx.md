@@ -217,7 +217,7 @@ the credentials the host swaps in:
   mocactl sbx credentials delete NAME            delete one
 
 templates: what a sandbox is created from:
-  mocactl sbx templates [--json]                 the templates a sandbox can be created from, with
+  mocactl sbx templates ls [--json]              the templates a sandbox can be created from, with
                                                  their readiness and tags
   mocactl sbx quota [--json]                     your template quotas and use, and your live-sandbox cap
   mocactl sbx policy [--json]                    the deployment's template policy: profiles (envelope,

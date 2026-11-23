@@ -255,7 +255,7 @@ the worker's `SANDBOX_TEMPLATE`, so Moca agent sessions naming the template find
 ### 4.5 Use it
 
 ```bash
-mocactl sbx templates
+mocactl sbx templates ls
 mocactl sbx create --template default --name try-default
 mocactl sbx run -- python3 -c 'print(6*7)'
 ```
@@ -757,7 +757,7 @@ templates file that `template-register.sh` wrote holds:
 only the id, the description and the tools.
 
 ```bash
-mocactl sbx templates
+mocactl sbx templates ls
 ```
 
 ```

@@ -66,7 +66,7 @@ sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a
 sandbox sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a (default), expires 2026-10-26T09:00:00.000Z, after 7 d without use; bound in .sbx/sandbox.json
 ```
 
-Without `--template`, `up` uses the `default` template; `mocactl sbx templates` lists the others,
+Without `--template`, `up` uses the `default` template; `mocactl sbx templates ls` lists the others,
 and `mocactl sbx up --template <id>` picks one. Run `up` again at any time: it reuses this
 repository's sandbox while it is live.
 

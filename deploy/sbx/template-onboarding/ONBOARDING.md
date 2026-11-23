@@ -234,7 +234,7 @@ it they stay on the host's disk.
 
 ## What a client does
 
-1. Lists the templates (`mocactl sbx templates`, `GET /v1/templates`) and creates a sandbox of one
+1. Lists the templates (`mocactl sbx templates ls`, `GET /v1/templates`) and creates a sandbox of one
    (`mocactl sbx create --template <id>` or `sbx up --template <id>`, `POST /v1/sandboxes {template}`).
    An unknown id is `400 unknown_template`. Without `--template`, `mocactl` asks for the template
    `default`, so on a deployment that lists no `default` a client must always name one.

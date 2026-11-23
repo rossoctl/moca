@@ -637,16 +637,33 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
         body: { templates: [{ id: 'node22', description: 'Node 22', tools: ['node'] }] },
       }),
     });
-    expect(await sbxMain(['templates'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
-    expect(io.outs.join('')).toMatch(/node22\s+Node 22/);
+    expect(await sbxMain(['templates', 'ls'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(0);
+    // An older control plane sends no readiness or tags: those columns are left out.
+    expect(io.outs.join('')).toBe('ID      DESCRIPTION\nnode22  Node 22\n');
     expect(cp.calls[0]!.auth).toBe('Bearer api-1');
     io.outs.length = 0;
-    expect(await sbxMain(['templates', '--json'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(
-      0,
-    );
+    expect(
+      await sbxMain(['templates', 'ls', '--json'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(0);
     expect(JSON.parse(io.outs.join(''))).toEqual([
       { id: 'node22', description: 'Node 22', tools: ['node'] },
     ]);
+  });
+
+  it('bare templates prints its subcommands, and makes no request', async () => {
+    const { home, env, io } = setup();
+    const cp = fakeCp({});
+    expect(await sbxMain(['templates'], env, io, { home, fetchImpl: cp.fetchImpl })).toBe(2);
+    const err = io.errs.join('');
+    expect(err).toContain('mocactl sbx templates ls [--json]');
+    expect(err).toContain('mocactl sbx templates create --spec F');
+    expect(err).not.toContain('mocactl sbx credentials');
+    expect(io.outs.join('')).toBe('');
+    expect(cp.calls).toEqual([]);
+    expect(
+      await sbxMain(['templates', 'ls', 'x'], env, io, { home, fetchImpl: cp.fetchImpl }),
+    ).toBe(2);
+    expect(io.errs.join('')).toContain('sbx: templates ls takes no argument');
   });
 
   it('moves tags onto a build and removes one, saying what changed (lifecycle §5.1)', async () => {

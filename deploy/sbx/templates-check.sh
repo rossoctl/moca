@@ -24,7 +24,7 @@
 #                           direct-client checks (the cross-template refusal)
 #
 # Checks, each printing `ok N - ...`, `ok N - ... # SKIP why` or `not ok N - ...: why`:
-#   1. list: `sbx templates --json` names every template in SBX_CHECK_TEMPLATES, and no worker id.
+#   1. list: `sbx templates ls --json` names every template in SBX_CHECK_TEMPLATES, and no worker id.
 #   2. create: user A creates one sandbox of each template; each record's template is the one asked.
 #      A create with an unknown template is refused, naming unknown_template, and creates nothing.
 #   3. routing: each sandbox's token (`sbx env`) names a worker; the templates' workers all differ,
@@ -127,9 +127,9 @@ x() { local n="$1"; shift; RC=0; "$@" >"$LOGS/$n.out" 2>"$LOGS/$n.err" </dev/nul
 echo "# SBX0 templates check: $SBX_API_URL, templates ${TEMPLATES[*]}, exec $EXEC, run $RUN"
 
 # 1. list ------------------------------------------------------------------------------------
-x templates as a templates --json
+x templates as a templates ls --json
 if [[ "$RC" != 0 ]]; then
-  notok 'list: sbx templates' "$(lastline "$LOGS/templates.err")"
+  notok 'list: sbx templates ls' "$(lastline "$LOGS/templates.err")"
   exit 1
 fi
 missing=''
