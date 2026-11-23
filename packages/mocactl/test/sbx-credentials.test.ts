@@ -351,7 +351,7 @@ describe('mocactl sbx credentials list and delete', () => {
   };
 
   it('lists names and destinations, never a secret', async () => {
-    const r = run(['credentials'], {
+    const r = run(['credentials', 'ls'], {
       'GET /v1/credentials': () => ({
         status: 200,
         body: { credentials: [{ ...listed.credentials[0], secret: { password: PAT } }] },
@@ -364,15 +364,32 @@ describe('mocactl sbx credentials list and delete', () => {
     expect(out).not.toContain(PAT);
   });
 
-  it('accepts `credentials list` as the bare listing, and refuses extra arguments', async () => {
+  it('accepts `credentials list`, the old name, as ls; refuses extra arguments', async () => {
     const r = run(['credentials', 'list'], {
       'GET /v1/credentials': () => ({ status: 200, body: listed }),
     });
     expect(await r.code).toBe(0);
     expect(r.s.io.outs.join('')).toContain('github.com,api.github.com');
-    const bad = run(['credentials', 'list', 'extra'], {});
-    expect(await bad.code).toBe(2);
-    expect(bad.cp.calls).toEqual([]);
+    for (const sub of ['ls', 'list']) {
+      const bad = run(['credentials', sub, 'extra'], {});
+      expect(await bad.code).toBe(2);
+      expect(bad.cp.calls).toEqual([]);
+    }
+  });
+
+  it('bare credentials points at credentials ls and prints its subcommands, with no request', async () => {
+    for (const argv of [['credentials'], ['credentials', '--json']]) {
+      const r = run(argv, {});
+      expect(await r.code).toBe(2);
+      const err = r.s.io.errs.join('');
+      expect(err).toMatch(
+        /^sbx: credentials needs a subcommand; to list the credentials, use 'mocactl sbx credentials ls'\nusage:\n/,
+      );
+      expect(err).toContain('mocactl sbx credentials add NAME');
+      expect(err).not.toContain('mocactl sbx templates');
+      expect(r.s.io.outs.join('')).toBe('');
+      expect(r.cp.calls).toEqual([]);
+    }
   });
 
   it('deletes a credential it lists', async () => {
@@ -390,7 +407,7 @@ describe('mocactl sbx credentials list and delete', () => {
   it('needs only the sandbox login, not a harness', async () => {
     const s = setup({ loggedIn: false });
     const cp = fakeCp({});
-    const code = await sbxMain(['credentials'], s.env, s.io, {
+    const code = await sbxMain(['credentials', 'ls'], s.env, s.io, {
       home: s.home,
       fetchImpl: cp.fetchImpl,
     });
@@ -401,7 +418,7 @@ describe('mocactl sbx credentials list and delete', () => {
 describe('mocactl sbx credentials, errors', () => {
   it('reports an unmounted route (404 not_found) as not offered, exit 2, on every route', async () => {
     for (const [argv, stdin] of [
-      [['credentials'], ''],
+      [['credentials', 'ls'], ''],
       [['credentials', 'delete', 'g'], ''],
       [['credentials', 'add', 'g', '--preset', 'github'], PAT],
     ] as const) {

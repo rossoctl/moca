@@ -290,7 +290,7 @@ a sandbox by hand: create one, its lease and processes, a direct client:
                                                  10 minutes after the end, it is final)
 
 the credentials the host swaps in:
-  mocactl sbx credentials [list] [--json]       the credentials the host swaps into your sandboxes' HTTPS requests
+  mocactl sbx credentials ls [--json]           the credentials the host swaps into your sandboxes' HTTPS requests
   mocactl sbx credentials add NAME (--host DEST ... [--kind K] | --preset ID)
                                                  store one (the secret is read from stdin, never argv);
                                                  --host: where it is swapped in, DEST is
@@ -1343,6 +1343,14 @@ async function sbxMainWith(
     sizes[flag] = n * 2 ** 20;
   }
   const { 'max-push': maxPush, 'max-file': maxFile } = sizes;
+  // Bare `credentials` lists its subcommands, as bare `sbx` does, first pointing an old script or
+  // habit (bare `credentials` once listed the credentials) at `credentials ls`.
+  if (command === 'credentials' && arg === undefined) {
+    io.err(
+      `sbx: credentials needs a subcommand; to list the credentials, use 'mocactl sbx credentials ls'\n${usage}`,
+    );
+    return SBX_EXIT.usage;
+  }
   // `run` takes everything after the command (after `--`) as CMD; `put` exactly one PATH; rm, token,
   // env and egress at most one ID; every other command no argument at all.
   const argsOk =
@@ -1358,12 +1366,10 @@ async function sbxMainWith(
         (extra.length === 0 ||
           (['enroll', 'unenroll', 'grant', 'revoke'].includes(extra[0]!) && extra.length === 2))
       : command === 'credentials'
-        ? arg === undefined ||
-          (arg === 'presets'
-            ? extra.length === 0
-            : arg === 'list'
-              ? extra.length === 0
-              : ['add', 'delete'].includes(arg) && extra.length === 1)
+        ? // `list`: the listing's old name, still taken from a script.
+          ['ls', 'list', 'presets'].includes(arg!)
+          ? extra.length === 0
+          : ['add', 'delete'].includes(arg!) && extra.length === 1
         : command === 'put'
           ? arg !== undefined && extra.length === 0
           : command === 'mode'

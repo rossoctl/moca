@@ -222,7 +222,7 @@ describe('mocactl sbx --record F', () => {
       ['token', SBX],
       ['login'],
       ['logout'],
-      ['credentials'],
+      ['credentials', 'ls'],
       ['credentials', 'delete', 'gh'],
     ])
       expect(await sbxMain([...argv, '--record', f], env, io, deps)).toBe(2);
