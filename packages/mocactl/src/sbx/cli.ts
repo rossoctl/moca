@@ -43,6 +43,8 @@ import {
   cmdTransferTemplate,
   cmdUntagTemplate,
   failRefresh,
+  resolveSandboxName,
+  SANDBOX_NAME_RE,
   SBX_EXIT,
   type SbxCtx,
 } from './commands.js';
@@ -421,7 +423,8 @@ Every command's sandbox commands are also recorded in the flight recorder,
 the command or its output), per tool call for \`sbx mcp\`. MOCACTL_SBX_RUN_ID (optional) labels
 them.
 --json: print the result as JSON on stdout, for a script.
-ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
+A sandbox's ID (or --sandbox ID) may be its name instead (create's or up's --name; one that looks
+like an id is taken as one), and defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, the one remembered at
 login, or the login's own (a login minted by an operator). \`up\` skips the bound sandbox's, and
 rebinds, when this machine has a login for the remembered (or login's) one and none for it. The
@@ -1435,8 +1438,15 @@ async function sbxMainWith(
         : TAKES_ID_ARG.has(command)
           ? arg
           : undefined;
+  // A sandbox named by its name rather than its id (an argument or --sandbox, never the binding,
+  // which holds an id): looked up once the API is open. A name shaped like an id (`sbx-abc`) is
+  // taken as the id.
+  let byName: string | undefined;
   if (TAKES_SANDBOX_FLAG.has(command)) {
     id = idArg ?? values.sandbox;
+    if (id !== undefined && !SANDBOX_ID_RE.test(id) && SANDBOX_NAME_RE.test(id)) {
+      byName = id;
+    }
     if (id === undefined) {
       const bound = readBinding(root ?? deps.cwd ?? process.cwd());
       id = bound?.id;
@@ -1446,13 +1456,13 @@ async function sbxMainWith(
     if (!id && command !== 'doctor') {
       io.err(
         TAKES_ID_ARG.has(command) || command === 'mode' || command === 'proc'
-          ? `sbx: ${command} needs a sandbox id (or a .sbx/sandbox.json in this repository)`
+          ? `sbx: ${command} needs a sandbox id or name (or a .sbx/sandbox.json in this repository)`
           : `sbx: ${command} needs --sandbox ID (or a .sbx/sandbox.json in this repository)`,
       );
       return SBX_EXIT.usage;
     }
-    if (id !== undefined && !SANDBOX_ID_RE.test(id)) {
-      io.err(`sbx: '${sanitizeRemote(id)}' is not a sandbox id (sbx-…)`);
+    if (id !== undefined && byName === undefined && !SANDBOX_ID_RE.test(id)) {
+      io.err(`sbx: '${sanitizeRemote(id)}' is not a sandbox id (sbx-…) or name`);
       return SBX_EXIT.usage;
     }
   }
@@ -1626,6 +1636,14 @@ async function sbxMainWith(
     ...(deps.sleep ? { sleep: deps.sleep } : {}),
     ...(deps.now ? { now: deps.now } : {}),
   };
+  if (byName !== undefined) {
+    const found = await resolveSandboxName(ctx, byName);
+    if (typeof found === 'number') return found;
+    id = found;
+  }
+  // claude and codex pass an explicit sandbox on to the `sbx mcp` they start: as the id it resolved
+  // to, which codex's TOML can carry only because an id needs no escaping.
+  const sandboxFlag = values.sandbox !== undefined ? id : undefined;
 
   switch (command) {
     case 'login':
@@ -1765,7 +1783,7 @@ async function sbxMainWith(
         ctx,
         positionals.slice(1),
         deps.claude ?? {},
-        values.sandbox,
+        sandboxFlag,
         values['control-plane-url'] !== undefined ? ctx.url : undefined,
         await repoRoot(cwd).then(cortexMode, () => false),
       );
@@ -1779,7 +1797,7 @@ async function sbxMainWith(
         ctx,
         positionals.slice(1),
         deps.codex ?? {},
-        values.sandbox,
+        sandboxFlag,
         values['control-plane-url'] !== undefined ? ctx.url : undefined,
       );
     case 'up':

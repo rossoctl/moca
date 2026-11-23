@@ -336,7 +336,8 @@ Every command's sandbox commands are also recorded in the flight recorder,
 the command or its output), per tool call for `sbx mcp`. MOCACTL_SBX_RUN_ID (optional) labels
 them.
 --json: print the result as JSON on stdout, for a script.
-ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
+A sandbox's ID (or --sandbox ID) may be its name instead (create's or up's --name; one that looks
+like an id is taken as one), and defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane
 comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, the one remembered at
 login, or the login's own (a login minted by an operator). `up` skips the bound sandbox's, and
 rebinds, when this machine has a login for the remembered (or login's) one and none for it. The

@@ -184,7 +184,7 @@ describe('mocactl sbx proc start (spec §7, P5-R31)', () => {
     const n = world();
     expect(await n.run(['proc', 'ls'])).toBe(2);
     expect(n.err()).toContain(
-      'sbx: proc needs a sandbox id (or a .sbx/sandbox.json in this repository)',
+      'sbx: proc needs a sandbox id or name (or a .sbx/sandbox.json in this repository)',
     );
     expect(n.cp.calls).toEqual([]);
   });
