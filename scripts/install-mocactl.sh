@@ -134,6 +134,10 @@ report() {
   installed="$("$TARGET" --version)" || die "installed $TARGET, but it does not run: check \`node --version\`"
   [ -n "$installed" ] ||
     die "installed $TARGET, but it printed no version: check \`node --version\` (Node.js $NODE_MAJOR_MIN or later)"
+  # --version's first line is the build's (`CLI version: V`; a build before that prints V alone),
+  # and the lines after it name the control planes' versions.
+  installed="$(printf '%s\n' "$installed" | head -n 1)"
+  installed="${installed#CLI version: }"
   log "installed mocactl $installed at $TARGET"
   case ":$PATH:" in
   *":$MOCACTL_INSTALL_DIR:"*) ;;

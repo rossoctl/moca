@@ -34,7 +34,7 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | undefined>
  * so a misbehaving deployment cannot spray the screen. One that sanitizes to nothing is unknown,
  * not blank.
  */
-function remoteVersion(v: string): string | undefined {
+export function remoteVersion(v: string): string | undefined {
   const safe = sanitizeRemote(v).slice(0, 64);
   return safe || undefined;
 }

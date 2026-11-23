@@ -31,6 +31,18 @@ const cleanEnv = (extra: Record<string, string> = {}) => {
   return { ...rest, ...extra };
 };
 
+// `--version` also asks each configured control plane: none here, whatever this machine's config.
+const noControlPlanes = () => {
+  const {
+    SH_CONTROL_PLANE_URL: _cp,
+    MOCACTL_SBX_URL: _sbx,
+    ...rest
+  } = cleanEnv({
+    XDG_CONFIG_HOME: join(dir, 'no-config'),
+  });
+  return rest;
+};
+
 const build = (args: string[]) => {
   const r = spawnSync(process.execPath, ['build.mjs', ...args], {
     cwd: pkg,
@@ -57,9 +69,13 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 describe('the bundle', () => {
   it('prints the version it was built with', () => {
-    const r = run(['--version']);
+    const r = spawnSync(process.execPath, [bundle, '--version'], {
+      cwd: dir,
+      env: noControlPlanes(),
+      encoding: 'utf8',
+    });
     expect(r.status, r.stderr).toBe(0);
-    expect(r.stdout).toBe(`${VERSION}\n`);
+    expect(r.stdout).toBe(`CLI version: ${VERSION}\n`);
   });
 
   // SBX0 §6.4: mocactl ships as one file, and @moca/sandbox-client (grpc-js, protobuf, the MCP SDK)
@@ -157,18 +173,18 @@ describe('the bundle', () => {
 
     const viaLink = spawnSync(process.execPath, [join(bin, 'mocactl'), '--version'], {
       cwd: home,
-      env: cleanEnv(),
+      env: noControlPlanes(),
       encoding: 'utf8',
     });
     expect(viaLink.status, viaLink.stderr).toBe(0);
-    expect(viaLink.stdout).toBe(`${VERSION}\n`);
+    expect(viaLink.stdout).toBe(`CLI version: ${VERSION}\n`);
 
     const viaCopy = spawnSync(process.execPath, [join(bin, 'mocactl-copy'), '--version'], {
       cwd: home,
-      env: cleanEnv(),
+      env: noControlPlanes(),
       encoding: 'utf8',
     });
-    expect(viaCopy.stdout).not.toBe(`${VERSION}\n`);
+    expect(viaCopy.stdout).not.toBe(`CLI version: ${VERSION}\n`);
   });
 
   // `sbx mcp` loads the MCP SDK's stdio transport lazily: a bundling gap would show only here. The

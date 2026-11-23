@@ -625,6 +625,23 @@ function upFallbackUrl(
   return url && !loadAuth(auth, boundUrl) && loadAuth(auth, url) ? url : undefined;
 }
 
+/**
+ * The sandbox control plane a bare `mocactl sbx` command would use, away from any bound sandbox:
+ * MOCACTL_SBX_URL, then the one `sbx login` remembered, then the login file's own. `--version`
+ * reports it.
+ */
+export function defaultSbxUrl(
+  env: NodeJS.ProcessEnv,
+  home: string = homedir(),
+): string | undefined {
+  return resolveSbxUrl(
+    undefined,
+    env,
+    loadConfig(resolvePaths(env, home)).config,
+    loginControlPlaneUrl(env, home),
+  );
+}
+
 /** Where resolveSbxUrl's answer came from, by the same precedence (and the same `||`). */
 function sbxUrlSource(
   flag: string | undefined,
