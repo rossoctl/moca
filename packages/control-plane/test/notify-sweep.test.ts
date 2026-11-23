@@ -4,7 +4,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseDestination } from '../src/egress-destination.js';
 import { NOTIFY_WEBHOOK_CRED } from '../src/notify-handlers.js';
 import { NotifyStore } from '../src/notify-store.js';
-import { sweepNotifications } from '../src/notify-sweep.js';
+import {
+  NOTIFY_SWEEP_INTERVAL_MS,
+  startNotifySweep,
+  sweepNotifications,
+} from '../src/notify-sweep.js';
 import { encodeTurnEvent, ownerEventsKey, type TurnEvent } from '../src/turn-record.js';
 import { alice, ctx, makeDeps, NOW_MS } from './helpers/deps.js';
 import { fakeRedis } from './helpers/fake-redis.js';
@@ -178,5 +182,26 @@ describe('sweepNotifications', () => {
     await sweepNotifications(deps);
     const call = sent.mock.calls[0]!;
     expect(JSON.stringify(call)).not.toContain(minted.webhookSecret as string);
+  });
+
+  // #394's acceptance criterion is "a gate reaches a phone within 30 s". deploy/compose has no
+  // Docker daemon available here to time a real push (see the task report), so this proves the
+  // same bound deterministically: one NOTIFY_SWEEP_INTERVAL_MS (10 s) tick of the armed timer is
+  // enough for a fresh owner event to become a delivery attempt, well inside the 30 s budget.
+  it('starting the timer delivers a fresh event within one NOTIFY_SWEEP_INTERVAL_MS tick', async () => {
+    vi.useFakeTimers();
+    try {
+      await configure();
+      await emit(ev());
+      const stop = startNotifySweep(deps);
+      try {
+        await vi.advanceTimersByTimeAsync(NOTIFY_SWEEP_INTERVAL_MS);
+        expect(sent).toHaveBeenCalledTimes(1);
+      } finally {
+        stop();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
