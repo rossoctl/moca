@@ -660,6 +660,41 @@ certificate is not publicly trusted).
 Uninstalling the last worker leaves the janitor. Remove it with
 `sudo <checkout>/deploy/sbx/install-host.sh --uninstall-janitor`.
 
+### The release listener
+
+With `SBX_RELEASE_CONTROL=1` the control plane does not leave an ended sandbox's workspace to the
+janitor's wait or the worker's idle reclaim: it asks the worker to release it, through the relay's
+control listener (`sandbox-relay-control`, port 9445, which a NetworkPolicy opens to the control
+plane alone). The worker frees the workspace's standby VMs and disk at once, or when its running
+Exec ends, and refuses new Execs on it. The control plane sends the release
+
+- at `DELETE /v1/sandboxes/{id}`, after the record is marked deleted;
+- from the janitor's `GET /v1/janitor/sandboxes`, for every ended sandbox the worker has not yet
+  answered: an expired sandbox is first noticed there, so its release waits for the next janitor
+  run (every 15 minutes), and a delete whose release went unanswered is retried there too;
+- on the combined profile, at a session's delete, to the worker the session last ran on.
+
+Each is best-effort and bounded (5 s): it never fails or delays a DELETE or the janitor's read
+beyond that. The worker's answer (`released`, `kept_busy`, `unknown_key`, or `unsupported` for a
+worker that predates release) is written to the sandbox record and audited as
+`sandbox_workspace_release`; anything else (the relay down, the worker detached) is logged and
+retried by the next janitor run while the record is retained. A session's is audited as
+`session_workspace_release`, `no_worker` when it never ran on one. The janitor keeps removing what
+is left after its wait, and idle reclaim stays the backstop everywhere.
+
+The listener's bearer, `MOCA_RELAY_RELEASE_TOKEN`, is in the Secret `moca-relay-release`, apart
+from `moca-mu1`, and both pods' settings hashes cover it. To rotate it, delete the key and re-run;
+the relay and the control plane roll, and nothing on the hosts changes:
+
+```bash
+kubectl patch secret moca-relay-release -n <namespace> --type=merge \
+  -p '{"data":{"MOCA_RELAY_RELEASE_TOKEN":null}}'
+deploy/sbx/setup.sh --env-file <env file>
+```
+
+Turning `SBX_RELEASE_CONTROL` off again leaves `moca-relay-release`, the `sandbox-relay-control`
+Service and its two NetworkPolicies in place, inert: nothing listens on 9445.
+
 ## 8. Status and the audit lines
 
 `deploy/sbx/status.sh` is read-only. It reads the audit lines of the relay's current pod only, so
@@ -1346,13 +1381,13 @@ In the cluster, delete what `setup.sh` applied, then its Secrets and ConfigMaps:
 kubectl delete -k deploy/sbx/.generated
 kubectl delete secret -n <namespace> moca-redis moca-relay moca-relay-attach \
   moca-relay-sandbox-tokens moca-mu1 sbx-token-keys sbx-egress sbx-template-hosts \
-  moca-relay-tls sbx-exec-tls --ignore-not-found
+  moca-relay-release moca-relay-tls sbx-exec-tls --ignore-not-found
 kubectl delete configmap -n <namespace> moca-settings sbx-settings --ignore-not-found
 rm -rf deploy/sbx/.generated
 ```
 
-`--ignore-not-found` covers the Secrets a stack without egress credentials (`sbx-egress`) or the
-template store (`sbx-template-hosts`) never had. With `SBX_PROFILE=combined`, the generated folder
+`--ignore-not-found` covers the Secrets a stack without egress credentials (`sbx-egress`), the
+template store (`sbx-template-hosts`) or the release listener (`moca-relay-release`) never had. With `SBX_PROFILE=combined`, the generated folder
 is `deploy/sbx/.generated-<namespace>/`, and `moca-supervisor-tls` is one more Secret to delete.
 
 **`kubectl delete -k` deletes the template store's and the egress credentials' volumes.** They are

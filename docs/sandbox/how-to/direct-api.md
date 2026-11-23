@@ -379,6 +379,11 @@ a `ReleaseOutcome`: `RELEASED` (freed), `KEPT_BUSY` (an `Exec` or a live lease i
 standbys go now, the workspace when it is free) or `UNKNOWN_KEY` (the worker holds no workspace for
 it).
 
+On a deployment with the relay's control listener on, the control plane also releases the
+workspace after your `DELETE`, and when the janitor first sees a sandbox expired, so a client that
+skips its own `Release` loses nothing; sending it first still frees the workspace before the delete
+returns.
+
 | Code                  | Cause                                                                                                           |
 | --------------------- | --------------------------------------------------------------------------------------------------------------- |
 | `UNAUTHENTICATED`     | Missing, expired or invalid sandbox token                                                                       |

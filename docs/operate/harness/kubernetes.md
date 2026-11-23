@@ -323,6 +323,7 @@ through the environment of the one `jq` that writes each Secret, and are applied
 | `moca-redis-provisioner` | `moca`         | `REDIS_PASSWORD`, `REDIS_URL` (only with `SH_WORKLOAD_SANDBOXES=1`; kept when off)                       | provisioner (`REDIS_URL`: its own Redis user, `GET` on `sh:wl:*` only)                                                         |
 | `moca-mu1`               | `moca`         | `SH_SESSION_TOKEN_PRIVATE_KEY`, `SH_SESSION_TOKEN_PUBLIC_KEYS`, `SH_CREDENTIAL_KEK`, `SH_EXCHANGE_TOKEN` | control plane (private key, KEK, exchange token as files); supervisor (exchange token as a file, public keyset as env)         |
 | `moca-test-users`        | `moca`         | `SH_TEST_USER_SECRET` (only while `SH_TEST_USERS` > 0; deleted when off)                                 | control plane (as a file, from an `optional` projected source; ADR-0045, §13)                                                  |
+| `moca-relay-release`     | `moca`         | `MOCA_RELAY_RELEASE_TOKEN` (only with `SH_RELAY_RELEASE_CONTROL=1`; kept when off)                       | relay and control plane (as a file each; the relay's control listener, section 15)                                             |
 | `moca-relay-attach`      | `moca-sandbox` | `SH_RELAY_TOKEN` (copied from `moca-relay`)                                                              | sandboxes                                                                                                                      |
 | `moca-supervisor-tls`    | `moca` (OCP)   | `tls.crt`, `tls.key`                                                                                     | ghostunnel sidecar                                                                                                             |
 
@@ -1433,3 +1434,25 @@ Claim 14 **assumes one supervisor pod**, as claim 9 does: it picks the pod befor
 leaf, and cannot learn which pod's drain then claimed it. Above `replicas: 1` claims 9 and 14 skip
 with a `note` rather than delete a pod that may be holding nothing. If you raised `replicas`
 (section 4) and want the redelivery claim back, scale the supervisor to one for the run.
+
+## 15. Releasing a deleted session's workspace (`SH_RELAY_RELEASE_CONTROL`)
+
+A sandbox keeps a deleted session's workspace until its idle reclaim (`SH_WORKSPACE_IDLE`, 8 h by
+default). With `SH_RELAY_RELEASE_CONTROL=1` the control plane releases it at the session's delete
+instead: through the relay's control listener (`base/relay-release-control`: the relay's
+`MOCA_RELAY_CONTROL_ADDR`, the `sandbox-relay-control` Service on 9445, and a NetworkPolicy that
+admits the control plane alone), to the sandbox the session last ran on (its `sandboxPod`, else its
+last `sandboxId`), after the delete has committed. It is best-effort, within 5 s, and never fails
+the delete; a worker that predates release answers `release_unsupported`, and the decision log
+records every outcome as `session_workspace_release` (`no_worker` when the session never ran on
+one). Idle reclaim stays the backstop.
+
+```bash
+SH_RELAY_RELEASE_CONTROL=1 deploy/k8s/setup.sh --target kind --skip-build
+```
+
+It is sticky like `SH_WORKLOAD_SANDBOXES`; only `1` and empty are accepted, and `--target ocp-single`
+refuses it. The listener's bearer is generated once into `moca-relay-release` (section 5), apart
+from `moca-mu1`; its digest is on both pod templates, so rotating it (delete the key and re-run)
+rolls the relay and the control plane. Empty turns the listener off and leaves the Secret, the
+Service and the two NetworkPolicies in place, inert.
