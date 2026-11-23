@@ -117,7 +117,9 @@ a repository's sandbox, in the order you use it:
                                                  id_* stay behind unless --include-secrets;
                                                  --max-push: refuse a tree over MiB, default 256;
                                                  --max-file: refuse a file over MiB, default 12)
-  mocactl sbx ls [--all] [--json]                your sandboxes (--all: everyone's; admins only)
+  mocactl sbx ls [--all] [--include-deleted] [--json]
+                                                 your sandboxes (--all: everyone's; admins only;
+                                                 --include-deleted: also those ended by sbx rm)
   mocactl sbx doctor [--sandbox SANDBOX] [--json]
                                                  check login, sandbox, agent config, exec and recent
                                                  calls (exit 0 when every check passes, else 1;

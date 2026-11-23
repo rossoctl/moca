@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { afterText, lifetimeText, parseLifetime } from '../src/sbx/lifetime.js';
+import { afterText, lifetimeText, parseLifetime, relativeText } from '../src/sbx/lifetime.js';
 
 describe('parseLifetime (#770)', () => {
   it('reads minutes, hours, days and whole seconds', () => {
@@ -32,5 +32,25 @@ describe('afterText (#770)', () => {
   });
   it.each([0, -1, 1.5, Number.NaN, '604800'])('prints nothing for %j', (v) => {
     expect(afterText({ idleLifetimeS: v as number })).toBe('');
+  });
+});
+
+describe('relativeText', () => {
+  const NOW = 1_800_000_000;
+  it.each([
+    [0, 'in <1 min'],
+    [59, 'in <1 min'],
+    [60, 'in 1 min'],
+    [3599, 'in 59 min'],
+    [3600, 'in 1 h'],
+    [86_399, 'in 23 h'],
+    [86_400, 'in 1 d'],
+    [6 * 86_400 + 86_399, 'in 6 d'],
+    [-59, '<1 min ago'],
+    [-60, '1 min ago'],
+    [-3600, '1 h ago'],
+    [-365 * 86_400, '365 d ago'],
+  ])('%i s from now is %s', (delta, text) => {
+    expect(relativeText(NOW + delta, NOW)).toBe(text);
   });
 });

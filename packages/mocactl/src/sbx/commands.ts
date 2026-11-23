@@ -27,7 +27,7 @@ import {
   type SetModeOutcome,
 } from './mode.js';
 import { sandboxName } from './names.js';
-import { afterText, lifetimeNotTakenText, lifetimeText, validLifetime } from './lifetime.js';
+import { afterText, lifetimeNotTakenText, relativeText } from './lifetime.js';
 import { forgetNotices } from './notices.js';
 import { SANDBOX_ID_RE } from './state.js';
 import { seedSandbox, type SeedResult } from './templates.js';
@@ -612,31 +612,70 @@ export async function resolveSandboxName(c: SbxCtx, name: string): Promise<strin
   return SBX_EXIT.failed;
 }
 
-export async function cmdLs(c: SbxCtx, all: boolean): Promise<number> {
+/**
+ * EXPIRES: a live sandbox's deadline, `in 6 d`; an ended one's end, `ended 2 h ago`, or just
+ * `ended` when the record says no end time and its deadline is still ahead (a control plane that
+ * leaves terminatedAt null), rather than a time it cannot know.
+ */
+function expiryText(s: SbxSandbox, nowS: number): string {
+  if (s.state !== 'terminated') {
+    // A live record past its deadline is clock skew: the control plane's state wins.
+    return relativeText(Math.max(s.expiresAt, nowS), nowS);
+  }
+  const end = s.terminatedAt ?? (s.expiresAt <= nowS ? s.expiresAt : undefined);
+  return end === undefined ? 'ended' : `ended ${relativeText(Math.min(end, nowS), nowS)}`;
+}
+
+/**
+ * `sbx ls`. A deleted sandbox is left out, in the table and in --json alike, unless
+ * `includeDeleted`: it was ended on purpose, so it is noise in a list of what one has. An expired
+ * one stays, since nobody chose to end it. EXPIRES is relative: a live sandbox's deadline, an
+ * ended one's end. The idle lifetime is `sbx get`'s.
+ */
+export async function cmdLs(
+  c: SbxCtx,
+  all: boolean,
+  o: { includeDeleted?: boolean } = {},
+): Promise<number> {
   try {
-    const ss = await c.api.listSandboxes({ all });
+    const ss = (await c.api.listSandboxes({ all })).filter(
+      (s) => o.includeDeleted || !(s.state === 'terminated' && s.reason === 'deleted'),
+    );
     if (c.json) {
       c.io.out(JSON.stringify(ss) + '\n');
       return SBX_EXIT.ok;
     }
-    for (const s of ss) {
-      // Sanitized before padding, so stripped control characters cannot skew the columns.
-      const cell = (v: string, width = 0) => sanitizeRemote(v).padEnd(width);
-      const expiry =
-        when(s.expiresAt) +
-        (validLifetime(s.idleLifetimeS) ? ` (${lifetimeText(s.idleLifetimeS)})` : '');
-      const row = [
-        cell(s.id, 30),
-        cell(s.name ?? '-', 16),
-        cell(s.template, 12),
-        cell(s.mode, 15),
-        cell(stateText(s), 22),
-        // Padded (24-character date, 12 for the longest ` (2591999 s)`) only to align the owner.
-        all ? cell(expiry, 36) : expiry,
-        ...(all ? [cell(s.owner)] : []),
-      ].join(' ');
-      c.io.out(row + '\n');
-    }
+    const nowS = Math.floor((c.now ?? c.rt.now)() / 1000);
+    // No header for an empty list, so "nothing" stays empty output.
+    if (ss.length === 0) return SBX_EXIT.ok;
+    const header = [
+      'ID',
+      'NAME',
+      'TEMPLATE',
+      'MODE',
+      'STATE',
+      'EXPIRES',
+      ...(all ? ['OWNER'] : []),
+    ];
+    // Sanitized before measuring, so stripped control characters cannot skew the columns.
+    const rows = ss.map((s) =>
+      [
+        s.id,
+        s.name ?? '-',
+        s.template,
+        s.mode,
+        stateText(s),
+        expiryText(s, nowS),
+        ...(all ? [s.owner] : []),
+      ].map(sanitizeRemote),
+    );
+    // Each column as wide as its widest cell, so a long name or template id cannot shift the
+    // columns after it; the last is not padded, so no line ends in spaces.
+    const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));
+    const line = (cells: string[]) =>
+      cells.map((v, i) => (i < cells.length - 1 ? v.padEnd(widths[i]!) : v)).join('  ') + '\n';
+    c.io.out(line(header));
+    for (const r of rows) c.io.out(line(r));
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);

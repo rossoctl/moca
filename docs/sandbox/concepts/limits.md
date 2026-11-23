@@ -12,7 +12,7 @@ sidebar_position: 2
   `mocactl sbx get` and an idle `mocactl sbx mcp` do not. Pick another lifetime with `--lifetime`
   on `mocactl sbx create` or `up`, up to the deployment's maximum (30 days by default); it is set
   at create only. When it ends, the sandbox and its files are gone: pull before. `mocactl sbx ls`
-  shows each sandbox's expiry and lifetime, and `mocactl sbx doctor` fails its sandbox check in the
+  shows each sandbox's expiry, `mocactl sbx get` its idle lifetime, and `mocactl sbx doctor` fails its sandbox check in the
   last 24 hours. For a fresh sandbox, pull, `mocactl sbx rm`, then `mocactl sbx up` (an expired one
   is removed with `mocactl sbx rm --force`, as its files can no longer be checked).
 - **3 sandboxes per person** by default, and a total for the whole service. Each worktree or clone
