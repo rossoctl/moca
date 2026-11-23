@@ -62,6 +62,9 @@ import { RedisTurnQueue } from './turn-queue.js';
 import { startGateSweep } from './gate-sweep.js';
 import { guardSchemaVersion } from './schema-version.js';
 import type { ResultRedisLike } from './turn-result.js';
+import { parseDestination } from './egress-destination.js';
+import { NotifyStore } from './notify-store.js';
+import { startNotifySweep } from './notify-sweep.js';
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const v = env[name];
@@ -82,17 +85,22 @@ function intEnv(env: NodeJS.ProcessEnv, name: string, def: number): number {
  * An optional absolute http(s) URL, trailing slashes dropped. A malformed value fails STARTUP: a
  * control plane advertising a harness URL no client can use would fail every user's first turn.
  */
-function urlEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
+function urlEnv(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  protocols: readonly string[] = ['http:', 'https:'],
+): string | undefined {
   const v = env[name];
   if (!v) return undefined;
+  const label = protocols.length === 1 ? protocols[0]!.replace(':', '') : 'http(s)';
   let u: URL;
   try {
     u = new URL(v);
   } catch {
-    throw new Error(`${name} must be an absolute http(s) URL, got "${v}"`);
+    throw new Error(`${name} must be an absolute ${label} URL, got "${v}"`);
   }
-  if (u.protocol !== 'http:' && u.protocol !== 'https:')
-    throw new Error(`${name} must be an absolute http(s) URL, got "${v}"`);
+  if (!protocols.includes(u.protocol))
+    throw new Error(`${name} must be an absolute ${label} URL, got "${v}"`);
   let end = v.length;
   // A loop, not /\/+$/: that regex is quadratic on a long run of slashes (CodeQL js/polynomial-redos).
   while (end > 0 && v.charCodeAt(end - 1) === 0x2f) end--;
@@ -119,6 +127,17 @@ function countEnv(env: NodeJS.ProcessEnv, name: string, def: number): number {
   if (!/^(0|[1-9][0-9]*)$/.test(v))
     throw new Error(`${name} must be a non-negative integer, got "${v}"`);
   return Number(v);
+}
+
+/**
+ * Like countEnv, but 0 refuses to boot: unlike the async quota, 0 reads as "unlimited" to an
+ * operator for these two notification settings, and taking it literally would silently mute every
+ * owner forever.
+ */
+function positiveCountEnv(env: NodeJS.ProcessEnv, name: string, def: number): number {
+  const n = countEnv(env, name, def);
+  if (n === 0) throw new Error(`${name} must not be 0: 0 would mute every subject permanently`);
+  return n;
 }
 
 function turnRecordTtlFromEnv(env: NodeJS.ProcessEnv): number {
@@ -195,6 +214,41 @@ function catalogHostsEnv(env: NodeJS.ProcessEnv): string[] {
     out.push(h);
   }
   return out;
+}
+
+/**
+ * `MOCA_NOTIFY_ALLOW`: the destinations a subject's notification sink may point at (#394).
+ * Comma-separated `host[:port][/prefix]`, parsed by the same `parseDestination` the egress
+ * allowlist uses. UNSET MEANS NOTIFICATIONS ARE OFF, and `PUT /v1/notifications` says so by name:
+ * this is the only SSRF control on a user-supplied URL the control plane fetches, so it is
+ * fail-closed. A malformed entry refuses to boot.
+ */
+function notifyFromEnv(env: NodeJS.ProcessEnv): CpConfig['notify'] {
+  const allow = (env.MOCA_NOTIFY_ALLOW ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s !== '')
+    .map((entry) => {
+      try {
+        return parseDestination(entry);
+      } catch (err) {
+        throw new Error(
+          `MOCA_NOTIFY_ALLOW entries must be host[:port][/prefix], got "${entry}": ${String(err)}`,
+        );
+      }
+    });
+  // https: only, and validated rather than merely trimmed: a scheme-less typo would otherwise ship
+  // as a non-navigable link inside every notification. Unset = no link, which is correct for a
+  // deployment the phone cannot reach.
+  const baseUrl = urlEnv(env, 'MOCA_NOTIFY_BASE_URL', ['https:']);
+  return {
+    allow,
+    ...(baseUrl ? { baseUrl } : {}),
+    // 0 is meaningful here: no minimum spacing between deliveries.
+    minIntervalS: countEnv(env, 'MOCA_NOTIFY_MIN_INTERVAL_S', 5),
+    perHour: positiveCountEnv(env, 'MOCA_NOTIFY_PER_HOUR', 60),
+    failMax: positiveCountEnv(env, 'MOCA_NOTIFY_FAIL_MAX', 10),
+  };
 }
 
 export function portFromEnv(env: NodeJS.ProcessEnv): number {
@@ -387,6 +441,8 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
     // Where a worker spends an inference grant (MI1 §6.3). Only the harness profile reads it: the
     // sandbox profile returns above and serves no turns.
     inferenceUrl: inferenceUrlFromEnv(env),
+    // #394: notifications stay off (fail-closed) until MOCA_NOTIFY_ALLOW is set.
+    notify: notifyFromEnv(env),
   };
   // Validated at startup even though only the provider uses it: a deployment with
   // SH_TEST_USERS set and no secret must fail to boot, not serve an unguarded login path.
@@ -502,6 +558,9 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
     tenancy: 'single',
     turnRecordTtlSeconds: turnRecordTtlFromEnv(env),
     turnSummaryBytes: countEnv(env, 'MOCA_TURN_SUMMARY_BYTES', 2048),
+    // #394: the sandbox profile mounts no notification routes, but still reads the env so a
+    // misconfigured allowlist fails the boot rather than being silently ignored.
+    notify: notifyFromEnv(env),
   };
   checkRefreshConfig(config);
   return config;
@@ -827,6 +886,7 @@ export function depsFromEnv(env: NodeJS.ProcessEnv): CpDeps {
       ttlMarginSeconds: TURN_RECORD_TTL_MARGIN_SECONDS,
     }),
     turnQueue: new RedisTurnQueue(client as unknown as CpRedisLike),
+    notify: new NotifyStore(client as unknown as CpRedisLike),
     // The leaf result store's reader (§4.4). The same client, narrowed to one method: the control
     // plane reads this key and never writes it -- the worker writes it, the cascade deletes it.
     leafResults: client as unknown as ResultRedisLike,
@@ -896,6 +956,9 @@ if (isMainModule) {
   // with MOCA_GATE_DEADLINE_S unset, so the sweep cannot be gated on the config value. Costs one
   // ZRANGEBYSCORE per 30 s when no gate is open.
   startGateSweep(deps);
+  // #394: pushes paused and finished turns to the owner's sinks. With MOCA_NOTIFY_ALLOW unset the
+  // pass returns before it reads the owner index, so an un-opted deployment pays nothing per tick.
+  startNotifySweep(deps);
   // The Redis schema version (#509): written if absent, and the process exits on a newer one once
   // Redis answers. In the background, because this server starts before Redis and waits for it.
   void guardSchemaVersion({

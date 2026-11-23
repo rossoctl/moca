@@ -18,6 +18,49 @@ that shipped it ("The data plane's twin … goes to"):
 | 1.1.0                  | [1.15.0](#1150)                |
 | 1.0.0                  | the first document, 2026-10-09 |
 
+## 1.38.0
+
+Push notifications for a subject's paused and finished subagents
+([#394](https://github.com/rossoctl/moca/issues/394)). Additive: three new routes, each
+authenticated and scoped to the caller's own subject.
+
+- `GET /v1/notifications` reads the caller's own config: `sinks`, `states`, the sweep's `cursor`,
+  `lastDeliveryAt`, `failures`, `mutedUntil`, and `secretMissing` when a webhook sink has no signing
+  key to deliver with. That sink is then skipped rather than retried -- no retry can mint a key --
+  so a second, working sink keeps receiving; `secretMissing` is the only signal, and re-`PUT`ting
+  mints a fresh key.
+- `PUT /v1/notifications` stores or replaces it: `sinks` (one `webhook`, one `ntfy`, or both -- a
+  sink's `url` must be allowed by the deployment's `MOCA_NOTIFY_ALLOW`) and an optional `states`
+  (defaulting to `[paused, failed, lost]`, drawn from every terminal state but `queued`/`running`;
+  `lost` is a default because the reaper writes it for a turn nobody picked up, leaving no result
+  and no reason behind). A
+  `webhook` sink's HMAC signing key is minted here and returned as `webhookSecret` in the response
+  body ONLY -- there is no route that reads it back, and a later PUT rotates it, which immediately
+  stops the old key verifying. An `ntfy` sink's `token` is stored the same way and likewise never
+  echoed; omitting it on a re-PUT keeps the stored one, but a re-PUT that also moves the sink to a
+  different HOST is refused (`invalid_request`) rather than sending a token authorized for one
+  server to another. Resend `token` to move an authenticated sink, or `DELETE` the config first to
+  move it anonymously. The sweep enforces the same binding when it delivers, so a stored token is
+  never attached to a host it was not authorized for even if the two somehow disagree.
+- `DELETE /v1/notifications` removes the config and both stored secrets; a second `DELETE` is a
+  204, same as removing nothing.
+- A background sweep (not a route) delivers: `POST` to a `webhook` sink carries
+  `X-Moca-Signature: sha256=<hex>`, an HMAC-SHA256 over `<timestamp>.<rawBody>` with the sink's own
+  key, plus `X-Moca-Delivery` and `X-Moca-Timestamp`. `X-Moca-Delivery` is the batch's head cursor,
+  not a fresh id per attempt, so a retry of the same unadvanced batch carries the same id and a
+  receiver can dedupe on it (at-least-once is the contract, ADR-0015). A retry whose batch GREW in
+  the meantime carries a new id, so dedupe does not cover that case and a receiver can see an event
+  twice. An `ntfy` sink is posted to
+  its server's JSON publish endpoint, with its token as a bearer header when one was given.
+- The feature is off end to end until the deployment sets `MOCA_NOTIFY_ALLOW`: a `PUT` refuses
+  every sink with `invalid_request` naming the unset variable, and the sweep that would deliver
+  never starts reading streams. The list is re-checked on every delivery, not only at the `PUT`, so
+  taking a host back out stops the sinks already stored under it; that sink is skipped and a
+  co-sink on a still-listed host keeps receiving, and only a subject left with no listed sink sees
+  `failures` climb.
+- A push with a gate on it links to an approval page that 404s until the login-gated approval page
+  ([#467/B8b](https://github.com/rossoctl/moca/issues/467)) lands.
+
 ## 1.37.0
 
 A gate can be given a deadline ([#393](https://github.com/rossoctl/moca/issues/393)). Additive: two

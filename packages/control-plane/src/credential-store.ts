@@ -189,6 +189,16 @@ const KINDS = new Map<string, KindSpec>([
       defaultBinding: { header: 'Authorization', format: 'Bearer {accessToken}' },
     },
   ],
+  [
+    // #394: a webhook SIGNING key, not a credential that travels in a header. The binding is
+    // descriptive -- `{hmac}` is computed from the body and this key, never the key itself -- which
+    // is why it is the one kind whose format names something outside `secretFields`.
+    'hmac-sha256',
+    {
+      secretFields: ['key'],
+      defaultBinding: { header: 'X-Moca-Signature', format: 'sha256={hmac}' },
+    },
+  ],
 ]);
 
 export function registerKind(kind: string, spec: KindSpec): void {

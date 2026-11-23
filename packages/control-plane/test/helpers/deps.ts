@@ -8,6 +8,7 @@ import { MemoryEgressStore } from '../../src/egress-log.js';
 import { MemoryRefreshStore, type AuditFields } from '../../src/refresh-store.js';
 import { makeSigner, publicKeyFromBase64, type TokenClaims } from '../../src/token.js';
 import { MemoryTurnQueue } from '../../src/turn-queue.js';
+import { NotifyStore } from '../../src/notify-store.js';
 import { TurnStore } from '../../src/turn-store.js';
 import { fakeBundleRedis, fakeRedis } from './fake-redis.js';
 import { StubIdentity } from './stub-identity.js';
@@ -85,6 +86,8 @@ export function makeDeps(
     turnSummaryBytes: 2048,
     grantTtlS: 300,
     turnMaxS: 1800,
+    // Empty allow = notifications off, which is what every suite that is not about them wants.
+    notify: { allow: [], minIntervalS: 5, perHour: 60, failMax: 10 },
     sandbox: {
       templates: [
         {
@@ -136,6 +139,7 @@ export function makeDeps(
     log: (line) => logLines.push(line),
     logLines,
     turns: new TurnStore(fake.redis, { resultTtlSeconds: 86_400, ttlMarginSeconds: 3_600 }),
+    notify: new NotifyStore(fake.redis),
     turnQueue: new MemoryTurnQueue(),
     leafResults: { get: async (k: string) => fake.strings.get(k) ?? null },
   };

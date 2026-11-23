@@ -170,6 +170,35 @@ spec:
                   configMapKeyRef:
                     { name: moca-settings, key: MOCA_GATE_DEADLINE_S, optional: true },
                 }
+            # Notifications (#394). Unset MOCA_NOTIFY_ALLOW = off; it is the SSRF allowlist a
+            # subject's sink URL must match.
+            - name: MOCA_NOTIFY_ALLOW
+              valueFrom:
+                { configMapKeyRef: { name: moca-settings, key: MOCA_NOTIFY_ALLOW, optional: true } }
+            - name: MOCA_NOTIFY_BASE_URL
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: MOCA_NOTIFY_BASE_URL, optional: true },
+                }
+            - name: MOCA_NOTIFY_MIN_INTERVAL_S
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: MOCA_NOTIFY_MIN_INTERVAL_S, optional: true },
+                }
+            - name: MOCA_NOTIFY_PER_HOUR
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: MOCA_NOTIFY_PER_HOUR, optional: true },
+                }
+            - name: MOCA_NOTIFY_FAIL_MAX
+              valueFrom:
+                {
+                  configMapKeyRef:
+                    { name: moca-settings, key: MOCA_NOTIFY_FAIL_MAX, optional: true },
+                }
             # The turn record's TTL is derived from this (+1 h margin), so raising it on the worker
             # without setting it here leaves records expiring before the results they explain.
             - name: LEAF_RESULT_TTL_SECONDS

@@ -11,7 +11,7 @@
 openapi: 3.1.0
 info:
   title: MOCA control plane
-  version: 1.37.0
+  version: 1.38.0
   description: |
     Multi-user control plane: authenticated API, owned sessions, per-user credentials (MU1).
     This document covers the CONTROL PLANE's routes only. The data plane also serves `/v1` paths
@@ -474,6 +474,39 @@ components:
           type: [string, 'null']
           maxLength: 2048
           description: full gateway origin; meaningful only for consumer `inference`
+    NotifySinkList:
+      description: |
+        At most one sink of each `kind` (#394). A `webhook` sink takes only `url`; an `ntfy` sink
+        also takes `topic`, and -- on a PUT only -- an optional write-only `token` for a
+        non-anonymous topic. Never includes a token on a read: `GET /v1/notifications` echoes
+        `url` and `topic` only.
+      type: array
+      minItems: 1
+      maxItems: 2
+      items:
+        type: object
+        required: [kind, url]
+        properties:
+          kind: { type: string, enum: [webhook, ntfy] }
+          url: { type: string, format: uri, description: https, allowed by `MOCA_NOTIFY_ALLOW` }
+          topic:
+            type: string
+            pattern: '^[A-Za-z0-9_-]{1,64}$'
+            description: required for `ntfy`, refused for `webhook`
+          token:
+            type: string
+            maxLength: 512
+            writeOnly: true
+            description: an ntfy publish token; request body only, and optional
+    NotifyStates:
+      description: |
+        Which terminal turn states to notify on (#394); defaults to `[paused, failed, lost]`.
+        `lost` is a default because the reaper writes it for a turn nobody ever picked up, which
+        leaves no result and no reason to find later. `queued` and `running` are never valid here
+        -- `running` fires for every turn that starts.
+      type: array
+      minItems: 1
+      items: { type: string, enum: [paused, responded, done, solved, failed, cancelled, lost] }
     ModelList:
       type: object
       required: [credential, models]
@@ -2420,6 +2453,108 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+  /v1/notifications:
+    get:
+      operationId: getNotifications
+      summary: My owner-notification config
+      description: |
+        The caller's own config for #394's paused/failed owner notifications, plus the sweep's
+        bookkeeping. Scoped by the token's subject, like `/v1/events`: there is no `?owner=` and no
+        path id to own. Never returns a secret -- `secretMissing` is `true` when a webhook sink is
+        configured but its signing key is gone (a half-written PUT, or a credential store outage
+        between the key write and the config write).
+      security: [{ sessionToken: [] }]
+      responses:
+        '200':
+          description: the stored config and bookkeeping
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  [sinks, states, cursor, lastDeliveryAt, failures, mutedUntil, secretMissing]
+                properties:
+                  sinks: { $ref: '#/components/schemas/NotifySinkList' }
+                  states: { $ref: '#/components/schemas/NotifyStates' }
+                  cursor: { type: string, description: the event-stream id delivery resumes AFTER }
+                  lastDeliveryAt:
+                    { type: integer, description: epoch ms; 0 before the first delivery }
+                  failures: { type: integer, description: consecutive failed sweep passes }
+                  mutedUntil: { type: integer, description: epoch ms; 0 when not muted }
+                  secretMissing:
+                    type: boolean
+                    description: a webhook sink is configured but its signing key is not
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: not_found -- no notification config for this subject
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    put:
+      operationId: putNotifications
+      summary: Store or replace my owner-notification config
+      description: |
+        Replaces the caller's whole config. At most one sink of each kind; a webhook sink's URL must
+        be allowed by the operator's `MOCA_NOTIFY_ALLOW`, the only control against notifying an
+        attacker-chosen host. A webhook signing key is minted on every PUT that keeps or adds a
+        webhook sink and returned EXACTLY ONCE, in this response -- rotated by any later PUT and
+        never retrievable again. An ntfy sink's `token` is write-only and optional: omitting it on a
+        re-PUT leaves a previously stored token in place rather than clearing it -- unless the sink's
+        HOST also changed, which is refused (400 `invalid_request`), because a stored token is
+        authorized for the host it was sent with and must not follow the sink to another server.
+        Resend `token` to move an authenticated sink, or DELETE this config first to move it
+        anonymously. The sender holds the same binding: a token is never attached to a host outside
+        the `destination.hosts` it was stored with, so a sink that disagrees is skipped rather than
+        posted to. A push with a `paused` event links to an approval page that 404s until the
+        login-gated approval page (#467/B8b) lands.
+      security: [{ sessionToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sinks]
+              properties:
+                sinks: { $ref: '#/components/schemas/NotifySinkList' }
+                states: { $ref: '#/components/schemas/NotifyStates' }
+      responses:
+        '200':
+          description: the stored config, with a freshly minted webhook signing key if applicable
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sinks, states, cursor]
+                properties:
+                  sinks: { $ref: '#/components/schemas/NotifySinkList' }
+                  states: { $ref: '#/components/schemas/NotifyStates' }
+                  cursor: { type: string, description: the event-stream id delivery resumes AFTER }
+                  webhookSecret:
+                    type: string
+                    pattern: '^[0-9a-f]{64}$'
+                    description: |
+                      The webhook signing key, hex. Present only when a webhook sink is kept or
+                      added, shown here and nowhere else, and rotated by every later PUT.
+        '400':
+          description: >-
+            invalid_request -- a malformed sink, or a webhook url `MOCA_NOTIFY_ALLOW` does not
+            allow (including an empty `MOCA_NOTIFY_ALLOW`, which refuses every PUT by name)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    delete:
+      operationId: deleteNotifications
+      summary: Remove my owner-notification config
+      description: |
+        204 whether or not a config existed. Removes the config, the owner index entry and both
+        stored secrets (the webhook signing key and the ntfy token) -- idempotent, like
+        `DELETE /v1/credentials/{name}`.
+      security: [{ sessionToken: [] }]
+      responses:
+        '204': { description: removed, or there was nothing to remove }
+        '401': { $ref: '#/components/responses/Unauthorized' }
   /v1/credentials:
     get:
       operationId: listCredentials
