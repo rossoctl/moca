@@ -86,6 +86,43 @@ export interface ExecAttempt {
   /** The command's exit code, or null when it never reported one. */
   exit: number | null;
   outcome: ExecAttemptOutcome;
+  /**
+   * The output bytes this attempt received: stdout (every stream but stderr, as the relay's
+   * `sandbox_exec.out_bytes` counts them) and stderr. Counts only, never the bytes.
+   */
+  outBytes: number;
+  errBytes: number;
+  /** The gRPC status the call ended with, when it was not OK (a cancel of this client's excluded). */
+  grpcStatus?: number;
+  /**
+   * The relay's or worker's wire text's code (`stale_mode`, `memory-budget`, `timeout`, …): the
+   * part before its first `:` when that is WIRE_CODE_RE's shape, never the text after it.
+   */
+  wireCode?: string;
+}
+
+/** A wire text's code prefix: lowercase letters, digits, `_` and `-`, at most 48, then `:`. */
+export const WIRE_CODE_RE = /^([a-z][a-z0-9_-]{0,47}):/;
+
+/** What one attempt's call carried besides its result, for its ExecAttempt. */
+interface AttemptWire {
+  outBytes: number;
+  errBytes: number;
+  grpcStatus?: number;
+  wire?: string;
+}
+
+/** The ExecAttempt fields from what the call carried. */
+function wireFields(
+  w: AttemptWire,
+): Pick<ExecAttempt, 'outBytes' | 'errBytes' | 'grpcStatus' | 'wireCode'> {
+  const code = w.wire === undefined ? null : WIRE_CODE_RE.exec(w.wire);
+  return {
+    outBytes: w.outBytes,
+    errBytes: w.errBytes,
+    ...(w.grpcStatus !== undefined ? { grpcStatus: w.grpcStatus } : {}),
+    ...(code ? { wireCode: code[1]! } : {}),
+  };
 }
 
 /**
@@ -657,9 +694,10 @@ export class SandboxExecConn {
       const { grant, timeoutS, capped } = await this.prepare(want, force);
       if (reqIds[reqIds.length - 1] !== reqId) reqIds.push(reqId);
       const start = this.now();
+      const wire: AttemptWire = { outBytes: 0, errBytes: 0 };
       let r: ExecResult;
       try {
-        r = await this.once(command, opts, reqId, timeoutS, grant.token, kind);
+        r = await this.once(command, opts, reqId, timeoutS, grant.token, kind, wire);
       } catch (err) {
         observe(opts, {
           reqId,
@@ -667,6 +705,7 @@ export class SandboxExecConn {
           ms: this.now() - start,
           exit: null,
           outcome: outcomeOf(err),
+          ...wireFields(wire),
         });
         throw err;
       }
@@ -676,6 +715,7 @@ export class SandboxExecConn {
         ms: this.now() - start,
         exit: r.timedOutS === undefined ? r.exitCode : null,
         outcome: r.timedOutS === undefined ? 'ok' : 'timeout',
+        ...wireFields(wire),
       });
       return { ...r, reqIds: [...reqIds], ...(capped ? { capped: true } : {}) };
     };
@@ -955,6 +995,8 @@ export class SandboxExecConn {
     timeoutS: number,
     token: string,
     kind: ExecKindArgs,
+    /** Filled in as the call goes: the attempt's byte counts, status and wire text. */
+    wire: AttemptWire = { outBytes: 0, errBytes: 0 },
   ): Promise<ExecResult> {
     const signal = opts.signal;
     if (signal?.aborted) return Promise.reject(new ExecAbortedError(signal));
@@ -1073,11 +1115,15 @@ export class SandboxExecConn {
         started = true;
         if (ev.chunk) {
           output = true;
-          (ev.chunk.stream === Stream.STREAM_STDERR ? err : out).push(Buffer.from(ev.chunk.data));
+          const stderr = ev.chunk.stream === Stream.STREAM_STDERR;
+          (stderr ? err : out).push(Buffer.from(ev.chunk.data));
+          if (stderr) wire.errBytes += ev.chunk.data.length;
+          else wire.outBytes += ev.chunk.data.length;
         } else if (ev.end) {
           end = { exitCode: ev.end.exitCode, truncated: ev.end.truncated };
         } else if (ev.error) {
           execError = ev.error.message ?? '';
+          wire.wire = execError;
         } else if (ev.lease) {
           lease.push(ev.lease);
         }
@@ -1085,9 +1131,11 @@ export class SandboxExecConn {
       call.on('error', (e: ServiceError) => {
         done();
         if (aborted) return;
+        if (e.code !== status.OK) wire.grpcStatus = e.code;
+        const details = e.details || e.message;
+        wire.wire ??= details;
         // The command's outcome arrived; whatever the status says after it is not the command's.
         if (end) return resolve(result(end));
-        const details = e.details || e.message;
         const outcome = outcomeOf(execError ?? details);
         if (outcome) return resolve(outcome);
         if (execError !== undefined) return fail(inStreamFailure(execError, e.code));

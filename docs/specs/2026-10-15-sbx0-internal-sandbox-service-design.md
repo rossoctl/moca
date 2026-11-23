@@ -630,12 +630,17 @@ nothing here changes, and moca does not need Cortex.
       server), `sbx`, `client` (the handshake's `clientInfo` as sent, each string capped at 128),
       `mocactl`, `run` (MOCACTL_SBX_RUN_ID, optional);
     - `call`, the line above plus `mcp_session`, `sbx`, `n` (the server's own counter), `rpc_id` (the
-      JSON-RPC id as sent), `exec[]` (each attempt's `req_id, start, ms, exit, outcome`) and
-      `meta_tool_use_id` (a tool-use id the client happens to send in `_meta`, else null);
+      JSON-RPC id as sent), `exec[]` (each attempt's fields, below) and `meta_tool_use_id` (a
+      tool-use id the client happens to send in `_meta`, else null);
     - `exec`, one per attempt for every other command (`sbx run`, `push`, `pull`, …): `sbx`,
-      `command`, `invocation` (`--record`'s id when that is on), `req_id, start, ms, exit, outcome`,
-      `run`;
+      `command`, `invocation` (`--record`'s id when that is on), the attempt's fields, `run`;
     - `session_end` when the server stops (`why`: `eof` or `signal`; best effort).
+  - An attempt's fields: `req_id, start, ms, exit, outcome`; `out_bytes` and `err_bytes` (the
+    output it received: stdout as the relay's `sandbox_exec.out_bytes` counts it, then stderr;
+    counts only); `grpc_status` (the status the call ended with when not OK, else null); and
+    `wire_code` (the relay's or worker's wire text's code before its first `:`, such as
+    `stale_mode` or `memory-budget`, when that is lowercase letters, digits, `_` and `-`, at most
+    48; else null). Never the wire text after the code.
   - Every Exec carries `x-moca-call-id` in its gRPC metadata (`<mcp_session>:<n>` or
     `<invocation>:<k>`, `[A-Za-z0-9._:-]{1,64}`), for the relay's audit line to name. A `req_id`
     matches the relay's `sandbox_exec.req_id`; a token refusal retries the same one, a `stale_mode`

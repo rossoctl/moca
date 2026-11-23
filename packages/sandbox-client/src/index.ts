@@ -1,6 +1,7 @@
 export {
   CALL_ID_HEADER,
   CALL_ID_RE,
+  WIRE_CODE_RE,
   CLIENT_CHANNEL_OPTIONS,
   ExecAbortedError,
   ExecMachineryError,

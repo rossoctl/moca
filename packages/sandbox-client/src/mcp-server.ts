@@ -91,6 +91,13 @@ export interface ExecEntry {
   ms: number;
   exit: number | null;
   outcome: ExecAttempt['outcome'];
+  /** Output byte counts (stdout as the relay's `out_bytes` counts it, then stderr). */
+  out_bytes: number;
+  err_bytes: number;
+  /** The gRPC status when the call ended with one other than OK, else null. */
+  grpc_status: number | null;
+  /** The wire text's code prefix (WIRE_CODE_RE), else null: never the text. */
+  wire_code: string | null;
 }
 
 /** The first line of a server's records: who connected, from the MCP handshake. */
@@ -121,6 +128,10 @@ export function execEntry(a: ExecAttempt): ExecEntry {
     ms: a.ms,
     exit: a.exit,
     outcome: a.outcome,
+    out_bytes: a.outBytes,
+    err_bytes: a.errBytes,
+    grpc_status: a.grpcStatus ?? null,
+    wire_code: a.wireCode ?? null,
   };
 }
 
