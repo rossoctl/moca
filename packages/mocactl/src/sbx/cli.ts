@@ -93,7 +93,7 @@ import { cmdProc, parseProcArgs, PROC_FLAG_OWNER, type ProcArgs } from './proc.j
 
 /**
  * What an sbx sandbox is, before the usage on `--help` and a bare `mocactl sbx` (#599): the plain
- * `mocactl` session's tools also run in "a sandbox", but one these commands never see, so a new
+ * `mocactl harness` session's tools also run in "a sandbox", but one these commands never see, so a new
  * user needs the distinction before the command list. It defines the sandbox itself (made from a
  * template; no repository needed: `create`, then `run` and `put` by ID), then `up` as the
  * common way in, and says what the commands really do: `up`
@@ -111,8 +111,8 @@ in sync: \`mocactl sbx push\` sends later local edits, and \`mocactl sbx pull --
 agent's edits here as a patch. /workspace is kept between commands; the sandbox ends after a period
 without use (7 days by default). Without a repository, \`mocactl sbx create\` makes one (from the
 default template, or \`--template ID\`), and \`run\` and \`put\` use it by ID; \`proc\` needs one
-made with \`--mode lease+processes\`. (A bare \`mocactl\` session's tools run in a sandbox of moca's
-own server, SH_CONTROL_PLANE_URL: these commands do not see it.)`;
+made with \`--mode lease+processes\`. (A \`mocactl harness\` session's tools run in a sandbox of
+moca's own server, SH_CONTROL_PLANE_URL: these commands do not see it.)`;
 
 /**
  * The commands, grouped, each group in the order a user reaches for them (#599): the everyday
@@ -123,10 +123,8 @@ export const SBX_USAGE = `usage (the sandbox service):
 a repository's sandbox, in the order you use it:
   mocactl sbx login [--control-plane-url URL] [--no-browser]
                                                  log in with the GitHub device flow
-                                                 (--control-plane-url: the sandbox service's URL,
-                                                 remembered for later commands; in a local
-                                                 terminal: copies the code, opens the browser;
-                                                 --no-browser: only prints the URL and the code)
+                                                 (--control-plane-url: the sandbox service's URL;
+                                                 --no-browser: only print the sign-in URL and code)
   mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--max-file MiB]
                  [--no-agent-config] [--cortex] [--lifetime DURATION]
                                                  in a git repository: create or reuse its sandbox,
@@ -432,6 +430,86 @@ exit: 0 ok, 1 failed, 2 usage, 3 log in first, 4 control plane unreachable, 5 a 
 130 interrupted (Ctrl-C)`;
 
 /**
+ * Each command's one line in the overview (bare `mocactl sbx`, `mocactl sbx --help`): what it
+ * does, no flags. The flags and their meaning are `mocactl sbx COMMAND --help`, cut from SBX_USAGE.
+ */
+const SBX_SUMMARIES: Record<string, string> = {
+  login: 'log in',
+  up: "create or reuse this repository's sandbox and point your agents at it",
+  claude: "run Claude Code on this sandbox's tools",
+  codex: "run Codex CLI on this sandbox's tools",
+  mcp: 'the stdio MCP server for your agent',
+  run: 'run a command in /workspace',
+  put: 'write a file under /workspace',
+  pull: "the sandbox's changes as a patch, or applied here",
+  push: 'send local edits to the sandbox',
+  ls: 'list your sandboxes',
+  doctor: 'check the login, sandbox, agent config and exec',
+  rm: 'delete the sandbox and its agent config',
+  logout: 'log out',
+  create: 'create a sandbox from a template',
+  get: "a sandbox's mode, idle timeout and lease",
+  mode: "change a sandbox's mode",
+  reset: "end a sandbox's lease",
+  proc: 'start, list, read the logs of and stop tracked processes',
+  token: 'print a sandbox token',
+  env: 'shell exports for a direct sandbox/v1 client',
+  egress: 'what a sandbox reached through its egress proxy',
+  credentials: 'list, add or delete them',
+  templates: 'list, create, build and manage templates',
+  quota: 'your template quotas and live-sandbox cap',
+  policy: "the deployment's template policy",
+  hosts: 'per KVM host: slots, memory, disk',
+  admin: 'enroll subjects, and grant or revoke the admin role',
+};
+
+/** SBX_USAGE's note on where the control plane comes from, for `login --help` and `logout --help`. */
+const SBX_CONTROL_PLANE_NOTE = `The control plane comes from --control-plane-url, MOCACTL_SBX_URL, the bound sandbox's, the one
+remembered at login, or the login's own (a login minted by an operator). The login is kept apart
+from \`mocactl login\`'s, so both can be active at once.`;
+
+/** Where the overview's descriptions start. */
+const SBX_SUMMARY_COLUMN = 30;
+
+/**
+ * SBX_USAGE's groups, in its order, with one line per command (SBX_SUMMARIES) instead of every
+ * form and flag. The admins' `templates transfer` and `quota` are in the templates line, so a
+ * group left with no command of its own (none today) is dropped.
+ */
+function sbxOverview(): string {
+  const head = '  mocactl sbx ';
+  const out: string[] = ['usage (the sandbox service):'];
+  const emitted = new Set<string>();
+  let heading: string | undefined;
+  for (const line of SBX_USAGE.split('\n').slice(1)) {
+    if (line.startsWith(head)) {
+      const word = /^[a-z][a-z+|-]*/.exec(line.slice(head.length))?.[0] ?? '';
+      if (emitted.has(word)) continue;
+      emitted.add(word);
+      if (heading !== undefined) {
+        if (out.length > 1) out.push('');
+        out.push(heading);
+        heading = undefined;
+      }
+      out.push(`${head}${word}`.padEnd(SBX_SUMMARY_COLUMN) + (SBX_SUMMARIES[word] ?? ''));
+    } else if (line.endsWith(':') && !line.startsWith(' ')) {
+      heading = line;
+    } else if (!line.startsWith(' ') && line !== '') {
+      break;
+    }
+  }
+  out.push('', "Run `mocactl sbx COMMAND --help` for a command's flags and details.");
+  return out.join('\n');
+}
+
+/** The commands SBX_OVERVIEW lists, in its order. */
+export const SBX_COMMANDS = (): string[] =>
+  [...SBX_OVERVIEW.matchAll(/^ {2}mocactl sbx (\S+)/gm)].map((m) => m[1]!);
+
+/** `mocactl sbx` and `mocactl sbx --help`: every command, one line each, in SBX_USAGE's groups. */
+export const SBX_OVERVIEW = sbxOverview();
+
+/**
  * `mocactl sbx COMMAND [SUB...] --help`: that command's entries (commandUsage), then the notes that
  * apply to them. Undefined for a command with no entry, which then gets the whole usage. A usage
  * error (`forError`) leaves out the exit codes: the user just saw which one they got.
@@ -445,6 +523,11 @@ function sbxCommandUsage(words: string[], opts: { forError?: boolean } = {}): st
       ? 'ID (or --sandbox ID) defaults to the sandbox in the nearest .sbx/sandbox.json.'
       : undefined,
     /--json\b/.test(body) ? '--json: print the result as JSON on stdout, for a script.' : undefined,
+    words[0] !== undefined && !NO_RECORD.has(words[0])
+      ? '--record F: append one NDJSON line per HTTP attempt to F (0600), with no token, host or\n' +
+        'free text in it.'
+      : undefined,
+    words[0] === 'login' || words[0] === 'logout' ? SBX_CONTROL_PLANE_NOTE : undefined,
     opts.forError
       ? undefined
       : 'exit codes: 0 ok, 1 failed, 2 usage error, 3 not logged in, 4 control plane unreachable,\n' +
@@ -891,7 +974,7 @@ async function sbxMainWith(
 ): Promise<number> {
   // A usage error shows the help of the command it is about (sbxCommandUsage), as --help does.
   const words = typedWords(argv, SBX_OPTIONS);
-  const usage = sbxCommandUsage(words, { forError: true }) ?? SBX_USAGE;
+  const usage = sbxCommandUsage(words, { forError: true }) ?? SBX_OVERVIEW;
   let parsed;
   try {
     parsed = parseArgs({
@@ -914,7 +997,7 @@ async function sbxMainWith(
   if (values.help) {
     // `sbx COMMAND --help`: that command's syntax, not every command's (the words before `--`).
     // Bare `sbx --help` opens with what an sbx sandbox is (#599).
-    io.out((sbxCommandUsage(words) ?? `${SBX_ABOUT}\n\n${SBX_USAGE}`) + '\n');
+    io.out((sbxCommandUsage(words) ?? `${SBX_ABOUT}\n\n${SBX_OVERVIEW}`) + '\n');
     return SBX_EXIT.ok;
   }
   if (!command) {

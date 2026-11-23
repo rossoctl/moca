@@ -47,7 +47,7 @@ describe('runDiagnostics', () => {
     const results = await runDiagnostics(d);
     expect(results.at(-1)).toMatchObject({ id: 3, status: 'fail', detail: 'no cached login' });
     expect(results.at(-1)?.fix).toBe(
-      'not logged in — run `mocactl login`, or start `mocactl` to log in',
+      'not logged in — run `mocactl login`, or start `mocactl harness` to log in',
     );
     expect((d.cp as unknown as { calls: string[] }).calls).not.toContain('me');
   });

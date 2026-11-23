@@ -15,7 +15,14 @@ import {
 import { cmdLogin, devicePrompt } from '../src/headless.js';
 import { buildRuntime } from '../src/runtime.js';
 import { SandboxApiClient } from '../src/sbx/api.js';
-import { openSbxRuntime, sbxMain, sbxPaths } from '../src/sbx/cli.js';
+import {
+  openSbxRuntime,
+  SBX_COMMANDS,
+  SBX_OVERVIEW,
+  SBX_USAGE,
+  sbxMain,
+  sbxPaths,
+} from '../src/sbx/cli.js';
 import { createWaitingForActivation } from '../src/sbx/commands.js';
 import { readBoundSandbox } from '../src/sbx/state.js';
 import { LeaseControlError } from '@moca/sandbox-client';
@@ -74,7 +81,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       const flat = about.replace(/\s+/g, ' ');
       // What the commands really do: copies made by up and push, the configuration up writes,
       // Bob's local tools left live, the agent's edits back by pull, how long a sandbox lasts,
-      // and not the sandbox a bare `mocactl` session's tools run in.
+      // and not the sandbox a `mocactl harness` session's tools run in.
       expect(flat).toContain(
         'In a git repository, `mocactl sbx up` creates or reuses one, copies the working tree',
       );
@@ -119,8 +126,50 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       ...['doctor', 'rm', 'logout'],
       // By hand, credentials, templates, then the admins' commands.
       ...['create', 'get', 'mode', 'reset', 'proc', 'token', 'env', 'egress', 'credentials'],
-      ...['templates', 'quota', 'policy', 'hosts', 'templates', 'admin'],
+      // (the admins' `templates transfer` and `quota` are in the one templates line).
+      ...['templates', 'quota', 'policy', 'hosts', 'admin'],
     ]);
+  });
+
+  it('lists every command on one line, with no flags, on --help and bare', async () => {
+    const help = setup();
+    expect(await sbxMain(['--help'], help.env, help.io, { home: help.home })).toBe(0);
+    const bare = setup();
+    expect(await sbxMain([], bare.env, bare.io, { home: bare.home })).toBe(2);
+    // Every command of the full usage, once, each with its one-line summary.
+    const all = new Set(
+      [...SBX_USAGE.matchAll(/^ {2}mocactl sbx ([a-z][a-z+|-]*)/gm)].map((m) => m[1]),
+    );
+    expect(new Set(SBX_COMMANDS())).toEqual(all);
+    expect(SBX_COMMANDS().length).toBe(all.size);
+    for (const line of SBX_OVERVIEW.split('\n')) {
+      expect(line.length).toBeLessThanOrEqual(100);
+      if (line.startsWith('  mocactl sbx ')) expect(line).toMatch(/^ {2}mocactl sbx \S+ {2,}\S/);
+    }
+    for (const text of [help.io.outs.join(''), bare.io.errs.join('\n')]) {
+      expect(text).toContain(SBX_OVERVIEW);
+      expect(text).toMatch(/^ {2}mocactl sbx login {2,}log in$/m);
+      // No flag explanations, and no login code talk: those are `COMMAND --help`'s.
+      expect(SBX_OVERVIEW).not.toMatch(/--(?!help)[a-z]/);
+      expect(text).not.toContain('copies the code');
+      expect(text).toContain('admins only:');
+      expect(text).toContain('Run `mocactl sbx COMMAND --help`');
+    }
+  });
+
+  it("login --help: the sandbox service's URL, and no clipboard or browser talk", async () => {
+    const { env, io } = setup();
+    expect(await main(['sbx', 'login', '--help'], env, io)).toBe(0);
+    const out = io.outs.join('');
+    expect(out).toContain("--control-plane-url: the sandbox service's URL;");
+    expect(out).toContain('--no-browser: only print the sign-in URL and code');
+    expect(out).not.toMatch(/copies|clipboard|opens the browser/);
+    expect(out).toContain('The control plane comes from --control-plane-url, MOCACTL_SBX_URL');
+    // login takes no --record (it would record a secret); ls does.
+    expect(out).not.toContain('--record F');
+    const ls = setup();
+    expect(await main(['sbx', 'ls', '--help'], ls.env, ls.io)).toBe(0);
+    expect(ls.io.outs.join('')).toContain('--record F: append one NDJSON line');
   });
 
   describe('COMMAND --help shows that command, not every command', () => {

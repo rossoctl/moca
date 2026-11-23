@@ -188,8 +188,8 @@ logged in as Ada Lovelace
 
 ### 1b. Store an inference credential
 
-Start `mocactl` and open **Credentials** with `ctrl+x k` (or run `mocactl --setup` for the
-onboarding flow; a plain `mocactl` with a control-plane URL and a login goes straight to chat).
+Start `mocactl harness` and open **Credentials** with `ctrl+x k` (or run `mocactl harness --setup` for the
+onboarding flow; a plain `mocactl harness` with a control-plane URL and a login goes straight to chat).
 Add one credential with consumer `inference`:
 
 - **A gateway token** (LiteLLM and the like): kind `bearer`, with the fields in

@@ -71,7 +71,7 @@ export async function runDiagnostics(deps: DiagnosticsDeps): Promise<CheckResult
       fix: deps.storedLoginUrl
         ? `auth.json holds a login for ${sanitizeRemote(deps.storedLoginUrl)}, but this run targets ` +
           `${sanitizeRemote(deps.controlPlaneUrl)} — use one URL (--control-plane-url / SH_CONTROL_PLANE_URL / config.json) or run \`mocactl login\``
-        : 'not logged in — run `mocactl login`, or start `mocactl` to log in',
+        : 'not logged in — run `mocactl login`, or start `mocactl harness` to log in',
     },
     {
       run: async () => {
