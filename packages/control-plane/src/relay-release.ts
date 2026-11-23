@@ -33,6 +33,13 @@ export interface RelayReleaser {
  */
 export const RELEASE_BOUND_MS = 5_000;
 
+/**
+ * How long one sender's claim on a sandbox's release lasts (SandboxStore.claimRelease): well past the
+ * bound, so a claim never lapses under a release still running, and short enough that a crashed
+ * claimer's release is retried by the next sweep.
+ */
+export const RELEASE_CLAIM_TTL_S = 60;
+
 /** Releases the sweep has in flight at once; the relay's control listener caps its own at 16. */
 export const RELEASE_SWEEP_CONCURRENCY = 8;
 
@@ -107,10 +114,29 @@ export function relayReleaserFromEnv(
   }
   if (others.includes(token)) {
     throw new Error(
-      'MOCA_RELAY_RELEASE_TOKEN must differ from the exchange, janitor, installer, egress and template host bearers',
+      'MOCA_RELAY_RELEASE_TOKEN must differ from every other control-plane secret and bearer',
     );
   }
   return httpRelayReleaser(raw, token, fetchImpl);
+}
+
+/**
+ * Starts `work` and returns at once: a release a DELETE sends after it commits must neither fail nor
+ * delay it. Every error ends here (logged), never as an unhandled rejection, which would end the
+ * process.
+ */
+export function inBackground(what: string, work: () => Promise<void>): void {
+  let p: Promise<void>;
+  try {
+    p = work();
+  } catch (err) {
+    p = Promise.reject(err);
+  }
+  p.catch((err: unknown) =>
+    console.error(
+      `[control-plane] ${what} failed: ${err instanceof Error ? err.message : String(err)}`,
+    ),
+  );
 }
 
 /**

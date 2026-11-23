@@ -85,7 +85,9 @@ import {
 import type { TokenClaims } from './token.js';
 import {
   RELEASE_BOUND_MS,
+  RELEASE_CLAIM_TTL_S,
   RELEASE_SWEEP_CONCURRENCY,
+  inBackground,
   withinBound,
   type ReleaseAnswer,
 } from './relay-release.js';
@@ -573,6 +575,11 @@ async function recordExpiries(deps: CpDeps, recs: SandboxRecord[], nowS: number)
  * Anything else (the relay down, no live worker, a timeout, the bound) writes nothing and is
  * logged only, so the janitor's next sweep sends it again while the record is retained. Never
  * throws: the release is best-effort.
+ *
+ * Sent once: the sender first claims it (SandboxStore.claimRelease, atomic, RELEASE_CLAIM_TTL_S),
+ * so a DELETE and a concurrent sweep, or two DELETEs, do not both send. An unanswered release drops
+ * its claim for the next sweep; a crashed sender's lapses. The audit line comes after `releasedAt`
+ * is written, so a failed write (which leaves the release to be sent again) is not audited twice.
  */
 async function releaseSandbox(
   deps: CpDeps,
@@ -581,6 +588,16 @@ async function releaseSandbox(
   subject: string,
   signal: AbortSignal,
 ): Promise<void> {
+  const unclaim = () => store.unclaimRelease(rec.id).catch(() => {});
+  try {
+    if (!(await store.claimRelease(rec.id, seconds(deps), RELEASE_CLAIM_TTL_S))) return;
+  } catch (err) {
+    console.error(
+      `[control-plane] the release of sandbox ${rec.id}'s workspace was not claimed: ` +
+        `${(err as Error).message} -- the next janitor sweep tries again`,
+    );
+    return;
+  }
   let answer: ReleaseAnswer;
   try {
     answer = await deps.relayRelease!.release(rec.worker, rec.wsk, signal);
@@ -589,6 +606,17 @@ async function releaseSandbox(
       `[control-plane] the release of sandbox ${rec.id}'s workspace on ${rec.worker} was not ` +
         `answered: ${(err as Error).message} -- the next janitor sweep sends it again`,
     );
+    await unclaim();
+    return;
+  }
+  try {
+    await store.markReleased(rec.id, seconds(deps));
+  } catch (err) {
+    console.error(
+      `[control-plane] releasedAt not recorded for sandbox ${rec.id}: ${(err as Error).message}` +
+        ' -- the next janitor sweep sends the release again',
+    );
+    await unclaim();
     return;
   }
   await auditBestEffort(deps, 'sandbox_workspace_release', rec.id, {
@@ -597,14 +625,6 @@ async function releaseSandbox(
     decision: 'sandbox_workspace_release',
     outcome: answer,
   });
-  try {
-    await store.markReleased(rec.id, seconds(deps));
-  } catch (err) {
-    console.error(
-      `[control-plane] releasedAt not recorded for sandbox ${rec.id}: ${(err as Error).message}` +
-        ' -- the next janitor sweep sends the release again',
-    );
-  }
 }
 
 /**
@@ -3107,15 +3127,13 @@ export const SANDBOX_HANDLERS: Record<string, Handler> = {
     // #338: its workspace released on its worker, only now that the record has ended -- a released
     // key refuses new Execs, so a release before a delete that then failed would strand a live
     // sandbox. Also after a delete that found it ended already ('already'), when no release was
-    // answered yet. Within the bound, and never this DELETE's failure: unanswered, the janitor's
-    // sweep sends it again.
-    if (rec.releasedAt === undefined) {
-      await releaseEnded(
-        deps,
-        store,
-        [{ ...rec, deletedAt: rec.deletedAt ?? now }],
-        now,
-        ctx.principal!.sub,
+    // answered yet. In the background, never awaited: it neither fails nor delays this DELETE, it
+    // has its own bound, and unanswered, the janitor's sweep sends it again.
+    if (rec.releasedAt === undefined && deps.relayRelease) {
+      const ended = { ...rec, deletedAt: rec.deletedAt ?? now };
+      const sub = ctx.principal!.sub;
+      inBackground(`the release of sandbox ${rec.id}'s workspace`, () =>
+        releaseEnded(deps, store, [ended], now, sub),
       );
     }
     if (outcome === 'deleted') {

@@ -165,6 +165,22 @@ redis.call('HSETNX', KEYS[1], 'releasedAt', ARGV[1])
 return 1
 `;
 
+// KEYS: rec, claim. ARGV: now, ttl.
+// The release claim (claimRelease): only on an ended record not yet released, and only when no
+// unexpired claim exists. The claim is a key of its own with EX, so a crashed claimer's lapses; a
+// hash field could not carry its own TTL.
+const CLAIM_RELEASE = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+if redis.call('HEXISTS', KEYS[1], 'releasedAt') == 1 then return 0 end
+if redis.call('HEXISTS', KEYS[1], 'deletedAt') == 0 and
+  tonumber(ARGV[1]) < tonumber(redis.call('HGET', KEYS[1], 'expiresAt')) then return 0 end
+if redis.call('SET', KEYS[2], '1', 'NX', 'EX', ARGV[2]) then return 1 end
+return 0
+`;
+
+// KEYS: claim.
+const UNCLAIM_RELEASE = `redis.call('DEL', KEYS[1]) return 1`;
+
 export class RedisSandboxStore implements SandboxStore {
   constructor(
     private readonly redis: SandboxRedisLike,
@@ -330,6 +346,27 @@ export class RedisSandboxStore implements SandboxStore {
       const h: Record<string, string> = {};
       for (let i = 0; i + 1 < out.length; i += 2) h[out[i]!] = out[i + 1]!;
       return fromHash(h);
+    });
+  }
+
+  claimRelease(id: string, nowS: number, ttlS: number): Promise<boolean> {
+    return this.guard(
+      async () =>
+        Number(
+          await this.redis.eval(CLAIM_RELEASE, {
+            keys: [this.recKey(id), `${this.recKey(id)}:releasing`],
+            arguments: [String(nowS), String(Math.max(1, Math.ceil(ttlS)))],
+          }),
+        ) === 1,
+    );
+  }
+
+  unclaimRelease(id: string): Promise<void> {
+    return this.guard(async () => {
+      await this.redis.eval(UNCLAIM_RELEASE, {
+        keys: [`${this.recKey(id)}:releasing`],
+        arguments: [],
+      });
     });
   }
 

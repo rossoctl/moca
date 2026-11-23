@@ -66,6 +66,7 @@ const record = (d: TestDeps, id: string) => d.sandboxes!.get(id, NOW);
 const decisions = (d: TestDeps, decision: string) =>
   [...d.streams.values()].flat().filter((r) => r.decision === decision);
 const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => {});
+const tick = () => new Promise((r) => setTimeout(r, 20));
 
 describe('relayReleaserFromEnv (#338)', () => {
   it('is off without SH_RELAY_CONTROL_URL, whatever else is set', () => {
@@ -91,7 +92,7 @@ describe('relayReleaserFromEnv (#338)', () => {
     } catch (e) {
       msg = (e as Error).message;
     }
-    expect(msg).toMatch(/must differ from the exchange, janitor/);
+    expect(msg).toMatch(/must differ from every other control-plane secret/);
     expect(msg).not.toContain(TOKEN);
     expect(
       relayReleaserFromEnv({ SH_RELAY_CONTROL_URL: url, MOCA_RELAY_RELEASE_TOKEN: TOKEN }, ['x']),
@@ -186,12 +187,14 @@ describe('a sandbox delete releases its workspace (#338)', () => {
     };
     const res = await HANDLERS.deleteSandbox!(on(id), d);
     expect(res.status).toBe(200);
+    await vi.waitFor(async () => expect((await record(d, id))?.releasedAt).toBe(NOW));
     expect(calls).toEqual([{ worker: 'sbx_default', workspaceKey: id }]);
     expect(states).toEqual(['deleted']);
-    expect((await record(d, id))?.releasedAt).toBe(NOW);
-    expect(decisions(d, 'sandbox_workspace_release')).toEqual([
-      expect.objectContaining({ subject: 'github:1234', sandboxId: id, outcome: 'released' }),
-    ]);
+    await vi.waitFor(() =>
+      expect(decisions(d, 'sandbox_workspace_release')).toEqual([
+        expect.objectContaining({ subject: 'github:1234', sandboxId: id, outcome: 'released' }),
+      ]),
+    );
   });
 
   it.each(['released', 'kept_busy', 'unknown_key', 'unsupported'] as const)(
@@ -201,8 +204,10 @@ describe('a sandbox delete releases its workspace (#338)', () => {
       const { id } = await create(d);
       d.relayRelease = fakeReleaser(() => answer).releaser;
       await HANDLERS.deleteSandbox!(on(id), d);
-      expect((await record(d, id))?.releasedAt).toBe(NOW);
-      expect(decisions(d, 'sandbox_workspace_release')[0]).toMatchObject({ outcome: answer });
+      await vi.waitFor(async () => expect((await record(d, id))?.releasedAt).toBe(NOW));
+      await vi.waitFor(() =>
+        expect(decisions(d, 'sandbox_workspace_release')[0]).toMatchObject({ outcome: answer }),
+      );
     },
   );
 
@@ -216,10 +221,13 @@ describe('a sandbox delete releases its workspace (#338)', () => {
     );
     d.relayRelease = releaser;
     expect((await HANDLERS.deleteSandbox!(on(id), d)).status).toBe(200);
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    await tick();
     expect((await record(d, id))?.releasedAt).toBeUndefined();
     expect(decisions(d, 'sandbox_workspace_release')).toEqual([]);
-    // The sweep sends it again: still failing, still unset.
+    // The sweep sends it again (the failed attempt dropped its claim): still failing, still unset.
     await sweep(d);
+    expect(calls).toHaveLength(2);
     expect((await record(d, id))?.releasedAt).toBeUndefined();
     fail = false;
     await sweep(d);
@@ -229,41 +237,88 @@ describe('a sandbox delete releases its workspace (#338)', () => {
     expect(calls).toHaveLength(3);
   });
 
-  it('never fails the DELETE: a release that throws, or a releasedAt write that throws', async () => {
+  it('returns before a release that never answers settles, not at the bound', async () => {
     quiet();
-    const d = sbxDeps();
-    const a = await create(d);
-    d.relayRelease = fakeReleaser(() => new Error('connect ECONNREFUSED')).releaser;
-    expect((await HANDLERS.deleteSandbox!(on(a.id), d)).body).toMatchObject({ reason: 'deleted' });
-    const b = await create(d);
-    d.relayRelease = fakeReleaser().releaser;
-    d.sandboxes!.markReleased = async () => {
-      throw new Error('redis down');
-    };
-    expect((await HANDLERS.deleteSandbox!(on(b.id), d)).body).toMatchObject({ reason: 'deleted' });
-  });
-
-  it('never delays the DELETE past the bound when the relay never answers', async () => {
-    quiet();
-    const d = sbxDeps({ releaseBoundMs: 100 });
+    const d = sbxDeps(); // the default 5 s bound
     const { id } = await create(d);
-    // Does not even honor the abort: the bound alone ends the wait.
+    // Never settles and ignores the abort.
     d.relayRelease = { release: () => new Promise(() => {}) };
     const t0 = Date.now();
     const res = await HANDLERS.deleteSandbox!(on(id), d);
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(Date.now() - t0).toBeLessThan(500);
     expect(res.body).toMatchObject({ id, state: 'terminated', reason: 'deleted' });
     expect((await record(d, id))?.releasedAt).toBeUndefined();
   });
 
-  it('a second delete does not send it again once answered', async () => {
+  it('a release that rejects or throws synchronously is no unhandled rejection, and the DELETE stands', async () => {
+    quiet();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (r: unknown) => unhandled.push(r);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const d = sbxDeps();
+      const a = await create(d);
+      d.relayRelease = { release: () => Promise.reject(new Error('connect ECONNREFUSED')) };
+      expect((await HANDLERS.deleteSandbox!(on(a.id), d)).body).toMatchObject({
+        reason: 'deleted',
+      });
+      const b = await create(d);
+      d.relayRelease = {
+        release: () => {
+          throw new Error('thrown before any promise');
+        },
+      };
+      expect((await HANDLERS.deleteSandbox!(on(b.id), d)).body).toMatchObject({
+        reason: 'deleted',
+      });
+      const c = await create(d);
+      d.relayRelease = fakeReleaser().releaser;
+      d.sandboxes!.markReleased = async () => {
+        throw new Error('redis down');
+      };
+      expect((await HANDLERS.deleteSandbox!(on(c.id), d)).body).toMatchObject({
+        reason: 'deleted',
+      });
+      const e = await create(d);
+      d.sandboxes!.claimRelease = async () => {
+        throw new Error('redis down');
+      };
+      expect((await HANDLERS.deleteSandbox!(on(e.id), d)).body).toMatchObject({
+        reason: 'deleted',
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).toEqual([]);
+      for (const x of [a, b]) expect((await record(d, x.id))?.releasedAt).toBeUndefined();
+      // A failed releasedAt write is not audited: the release will be sent, and audited, again.
+      expect(decisions(d, 'sandbox_workspace_release')).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('sends once: two DELETEs, or a DELETE and a sweep, race for one claim', async () => {
     const d = sbxDeps();
     const { id } = await create(d);
-    const { releaser, calls } = fakeReleaser();
-    d.relayRelease = releaser;
+    let answer!: (a: ReleaseAnswer) => void;
+    const calls: string[] = [];
+    d.relayRelease = {
+      release: (_w, k) => {
+        calls.push(k);
+        return new Promise<ReleaseAnswer>((r) => (answer = r));
+      },
+    };
     await HANDLERS.deleteSandbox!(on(id), d);
     await HANDLERS.deleteSandbox!(on(id), d);
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
+    const swept = sweep(d);
+    await tick();
     expect(calls).toHaveLength(1);
+    answer('released');
+    await swept;
+    await vi.waitFor(async () => expect((await record(d, id))?.releasedAt).toBe(NOW));
+    await sweep(d);
+    expect(calls).toHaveLength(1);
+    await vi.waitFor(() => expect(decisions(d, 'sandbox_workspace_release')).toHaveLength(1));
   });
 
   it('sends nothing and records nothing without a releaser', async () => {
@@ -367,6 +422,7 @@ describe('a session delete releases its workspace (#338)', () => {
     });
     await d.index.putRuntime('sid-fixed', { sandboxPod: 'moca-sandbox-0', sandboxId: 'other' });
     expect((await del(d)).status).toBe(204);
+    await vi.waitFor(() => expect(lines(d)).toHaveLength(1));
     expect(calls).toEqual([{ worker: 'moca-sandbox-0', workspaceKey: 'sid-fixed' }]);
     // The session was already gone when the release went out.
     expect(seen).toEqual([null]);
@@ -384,6 +440,7 @@ describe('a session delete releases its workspace (#338)', () => {
     const d = await sessionDeps(releaser);
     await d.index.putRuntime('sid-fixed', { sandboxId: 'moca_microvm_0' });
     await del(d);
+    await vi.waitFor(() => expect(lines(d)).toHaveLength(1));
     expect(calls).toEqual([{ worker: 'moca_microvm_0', workspaceKey: 'sid-fixed' }]);
     expect(lines(d)[0]).toMatchObject({ outcome: 'kept_busy' });
   });
@@ -392,6 +449,7 @@ describe('a session delete releases its workspace (#338)', () => {
     const { releaser, calls } = fakeReleaser();
     const d = await sessionDeps(releaser);
     expect((await del(d)).status).toBe(204);
+    await vi.waitFor(() => expect(lines(d)).toHaveLength(1));
     expect(calls).toEqual([]);
     expect(lines(d)).toEqual([
       expect.objectContaining({ sessionId: 'sid-fixed', outcome: 'no_worker' }),
@@ -399,13 +457,30 @@ describe('a session delete releases its workspace (#338)', () => {
     expect(lines(d)[0]).not.toHaveProperty('sandboxId');
   });
 
-  it('audits not_answered and still deletes when the relay fails', async () => {
+  it('audits not_answered once and still deletes when the relay rejects or throws, with no unhandled rejection', async () => {
     quiet();
-    const d = await sessionDeps(fakeReleaser(() => new Error('the relay answered 503')).releaser);
-    await d.index.putRuntime('sid-fixed', { sandboxPod: 'moca-sandbox-0' });
-    expect((await del(d)).status).toBe(204);
-    expect(await d.index.get('sid-fixed')).toBeNull();
-    expect(lines(d)[0]).toMatchObject({ outcome: 'not_answered' });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (r: unknown) => unhandled.push(r);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      for (const release of [
+        () => Promise.reject(new Error('the relay answered 503')),
+        () => {
+          throw new Error('thrown before any promise');
+        },
+      ] as RelayReleaser['release'][]) {
+        const d = await sessionDeps({ release });
+        await d.index.putRuntime('sid-fixed', { sandboxPod: 'moca-sandbox-0' });
+        expect((await del(d)).status).toBe(204);
+        expect(await d.index.get('sid-fixed')).toBeNull();
+        await vi.waitFor(() => expect(lines(d)).toHaveLength(1));
+        expect(lines(d)[0]).toMatchObject({ outcome: 'not_answered' });
+      }
+      await new Promise((r) => setTimeout(r, 50));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
   });
 
   it('never sends a release when the delete itself fails', async () => {
@@ -416,17 +491,17 @@ describe('a session delete releases its workspace (#338)', () => {
       throw new Error('redis down');
     };
     await expect(del(d)).rejects.toThrow('redis down');
+    await tick();
     expect(calls).toEqual([]);
   });
 
-  it('never delays the DELETE past the bound', async () => {
+  it('returns before a release that never answers settles, not at the bound', async () => {
     quiet();
-    const d = await sessionDeps({ release: () => new Promise(() => {}) });
-    d.releaseBoundMs = 100;
+    const d = await sessionDeps({ release: () => new Promise(() => {}) }); // the default 5 s bound
     await d.index.putRuntime('sid-fixed', { sandboxPod: 'moca-sandbox-0' });
     const t0 = Date.now();
     expect((await del(d)).status).toBe(204);
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(Date.now() - t0).toBeLessThan(500);
   });
 
   it('makes no extra runtime read and writes no audit line without a releaser', async () => {

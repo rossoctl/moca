@@ -375,5 +375,34 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       expect((await store.listAll(T0 + 10)).map((r) => r.id)).toContain(gone.id);
       await done();
     });
+
+    it('claimRelease lets one caller send a release, until it is answered, dropped or lapses', async () => {
+      const { store, done } = await make();
+      const live = rec();
+      const gone = rec();
+      for (const r of [live, gone]) expect(await store.create(r, LIMITS, T0)).toBe('ok');
+      expect(await store.claimRelease(live.id, T0, 60)).toBe(false);
+      expect(await store.claimRelease('sbx-missing', T0, 60)).toBe(false);
+      await store.markDeleted(gone.id, T0 + 1, LIMITS.retentionS);
+      expect(await store.claimRelease(gone.id, T0 + 1, 60)).toBe(true);
+      // Held: a second sender (a concurrent DELETE or sweep) does not send.
+      expect(await store.claimRelease(gone.id, T0 + 1, 60)).toBe(false);
+      // Dropped after an unanswered release: the next one may send.
+      await store.unclaimRelease(gone.id);
+      expect(await store.claimRelease(gone.id, T0 + 1, 1)).toBe(true);
+      // A crashed sender's claim lapses (Redis by its key's real-time TTL, memory by nowS).
+      await new Promise((r) => setTimeout(r, 1100));
+      expect(await store.claimRelease(gone.id, T0 + 3, 60)).toBe(true);
+      // Answered: nobody claims it again; the record itself is unchanged by the claims.
+      await store.markReleased(gone.id, T0 + 3);
+      await store.unclaimRelease(gone.id);
+      expect(await store.claimRelease(gone.id, T0 + 3, 60)).toBe(false);
+      expect(await store.get(gone.id, T0 + 3)).toEqual({
+        ...gone,
+        deletedAt: T0 + 1,
+        releasedAt: T0 + 3,
+      });
+      await done();
+    });
   });
 }
