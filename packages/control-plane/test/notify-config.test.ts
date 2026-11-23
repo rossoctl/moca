@@ -87,6 +87,29 @@ describe('parseNotifyConfig', () => {
     }
   });
 
+  it('refuses an explicitly-empty ntfy token, naming DELETE as the way to clear one', async () => {
+    try {
+      parseNotifyConfig({ sinks: [{ ...ntfy, token: '' }] }, allow);
+      throw new Error('expected a throw');
+    } catch (e) {
+      expect((e as Error).message).toContain('DELETE /v1/notifications');
+    }
+    // An absent token is unaffected: that is "leave the stored one alone", not "clear it".
+    const { ntfyToken } = parseNotifyConfig({ sinks: [ntfy] }, allow);
+    expect(ntfyToken).toBeUndefined();
+  });
+
+  it('echoes only the hostname of a rejected sink url, never the raw value', async () => {
+    try {
+      parseNotifyConfig({ sinks: [{ ...webhook, url: 'https://u:hunter2@evil.test/x' }] }, allow);
+      throw new Error('expected a throw');
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toContain('evil.test');
+      expect(msg).not.toContain('hunter2');
+    }
+  });
+
   it('dedupes states and keeps TURN_STATES order', () => {
     const { config } = parseNotifyConfig(
       { sinks: [webhook], states: ['failed', 'paused', 'failed'] },

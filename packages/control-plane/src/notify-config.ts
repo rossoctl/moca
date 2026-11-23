@@ -93,13 +93,25 @@ export function allowsUrl(raw: string, allow: Destination[]): boolean {
   );
 }
 
+/** The hostname of a value that may not even be a URL -- never the raw value, see its one caller. */
+function hostnameOf(raw: unknown): string {
+  if (typeof raw !== 'string') return '(not a string)';
+  const u = URL.parse(raw);
+  return u ? u.hostname : '(unparseable url)';
+}
+
 function parseSink(raw: unknown, allow: Destination[]): { sink: NotifySink; token?: string } {
   const s = asObject(raw, 'each sink must be an object');
   if (s.kind !== 'webhook' && s.kind !== 'ntfy') {
     invalid("sink kind must be 'webhook' or 'ntfy'");
   }
   if (typeof s.url !== 'string' || !allowsUrl(s.url, allow)) {
-    invalid(`sink url must be an https URL allowed by MOCA_NOTIFY_ALLOW, got '${String(s.url)}'`);
+    // The hostname only, never the raw url: a sink url is exactly where someone pastes a token, and
+    // this message only reaches the caller's own 400 body, but echoing the thing that was just
+    // rejected FOR carrying credentials would be the same mistake with extra steps.
+    invalid(
+      `sink url must be an https URL allowed by MOCA_NOTIFY_ALLOW, got host '${hostnameOf(s.url)}'`,
+    );
   }
   if (s.kind === 'webhook') {
     if (s.topic !== undefined) invalid('a webhook sink takes no topic');
@@ -109,12 +121,19 @@ function parseSink(raw: unknown, allow: Destination[]): { sink: NotifySink; toke
   if (typeof s.topic !== 'string' || !NTFY_TOPIC_RE.test(s.topic)) {
     invalid(`an ntfy sink needs a topic matching ${NTFY_TOPIC_RE.source}`);
   }
-  if (s.token !== undefined && (typeof s.token !== 'string' || s.token.length > MAX_TOKEN_CHARS)) {
-    invalid(`an ntfy token must be a string of at most ${MAX_TOKEN_CHARS} characters`);
+  if (s.token !== undefined) {
+    if (typeof s.token !== 'string' || s.token.length > MAX_TOKEN_CHARS) {
+      invalid(`an ntfy token must be a string of at most ${MAX_TOKEN_CHARS} characters`);
+    }
+    // An explicitly-present empty token is how a user tries to clear it -- but an absent `token` is
+    // "left alone", so a silently-kept '' would quietly keep auth the user just asked to drop.
+    if (s.token === '') {
+      invalid('an empty ntfy token is refused; DELETE /v1/notifications is how you clear it');
+    }
   }
   return {
     sink: { kind: 'ntfy', url: s.url, topic: s.topic },
-    ...(typeof s.token === 'string' && s.token !== '' ? { token: s.token } : {}),
+    ...(s.token !== undefined ? { token: s.token as string } : {}),
   };
 }
 
