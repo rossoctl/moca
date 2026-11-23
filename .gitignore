@@ -66,3 +66,8 @@ docs/api/examples/sandbox/
 /opencode.jsonc
 /AGENTS.md
 /.sbx/
+
+# Compose's auto-loaded local override (unanchored: any compose directory may have one).
+# Per-developer by design, and it pins inference endpoints and tokens the .env would
+# otherwise be the only holder of — so it never gets committed.
+docker-compose.override.yml
