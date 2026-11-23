@@ -238,4 +238,34 @@ describe('sweepNotifications', () => {
       errSpy.mockRestore();
     }
   });
+
+  it('does not start a second pass while one tick is still in flight', async () => {
+    await configure();
+    await emit(ev());
+    vi.useFakeTimers();
+    try {
+      let resolveFetch: (() => void) | undefined;
+      sent.mockImplementation(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveFetch = () => resolve(new Response(null, { status: 204 }));
+          }),
+      );
+      const stop = startNotifySweep(deps);
+      try {
+        await vi.advanceTimersByTimeAsync(NOTIFY_SWEEP_INTERVAL_MS); // tick 1: starts, hangs in fetch
+        expect(sent).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(NOTIFY_SWEEP_INTERVAL_MS); // tick 2: must be skipped
+        expect(sent).toHaveBeenCalledTimes(1);
+        resolveFetch?.();
+        await vi.advanceTimersByTimeAsync(0); // let the in-flight pass finish and clear the flag
+        await vi.advanceTimersByTimeAsync(NOTIFY_SWEEP_INTERVAL_MS); // tick 3: cursor already moved
+        expect(sent).toHaveBeenCalledTimes(1);
+      } finally {
+        stop();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

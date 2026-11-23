@@ -151,13 +151,25 @@ function hourWindow(c: StoredNotifyConfig, now: number): { hourStart: number; ho
     : { hourStart: c.hourStart, hourCount: c.hourCount };
 }
 
+// Guards against a pass overlapping ITSELF: three owners with hanging sinks can push one pass past
+// `intervalMs`, and without this a second `setInterval` tick would re-read and re-deliver the same
+// unadvanced batch. Not the two-replica case -- that is the `shortcut:` on sweepNotifications above,
+// and a module-level flag does nothing for a second process.
+let running = false;
+
 /** Armed from main.ts, exactly as startGateSweep is. `unref` so it never holds the process open. */
 export function startNotifySweep(deps: CpDeps, intervalMs = NOTIFY_SWEEP_INTERVAL_MS): () => void {
   const timer = setInterval(() => {
+    if (running) return;
+    running = true;
     // Nothing may reject out of a setInterval callback on Node 22: the default for an unhandled
     // rejection is to terminate the process, so a Redis blip would restart the control plane every
     // tick instead of just costing one skipped pass.
-    void sweepNotifications(deps).catch((err) => console.error('[notify-sweep]', err));
+    void sweepNotifications(deps)
+      .catch((err) => console.error('[notify-sweep]', err))
+      .finally(() => {
+        running = false;
+      });
   }, intervalMs);
   timer.unref();
   return () => clearInterval(timer);
