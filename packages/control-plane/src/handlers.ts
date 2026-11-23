@@ -836,7 +836,10 @@ export const HANDLERS: Record<string, Handler> = {
       };
     }
     if (profile === 'sandbox') {
-      return { status: 200, body: { profile: 'sandbox', ...sandboxFields } };
+      return {
+        status: 200,
+        body: { profile: 'sandbox', ...sandboxFields, version: deps.config.version ?? null },
+      };
     }
     // harness, and combined (combined control plane spec §3.1): the harness fields, plus the
     // sandbox ones on combined.

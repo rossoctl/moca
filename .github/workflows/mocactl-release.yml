@@ -74,7 +74,7 @@ jobs:
           cp packages/mocactl/dist/mocactl.mjs "$dir/"
           cd "$dir"
           got="$(env -u NODE_PATH node mocactl.mjs --version)"
-          [ "$got" = "$VERSION" ] || { echo "bundle says '$got', expected '$VERSION'" >&2; exit 1; }
+          [ "$got" = "CLI version: $VERSION" ] || { echo "bundle says '$got', expected 'CLI version: $VERSION'" >&2; exit 1; }
           env -u NODE_PATH node mocactl.mjs --help >/dev/null
           sha256sum mocactl.mjs >mocactl.mjs.sha256
 

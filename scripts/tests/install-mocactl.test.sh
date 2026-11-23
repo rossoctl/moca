@@ -78,7 +78,7 @@ MOCK
 cat >"$TMP/node/node" <<'MOCK'
 #!/bin/sh
 if [ "$1" = -p ]; then printf '%s\n' "${MOCK_NODE_VERSION:-22.11.0}"; exit 0; fi
-sed -n 's|^// version ||p' "$1"
+sed -n 's|^// version \(..*\)|CLI version: \1|p' "$1"
 MOCK
 chmod +x "$TMP/curl/curl" "$TMP/node/node"
 

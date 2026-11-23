@@ -1235,7 +1235,7 @@ paths:
         `version` is always present; a control plane that predates advertising one omits it.
         `profile` names the control plane's route profile; on `sandbox`, `execEndpoint` and `execCa`
         say where to send Exec and which CA to trust (sandbox-service spec §4.1). A `sandbox` control plane answers
-        only `profile`, `execEndpoint` and, when the exec certificate is self-issued, `execCa`;
+        only `profile`, `execEndpoint`, `version` and, when the exec certificate is self-issued, `execCa`;
         templates are at the fixed `/v1/templates`. A control plane that predates profiles omits
         `profile`, and is a `harness` one.
       security: []
@@ -1306,6 +1306,11 @@ paths:
                         description: |
                           sandbox profile only -- PEM of a self-issued exec certificate; absent when
                           the certificate chains to a public CA
+                      version:
+                        type: [string, 'null']
+                        description: |
+                          the deployment's version, as the harness profile's; a sandbox control
+                          plane that predates advertising one omits it
   /v1/auth/device:
     post:
       operationId: startDeviceAuth

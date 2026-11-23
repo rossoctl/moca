@@ -25,8 +25,11 @@ usage:
                                                  setup again: the server form, then login and
                                                  credential, each skipped when already done;
                                                  --no-animation: a still spinner)
-  mocactl --version                              print this build's version (a release tag, edge-<sha>,
-                                                 or dev-<sha> from a source checkout)
+  mocactl --version                              print this build's version as "CLI version: V" (a
+                                                 release tag, edge-<sha>, or dev-<sha> from a source
+                                                 checkout), then each configured control plane's
+                                                 (harness and sandbox service) version and URL, or
+                                                 unreachable
   mocactl login [--no-browser]                   log in with the GitHub device flow (in a local
                                                  terminal: copies the code, opens the browser;
                                                  --no-browser: only prints the URL and the code)

@@ -123,17 +123,59 @@ describe('main', () => {
     expect(o2.errs.join('\n')).not.toContain('mocactl credentials');
   });
 
-  it('prints the version for --version and -V, reading no config and no network', async () => {
+  it('prints only the version for --version and -V when no control plane is configured', async () => {
+    const env = { XDG_CONFIG_HOME: mkdtempSync(join(tmpdir(), 'mocactl-version-')) };
     for (const flag of ['--version', '-V']) {
       const o = io();
-      const build = vi.fn(fakeBuild);
-      expect(await main([flag], {}, o, { buildRuntime: build })).toBe(0);
+      const fetchImpl = vi.fn(() => Promise.reject(new Error('no network expected')));
+      expect(await main([flag], env, o, { fetchImpl: fetchImpl as typeof fetch })).toBe(0);
       // Under vitest (as under tsx) no build defined MOCACTL_VERSION: a source checkout names its
       // commit, and plain `dev` is left where git can't say (a source tarball).
-      expect(o.outs.join('')).toMatch(/^dev(-[0-9a-f]{8}(-dirty)?)?\n$/);
+      expect(o.outs.join('')).toMatch(/^CLI version: dev(-[0-9a-f]{8}(-dirty)?)?\n$/);
       expect(o.errs).toEqual([]);
-      expect(build).not.toHaveBeenCalled();
+      expect(fetchImpl).not.toHaveBeenCalled();
     }
+  });
+
+  it("adds each configured control plane's version and URL, or unreachable", async () => {
+    const env = {
+      XDG_CONFIG_HOME: mkdtempSync(join(tmpdir(), 'mocactl-version-')),
+      SH_CONTROL_PLANE_URL: 'http://cp.example.invalid',
+      MOCACTL_SBX_URL: 'http://sbx.example.invalid',
+    };
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url === 'http://cp.example.invalid/v1/discovery') {
+        return Response.json({ harnessUrl: null, sandboxTiers: null, version: 'v1.2.3' });
+      }
+      throw new TypeError('fetch failed');
+    });
+    const o = io();
+    expect(await main(['--version'], env, o, { fetchImpl: fetchImpl as typeof fetch })).toBe(0);
+    const lines = o.outs.join('').split('\n');
+    expect(lines[0]).toMatch(/^CLI version: dev(-[0-9a-f]{8}(-dirty)?)?$/);
+    expect(lines.slice(1)).toEqual([
+      'control plane:         v1.2.3 (http://cp.example.invalid)',
+      'sandbox control plane: unreachable (http://sbx.example.invalid)',
+      '',
+    ]);
+    expect(o.errs).toEqual([]);
+  });
+
+  it('says so when a control plane answers without a version', async () => {
+    const env = {
+      XDG_CONFIG_HOME: mkdtempSync(join(tmpdir(), 'mocactl-version-')),
+      MOCACTL_SBX_URL: 'http://sbx.example.invalid',
+    };
+    const fetchImpl = vi.fn(async () =>
+      Response.json({ profile: 'sandbox', execEndpoint: 'x:443' }),
+    );
+    const o = io();
+    expect(await main(['-V'], env, o, { fetchImpl: fetchImpl as typeof fetch })).toBe(0);
+    expect(o.outs.join('').split('\n').slice(1)).toEqual([
+      'sandbox control plane: version unknown (http://sbx.example.invalid)',
+      '',
+    ]);
   });
 
   it('lists --version in the usage', () => {

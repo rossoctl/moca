@@ -120,12 +120,19 @@ describe('enrollment gates login and refresh on the sandbox profile (SBX0 §4.2)
 });
 
 describe('discovery under each profile (SBX0 §4.1, spec v1.1)', () => {
-  it('advertises only the profile and the exec endpoint on the sandbox profile', async () => {
+  it('advertises only the profile, the exec endpoint and the version on the sandbox profile', async () => {
     const sbx = await HANDLERS.getDiscovery!(ctx(), sandboxDeps('github:1234'));
     expect(sbx).toEqual({
       status: 200,
-      body: { profile: 'sandbox', execEndpoint: 'sbx-exec.apps.example.invalid:443' },
+      body: {
+        profile: 'sandbox',
+        execEndpoint: 'sbx-exec.apps.example.invalid:443',
+        version: null,
+      },
     });
+    const d = sandboxDeps('github:1234');
+    d.config.version = 'v1.2.3';
+    expect((await HANDLERS.getDiscovery!(ctx(), d)).body).toMatchObject({ version: 'v1.2.3' });
   });
 
   it('adds the exec CA when the exec certificate is self-issued', async () => {
@@ -135,6 +142,7 @@ describe('discovery under each profile (SBX0 §4.1, spec v1.1)', () => {
       profile: 'sandbox',
       execEndpoint: 'sbx-exec.apps.example.invalid:443',
       execCa: d.config.sandbox!.execCa,
+      version: null,
     });
   });
 

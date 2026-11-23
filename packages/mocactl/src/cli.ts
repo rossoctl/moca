@@ -23,7 +23,7 @@ import {
 import { DiscoveringHarness } from './api/discovery.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
 import { openCallRecord, RUN_LENGTH_FIELDS, type CallRecorder } from './sbx/call-record.js';
-import { sbxMain } from './sbx/cli.js';
+import { defaultSbxUrl, openSbxRuntime, sbxMain } from './sbx/cli.js';
 import {
   cmdGet,
   cmdSpawn,
@@ -40,6 +40,7 @@ import {
   cmdWorkloadList,
 } from './workloads.js';
 import { versionLine } from './version.js';
+import { versionReport, type VersionTarget } from './version-report.js';
 import { commandUsage, typedWords } from './core/usage.js';
 
 /**
@@ -77,7 +78,8 @@ login and setup (the harness service; \`mocactl sbx login\` is the sandbox servi
   auth token     print a valid API token
   doctor         check the setup; one fix per failure
 
-  --version      print this build's version
+  --version      print this build's version (CLI version: ...), and the control planes' versions
+                 and URLs
 
 Run \`mocactl COMMAND --help\` for a command's details (\`mocactl sbx --help\` for the sandbox
 service's commands).`;
@@ -87,8 +89,11 @@ export const USAGE = `usage:
                                                  setup again: the server form, then login and
                                                  credential, each skipped when already done;
                                                  --no-animation: a still spinner)
-  mocactl --version                              print this build's version (a release tag, edge-<sha>,
-                                                 or dev-<sha> from a source checkout)
+  mocactl --version                              print this build's version as "CLI version: V" (a
+                                                 release tag, edge-<sha>, or dev-<sha> from a source
+                                                 checkout), then each configured control plane's
+                                                 (harness and sandbox service) version and URL, or
+                                                 unreachable
   mocactl login [--no-browser]                   log in with the GitHub device flow (in a local
                                                  terminal: copies the code, opens the browser;
                                                  --no-browser: only prints the URL and the code)
@@ -330,7 +335,35 @@ async function mainWith(
   }
   const { values, positionals } = parsed;
   if (values.version) {
-    io.out(versionLine() + '\n');
+    io.out(`CLI version: ${versionLine()}\n`);
+    // Then each configured control plane's version (public discovery, no login needed): the
+    // harness service's, and the sandbox service's. Neither configured: the version alone.
+    const targets: VersionTarget[] = [];
+    const fetchImpl = deps.fetchImpl ?? fetch;
+    const rt = (deps.buildRuntime ?? buildRuntime)(
+      { controlPlaneUrl: values['control-plane-url'], harnessUrl: values['harness-url'] },
+      env,
+      undefined,
+      fetchImpl,
+    );
+    const cp = rt.cp;
+    if (rt.endpoints.controlPlaneUrl && cp) {
+      targets.push({
+        label: 'control plane',
+        url: rt.endpoints.controlPlaneUrl,
+        discovery: (o) => cp.discovery(o),
+      });
+    }
+    const sbxUrl = defaultSbxUrl(env);
+    if (sbxUrl) {
+      const { api } = openSbxRuntime(sbxUrl, env, { fetchImpl });
+      targets.push({
+        label: 'sandbox control plane',
+        url: sbxUrl,
+        discovery: (o) => api.discovery(o),
+      });
+    }
+    for (const line of await versionReport(targets)) io.out(line + '\n');
     return 0;
   }
   if (values.help) {
