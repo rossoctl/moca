@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main, 'release-*']
 
+# A newer push supersedes a run still waiting for a runner (seen 2026-11-24): nine main
+# merges in an hour queued nine full CI sets on the org's shared runner pool, and PR runs starved
+# behind them. Only one run per group can be pending, so older queued runs are cancelled. A PR's
+# in-progress run is cancelled too (its head is stale); a main run already in progress finishes,
+# so every main result that started still lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
