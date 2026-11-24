@@ -145,6 +145,8 @@ DEFAULT_IMAGE_MB=2048
 # SNAPSHOT_WORKSPACE_MB says why). A larger image cannot be mounted by a restored guest.
 SNAPSHOT_WORKSPACE_MB=2048
 DEFAULT_IDLE_CEILING_S=1800
+# SH_LEASE_CACHE_DROP_S (#1011): microvm-worker's default, for a bundle from before setup.sh wrote it.
+DEFAULT_CACHE_DROP_S=30
 DEFAULT_BUDGET_MB=8192
 # The unit's own values (sbx-worker@.service: SH_STANDBY_DEPTH, SH_MEMORY_RESERVE_MB) and the VMM's
 # fixed per-VM cost outside guest RAM (vmpool.DefaultVMOverheadBytes), for check_snapshot_ram.
@@ -702,10 +704,10 @@ remove_sampler() {
 }
 
 # validate_worker reads and checks the bundle and the flags, setting W_ID, W_ADDR, W_TOK, W_IDLE,
-# W_IMAGE_MB, W_IDLE_CEILING and (check_snapshot_ram) W_GUEST_MB, and (check_template_record) W_RECORD and
+# W_IMAGE_MB, W_IDLE_CEILING, W_CACHE_DROP and (check_snapshot_ram) W_GUEST_MB, and (check_template_record) W_RECORD and
 # W_TEMPLATE. It writes nothing and touches no unit, so a refusal comes before install_egress starts one.
 validate_worker() {
-  local env="$BUNDLE/worker.env" id addr tok idle image_mb ceiling
+  local env="$BUNDLE/worker.env" id addr tok idle image_mb ceiling cache_drop
   [[ -f "$env" ]] || die "no $env: pass the bundle directory deploy/sbx/setup.sh wrote (workers/<id>)"
   id="$(env_value SANDBOX_ID "$env")"
   valid_id "$id" || die "SANDBOX_ID in $env is not a valid worker id"
@@ -732,6 +734,11 @@ validate_worker() {
   # At most 86400 s, setup.sh's cap: the janitor's wait must outlast it when a lease mode is allowed.
   [[ "$ceiling" =~ ^[1-9][0-9]{0,5}$ ]] && ((ceiling >= 300 && ceiling <= 86400)) ||
     die "SH_LEASE_IDLE_CEILING_S in $env must be a whole number of seconds, 300-86400"
+  cache_drop="$(env_value SH_LEASE_CACHE_DROP_S "$env")"
+  cache_drop="${cache_drop:-$DEFAULT_CACHE_DROP_S}"
+  # microvm-worker's bounds (vmpool.MaxLeaseCacheDrop): 0 turns the drop off.
+  [[ "$cache_drop" =~ ^(0|[1-9][0-9]{0,4})$ ]] && ((cache_drop <= 86400)) ||
+    die "SH_LEASE_CACHE_DROP_S in $env must be a whole number of seconds, 0 (off) to 86400"
   [[ -n "$SNAPSHOT" ]] || die '--snapshot IMAGE is required'
   [[ "$SNAPSHOT" =~ ^[A-Za-z0-9._-]+$ ]] || die '--snapshot must be a directory name'
   [[ -d "$SBX_SRV/snapshots/$SNAPSHOT" ]] || die "no snapshot $SBX_SRV/snapshots/$SNAPSHOT (build it with deploy/microvm/build-snapshot.sh)"
@@ -744,7 +751,7 @@ validate_worker() {
   check_jail_path "$id"
   check_lease_state "$id"
   check_template_record "$id"
-  W_ID="$id" W_ADDR="$addr" W_TOK="$tok" W_IDLE="$idle" W_IMAGE_MB="$image_mb" W_IDLE_CEILING="$ceiling"
+  W_ID="$id" W_ADDR="$addr" W_TOK="$tok" W_IDLE="$idle" W_IMAGE_MB="$image_mb" W_IDLE_CEILING="$ceiling" W_CACHE_DROP="$cache_drop"
 }
 
 # check_lease_state WORKER_ID: the worker's .lease-state, if there is one, is a real directory (as the
@@ -791,7 +798,7 @@ check_template_record() {
 }
 
 install_worker() {
-  local id="$W_ID" addr="$W_ADDR" tok="$W_TOK" idle="$W_IDLE" image_mb="$W_IMAGE_MB" guest_mb="$W_GUEST_MB" ceiling="$W_IDLE_CEILING" ca=''
+  local id="$W_ID" addr="$W_ADDR" tok="$W_TOK" idle="$W_IDLE" image_mb="$W_IMAGE_MB" guest_mb="$W_GUEST_MB" ceiling="$W_IDLE_CEILING" cache_drop="$W_CACHE_DROP" ca=''
   install -d -m 0700 "$SBX_ENV_DIR" "$SBX_ENV_DIR/workers"
   if [[ -f "$BUNDLE/relay-ca.crt" ]]; then
     grep -q -- '-----BEGIN CERTIFICATE-----' "$BUNDLE/relay-ca.crt" || die "$BUNDLE/relay-ca.crt holds no PEM certificate"
@@ -813,7 +820,7 @@ install_worker() {
       # The verify cache under SBX0's own tree, where template-build.sh's seed writes it.
       printf 'SH_VERIFY_CACHE_DIR=%s\n' "$SBX_SRV/verify-cache"
       printf 'SH_MAX_COMMITTED_MB=%s\nSH_WORKSPACE_IDLE=%s\nSH_WORKSPACE_IMAGE_MB=%s\n' "$BUDGET_MB" "$idle" "$image_mb"
-      printf 'SH_LEASE_IDLE_CEILING_S=%s\n' "$ceiling"
+      printf 'SH_LEASE_IDLE_CEILING_S=%s\nSH_LEASE_CACHE_DROP_S=%s\n' "$ceiling" "$cache_drop"
       [[ -n "$NO_EGRESS" ]] || printf 'MOCA_EGRESS_CONTROL_SOCK=/run/moca-egress/control.sock\n'
     } >"$SBX_ENV_DIR/workers/$id.env"
   )

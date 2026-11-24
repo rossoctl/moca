@@ -250,6 +250,11 @@ refusals=(
   'export SBX_IDLE_CEILING_S=30m => SBX_IDLE_CEILING_S must be'
   'export SBX_IDLE_CEILING_S=1000000 => SBX_IDLE_CEILING_S must be'
   'export SBX_IDLE_CEILING_S=86401 => SBX_IDLE_CEILING_S must be a whole number of seconds, 300-86400'
+  'export SBX_LEASE_CACHE_DROP_S=-1 => SBX_LEASE_CACHE_DROP_S must be a whole number of seconds, 0 \(off\) to 86400'
+  'export SBX_LEASE_CACHE_DROP_S=30s => SBX_LEASE_CACHE_DROP_S must be'
+  'export SBX_LEASE_CACHE_DROP_S=1.5 => SBX_LEASE_CACHE_DROP_S must be'
+  'export SBX_LEASE_CACHE_DROP_S=030 => SBX_LEASE_CACHE_DROP_S must be'
+  'export SBX_LEASE_CACHE_DROP_S=86401 => SBX_LEASE_CACHE_DROP_S must be a whole number of seconds, 0 \(off\) to 86400'
   'export SBX_MODES_ALLOWED=per-exec,lease SBX_IDLE_CEILING_S=3600 => SBX_JANITOR_WAIT_MINUTES \(3600 s\) must exceed the token lifetime plus the 30 s leeway plus SBX_IDLE_CEILING_S \(4530 s\) when a lease mode is allowed'
   'export SBX_MODES_ALLOWED=lease+processes SBX_IDLE_CEILING_S=2700 SBX_JANITOR_WAIT_MINUTES=60 => SBX_JANITOR_WAIT_MINUTES \(3600 s\) must exceed .* \(3630 s\)'
   'export SBX_MODES_ALLOWED=per-exec,lease SBX_TOKEN_TTL_MINUTES=60 => SBX_JANITOR_WAIT_MINUTES \(3900 s\) must exceed .* \(5430 s\)'
@@ -428,6 +433,7 @@ grep -qx "SANDBOX_TOKEN=$(secret_val moca-relay-sandbox-tokens sbx_py312)" "$W/w
 grep -qx 'SH_WORKSPACE_IDLE=768h' "$W/worker.env" || fail 'worker bundle idle is not the maximum lifetime + 2 days'
 grep -qx 'SH_WORKSPACE_IMAGE_MB=2048' "$W/worker.env" || fail 'worker bundle image size'
 grep -qx 'SH_LEASE_IDLE_CEILING_S=1800' "$W/worker.env" || fail 'worker bundle idle ceiling is not the default 1800'
+grep -qx 'SH_LEASE_CACHE_DROP_S=30' "$W/worker.env" || fail 'worker bundle cache drop is not the default 30'
 [[ -f "$W/relay-ca.crt" ]] || fail 'self-signed attach certificate not shipped in the worker bundle'
 [[ "$(stat -c %a "$W/worker.env" 2>/dev/null || stat -f %Lp "$W/worker.env")" == 600 ]] || fail 'worker.env is not 0600'
 pass 'writes 0600 worker bundles in the P6.2 format, with the idle derived from the lifetime and the image size'
@@ -829,6 +835,28 @@ grep -qx 'SH_LEASE_IDLE_CEILING_S=1800' "$GEN/workers/sbx_default/worker.env" ||
 render
 [[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the hash did not return with the defaults'
 pass 'SBX_MODES_ALLOWED and SBX_IDLE_CEILING_S reach sbx-settings and move the hash; the ceiling reaches every worker bundle'
+
+# 4c'''. SBX_LEASE_CACHE_DROP_S (#1011) reaches every worker bundle as SH_LEASE_CACHE_DROP_S, 0
+# included (the drop off). It is the workers' alone: the control plane's settings and hash do not
+# move. A running worker keeps its old value until install-host.sh is re-run, so a change warns and
+# names the hosts, as a ceiling change does.
+run_setup export SBX_LEASE_CACHE_DROP_S=0 || fail 'a run with the cache drop off failed'
+for w in sbx_default sbx_py312; do
+  grep -qx 'SH_LEASE_CACHE_DROP_S=0' "$GEN/workers/$w/worker.env" || fail "the $w bundle's cache drop is not 0"
+  [[ "$(grep -c '^SH_LEASE_CACHE_DROP_S=' "$GEN/workers/$w/worker.env")" == 1 ]] || fail "the $w bundle has the cache drop twice"
+done
+grep -q 'WARNING: SH_LEASE_CACHE_DROP_S changes from 30 to 0' "$TMP/out" ||
+  fail 'a cache drop change does not warn, naming SH_LEASE_CACHE_DROP_S and both values'
+grep -q 'WARNING: SH_LEASE_CACHE_DROP_S changed: re-run deploy/sbx/install-host.sh now on the host of each of: sbx_default sbx_py312' "$TMP/out" ||
+  fail 'a cache drop change does not end by naming the hosts to reinstall'
+render
+[[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'the cache drop moved the control plane hash'
+run_setup export SBX_LEASE_CACHE_DROP_S=0 || fail 'a re-run with the same cache drop failed'
+! grep -q 'SH_LEASE_CACHE_DROP_S' "$TMP/out" || fail 'an unchanged cache drop still warns'
+run_setup true || fail 'the run back to the default cache drop failed'
+grep -qx 'SH_LEASE_CACHE_DROP_S=30' "$GEN/workers/sbx_default/worker.env" || fail 'the bundle cache drop did not return to 30'
+grep -q 'WARNING: SH_LEASE_CACHE_DROP_S changes from 0 to 30' "$TMP/out" || fail 'the cache drop back to 30 does not warn'
+pass 'SBX_LEASE_CACHE_DROP_S reaches every worker bundle, 0 included, and a change names the hosts to reinstall'
 
 # 4c''. A running worker keeps the SH_LEASE_IDLE_CEILING_S it was installed with until install-host.sh
 # is re-run on its host, so a ceiling change names the hosts to reinstall. A warning, not a refusal:
