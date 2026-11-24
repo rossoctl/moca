@@ -156,3 +156,34 @@ func TestAFundedAdmissionLogsNoRefusal(t *testing.T) {
 		t.Fatalf("a funded admission logged a refusal: %q", logs.String())
 	}
 }
+
+// The depth on an evicted outcome includes its own batch (PR #1026 review): the number an
+// operator reads beside a refusal is the queue as the eviction left it.
+func TestEvictedOutcomeCountsItsOwnBatch(t *testing.T) {
+	p, lc, clk := leasePool(t, func(c *Config) { c.MaxCommittedBytes = DefaultLeaseStartBytes })
+	leasesOn(t, p, clk, "a")
+	held, unhold := make(chan struct{}), make(chan struct{})
+	lc.setDestroyHook(func(string) {
+		select {
+		case held <- struct{}{}:
+			<-unhold
+		default:
+		}
+	})
+	vm, err := lc.Restore(t.Context(), RestoreRequest{ID: "stuck"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.mu.Lock()
+	p.reclaimQ <- reclaimBatch{vms: []VM{vm}}
+	p.mu.Unlock()
+	recvWithin(t, held, "the held destroy")
+	defer close(unhold)
+
+	p.mu.Lock()
+	out := p.evictForAdmissionLocked(DefaultLeaseStartBytes, nil)
+	p.mu.Unlock()
+	if out.why != "evicted" || out.leases != 1 || out.queueLen != 1 {
+		t.Fatalf("outcome = %+v, want evicted with one lease and reclaim_queue 1 (its own batch)", out)
+	}
+}

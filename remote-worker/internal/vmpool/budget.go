@@ -119,9 +119,8 @@ func (p *pool) admitOrEvictAtLocked(key string, newRun bool, price int64) error 
 // memory-budget refusal that follows it (#1005): with an idle lease alive, the refusal
 // says which of the reasons below kept it. why is one of
 //
-//   - "fits": the admission fitted when the eviction looked (the promotion path, whose
-//     need is only perVM less the standby's own charge)
-//   - "closed": the pool is closing
+//   - "closed": the pool is closing (Close took p.mu between the admission and the
+//     eviction), so nothing was detached
 //   - "reclaim-queue-full": reclamation is behind, so nothing was detached
 //   - "futile": the standbys and the free-gated idle leases together could not cover
 //     short_by, so nothing was detached (an idle lease whose gate is held counts in
@@ -129,6 +128,11 @@ func (p *pool) admitOrEvictAtLocked(key string, newRun bool, price int64) error 
 //   - "gates-taken": every idle lease counted was taken by an Exec before the take
 //   - "evicted": victims were queued, and the re-check refused anyway (freed is short
 //     of short_by when MaxReclaimsPerScan capped the leases taken)
+//
+// "fits" (the admission fitted when the eviction looked) is set but never logged: under
+// the same p.mu hold the re-check uses the eviction's own arithmetic (committed + need
+// against the budget, need being perVM less the standby's charge on the promotion path),
+// so it admits.
 type evictOutcome struct {
 	why                  string
 	shortBy              int64 // bytes short before the eviction, 0 when it fitted
@@ -137,7 +141,7 @@ type evictOutcome struct {
 	idleLeases, gateHeld int
 	shedStandbys, leases int
 	freed                int64 // the charges of the victims queued
-	queueLen             int
+	queueLen             int   // reclaimQ's depth when the eviction returned, its own batch included
 }
 
 // log writes o as one line for a memory-budget refusal of key's admission, beside the
@@ -276,7 +280,7 @@ func (p *pool) evictForAdmissionLocked(need int64, exclude *runPool) (out evictO
 	}
 	// One slot for both: doReclaim destroys the leases first, each under its gate.
 	p.reclaimQ <- reclaimBatch{vms: batch, leases: leases}
-	out.why = "evicted"
+	out.why, out.queueLen = "evicted", len(p.reclaimQ)
 	return out
 }
 

@@ -1342,7 +1342,7 @@ func (p *pool) reclaimableLeasesLocked() (idle, held int, bytes int64) {
 			continue
 		}
 		if n >= p.cfg.MaxReclaimsPerScan {
-			continue // counted for held only; the take would stop here too
+			continue // past the take's cap: not counted in bytes
 		}
 		n++
 		bytes += p.leaseChargeLocked(rp.lease)

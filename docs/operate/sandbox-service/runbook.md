@@ -806,7 +806,8 @@ adds each command's first 200 bytes as `cmd`.
   worker's journal, with the workspace key and `why`: `futile` (the idle standbys and idle leases
   together could not cover `short_by`; the line gives each one's bytes), `reclaim-queue-full`
   (reclamation is behind), `gates-taken` (every idle lease started an Exec before it could be
-  taken) or `evicted` (victims were queued and it was still short). `gate_held` counts idle leases
+  taken), `evicted` (victims were queued and it was still short) or `closed` (the worker is
+  shutting down, as during a restart: benign). `gate_held` counts idle leases
   whose gate an Exec held, which an admission never takes.
 
 ## Reproducing a member's issue
