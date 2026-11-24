@@ -1,0 +1,25 @@
+# ocp-single's combined profile (--profile combined): the harness stack of §12 PLUS the sandbox
+# service, so one namespace serves both `moca` and `sbx` (combined control plane spec §3). A
+# Component, not files in the parent overlay: setup.sh's generated overlay lists it only for
+# --profile combined, so a harness-only stack renders byte-for-byte as it did before.
+#
+# Why this is not ../ocp-combined, which already composes ocp-single with the sandbox pieces: that
+# overlay is deploy/sbx/setup.sh's, and it is a full Kustomization pinning `namespace:
+# moca-sbx-combined`, with that namespace hardcoded in the in-cluster addresses its installer
+# re-patches afterwards. ocp-single already owns namespace and addressing, so a complete overlay
+# cannot go on top of it -- only a Component can. Every file below declares `namespace: moca-single`,
+# the placeholder the generated overlay rewrites to SH_SINGLE_NAMESPACE, exactly as ../routes does.
+#
+# What this does NOT bring: the template store (../ocp-sbx/template-store). It mounts a PVC and
+# replaces the credentials projected volume's whole source list, which would collide with this
+# overlay's, and it requires a Secret (sbx-template-hosts) that deploy/k8s/setup.sh does not write.
+# Without SH_PROVENANCE_DIR the control plane serves templates from SH_SANDBOX_TEMPLATES and
+# `sbx quota` answers 400 (docs/operate/harness/kubernetes.md §12.6).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+# The sandbox service's own objects: the exec Route and its TLS sidecar (reused from
+# ../../ocp-sbx/exec-tls), the container-tier worker, and the policies that let it attach.
+components:
+  - ../sbx-service
+patches:
+  - path: patch-control-plane.yaml

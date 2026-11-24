@@ -1,0 +1,28 @@
+# The sandbox service's own objects on an ocp-single stack: a Component, listed by the profile
+# overlay that wants them (../combined), so a harness-only stack renders exactly as it did before.
+#
+# The exec path -- a ghostunnel sidecar on the relay, its Service, the passthrough Route and the
+# router's ingress policy -- is NOT redefined here. ../../ocp-sbx/exec-tls already defines it and is
+# itself a Component, so it is reused verbatim. Its objects and its patch declare `namespace: moca`
+# (the base's); the parent overlay's namespace transformer rewrites them, and the patch still
+# matches, which packages/supervisor/test/k8s/sbx-service.test.ts asserts. The cost of reuse is a
+# dependency between the two installer trees, deploy/k8s and deploy/sbx -- taken deliberately, so a
+# ghostunnel bump or an ALPN fix is made once instead of twice in two copies that can drift.
+#
+# ../ocp-combined composes the same pieces for deploy/sbx/setup.sh and CANNOT be reused: it is a
+# full Kustomization that pins `namespace: moca-sbx-combined` and hardcodes that namespace in its
+# in-cluster addresses, which that installer's combined_addresses() re-patches afterwards.
+# ocp-single already owns namespace and addressing, so only a Component can layer onto it.
+#
+# The files here declare `namespace: moca-single` -- the placeholder the generated overlay rewrites
+# to SH_SINGLE_NAMESPACE -- exactly as ../routes does.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+components:
+  - ../../ocp-sbx/exec-tls
+resources:
+  - sbx-worker.yaml
+  - network-policy.yaml
+patches:
+  - path: patch-control-plane.yaml
+  - path: patch-relay.yaml

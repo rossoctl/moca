@@ -1,0 +1,81 @@
+# Additive rules (policies union), all three needed because the namespace's default-deny covers
+# every pod and every direction (../network-policy-single.yaml). BOTH directions of the worker's
+# attach need their own rule: a denied connection is a timeout, not a refusal, so a missing half
+# reads as a broken relay rather than a policy problem.
+#
+# The router's ingress to the exec sidecar (port 8445) is not here: ../../ocp-sbx/exec-tls brings
+# that policy with the sidecar it belongs to.
+# 1. DNS for the worker. allow-dns lists four app labels by name and sbx-worker is not one of them,
+#    so without this the worker resolves nothing: it logs `dial udp ...:53: i/o timeout` and
+#    reconnects forever, which looks like a broken relay rather than a missing policy. openshift-dns
+#    on 5353, as every other DNS rule here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sbx-worker-dns
+  namespace: moca-single
+spec:
+  podSelector:
+    matchLabels:
+      app: sbx-worker
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openshift-dns
+      ports:
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+---
+# 2. The shared pool's own egress, for the same workload: the relay's attach port and the public
+#    internet with the private, CGNAT and link-local ranges carved out (base/sandbox.yaml's
+#    moca-sandbox policy, with ../patch-policies.yaml's same-namespace selector since there is one
+#    namespace here). Ingress stays denied: a worker dials out and accepts nothing.
+#    SH_SANDBOX_EGRESS_EXCEPT is appended to egress[1] here too, by the generated overlay.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sbx-worker
+  namespace: moca-single
+spec:
+  podSelector: { matchLabels: { app: sbx-worker } }
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - podSelector: { matchLabels: { app: sandbox-relay } }
+      ports:
+        - { protocol: TCP, port: 9443 }
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16]
+---
+# 3. The relay accepts the worker's attach. base/sandbox.yaml's `sandbox-relay` policy admits 9443
+#    from `app: moca-sandbox` only, and this worker is `app: sbx-worker`, so without this rule the
+#    attach is dropped at the relay even though rule 3 lets the worker out: the worker logs
+#    `dial tcp <relay clusterIP>:9443: i/o timeout` and reconnects forever, the relay logs nothing,
+#    and `sbx run` fails with `no live worker for sandbox 'sbx_default'`. Measured on a cluster
+#    whose namespace had no leftover hand-made policy to mask it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sbx-relay-attach-from-worker
+  namespace: moca-single
+spec:
+  podSelector:
+    matchLabels:
+      app: sandbox-relay
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: sbx-worker
+      ports:
+        - protocol: TCP
+          port: 9443

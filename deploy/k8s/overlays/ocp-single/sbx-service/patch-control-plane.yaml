@@ -1,0 +1,67 @@
+# The sandbox settings both sbx-serving profiles read, from a ConfigMap of their own
+# (sbx-settings), which is also the name deploy/sbx/setup.sh's ocp-combined overlay reads -- so the
+# two installers share one contract for the sandbox half.
+#
+# Not keys in moca-settings, deliberately: a harness stack's moca-settings then keeps exactly the
+# keys it had, and its settings hash (and so its rollout) is untouched by this feature existing.
+#
+# `optional` where the control plane has a working default (sandbox-config.ts), required where its
+# absence must refuse the boot: SBX0 §4 -- a control plane with no allow list would admit every
+# account that can log in, and one with no templates or exec endpoint can serve no sandbox at all.
+#
+# SH_TEST_USERS is NOT here: deploy/k8s/setup.sh already writes it to moca-settings, which the base
+# reads with an optional ref, so test users are configured the same way on every profile.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moca-control-plane
+  namespace: moca-single
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - name: SH_ALLOWED_SUBJECTS
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_ALLOWED_SUBJECTS } }
+            - name: SH_SANDBOX_TEMPLATES
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TEMPLATES } }
+            - name: SH_SANDBOX_EXEC_ENDPOINT
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_EXEC_ENDPOINT } }
+            # PEM of the exec Route's certificate when it is self-signed, which is what setup.sh
+            # generates unless given one: absent with a cert the client's trust store already has.
+            - name: SH_SANDBOX_EXEC_CA
+              valueFrom:
+                configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_EXEC_CA, optional: true }
+            - name: SH_SANDBOX_TOKEN_ISSUER
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TOKEN_ISSUER } }
+            # Enrols test:1..SH_TEST_USERS for the sandbox routes (ADR-0045 range check). Optional
+            # and off by default: a stack that wants it says so, and main.ts refuses the flag
+            # without SH_TEST_USERS.
+            - name: SH_SANDBOX_TEST_USERS_ENROLLED
+              valueFrom:
+                configMapKeyRef:
+                  { name: sbx-settings, key: SH_SANDBOX_TEST_USERS_ENROLLED, optional: true }
+            - name: SH_SANDBOX_LIFETIME_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  { name: sbx-settings, key: SH_SANDBOX_LIFETIME_SECONDS, optional: true }
+            - name: SH_SANDBOX_MAX_LIFETIME_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  { name: sbx-settings, key: SH_SANDBOX_MAX_LIFETIME_SECONDS, optional: true }
+            - name: SH_SANDBOX_TOKEN_TTL_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  { name: sbx-settings, key: SH_SANDBOX_TOKEN_TTL_SECONDS, optional: true }
+            - name: SH_SANDBOX_RETENTION_SECONDS
+              valueFrom:
+                configMapKeyRef:
+                  { name: sbx-settings, key: SH_SANDBOX_RETENTION_SECONDS, optional: true }
+            - name: SH_SANDBOX_MAX_PER_SUBJECT
+              valueFrom:
+                configMapKeyRef:
+                  { name: sbx-settings, key: SH_SANDBOX_MAX_PER_SUBJECT, optional: true }
+            - name: SH_SANDBOX_MAX_TOTAL
+              valueFrom:
+                configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_MAX_TOTAL, optional: true }
