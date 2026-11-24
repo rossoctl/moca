@@ -122,9 +122,10 @@ only the admin role matters there, and `mocactl sbx admin subjects` does not dri
 control plane, so call the API directly. A refusal is `403 not_enrolled`, and its message names the
 caller's own subject for the operator to enroll.
 
-A **test user on `combined`** is a case of its own. `mocactl sbx login --test-user N` logs it in
-(the login is open there, as on `harness`), but the sandbox routes still check enrollment, so the
-subject must also be enrolled, in one of three ways:
+A **test user** is a case of its own. `mocactl sbx login --test-user N` logs it in on `combined`
+(the login is open there, as on `harness`) and on `sandbox` (where enrollment is the login gate),
+and the sandbox routes check enrollment either way, so the subject must be enrolled, in one of
+three ways:
 
 | How                                   | What it enrols                                                    | When to use it                           |
 | ------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------- |
@@ -132,11 +133,16 @@ subject must also be enrolled, in one of three ways:
 | `SH_ADMIN_SUBJECTS=test:1`            | that subject, with the admin role as well                         | testing the admin path                   |
 | `SH_SANDBOX_TEST_USERS_ENROLLED=true` | `test:1` … `test:SH_TEST_USERS`, as a range check                 | a stack running tens or hundreds of them |
 
-Without one of them the login succeeds and `mocactl sbx up` answers `403 not_enrolled` naming
-`test:<n>`. The range flag is for dev and test stacks only (ADR-0045): the control plane refuses it
-without `SH_TEST_USERS`, and reads it as exactly `true`, so a typo cannot enrol a thousand subjects.
-On the `sandbox` profile there is nothing to configure: the control plane refuses to boot with
-`SH_TEST_USERS` set at all (ADR-0045).
+Without one of them, on `combined`, the login succeeds and `mocactl sbx up` answers
+`403 not_enrolled` naming `test:<n>`. The range flag is for dev and test stacks only (ADR-0045):
+the control plane refuses it without `SH_TEST_USERS`, and reads it as exactly `true`, so a typo
+cannot enrol a thousand subjects. On the `sandbox` profile `SH_TEST_USERS` boots and
+`POST /v1/auth/test-token` is mounted, but enrollment is that profile's own authentication, so one
+of the three rows above is what makes the **login** succeed at all -- unenrolled, a test user there
+is refused at login rather than at `sbx up`. The control plane refuses a count that none of the
+three enrols, naming every way out, so the route is never served in a state where it can only
+refuse. A `test:0` or out-of-range entry does not count as enrolment: the login would refuse it
+too.
 
 ## When a user leaves
 

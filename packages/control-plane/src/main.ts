@@ -30,6 +30,7 @@ import {
   adminSubjectsFromEnv,
   INSTALLER_SUBJECT,
   GithubOAuthProvider,
+  namesEnrolledTestUser,
   TestUserProvider,
   testUsersFromEnv,
   testUserSecretFromEnv,
@@ -531,16 +532,16 @@ function testUserProvider(
  * settings, so none is required; the harness-only fields take inert values that no mounted route reads.
  */
 function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
-  // ADR-0045: the sandbox profile admits only ENROLLED subjects (SBX0 §4.2, SH_ALLOWED_SUBJECTS,
-  // whose entries match SUBJECT_RE -- github: or oidc:). A synthetic `test:N` subject can never be
-  // enrolled there, so rather than serve a route that always refuses, refuse to boot and say which
-  // two settings conflict.
-  if (testUsersFromEnv(env.SH_TEST_USERS) > 0) {
-    throw new Error(
-      'SH_TEST_USERS cannot be used on the sandbox profile: it admits only enrolled ' +
-        'github:/oidc: subjects (SH_ALLOWED_SUBJECTS)',
-    );
-  }
+  // ADR-0045 originally refused test users here, on the grounds that this profile admits only
+  // ENROLLED subjects and a synthetic test:<n> could never be one. That second half is what
+  // changed: SH_ALLOWED_SUBJECTS validates with SUBJECT_RE, which admits test:<n>, and
+  // SH_SANDBOX_TEST_USERS_ENROLLED enrols the whole range, so a test user CAN be enrolled here --
+  // and an sbx-only stack is exactly where browser-free multi-user testing is wanted.
+  //
+  // What did not change is the gate: enrollment is this profile's only authentication, so a test
+  // login that is not enrolled is refused at login, not merely at the sandbox routes
+  // (isEnrolled, sandbox-config.ts). Turning the range on therefore hands every holder of
+  // SH_TEST_USER_SECRET a working account, which is why it stays opt-in and dev/test only.
   const sandbox = sandboxConfigFromEnv(env);
   const installerToken = installerTokenFromEnv(env);
   const config: CpConfig = {
@@ -564,7 +565,10 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
     bundleSubjectBytes: 0,
     bundleTotalBytes: 0,
     version: resolveVersion(env),
-    testUsers: 0,
+    // ADR-0045 on this profile too: the count mounts the login route (routes.ts `feature`) and
+    // bounds which test:<n> subjects exist. The secret is required once the count is positive --
+    // testUserProvider throws without it, at boot.
+    testUsers: testUsersFromEnv(env.SH_TEST_USERS),
     asyncQueuedPerOwner: 0,
     // The sandbox profile serves no turns, so it gates nothing and sweeps nothing.
     gateDeadlineS: 0,
@@ -575,6 +579,43 @@ function sandboxProfileConfig(env: NodeJS.ProcessEnv): CpConfig {
     // misconfigured allowlist fails the boot rather than being silently ignored.
     notify: notifyFromEnv(env),
   };
+  // As on the combined profile (above): a flag that enrols test:1..N means nothing without a
+  // positive count, and silently doing nothing is the failure mode ADR-0045's opt-in exists to
+  // avoid. Named here too rather than only there, because this profile reaches it by another path.
+  if (sandbox.testUsersEnrolled && config.testUsers <= 0) {
+    throw new Error('SH_SANDBOX_TEST_USERS_ENROLLED needs SH_TEST_USERS: no test user can log in');
+  }
+  // And the converse, which is what ADR-0045 refused this pairing OUTRIGHT to avoid: enrollment is
+  // this profile's only authentication, so test users that nothing enrols cannot log in at all --
+  // the route would mount and answer not_enrolled to every call. Carrying test users here is the
+  // change; serving a login path that always refuses is not, and it is the failure that reads as a
+  // broken stack rather than a misconfigured one. Every way out is named, no value is.
+  //
+  // It must ask about enrollment exactly as isEnrolled does, or it refuses a stack that works:
+  // onAllowList admits the allow list OR an admin (sandbox-config.ts), and a test user's roles come
+  // from SH_ADMIN_SUBJECTS (TestUserProvider.principalFor -> rolesFor), so SH_ADMIN_SUBJECTS=test:1
+  // is a third enrolment path -- one users-and-roles.md documents. Hence namesEnrolledTestUser over
+  // both lists, which also bounds the index to 1..N rather than matching the `test:` prefix: a
+  // `test:0` entry enrols nothing, so taking it as enrolment would boot a stack whose every test
+  // login is refused -- the state this guard exists to prevent.
+  const adminSubjects = adminSubjectsFromEnv(env.SH_ADMIN_SUBJECTS);
+  if (
+    config.testUsers > 0 &&
+    !sandbox.testUsersEnrolled &&
+    !namesEnrolledTestUser(sandbox.allowedSubjects, config.testUsers) &&
+    !namesEnrolledTestUser(adminSubjects, config.testUsers)
+  ) {
+    throw new Error(
+      'SH_TEST_USERS on the sandbox profile needs its subjects enrolled, since enrollment is ' +
+        "this profile's login gate: set SH_SANDBOX_TEST_USERS_ENROLLED=true for the whole " +
+        'range, or name test:<n> subjects within the count in SH_ALLOWED_SUBJECTS or ' +
+        'SH_ADMIN_SUBJECTS',
+    );
+  }
+  // Validated here as on the harness profile (configFromEnv above), even though only the provider
+  // reads it: a stack with SH_TEST_USERS and no secret must fail at the same point on both
+  // profiles, not later and elsewhere when testUserProvider is constructed.
+  testUserSecretFromEnv(env.SH_TEST_USER_SECRET, config.testUsers);
   checkRefreshConfig(config);
   return config;
 }

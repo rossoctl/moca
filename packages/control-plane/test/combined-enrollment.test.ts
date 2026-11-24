@@ -97,7 +97,17 @@ describe('who may call what on the combined profile', () => {
       expect(isEnrolledForSandbox(sub, [], d.config), sub).toBe(true);
     // The bound is the configured count, and a subject the login endpoint will not issue (test:0,
     // out of range, or not an integer) is not enrolled here either.
-    for (const sub of ['test:0', 'test:1001', 'test:01x', 'test:', 'test:1.5', 'test:-1'])
+    // `test:01` belongs here too: the index is in range but the spelling is not the one
+    // principalFor mints, and enrollment never canonicalises a subject.
+    for (const sub of [
+      'test:0',
+      'test:1001',
+      'test:01',
+      'test:01x',
+      'test:',
+      'test:1.5',
+      'test:-1',
+    ])
       expect(isEnrolledForSandbox(sub, [], d.config), sub).toBe(false);
     // Everyone else is judged by the allow list exactly as before.
     expect(isEnrolledForSandbox(outsider.sub, [], d.config)).toBe(false);

@@ -1258,8 +1258,9 @@ Three things this does **not** give you, all dev/test-only by design:
 ## 13. Test users, for unattended multi-user testing (`SH_TEST_USERS`)
 
 > **Preview.** Test-user logins are implemented but not yet declared Stable; interfaces and limits
-> may change. Known limits: dev and test only, container tier only, and not available on the
-> sandbox profile (see below and [ADR-0045](../../adrs/0045-test-user-logins.md)).
+> may change. Known limits: dev and test only, container tier only, and on the sandbox profile
+> only for subjects that are enrolled (see below and
+> [ADR-0045](../../adrs/0045-test-user-logins.md)).
 
 Every login is GitHub's device flow, which needs a person and a browser. `SH_TEST_USERS=N` adds N
 synthetic subjects `test:1` … `test:N` that log in with a shared secret instead, so a script can
@@ -1270,8 +1271,11 @@ issues the same refresh family and the same token lifetimes, so rotation, roles
 
 **It is off unless asked for,** and gated by a secret, because the endpoint issues a real login for
 an arbitrary subject: without one, anyone who can reach the control plane is every test user.
-`POST /v1/auth/test-token` answers 404 while `SH_TEST_USERS` is unset, the route is not mounted on
-the sandbox profile, and the control plane refuses to boot if the two are combined.
+`POST /v1/auth/test-token` answers 404 while `SH_TEST_USERS` is unset -- on every profile: the
+route is declared for the harness, sandbox and combined profiles but is only mounted by a positive
+count. On the sandbox profile enrollment is additionally the login gate, so a count whose subjects
+nothing enrols is refused at boot rather than served as a login that always says `not_enrolled`
+(section 12.6).
 
 ### 13.1 Bring it up
 

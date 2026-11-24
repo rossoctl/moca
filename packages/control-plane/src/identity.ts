@@ -262,8 +262,9 @@ export const SUBJECT_RE = new RegExp(`^(?:github:[0-9]+|test:[0-9]+|oidc:${OIDC_
 /**
  * The subjects the members, owner and quota routes accept (adapted to #701): a person's
  * login from either real provider, `github:<numeric id>` or `oidc:<provider sub>`. Never `test:<n>`:
- * a synthetic test user is enrolled by SH_TEST_USERS, not by the API, and the sandbox profile refuses
- * one outright. Built from the same pattern as SUBJECT_RE, so the two cannot drift.
+ * a synthetic test user exists because SH_TEST_USERS says so and is enrolled by configuration --
+ * SH_SANDBOX_TEST_USERS_ENROLLED, or its own entry in SH_ALLOWED_SUBJECTS/SH_ADMIN_SUBJECTS --
+ * never by these routes. Built from the same pattern as SUBJECT_RE, so the two cannot drift.
  */
 export const MEMBER_SUBJECT_RE = new RegExp(`^(?:github:[0-9]+|oidc:${OIDC_SUB_PATTERN})$`);
 
@@ -286,6 +287,30 @@ export function adminSubjectsFromEnv(raw: string | undefined): string[] {
 
 export function rolesFor(subject: string, adminSubjects: string[]): string[] {
   return adminSubjects.includes(subject) ? ['admin'] : [];
+}
+
+/**
+ * Does any of `subjects` name a test user that a count of `count` actually mints? The boot guards
+ * on the sandbox profile ask this of SH_ALLOWED_SUBJECTS and of SH_ADMIN_SUBJECTS -- both enrol,
+ * because onAllowList admits an entry on the list OR an admin (sandbox-config.ts), and a test
+ * user's roles come from SH_ADMIN_SUBJECTS (rolesFor, above).
+ *
+ * The arithmetic is TestUserProvider.has()'s, deliberately: whole numbers in 1..N. A guard that
+ * accepted `test:0` or `test:<N+1>` would pass a stack whose every test login is still refused,
+ * which is the failure it exists to catch.
+ */
+export function namesEnrolledTestUser(subjects: string[], count: number): boolean {
+  return subjects.some((s) => {
+    if (!TEST_SUBJECT_RE.test(s)) return false;
+    const index = Number(s.slice('test:'.length));
+    // The canonical spelling, not merely the arithmetic. TEST_SUBJECT_RE admits `test:01` and
+    // Number() reads it as 1, but nothing downstream canonicalises it: principalFor mints
+    // testSubject(1) === 'test:1' and enrolment is a string compare against the list as written,
+    // so a guard satisfied by `test:01` would pass a stack whose every test login still answers
+    // not_enrolled -- the state it exists to catch. Comparing against testSubject(index) subsumes
+    // Number.isInteger too: a canonical index carries no decimal point.
+    return index >= 1 && index <= count && s === testSubject(index);
+  });
 }
 
 const GRANT_DEVICE_CODE = 'urn:ietf:params:oauth:grant-type:device_code';

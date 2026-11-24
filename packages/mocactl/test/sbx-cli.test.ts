@@ -359,9 +359,35 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       expect(cp.calls.every((c) => !c.path.includes(SECRET))).toBe(true);
     });
 
-    it('refuses a sandbox-profile control plane before sending the secret', async () => {
+    // A sandbox-only stack is the configuration this flag exists for: the control plane mounts
+    // /v1/auth/test-token on `sandbox` too (ADR-0045), where enrollment is the login gate, so the
+    // client must send the secret rather than refuse the profile before asking anything.
+    it('logs in against a sandbox-profile control plane too', async () => {
       const { home, paths, io } = setup({ loggedIn: false });
-      const cp = fakeCp({ 'GET /v1/discovery': () => ({ status: 200, body: SBX_DISCOVERY }) });
+      const cp = fakeCp({
+        'GET /v1/discovery': () => ({ status: 200, body: SBX_DISCOVERY }),
+        'POST /v1/auth/test-token': () => ({ status: 200, body: loginBody('api-t', 'test:3') }),
+      });
+      expect(
+        await sbxMain(
+          ['login', '--test-user', '3'],
+          { HOME: home, MOCACTL_SBX_URL: URL_, MOCA_TEST_USER_SECRET: SECRET },
+          io,
+          { home, fetchImpl: cp.fetchImpl },
+        ),
+      ).toBe(0);
+      expect(cp.calls.find((c) => c.path === '/v1/auth/test-token')?.body).toMatchObject({
+        index: 3,
+        secret: SECRET,
+      });
+      expect(loadAuth(sbxPaths(paths), URL_)?.apiToken).toBe('api-t');
+      expect(io.errs.join('\n')).not.toContain('serves no test users');
+    });
+
+    // Still refused: a MOCA control plane, whose discovery has no sandbox profile at all.
+    it('refuses a control plane that is not the sandbox service, before sending the secret', async () => {
+      const { home, paths, io } = setup({ loggedIn: false });
+      const cp = fakeCp({ 'GET /v1/discovery': () => ({ status: 404, body: {} }) });
       expect(
         await sbxMain(
           ['login', '--test-user', '1'],
@@ -370,7 +396,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
           { home, fetchImpl: cp.fetchImpl },
         ),
       ).toBe(2);
-      expect(io.errs.join('\n')).toContain('serves no test users');
+      expect(io.errs.join('\n')).toContain('is not the sandbox service');
       expect(cp.calls.some((c) => c.path === '/v1/auth/test-token')).toBe(false);
       expect(loadAuth(sbxPaths(paths), URL_)).toBeNull();
     });
