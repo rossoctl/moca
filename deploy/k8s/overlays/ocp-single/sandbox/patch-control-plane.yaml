@@ -1,0 +1,50 @@
+# SH_ROUTE_PROFILE=sandbox, plus the two things that profile REFUSES to boot with.
+#
+# 1. The credential KEK. SBX0 §4.1: this profile needs none, and sandboxConfigFromEnv pairs it with
+#    SH_EGRESS_HOSTS -- "set both or neither" -- so a KEK projected from moca-mu1 with no egress
+#    hosts crash-loops the control plane. The exchange token goes with it (the harness's token
+#    exchange is not served here). The volume is therefore re-listed WITHOUT them.
+#
+#    Volumes merge by name, and a projected volume's sources are replaced wholesale rather than
+#    merged, so this lists every source the stack still needs: the signing key, the test-user
+#    secret and the oidc client secret. Both of the latter are `optional` sources of their own --
+#    ADR-0045: credentialValue returns "unset" only for ENOENT and THROWS on an empty file, and a
+#    `secret` volume's `optional` is whole-source, never per item, which is why they cannot simply
+#    be keys in moca-mu1.
+#
+# 2. SH_CREDENTIAL_STORE. The harness's credential issuance is not served, and the k8s store would
+#    need Secret-writing rights this profile has no use for; the file store needs no volume here
+#    because nothing writes credentials. SH_CREDENTIAL_NAMESPACE goes with it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moca-control-plane
+  namespace: moca-single
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - { name: SH_ROUTE_PROFILE, value: sandbox }
+            - { name: SH_CREDENTIAL_STORE, $patch: delete }
+            - { name: SH_CREDENTIAL_NAMESPACE, $patch: delete }
+      volumes:
+        - name: credentials
+          projected:
+            defaultMode: 256 # 0400
+            sources:
+              - secret:
+                  name: moca-mu1
+                  items:
+                    - { key: SH_SESSION_TOKEN_PRIVATE_KEY, path: SH_SESSION_TOKEN_PRIVATE_KEY }
+              - secret:
+                  name: moca-test-users
+                  optional: true
+                  items:
+                    - { key: SH_TEST_USER_SECRET, path: SH_TEST_USER_SECRET }
+              - secret:
+                  name: moca-oidc
+                  optional: true
+                  items:
+                    - { key: SH_OIDC_CLIENT_SECRET, path: SH_OIDC_CLIENT_SECRET }

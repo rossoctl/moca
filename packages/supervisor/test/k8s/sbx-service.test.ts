@@ -7,6 +7,7 @@ import {
   K8S_DIR,
   NO_KUBECTL,
   container,
+  envNames,
   envVar,
   find,
   podSpec,
@@ -51,6 +52,83 @@ function renderCombined(): K8sObject[] {
     .map((d) => d.toJS() as K8sObject | null)
     .filter((o): o is K8sObject => o !== null);
 }
+
+const SANDBOX_DIR = resolve(K8S_DIR, '.generated/test-sbx-sandbox');
+
+/**
+ * The SANDBOX-ONLY profile, rendered the same way (overlays/ocp-single/sandbox). Its two claims are
+ * what these tests exist for, because neither is visible in setup.sh's generated kustomization --
+ * which is all the mocked deploy/k8s/tests/setup.test.sh can see -- so only a real render catches
+ * a patch that stops applying:
+ *
+ * - the supervisor is held at 0 replicas. It serves sessions this profile does not mount, and
+ *   leaving it at 1 runs a pod against a control plane that answers it nothing.
+ * - the control plane boots at all: this profile REFUSES a credential KEK without egress hosts and
+ *   needs no credential store, so the patch must remove both -- and the credentials volume is
+ *   re-listed, which a wrong source list turns into a crashloop on an empty or missing file.
+ */
+function renderSandbox(): K8sObject[] {
+  mkdirSync(SANDBOX_DIR, { recursive: true });
+  writeFileSync(
+    resolve(SANDBOX_DIR, 'kustomization.yaml'),
+    [
+      'apiVersion: kustomize.config.k8s.io/v1beta1',
+      'kind: Kustomization',
+      'resources:',
+      '  - ../../overlays/ocp-single',
+      'components:',
+      '  - ../../overlays/ocp-single/sandbox',
+      `namespace: ${NS}`,
+      '',
+    ].join('\n'),
+  );
+  const out = execFileSync('kubectl', ['kustomize', SANDBOX_DIR], { encoding: 'utf8' });
+  return parseAllDocuments(out)
+    .map((d) => d.toJS() as K8sObject | null)
+    .filter((o): o is K8sObject => o !== null);
+}
+
+describe.skipIf(NO_KUBECTL)('overlays/ocp-single/sandbox: the sandbox-only profile', () => {
+  afterAll(() => rmSync(SANDBOX_DIR, { recursive: true, force: true }));
+
+  it('holds the supervisor at 0 replicas and keeps every sandbox object', () => {
+    const objs = renderSandbox();
+    // The defining claim of the profile. Asserted on the rendered value, not on the patch file.
+    expect(find(objs, 'Deployment', 'moca-supervisor').spec.replicas).toBe(0);
+    // Kept as an object rather than deleted, so switching back is a replica change and its
+    // ServiceAccount, Service and NetworkPolicy stay where the other manifests expect them.
+    // (No Role: only the control plane has one, for credential Secrets.)
+    for (const kind of ['ServiceAccount', 'Service', 'NetworkPolicy']) {
+      expect(() => find(objs, kind, 'moca-supervisor')).not.toThrow();
+    }
+    // The sandbox half still comes from ../sbx-service through the component chain.
+    expect(() => find(objs, 'Deployment', 'sbx-worker')).not.toThrow();
+  });
+
+  it('removes exactly what the sandbox profile refuses to boot with', () => {
+    const cp = container(
+      find(renderSandbox(), 'Deployment', 'moca-control-plane'),
+      'control-plane',
+    );
+    expect(envVar(cp, 'SH_ROUTE_PROFILE')?.value).toBe('sandbox');
+    // sandboxConfigFromEnv pairs the KEK with SH_EGRESS_HOSTS -- both or neither -- and this
+    // profile serves no credential issuance, so both of these must be gone.
+    expect(envNames(cp)).not.toContain('SH_CREDENTIAL_STORE');
+    expect(envNames(cp)).not.toContain('SH_CREDENTIAL_NAMESPACE');
+    const vol = podSpec(find(renderSandbox(), 'Deployment', 'moca-control-plane')).volumes.find(
+      (v: { name: string }) => v.name === 'credentials',
+    );
+    // One source type per volume: a `secret:` left beside `projected:` is refused by the API
+    // server, and the KEK must not be among the sources.
+    expect(vol.secret).toBeUndefined();
+    const keys = vol.projected.sources.flatMap(
+      (src: { secret?: { items?: { key: string }[] } }) =>
+        src.secret?.items?.map((i) => i.key) ?? [],
+    );
+    expect(keys).not.toContain('SH_CREDENTIAL_KEK');
+    expect(keys).toContain('SH_TEST_USER_SECRET');
+  });
+});
 
 describe.skipIf(NO_KUBECTL)('overlays/ocp-single/combined: the sandbox service', () => {
   afterAll(() => rmSync(DIR, { recursive: true, force: true }));

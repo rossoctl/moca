@@ -1,0 +1,12 @@
+# The supervisor serves sessions, which this profile does not mount (SBX0 §4.1), so it is scaled to
+# 0 rather than left running against a control plane that answers it nothing. Kept as an object, not
+# deleted: switching back to --profile combined is then a replica change, and its ServiceAccount,
+# Service and NetworkPolicy stay where the other manifests expect them. (It has no Role: only the
+# control plane does, for credential Secrets.)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moca-supervisor
+  namespace: moca-single
+spec:
+  replicas: 0
