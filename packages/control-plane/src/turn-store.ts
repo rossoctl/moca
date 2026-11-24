@@ -175,16 +175,29 @@ export class TurnStore {
   }
 
   /**
-   * When `held`'s claim on `key` started its age clock: the stored instant, or `now` once this call
-   * stamps it. HSETNX, so two readers stamping at once agree on one instant rather than one of them
-   * resetting the clock the other is about to measure.
+   * When `held`'s claim on `key` started its age clock -- the stored instant, or `now` once this call
+   * stamps it -- and who holds the key as of that read. HSETNX for the stamp, so two readers stamping
+   * at once agree on one instant rather than one of them resetting the clock the other is about to
+   * measure.
+   *
+   * `held` is returned because the stamp alone cannot tell the caller WHOSE clock it just read. A
+   * stepover (`releaseIdempotencyKeyIf`) deletes the whole hash, stamp included, so a caller that
+   * lost a race to another submission would find its own holder's field missing, stamp a fresh one on
+   * the WINNER's hash and read an age of zero -- then answer with a turn id that was just released
+   * and will never have a record. Comparing the holder makes that caller fall through to the stepover
+   * instead, whose compare-and-reclaim converges on the winner's id. The extra read costs one round
+   * trip on the stamping path only, and only on the unreadable-holder branch.
    *
    * The READER stamps, not the claimant: this is read only by `claimKey`'s unreadable-holder branch
    * (#989), so `claimIdempotencyKey` keeps its single round trip on the path every submission takes.
    * The cost is that a claim orphaned by a crash starts its clock when the next submission first
    * looks at it rather than when it was made, so the key frees a grace after the first duplicate
    * attempt instead of a grace after the crash. It still frees, and it never frees EARLY, which is
-   * the side that would hand a live turn's key to a second submission.
+   * the side that would hand a live turn's key to a second submission -- within one replica's clock.
+   * ACROSS replicas it is the usual wall-clock assumption: whichever replica reads the claim first
+   * writes the stamp, and a later reader compares it against its own `now`, so a replica running more
+   * than the grace ahead of the stamping one does step over a live claim. The same assumption
+   * `gateDeadlineS` and `dueGates` already make, and skew that large breaks token validation first.
    *
    * The stamp is a field PER HOLDER, because a claim can change hands without the hash being deleted
    * in between: a holder releasing the key (its `del`) between a caller's read of its record and this
@@ -193,20 +206,24 @@ export class TurnStore {
    * over a LIVE claim -- the exact duplicate fan-out this grace exists to prevent. A per-holder field
    * cannot be misattributed; a stale one is a few dead bytes until the key's eventual release.
    *
-   * shortcut: a holder releasing the key DURING this call leaves a stamp-only hash that nothing
-   * releases (`releaseIdempotencyKeyIf` deletes only on a holder match), so ~40 bytes leak per
-   * occurrence; upgrade when idempotency keys get a TTL of their own.
+   * A stamp-only hash -- what HSETNX leaves when the holder deleted the key just before it -- is not
+   * a leak: `held` then reads as null, which sends the caller into the stepover, and
+   * `releaseIdempotencyKeyIf` treats a hash with no `turnId` as already released and deletes it.
    */
-  async claimedAtOr(owner: string, key: string, held: string, now: number): Promise<number> {
+  async claimedAtOr(
+    owner: string,
+    key: string,
+    held: string,
+    now: number,
+  ): Promise<{ at: number; heldBy: string | null }> {
     const k = idempotencyKeyKey(this.tag(owner), key);
     const field = `claimedAt:${held}`;
     const stamped = await this.guard(() => this.redis.hSetNX(k, field, String(now)));
-    if (stamped) return now;
     const fields = await this.guard(() => this.redis.hGetAll(k));
-    const at = Number(fields[field]);
-    // A field that vanished between the two calls (the holder's release) reads as `now`: the caller
-    // then treats the holder as live for one grace, and its own next claim wins the freed key.
-    return Number.isFinite(at) ? at : now;
+    // A field that vanished between the two calls (the holder's release) reads as `now`. Harmless:
+    // `heldBy` has changed too, so the caller steps over rather than trusting the age.
+    const at = stamped ? now : Number(fields[field]);
+    return { at: Number.isFinite(at) ? at : now, heldBy: fields.turnId ?? null };
   }
 
   /**

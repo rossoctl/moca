@@ -133,11 +133,19 @@ async function claimKey(
   if (held === turnId) return { turnId, fresh: true };
   const existing = await turns.get(held);
   if (existing && !isTerminalState(existing.state)) return { turnId: held, fresh: false };
-  if (!existing && now - (await turns.claimedAtOr(owner, key, held, now)) < CLAIM_GRACE_MS) {
-    // Young and unreadable: a holder still between its claim and its create. Answered exactly like
+  if (!existing) {
+    const claim = await turns.claimedAtOr(owner, key, held, now);
+    // STILL the holder, and young: a holder between its claim and its create. Answered exactly like
     // a live holder -- nothing created, nothing enqueued -- so the record it is about to write stays
     // the only one for this key. The caller polls a 404 until it lands.
-    return { turnId: held, fresh: false };
+    //
+    // The holder check is what keeps that promise true. Another submission can step this same holder
+    // over in the window above, and its release deletes the whole hash: the age we then read is a
+    // stamp this call just wrote on the WINNER's claim, zero seconds old, for a holder that no longer
+    // exists and never will. Answering with it would hand the client a turn id whose GET 404s
+    // forever. Falling through to the stepover converges on the winner's id instead.
+    if (claim.heldBy === held && now - claim.at < CLAIM_GRACE_MS)
+      return { turnId: held, fresh: false };
   }
   // The holder finished, or it is past the grace with no record (crashed mid-create, or expired):
   // the key is stale, so release THAT holder and take it. The second claim re-reads the holder, so

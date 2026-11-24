@@ -412,6 +412,40 @@ describe('submitTurn (spec §4.1)', () => {
     expect(d.turnQueue.ids).toEqual([turnId]);
   });
 
+  it('answers with the WINNER when two submissions race past one orphaned claim (#989)', async () => {
+    const d = turnDeps();
+    const sid = await session(d);
+    await d.turns.claimIdempotencyKey('github:1234', sid, 't-ghost');
+    d.fake.hashes.set(idempotencyKeyKey('github:1234', sid), {
+      turnId: 't-ghost',
+      'claimedAt:t-ghost': String(NOW_MS - CLAIM_GRACE_MS - 1),
+    });
+
+    // Same deterministic interleave as the terminal-holder race above: B's read of the ghost is the
+    // gap, and A runs the whole stepover inside it. A's release DELETES the hash, stamp included, so
+    // B's `claimedAtOr` stamps a fresh `claimedAt:t-ghost` on A's claim and would read an age of
+    // zero -- answering 202 with a ghost turn id that no retry can ever resolve, where before the
+    // grace B returned A's id. Which is why the age is only trusted while the holder is unchanged.
+    const realGet = d.turns.get.bind(d.turns);
+    let aResult: { turnId: string } | null = null;
+    let armed = true;
+    d.turns.get = async (turnId: string) => {
+      if (armed && turnId === 't-ghost') {
+        armed = false;
+        aResult = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+      }
+      return realGet(turnId);
+    };
+    const b = (await submit(d, sid, { item, async: true })).body as { turnId: string };
+
+    expect(aResult).not.toBeNull();
+    expect(b.turnId).toBe(aResult!.turnId);
+    expect(b.turnId).not.toBe('t-ghost');
+    // One turn for the key, and it is one that exists: B added nothing and named no ghost.
+    expect(recordedTurnIds(d)).toEqual([aResult!.turnId]);
+    expect(d.turnQueue.ids).toEqual([aResult!.turnId]);
+  });
+
   it('honours an explicit idempotencyKey, so two turns on one session are possible', async () => {
     const d = turnDeps();
     const sid = await session(d);
