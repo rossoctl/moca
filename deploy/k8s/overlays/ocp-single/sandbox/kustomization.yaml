@@ -1,0 +1,19 @@
+# ocp-single's SANDBOX-ONLY profile (--profile sandbox): the control plane serves the sandbox
+# service's routes and none of the harness's (SBX0 §4.1). The sandbox objects themselves come from
+# ../sbx-service, exactly as ../combined gets them.
+#
+# What a sandbox-only stack is for here: `sbx` against a namespace-scoped OpenShift project,
+# including browser-free test-user logins (ADR-0045). The alternative installer for this profile,
+# deploy/sbx/setup.sh, wants four DNS names and cluster-scoped rights; this one needs a namespace.
+#
+# What still runs and why: Redis (the sandbox records store), the relay (attach and exec), the
+# worker. The supervisor is scaled to 0 by patch-supervisor.yaml -- it serves sessions, and this
+# profile has none -- and the shared sandbox pool with SH_SANDBOX_COUNT=0, which is this installer's
+# existing input. On a 2-core namespace that headroom is the difference between fitting and not.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+components:
+  - ../sbx-service
+patches:
+  - path: patch-control-plane.yaml
+  - path: patch-supervisor.yaml
