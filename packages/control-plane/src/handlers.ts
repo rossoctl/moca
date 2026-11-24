@@ -349,8 +349,9 @@ export interface CpDeps {
  * session's `sandboxPod`, else the `sandboxId` its last leased turn ran on (both self-reported into
  * the runtime hash, read before the cascade); with neither there is nothing to send, and the audit
  * says so (`no_worker`). One `session_workspace_release` audit line either way, its outcome the
- * worker's answer or `not_answered`: the session record is gone, so nothing retries it, and the
- * worker's idle reclaim is the backstop. Never throws; the DELETE does not wait for it.
+ * worker's answer or `not_answered`, the worker under `worker` (a worker id, not a sandbox record,
+ * so not `sandboxId`): the session record is gone, so nothing retries it, and the worker's idle
+ * reclaim is the backstop. Never throws; the DELETE does not wait for it.
  */
 async function releaseSessionWorkspace(
   deps: CpDeps,
@@ -364,7 +365,7 @@ async function releaseSessionWorkspace(
       sessionId: rec.sessionId,
       decision: 'session_workspace_release',
       outcome,
-      ...(worker ? { sandboxId: worker } : {}),
+      ...(worker ? { worker } : {}),
     });
   if (!worker) {
     await line('no_worker');

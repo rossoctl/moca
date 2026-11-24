@@ -462,7 +462,7 @@ describe('a session delete releases its workspace (#338)', () => {
     expect(lines(d)).toEqual([
       expect.objectContaining({
         sessionId: 'sid-fixed',
-        sandboxId: 'moca-sandbox-0',
+        worker: 'moca-sandbox-0',
         outcome: 'released',
       }),
     ]);
@@ -475,7 +475,9 @@ describe('a session delete releases its workspace (#338)', () => {
     await del(d);
     await vi.waitFor(() => expect(lines(d)).toHaveLength(1));
     expect(calls).toEqual([{ worker: 'moca_microvm_0', workspaceKey: 'sid-fixed' }]);
-    expect(lines(d)[0]).toMatchObject({ outcome: 'kept_busy' });
+    expect(lines(d)[0]).toMatchObject({ outcome: 'kept_busy', worker: 'moca_microvm_0' });
+    // A worker id is not a sandbox record: the line names no sandboxId.
+    expect(lines(d)[0]).not.toHaveProperty('sandboxId');
   });
 
   it('sends nothing with no worker recorded, and audits that', async () => {
@@ -488,6 +490,7 @@ describe('a session delete releases its workspace (#338)', () => {
       expect.objectContaining({ sessionId: 'sid-fixed', outcome: 'no_worker' }),
     ]);
     expect(lines(d)[0]).not.toHaveProperty('sandboxId');
+    expect(lines(d)[0]).not.toHaveProperty('worker');
   });
 
   it('audits not_answered once and still deletes when the relay rejects or throws, with no unhandled rejection', async () => {

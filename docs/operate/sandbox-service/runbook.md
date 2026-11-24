@@ -686,7 +686,7 @@ release is sent once even when a DELETE and a janitor run race (an atomic claim)
 worker that predates release) is written to the sandbox record and audited as
 `sandbox_workspace_release`; anything else (the relay down, the worker detached) is logged and
 retried by the next janitor run while the record is retained. A session's is audited as
-`session_workspace_release`, `no_worker` when it never ran on one. The janitor keeps removing what
+`session_workspace_release`, with the worker under `worker`, `no_worker` when it never ran on one. The janitor keeps removing what
 is left after its wait, and idle reclaim stays the backstop everywhere.
 
 The listener's bearer, `MOCA_RELAY_RELEASE_TOKEN`, is in the Secret `moca-relay-release`, apart
