@@ -242,18 +242,19 @@ killed and empty, as on a timeout. A guest that does not answer within 8 s still
 (`remote-worker/internal/vmpool/gates_inventory_test.go`). Plan 2's PR (#763) records them passing
 on the KVM rig, at that PR's worker. Since then, `go test -run TestGateLease ./internal/vmpool/`
 has run twice on the E15 metal rig, each time on a pre-merge branch tree with a snapshot built from
-that tree:
+that tree, and once on SBX0's own KVM host at the commit SBX0 now runs:
 
-| Date       | Tree                                                | Snapshot      | Result              |
-| ---------- | --------------------------------------------------- | ------------- | ------------------- |
-| 2026-11-20 | #970's branch (the abort frame)                     | `p6-af456b02` | 15 passed, 0 failed |
-| 2026-11-21 | #974's branch (the idle cache drop; has #966, #970) | `p7-649208a6` | 16 passed, 0 failed |
+| Date       | Tree                                                                                                  | Snapshot                            | Result                         |
+| ---------- | ----------------------------------------------------------------------------------------------------- | ----------------------------------- | ------------------------------ |
+| 2026-11-20 | #970's branch (the abort frame)                                                                       | `p6-af456b02`                       | 15 passed, 0 failed            |
+| 2026-11-21 | #974's branch (the idle cache drop; has #966, #970)                                                   | `p7-649208a6`                       | 16 passed, 0 failed            |
+| 2026-11-24 | `main` at `a9a11a22` (has #966, #970, #974, #1026, #1027), SBX0's deployed commit, on SBX0's KVM host | `default-main-a9a11a2` (`61cb13a3`) | 16 passed, 0 failed, 0 skipped |
 
 Plans 3 and 4's worker changes (the lease frames; the expiring deadline, `sandbox_deleted`, the
-status cap and the boot marker) are in both trees. The merged commit `e5ae5151` was not gate-run
-itself: E17c measured it (rossoctl/moca-experiments#38) but ran no gate. **A gate run at the exact
-commit the deployment will run is still owed**; it is a step of the live smoke (§6.4), and its
-date and snapshot go in this table.
+status cap and the boot marker) are in every tree. The merged commit `e5ae5151` was not gate-run
+itself: E17c measured it (rossoctl/moca-experiments#38) but ran no gate. The 2026-11-24 run is the
+gate run at the deployed commit that this section asked for. SBX0 was upgraded to `main-a9a11a2` the
+same day, with its worker on the snapshot the gates ran against.
 
 ### 6.3 What level 1 does not claim
 
@@ -284,7 +285,8 @@ date and snapshot go in this table.
 - **Smoke step 8 has not run live.** It is tested offline only. It needs a deployment that allows
   `lease` and a template whose snapshot advertises `lease-v1`. Because the policy is deployment-wide,
   run it on a test deployment, or list `lease` for the run only (`deploy/sbx/RUNBOOK.md` §13).
-- **The KVM gates at the deployed worker** (§6.2).
+- **The KVM gates at the deployed worker** (§6.2): run 2026-11-24 on SBX0's host at `a9a11a22`,
+  16 passed.
 - **The memory squeeze (spec §10, criterion 3).** E17b's passed (rossoctl/moca-experiments#35): 551
   reclaims, all of the idle-longest lease, and no refusal while an idle lease existed. E17c re-ran it
   with the idle cache drop (#974) and missed criterion 3′ as sealed: 6 `memory-budget` refusals while
