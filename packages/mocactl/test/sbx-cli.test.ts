@@ -183,7 +183,7 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     it('credentials --help: every credentials form, and nothing else', async () => {
       const out = await help('credentials');
       for (const form of [
-        'credentials [list]',
+        'credentials ls|list',
         'credentials add NAME',
         'credentials presets',
         'credentials delete NAME',
@@ -215,11 +215,13 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
       expect(out).not.toContain('mocactl sbx quota [--json]');
     });
 
-    it('an optional subcommand narrows too: credentials list is its own entry', async () => {
-      const list = await help('credentials', 'list');
-      expect(list).toContain('mocactl sbx credentials [list] [--json]');
-      expect(list).not.toContain('mocactl sbx credentials add');
-      expect(list).not.toContain('mocactl sbx credentials delete');
+    it('a subcommand narrows too, by either of its names: credentials ls and list', async () => {
+      for (const sub of ['ls', 'list']) {
+        const list = await help('credentials', sub);
+        expect(list).toContain('mocactl sbx credentials ls|list [--json]');
+        expect(list).not.toContain('mocactl sbx credentials add');
+        expect(list).not.toContain('mocactl sbx credentials delete');
+      }
     });
 
     it('a word that is not a subcommand is ignored: run -- CMD, an id', async () => {
@@ -233,17 +235,17 @@ describe('mocactl sbx (SBX0 §6.1, 1b subset)', () => {
     it("a usage error shows the failed command's help, not every command's", async () => {
       const { env, io } = setup();
       // An unknown flag: the parse fails, yet the help is still the command's own.
-      expect(await main(['sbx', 'credentials', 'list', '--jsn'], env, io)).toBe(2);
+      expect(await main(['sbx', 'credentials', 'ls', '--jsn'], env, io)).toBe(2);
       const err = io.errs.join('\n');
       expect(err).toMatch(/--jsn/);
-      expect(err).toContain('mocactl sbx credentials [list] [--json]');
+      expect(err).toContain('mocactl sbx credentials ls|list [--json]');
       expect(err).not.toContain('mocactl sbx credentials add');
       expect(err).not.toContain('mocactl sbx up');
       // The error is the exit code: no list of the others, no Ctrl-C.
       expect(err).not.toMatch(/exit codes|Ctrl-C/);
       expect(err).toContain('Run `mocactl sbx --help` for the list of all commands.');
       // --help keeps them: there they are reference.
-      expect(await help('credentials', 'list')).toMatch(/exit codes: 0 ok/);
+      expect(await help('credentials', 'ls')).toMatch(/exit codes: 0 ok/);
       // A misused flag after a parse that succeeded, with a string flag's value before the word.
       const { io: io2 } = setup();
       expect(await main(['sbx', '--sandbox', SBX, 'ls', '--timeout', '5'], env, io2)).toBe(2);

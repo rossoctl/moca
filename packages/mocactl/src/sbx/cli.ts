@@ -290,7 +290,7 @@ a sandbox by hand: create one, its lease and processes, a direct client:
                                                  10 minutes after the end, it is final)
 
 the credentials the host swaps in:
-  mocactl sbx credentials [list] [--json]       the credentials the host swaps into your sandboxes' HTTPS requests
+  mocactl sbx credentials ls|list [--json]      the credentials the host swaps into your sandboxes' HTTPS requests
   mocactl sbx credentials add NAME (--host DEST ... [--kind K] | --preset ID)
                                                  store one (the secret is read from stdin, never argv);
                                                  --host: where it is swapped in, DEST is
@@ -1348,11 +1348,11 @@ async function sbxMainWith(
     sizes[flag] = n * 2 ** 20;
   }
   const { 'max-push': maxPush, 'max-file': maxFile } = sizes;
-  // Bare `templates` lists its subcommands, as bare `sbx` does, first pointing an old script or
-  // habit (bare `templates` once listed the templates) at `templates ls`.
-  if (command === 'templates' && arg === undefined) {
+  // Bare `templates` and `credentials` list their subcommands, as bare `sbx` does, first pointing an
+  // old script or habit (bare, each once listed its own) at `templates ls` or `credentials ls`.
+  if ((command === 'templates' || command === 'credentials') && arg === undefined) {
     io.err(
-      `sbx: templates needs a subcommand; to list the templates, use 'mocactl sbx templates ls'\n${usage}`,
+      `sbx: ${command} needs a subcommand; to list the ${command}, use 'mocactl sbx ${command} ls'\n${usage}`,
     );
     return SBX_EXIT.usage;
   }
@@ -1371,12 +1371,10 @@ async function sbxMainWith(
         (extra.length === 0 ||
           (['enroll', 'unenroll', 'grant', 'revoke'].includes(extra[0]!) && extra.length === 2))
       : command === 'credentials'
-        ? arg === undefined ||
-          (arg === 'presets'
-            ? extra.length === 0
-            : arg === 'list'
-              ? extra.length === 0
-              : ['add', 'delete'].includes(arg) && extra.length === 1)
+        ? // `ls` and `list` both list (`list` is the name scripts already use).
+          ['ls', 'list', 'presets'].includes(arg!)
+          ? extra.length === 0
+          : ['add', 'delete'].includes(arg!) && extra.length === 1
         : command === 'put'
           ? arg !== undefined && extra.length === 0
           : command === 'mode'

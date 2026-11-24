@@ -253,7 +253,7 @@ left() { # left a|b ID: delete a sandbox this run created and a step did not
 stored_creds() { # the recorded names user A's `credentials list` still shows (see the cleanup);
   # exit 1 -- after printing every recorded name -- when the listing itself failed
   local listed n
-  listed="$(as a credentials --json 2>>"$LOGS/cleanup.log" </dev/null | "$PY" -c '
+  listed="$(as a credentials list --json 2>>"$LOGS/cleanup.log" </dev/null | "$PY" -c '
 import json, sys
 try:
     doc = json.load(sys.stdin)

@@ -22,8 +22,9 @@ const DESCRIBED = /\S {2,}\S/;
 
 /**
  * The words before the first flag, placeholder or quote: `templates create`, `proc logs`. A
- * bracketed word is an optional subcommand and counts (`credentials [list]` gives `credentials
- * list`), so `credentials list --help` finds that entry alone.
+ * bracketed word is an optional subcommand and counts (`proc [list]` would give `proc list`), so
+ * `proc list --help` finds that entry alone; `a|b` names one subcommand twice (`credentials
+ * ls|list`), and either word finds it (wordMatches).
  */
 function headWords(head: string): string[] {
   const words: string[] = [];

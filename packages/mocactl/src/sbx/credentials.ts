@@ -221,7 +221,7 @@ export function listPresets(
   return SBX_EXIT.ok;
 }
 
-/** `mocactl sbx credentials` (list) and `delete NAME`: the MOCA commands on the sandbox login. */
+/** `mocactl sbx credentials ls` and `delete NAME`: the MOCA commands on the sandbox login. */
 export const listCredentials = (c: SbxCtx): Promise<number> =>
   cmdCredentials(c.rt, c.io, {
     json: c.json,

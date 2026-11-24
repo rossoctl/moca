@@ -12,7 +12,7 @@ function commandLines(usage: string, head: string): string[] {
   return usage.split('\n').filter((l) => l.startsWith(head));
 }
 
-/** A head line's command words, as typed for `COMMAND --help` (`credentials [list]`). */
+/** A head line's command words, as typed for `COMMAND --help` (`credentials ls|list`: `credentials ls`). */
 function typed(line: string, head: string): string[] {
   const words: string[] = [];
   for (const w of line.slice(head.length).split(/ {2,}/)[0]!.split(' ')) {

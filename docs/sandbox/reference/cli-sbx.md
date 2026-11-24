@@ -203,7 +203,7 @@ a sandbox by hand: create one, its lease and processes, a direct client:
                                                  10 minutes after the end, it is final)
 
 the credentials the host swaps in:
-  mocactl sbx credentials [list] [--json]       the credentials the host swaps into your sandboxes' HTTPS requests
+  mocactl sbx credentials ls|list [--json]      the credentials the host swaps into your sandboxes' HTTPS requests
   mocactl sbx credentials add NAME (--host DEST ... [--kind K] | --preset ID)
                                                  store one (the secret is read from stdin, never argv);
                                                  --host: where it is swapped in, DEST is
