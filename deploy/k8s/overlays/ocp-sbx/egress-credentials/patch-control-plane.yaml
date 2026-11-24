@@ -57,3 +57,11 @@ spec:
                   items:
                     - { key: MOCA_RELAY_RELEASE_TOKEN, path: MOCA_RELAY_RELEASE_TOKEN }
               - secret: { name: sbx-egress }
+              # ADR-0045 test users: the shared secret, optional like the two above -- only a stack
+              # with SBX_TEST_USERS on (deploy/sbx/setup.sh) has the Secret moca-test-users. Every
+              # re-lister of these sources carries it: the last patch writing them decides.
+              - secret:
+                  name: moca-test-users
+                  optional: true
+                  items:
+                    - { key: SH_TEST_USER_SECRET, path: SH_TEST_USER_SECRET }
