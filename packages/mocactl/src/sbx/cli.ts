@@ -31,6 +31,7 @@ import {
   cmdEgress,
   cmdEnv,
   cmdLogin,
+  cmdLoginTestUser,
   cmdLogout,
   cmdLs,
   cmdRm,
@@ -127,6 +128,10 @@ a repository's sandbox, in the order you use it:
                                                  log in with the GitHub device flow
                                                  (--control-plane-url: the sandbox service's URL;
                                                  --no-browser: only print the sign-in URL and code)
+  mocactl sbx login --test-user N                log in as test user N with no browser, for tests
+                                                 (--test-user: the user's 1-based index; needs a
+                                                 combined control plane's SH_TEST_USERS, and the
+                                                 shared secret in MOCA_TEST_USER_SECRET)
   mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--max-file MiB]
                  [--no-agent-config] [--cortex] [--lifetime DURATION]
                                                  in a git repository: create or reuse its sandbox,
@@ -839,6 +844,7 @@ const SYNC_FLAGS: [
     | 'cortex'
     | 'keep-config'
     | 'no-browser'
+    | 'test-user'
     | 'renew-every'
     | 'seed'
     | 'mode'
@@ -861,6 +867,7 @@ const SYNC_FLAGS: [
   ['cortex', ['up']],
   ['keep-config', ['rm']],
   ['no-browser', ['login']],
+  ['test-user', ['login']],
   ['renew-every', ['token']],
 ];
 
@@ -979,6 +986,7 @@ const SBX_OPTIONS = {
   cortex: { type: 'boolean' },
   'keep-config': { type: 'boolean' },
   'no-browser': { type: 'boolean' },
+  'test-user': { type: 'string' },
   host: { type: 'string', multiple: true },
   kind: { type: 'string' },
   preset: { type: 'string' },
@@ -1687,12 +1695,26 @@ async function sbxMainWith(
   const sandboxFlag = values.sandbox !== undefined ? id : undefined;
 
   switch (command) {
-    case 'login':
-      return cmdLogin(
-        ctx,
-        values['control-plane-url'] !== undefined,
-        values['no-browser'] ? undefined : deps.loginHelpers,
-      );
+    case 'login': {
+      const raw = values['test-user'];
+      // A test-user login prints no device code, so it needs neither the clipboard nor the browser.
+      if (raw === undefined) {
+        return cmdLogin(
+          ctx,
+          values['control-plane-url'] !== undefined,
+          values['no-browser'] ? undefined : deps.loginHelpers,
+        );
+      }
+      // Validated before any network call, so a typo costs nothing and reports as usage, in the
+      // words `mocactl login --test-user` uses for the same mistake.
+      if (!/^[0-9]+$/.test(raw) || Number(raw) < 1) {
+        io.err(
+          `sbx: --test-user needs a whole number from 1 (got ${JSON.stringify(raw)})\n${usage}`,
+        );
+        return SBX_EXIT.usage;
+      }
+      return cmdLoginTestUser(ctx, Number(raw), env, values['control-plane-url'] !== undefined);
+    }
     case 'logout':
       return cmdLogout(ctx);
     case 'quota':

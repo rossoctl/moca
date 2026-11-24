@@ -86,6 +86,13 @@ server, because the seam already exists and `identity.ts` already anticipates a 
 - Negative / accepted cost: `test:N` subjects can be named in `SH_ADMIN_SUBJECTS`, so a
   misconfigured test cluster can hand admin to a synthetic subject. Deliberate — it is what makes
   the admin path testable — but it is one more reason the secret is not optional.
+- Later addition: the sandbox service takes a test-user login too, as
+  `mocactl sbx login --test-user N`, and only on the `combined` profile — `POST /v1/auth/test-token`
+  is declared `harness`, which `mountsOn` also mounts on `combined`, while the `sandbox` profile
+  neither mounts it nor boots with `SH_TEST_USERS`. The boundary above is unchanged; what is new is
+  that `mocactl` can now fill `sbx-auth.json` without a browser. A login is not a sandbox: on
+  `combined` the sandbox routes check enrollment, so the operator must also put the subject in
+  `SH_ALLOWED_SUBJECTS` (which admits `test:<n>`, unlike `/v1/subjects`) or `SH_ADMIN_SUBJECTS`.
 - Follow-up owed: migrate `smoke.sh` off the in-pod mint; decide whether `mocactl` should grow a
   `--profile` flag, since today a second login in one `XDG_CONFIG_HOME` overwrites the first and the
   driver script works around it with a directory per user.

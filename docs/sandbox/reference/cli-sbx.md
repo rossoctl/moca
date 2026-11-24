@@ -40,6 +40,10 @@ a repository's sandbox, in the order you use it:
                                                  log in with the GitHub device flow
                                                  (--control-plane-url: the sandbox service's URL;
                                                  --no-browser: only print the sign-in URL and code)
+  mocactl sbx login --test-user N                log in as test user N with no browser, for tests
+                                                 (--test-user: the user's 1-based index; needs a
+                                                 combined control plane's SH_TEST_USERS, and the
+                                                 shared secret in MOCA_TEST_USER_SECRET)
   mocactl sbx up [--template T] [--name N] [--include-secrets] [--max-push MiB] [--max-file MiB]
                  [--no-agent-config] [--cortex] [--lifetime DURATION]
                                                  in a git repository: create or reuse its sandbox,
