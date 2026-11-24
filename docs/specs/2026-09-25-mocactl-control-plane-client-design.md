@@ -406,8 +406,9 @@ token re-renders the whole history.
 
 ### 6.2 Sessions overlay
 
-`GET /v1/sessions` (paged, newest first), fuzzy-filterable as you type. Each row: **title**, relative
-`lastTurnAt` ("3h ago"), turn count, and a marker when the transcript is local (resumable with history).
+`GET /v1/sessions` (paged, newest first), fuzzy-filterable as you type. Each row: **title**, short id
+(unless the title shows it), relative `lastTurnAt` ("3h ago"), turn count, and a marker when the
+transcript is local (resumable with history).
 
 **Titles** are client-side: the first prompt of a session, trimmed to ~50 characters on a word
 boundary, stored in its local transcript (§6.6). `/rename` overrides it. A session with no local

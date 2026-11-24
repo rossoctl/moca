@@ -79,7 +79,10 @@ export function SessionsOverlay({
     () =>
       (sessions ?? []).map((s) => {
         const title = sessionTitle(s, transcripts);
+        const shortId = sanitizeRemote(s.sessionId).slice(0, 8);
         const detail = [
+          // Titles derived from the first prompt can repeat; the id tells the sessions apart.
+          title.endsWith(shortId) ? undefined : shortId,
           formatRelative(s.lastTurnAt ?? s.createdAt, now()),
           `${s.turns} turn${s.turns === 1 ? '' : 's'}`,
           s.sandboxTier ? sanitizeRemote(s.sandboxTier) : undefined,
