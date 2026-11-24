@@ -1,6 +1,6 @@
 /**
- * `mocactl spawn | subagents | watch | get | approve | reject`, built on the leaf-turn transport
- * and the subagent ledger.
+ * `mocactl spawn | subagents | watch | get | approve | reject | follow-up`, built on the leaf-turn
+ * transport and the subagent ledger.
  */
 import { spawn as spawnChild } from 'node:child_process';
 import { writeFileSync, mkdirSync, existsSync, openSync, closeSync } from 'node:fs';
@@ -901,6 +901,32 @@ export const DEFAULT_WAIT_TIMEOUT_S = 300;
  *  server-side run events (#392) land and the poll can become a subscription. */
 const WAIT_POLL_MS = 2_000;
 
+/**
+ * A result's bytes on disk, one file per kind it carries, and the paths written. Shared by `get`
+ * and `follow-up`, which preserves the result it is about to overwrite by writing it the same way.
+ */
+function writeResultFiles(sessionId: string, body: LeafResultBody, outDir?: string): string[] {
+  const dir = resolve(outDir ?? '.');
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const written: string[] = [];
+  if (body.text) {
+    const p = join(dir, `${sessionId}.text`);
+    writeFileSync(p, body.text, { mode: 0o644 });
+    written.push(p);
+  }
+  if (body.verdict !== undefined) {
+    const p = join(dir, `${sessionId}.verdict.json`);
+    writeFileSync(p, JSON.stringify(body.verdict, null, 2) + '\n', { mode: 0o644 });
+    written.push(p);
+  }
+  if (body.patch) {
+    const p = join(dir, `${sessionId}.patch`);
+    writeFileSync(p, body.patch.endsWith('\n') ? body.patch : body.patch + '\n', { mode: 0o644 });
+    written.push(p);
+  }
+  return written;
+}
+
 export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<number> {
   if (!requireReady(rt, io)) return 2;
   if (!SAFE_ID_RE.test(opts.sessionId)) {
@@ -917,24 +943,7 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
     if (opts.json) io.out(JSON.stringify({ sessionId: opts.sessionId, status: 'queued' }) + '\n');
     return 1;
   }
-  const outDir = resolve(opts.outDir ?? '.');
-  if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
-  const written: string[] = [];
-  if (raw.text) {
-    const p = join(outDir, `${opts.sessionId}.text`);
-    writeFileSync(p, raw.text, { mode: 0o644 });
-    written.push(p);
-  }
-  if (raw.verdict !== undefined) {
-    const p = join(outDir, `${opts.sessionId}.verdict.json`);
-    writeFileSync(p, JSON.stringify(raw.verdict, null, 2) + '\n', { mode: 0o644 });
-    written.push(p);
-  }
-  if (raw.patch) {
-    const p = join(outDir, `${opts.sessionId}.patch`);
-    writeFileSync(p, raw.patch.endsWith('\n') ? raw.patch : raw.patch + '\n', { mode: 0o644 });
-    written.push(p);
-  }
+  const written = writeResultFiles(opts.sessionId, raw, opts.outDir);
   // `paused` is terminal but still awaiting a gate decision — exit 1.
   const completed = raw.status === 'responded' || raw.status === 'done' || raw.status === 'solved';
   const status = sanitizeRemote(raw.status);
@@ -1365,4 +1374,187 @@ function noResultComing(record: LedgerRecord, now: number): string | undefined {
   // Same liveness + grace mapping `cmdSubagents` applies, so both commands agree on `unknown`.
   const view = mapHonestState('queued', { alive: false, observedAt: record.stateObservedAt }, now);
   return view.state === 'unknown' ? (view.detail ?? 'child exited with no result') : undefined;
+}
+
+// --- follow-up ---
+
+export interface FollowUpOptions {
+  sessionId: string;
+  /** The next turn's prompt. Sent verbatim; the session keeps the first turn's context. */
+  prompt: string;
+  /** Where the result about to be overwritten is copied first. Defaults to the cwd, as `get`'s. */
+  outDir?: string;
+  json: boolean;
+  signal?: AbortSignal;
+  /** Test seams, as `cmdDecide`'s. */
+  ledger?: Ledger;
+  transport?: LeafTransport;
+  turns?: Pick<AsyncTurnTransport, 'submit'>;
+  forkFn?: (
+    sessionId: string,
+    token: string,
+    envelope: LeafEnvelope,
+    cwd: string,
+  ) => number | Promise<number>;
+}
+
+/**
+ * `mocactl follow-up SESSIONID "prompt"`: a second turn on a subagent's session, which keeps the
+ * first turn's context (the harness runs a leaf with `createIfAbsent`, so one on a session that
+ * already exists resumes it — ADR-0028).
+ *
+ * The result is copied out before the turn is dispatched, because the sync path keeps one result
+ * record per session and overwrites it unconditionally. An async row needs no copy: each turn keeps
+ * its own artifacts for seven days (#840).
+ *
+ * The dispatch mirrors the row's backend, exactly as a gate decision does: a row with a `turnId`
+ * submits another turn, a row without one forks the same detached worker `spawn` uses.
+ */
+export async function cmdFollowUp(rt: Runtime, io: Io, opts: FollowUpOptions): Promise<number> {
+  if (!requireReady(rt, io)) return 2;
+  if (!SAFE_ID_RE.test(opts.sessionId)) {
+    io.err(`invalid sessionId '${sanitizeRemote(opts.sessionId)}'`);
+    return 2;
+  }
+  if (!opts.prompt.trim()) {
+    io.err('follow-up needs a non-empty prompt');
+    return 2;
+  }
+  if (Buffer.byteLength(opts.prompt, 'utf8') > MAX_PROMPT_BYTES) {
+    io.err(`prompt is too large (max ${MAX_PROMPT_BYTES} bytes); shorten it or split the task`);
+    return 2;
+  }
+  initLedger(rt.paths.subagentsFile);
+  const ledger = opts.ledger ?? openLedger(rt.paths.subagentsFile, rt.now);
+  const record = ledger.find(opts.sessionId);
+  if (record === undefined) {
+    io.err(`no ledger row for '${sanitizeRemote(opts.sessionId)}'`);
+    // The row carries the bundle and workload the next turn has to inherit, and on the sync path
+    // there is no turn record anywhere to recover them from.
+    io.err('a subagent is followed up from the machine that spawned it, which holds its row');
+    return 1;
+  }
+  if (record.lastKnownState === 'paused') {
+    io.err(
+      `'${sanitizeRemote(opts.sessionId)}' is parked at a gate; a follow-up prompt does not ` +
+        `answer one — \`mocactl approve ${opts.sessionId}\` (or reject) does`,
+    );
+    return 1;
+  }
+  if (!isTerminalState(record.lastKnownState) && record.lastKnownState !== 'unknown') {
+    io.err(
+      `'${sanitizeRemote(opts.sessionId)}' is still ${sanitizeRemote(record.lastKnownState)}; ` +
+        `a second turn would queue behind it — \`mocactl get --wait ${opts.sessionId}\` first`,
+    );
+    return 1;
+  }
+
+  // Always a prompt, even on a solve row: the session holds the repo workspace already (#461), so
+  // the follow-up needs no repo or ref, and a legacy `converge` row follows up as readily as any.
+  const nextEnvelope: LedgerEnvelope = {
+    kind: 'prompt',
+    prompt: opts.prompt,
+    ...(record.envelope.configRef ? { configRef: record.envelope.configRef } : {}),
+    ...(record.envelope.workloadId ? { workloadId: record.envelope.workloadId } : {}),
+    ...(record.envelope.contextWritable ? { contextWritable: true } : {}),
+  };
+  const envelope: LeafEnvelope = { sessionId: opts.sessionId, ...nextEnvelope, kind: 'prompt' };
+
+  // Copied before the dispatch, never after: otherwise the overwriting turn races this read.
+  let written: string[] = [];
+  if (record.turnId === undefined) {
+    const transport = opts.transport ?? new LeafTransport(rt.harness, rt.fetchImpl);
+    let previous: LeafResultBody | 'queued';
+    try {
+      const token = (await rt.cp.mintSessionToken(opts.sessionId)).token;
+      previous = await transport.readLeafState(opts.sessionId, token, opts.signal);
+    } catch (err) {
+      // Refused rather than dispatched: this command promises to preserve the result first, and a
+      // read that failed cannot tell "nothing is there" from "could not look".
+      io.err(describeError(err));
+      io.err('the previous result could not be read, so it was not overwritten');
+      return 1;
+    }
+    // A 24 h record that has aged out is not a reason to refuse — there is nothing left to keep.
+    if (previous === 'queued') io.err('no result to preserve');
+    else written = writeResultFiles(opts.sessionId, previous, opts.outDir);
+    for (const p of written) io.err(`wrote   ${p}`);
+  }
+
+  const next = await dispatchFollowUp(rt, io, opts, envelope, record);
+  if (typeof next === 'number') return next;
+
+  // A fresh `record` line, not an update: `foldLines` replaces the folded row with the later one,
+  // and an update line cannot carry an envelope. Replacing it is what makes a gate on this turn
+  // resumable — `approve` re-sends the row's envelope, which has to be the follow-up's text and
+  // not the first turn's. The caller-side labels carry over: one subagent, one turn on.
+  ledger.append({
+    sessionId: opts.sessionId,
+    ...('turnId' in next ? { turnId: next.turnId } : {}),
+    ...(record.tag ? { tag: record.tag } : {}),
+    ...(record.label ? { label: record.label } : {}),
+    ...(record.bundle ? { bundle: record.bundle } : {}),
+    ...(record.workloadId ? { workloadId: record.workloadId } : {}),
+    ...(record.writable ? { writable: true } : {}),
+    envelope: nextEnvelope,
+    ...('pid' in next ? { childPid: next.pid } : {}),
+    submittedAt: rt.now(),
+    lastKnownState: 'running',
+    stateObservedAt: rt.now(),
+  });
+
+  const where = 'turnId' in next ? `turn ${next.turnId}` : `pid ${next.pid}`;
+  io.err(`followed up on ${opts.sessionId}  (${where})`);
+  if (opts.json) {
+    io.out(
+      JSON.stringify({ type: 'session', sessionId: opts.sessionId, ...next, files: written }) +
+        '\n',
+    );
+  } else {
+    io.out(`${opts.sessionId}\n`);
+  }
+  return 0;
+}
+
+/** The next turn, on whichever backend holds the row. A number is a reported failure's exit code. */
+async function dispatchFollowUp(
+  rt: Runtime & Required<Pick<Runtime, 'cp' | 'harness'>>,
+  io: Io,
+  opts: FollowUpOptions,
+  envelope: LeafEnvelope,
+  record: LedgerRecord,
+): Promise<{ turnId: string } | { pid: number } | number> {
+  if (record.turnId !== undefined) {
+    try {
+      const turns = opts.turns ?? new AsyncTurnTransport(rt.cp);
+      return { turnId: await turns.submit(envelope) };
+    } catch (err) {
+      io.err(describeError(err));
+      return 1;
+    }
+  }
+  let token: string;
+  try {
+    token = (await rt.cp.mintSessionToken(opts.sessionId)).token;
+  } catch (err) {
+    io.err(describeError(err));
+    return 1;
+  }
+  // Resolved in the parent so the child never re-discovers, exactly as `spawn` does.
+  let resolvedHarnessUrl: string | undefined;
+  try {
+    resolvedHarnessUrl = await rt.harness.baseUrl();
+  } catch {
+    resolvedHarnessUrl = rt.endpoints.harnessUrl;
+  }
+  const forkFn =
+    opts.forkFn ??
+    ((sid, tok, env, cwd) => defaultFork(sid, tok, env, cwd, rt, resolvedHarnessUrl));
+  try {
+    return { pid: await forkFn(opts.sessionId, token, envelope, rt.paths.stateDir) };
+  } catch (err) {
+    // Nothing was sent, so the row stays as it was and the follow-up can be made again.
+    io.err(describeError(err));
+    return 1;
+  }
 }

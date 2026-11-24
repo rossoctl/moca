@@ -663,6 +663,37 @@ describe('spawn / subagents / get', () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it('follow-up routes both positionals and --out through to cmdFollowUp', async () => {
+    const stub = vi.fn(async (..._a: unknown[]) => 0);
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdFollowUp').mockImplementation(stub);
+    onTestFinished(() => spy.mockRestore());
+    expect(
+      await main(['follow-up', 'sess-1', 'and now this', '--out', '/tmp/x'], {}, io(), {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(0);
+    expect(stub.mock.calls[0][2]).toMatchObject({
+      sessionId: 'sess-1',
+      prompt: 'and now this',
+      outDir: '/tmp/x',
+    });
+    // The prompt is the second positional, so a missing one is usage, not an empty follow-up.
+    expect(await main(['follow-up', 'sess-1'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['follow-up', 'a', 'b', 'c'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(stub).toHaveBeenCalledTimes(1);
+  });
+
+  it('--out applies to get and follow-up, and nothing else', async () => {
+    const o = io();
+    expect(await main(['subagents', '--out', '/tmp/x'], {}, o, { buildRuntime: fakeBuild })).toBe(
+      2,
+    );
+    expect(o.errs.join('\n')).toContain(
+      '--out only applies to `mocactl get` and `mocactl follow-up`',
+    );
+  });
+
   it('--require-approval reaches cmdSpawn, and only on spawn', async () => {
     const stub = vi.fn(async (..._a: unknown[]) => 0);
     const mod = await import('../src/subagent.js');
