@@ -164,9 +164,12 @@ export interface TurnStatus {
     summary?: string;
     artifacts?: { kind: string; bytes: number; sha256?: string }[];
     workspace?: Record<string, unknown>;
-    gate?: Record<string, unknown>;
-    /** The pending gate's id, which a decision must name. Beside `gate`, not inside it. */
-    gateId?: number;
+    /**
+     * The pending gate. The id a decision must name is NESTED here, not beside it: `toResultRecord`
+     * (`harness/src/leaf-result-store.ts`) nests it when it stores a paused result and no writer
+     * sets a top-level one — the flat field exists only on the sync `/runs/status` body.
+     */
+    gate?: { gateId?: number; summary?: string; proposed_action?: string };
     reason?: string;
   };
 }

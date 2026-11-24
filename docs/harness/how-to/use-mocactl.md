@@ -179,7 +179,9 @@ aged out — and the control plane checks the number itself. On a sync row `--ga
 cross-check rather than a short cut: the paused result is still read, because nothing behind this
 command would catch a stale number. `--feedback` goes to the model verbatim and is capped at 4096
 bytes. Answering a gate that is not pending — already answered, or answered by the deadline
-sweep — exits `1` and says which gate the session is at.
+sweep — exits `1` and says which gate the session is at. A gate can only be answered while the
+subagent is parked at it: on a sync row a second decision taken while the first one's run is still
+going is refused and names the pid, because that run holds the only answer the gate has.
 
 A subagent spawned **without** `--async` is resumed from the machine that spawned it: the decision
 re-sends the stored envelope from a fresh detached worker, and only that machine's ledger holds it.

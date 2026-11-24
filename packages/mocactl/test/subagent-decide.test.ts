@@ -267,6 +267,43 @@ describe('cmdDecide — sync row', () => {
     expect(sent[0]?.decision).toEqual({ gateId: 3, action: 'approve' });
   });
 
+  it('refuses while a resume is still running, which the result store cannot show', async () => {
+    const { rt } = makeRt(scratch);
+    const { io, err } = makeIo();
+    // What an answered gate looks like locally: the row was re-pointed at the resume's worker. The
+    // store still serves the PAUSED record until that worker returns, so the read cannot tell.
+    ledger.append(row({ lastKnownState: 'running', childPid: process.pid }));
+    const forkFn = vi.fn(async () => 1);
+    const transport = fakeTransport(PAUSED);
+    const r = await cmdDecide(rt, io, opts({ action: 'reject', forkFn, transport }));
+    expect(r).toBe(1);
+    expect(forkFn).not.toHaveBeenCalled();
+    expect(transport.readLeafState).not.toHaveBeenCalled();
+    expect(err.join('\n')).toContain('has a run in flight');
+  });
+
+  it('answers the gate when the row is stale but its worker is gone', async () => {
+    const { rt } = makeRt(scratch);
+    const { io } = makeIo();
+    // A worker that died before writing a result leaves `running` behind; refusing on the row's
+    // state alone would make the gate unanswerable, so a dead child falls through to the read.
+    ledger.append(row({ lastKnownState: 'running', childPid: 0x7fffffff }));
+    const sent: LeafEnvelope[] = [];
+    const r = await cmdDecide(
+      rt,
+      io,
+      opts({
+        transport: fakeTransport(PAUSED),
+        forkFn: async (_s: string, _t: string, env: LeafEnvelope) => {
+          sent.push(env);
+          return 11;
+        },
+      }),
+    );
+    expect(r).toBe(0);
+    expect(sent[0]?.decision).toEqual({ gateId: 3, action: 'approve' });
+  });
+
   it('refuses a row whose envelope it cannot rebuild, before forking anything', async () => {
     const { rt } = makeRt(scratch);
     const { io, err } = makeIo();

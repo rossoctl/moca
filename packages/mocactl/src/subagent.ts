@@ -1129,6 +1129,24 @@ export async function cmdDecide(rt: Runtime, io: Io, opts: DecideOptions): Promi
   const transport = opts.transport ?? new LeafTransport(rt.harness, rt.fetchImpl);
   // A row with no turn record was dispatched synchronously, and resumes by re-sending its envelope.
   const syncRow = record !== undefined && record.turnId === undefined ? record : undefined;
+  // A live child means the leaf has not parked: either it has not reached its first gate, or a
+  // decision already answered this one and its resume is still running. The read below cannot tell
+  // the second case apart on its own -- `/runs/status` serves the PAUSED record for the whole life
+  // of the resume, because the sync worker writes its result only when the leaf returns (#1010
+  // review). Gated on a live child rather than on the row's state alone, so a worker that died
+  // before writing a result still falls through and leaves the gate answerable.
+  if (
+    syncRow !== undefined &&
+    syncRow.lastKnownState !== 'paused' &&
+    syncRow.childPid !== undefined &&
+    isAlive(syncRow.childPid)
+  ) {
+    io.err(
+      `session '${sanitizeRemote(opts.sessionId)}' has a run in flight (pid ${syncRow.childPid}); ` +
+        'a gate can only be answered while the subagent is parked at it',
+    );
+    return 1;
+  }
   let gateId = opts.gateId;
   // Read it rather than ask for it: at most one gate of a session is pending at a time, so the
   // paused result names it exactly. `--gate N` is for the session whose result cannot be read --

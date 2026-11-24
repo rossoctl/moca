@@ -74,9 +74,9 @@ describe('AsyncTurnTransport.readTurnState', () => {
           result: {
             status: 'paused',
             reason: 'gate',
-            // `approve` reads the id from here when `--gate` is omitted, so it must survive.
-            gateId: 4,
-            gate: { summary: 's', proposed_action: 'a' },
+            // The stored record nests the id, and `approve` reads it when `--gate` is omitted,
+            // so it must survive -- lifted to the flat field the sync body uses.
+            gate: { gateId: 4, summary: 's', proposed_action: 'a' },
             summary: 'clipped',
             artifacts: [
               { kind: 'patch', bytes: 3 },
@@ -89,7 +89,7 @@ describe('AsyncTurnTransport.readTurnState', () => {
       status: 'paused',
       reason: 'gate',
       gateId: 4,
-      gate: { summary: 's', proposed_action: 'a' },
+      gate: { gateId: 4, summary: 's', proposed_action: 'a' },
       artifacts: ['patch', 'text'],
     });
   });
