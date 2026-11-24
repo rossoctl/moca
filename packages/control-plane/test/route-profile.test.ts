@@ -22,6 +22,10 @@ const SHARED = [
   'GET /v1/auth/oidc/callback',
   'POST /v1/auth/oidc/callback',
   'POST /v1/auth/token',
+  // ADR-0045: the test-user login is shared since the sandbox profile may serve browser-free
+  // logins. It stays unrouted without SH_TEST_USERS (the route's `feature` gate), and on this
+  // profile the login still has to pass enrollment -- mounting it is not by itself a way in.
+  'POST /v1/auth/test-token',
   'POST /v1/auth/revoke',
   'POST /v1/auth/revoke-all',
   'GET /v1/me',

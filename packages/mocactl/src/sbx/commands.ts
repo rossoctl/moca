@@ -280,15 +280,18 @@ function loginFailed(c: SbxCtx, err: unknown): number {
  * gives: a flag would put it in the shell history and in every `ps` listing of the machine running
  * the test.
  *
- * COMBINED ONLY, and that is a property of the server, not a policy chosen here:
- * `POST /v1/auth/test-token` is declared `profiles: HARNESS` (control-plane `routes.ts`), which
- * `mountsOn` also mounts on `combined`, while the `sandbox` profile neither mounts it nor boots
- * with SH_TEST_USERS at all (control-plane `main.ts`, ADR-0045). So a `sandbox` control plane is
- * refused here rather than being sent a secret it can only 404.
+ * A SANDBOX SERVICE of either profile, which is a property of the server, not a policy chosen
+ * here: `POST /v1/auth/test-token` is declared for `sandbox` and `combined` alike (control-plane
+ * `routes.ts`, ADR-0045), so an sbx-only stack serves browser-free logins too. What is refused
+ * here is only a control plane whose `/v1/discovery` has no sandbox profile at all, where the
+ * login would be useless. A control plane that simply has the feature off is not refused here --
+ * it cannot be, since `/v1/discovery` does not advertise test users; its 404 is the answer, and
+ * the catch below turns that into "this control plane has no test users".
  *
  * A login is not yet a usable sandbox: on `combined` the sandbox routes check enrollment, so the
- * operator must also have the subject in SH_ALLOWED_SUBJECTS (or SH_ADMIN_SUBJECTS). That refusal
- * arrives later, from `sbx up`, as `not_enrolled` naming the subject.
+ * operator must also have the subject in SH_ALLOWED_SUBJECTS (or SH_ADMIN_SUBJECTS); that refusal
+ * arrives later, from `sbx up`, as `not_enrolled` naming the subject. On `sandbox` enrollment is
+ * the login gate itself, so the same configuration is what makes THIS call succeed.
  */
 export async function cmdLoginTestUser(
   c: SbxCtx,
@@ -318,11 +321,9 @@ export async function cmdLoginTestUser(
       if (err instanceof ApiError && err.status === 404) return {};
       throw err;
     });
-    if (d.profile !== 'combined') {
+    if (d.profile !== 'sandbox' && d.profile !== 'combined') {
       c.io.err(
-        d.profile === 'sandbox'
-          ? `sbx: ${c.url} serves no test users: only a combined control plane does (a sandbox-profile one admits enrolled github:/oidc: subjects only, ADR-0045)`
-          : `sbx: ${c.url} is not the sandbox service (its /v1/discovery has no sandbox profile)`,
+        `sbx: ${c.url} is not the sandbox service (its /v1/discovery has no sandbox profile)`,
       );
       return SBX_EXIT.usage;
     }
