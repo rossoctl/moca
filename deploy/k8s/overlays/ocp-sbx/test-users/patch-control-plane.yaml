@@ -1,0 +1,15 @@
+# The enrollment flag on the sandbox profile (#1018). Names the BASE namespace like every patch in
+# the overlay. setup.sh writes the key as exactly 'true' or leaves it absent; the ref is optional so
+# an absent key is the control plane's default (off), never a boot failure.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: moca-control-plane, namespace: moca }
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - name: SH_SANDBOX_TEST_USERS_ENROLLED
+              valueFrom:
+                { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TEST_USERS_ENROLLED, optional: true } }
