@@ -180,8 +180,11 @@ cross-check rather than a short cut: the paused result is still read, because no
 command would catch a stale number. `--feedback` goes to the model verbatim and is capped at 4096
 bytes. Answering a gate that is not pending — already answered, or answered by the deadline
 sweep — exits `1` and says which gate the session is at. A gate can only be answered while the
-subagent is parked at it: on a sync row a second decision taken while the first one's run is still
-going is refused and names the pid, because that run holds the only answer the gate has.
+subagent is parked at it: on a sync row a second decision taken once the first one's run has
+started is refused and names the pid, because that run holds the only answer the gate has. Two
+decisions started at the same instant (`mocactl approve S & mocactl approve S`) can both get
+through — the check reads the ledger row, which the first decision only marks `running` after it
+forks — so answer a gate once and wait for the command to return.
 
 A subagent spawned **without** `--async` is resumed from the machine that spawned it: the decision
 re-sends the stored envelope from a fresh detached worker, and only that machine's ledger holds it.

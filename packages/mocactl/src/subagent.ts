@@ -947,8 +947,11 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
     raw.gate && typeof raw.gateId === 'number'
       ? {
           gateId: raw.gateId,
-          summary: sanitizeRemote(raw.gate.summary),
-          proposed_action: sanitizeRemote(raw.gate.proposed_action),
+          // Both strings can be absent: at `MOCA_TURN_SUMMARY_BYTES=0` the control plane drops them
+          // and keeps the id. The id is the part a decision needs, so report the gate either way
+          // rather than hide it -- and never hand `sanitizeRemote` an undefined.
+          summary: sanitizeRemote(raw.gate.summary ?? ''),
+          proposed_action: sanitizeRemote(raw.gate.proposed_action ?? ''),
         }
       : undefined;
   if (opts.json) {
@@ -968,8 +971,8 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
   if (reason) io.err(`reason  ${reason}`);
   if (message && message !== reason) io.err(`detail  ${message}`);
   if (gate) {
-    io.err(`gate    ${gate.gateId}  ${gate.summary}`);
-    io.err(`propose ${gate.proposed_action}`);
+    io.err(`gate    ${gate.gateId}${gate.summary ? `  ${gate.summary}` : ''}`);
+    if (gate.proposed_action) io.err(`propose ${gate.proposed_action}`);
     io.err(`answer  mocactl approve ${opts.sessionId}  (or reject, with --feedback)`);
   }
   for (const p of written) io.err(`wrote   ${p}`);
@@ -1135,6 +1138,12 @@ export async function cmdDecide(rt: Runtime, io: Io, opts: DecideOptions): Promi
   // of the resume, because the sync worker writes its result only when the leaf returns (#1010
   // review). Gated on a live child rather than on the row's state alone, so a worker that died
   // before writing a result still falls through and leaves the gate answerable.
+  // shortcut: this is a read-then-act on a lock-free ledger, so two decisions started at once
+  // (`mocactl approve S & mocactl approve S`) can both pass it and both resume the leaf -- the row
+  // only turns `running` inside `resumeSyncRow`, after the fork. It closes the sequential case,
+  // which is the one a human hits. Upgrade when the harness makes a gate decision idempotent on the
+  // sync path too (the async path already keys on `${sessionId}:gate:${gateId}`); moving the row
+  // write earlier narrows the window without closing it.
   if (
     syncRow !== undefined &&
     syncRow.lastKnownState !== 'paused' &&
