@@ -5,7 +5,8 @@
 #   write-generated-overlay.sh DIR
 #
 # Globals come from the environment as GO_<name>: GO_TARGET, GO_IMAGE, GO_SANDBOX_IMAGE, GO_SUP_HOST,
-# GO_CP_HOST, GO_SANDBOX_COUNT, GO_CLIENT_ID, GO_SETTINGS_HASH, GO_P4_IDS, GO_RELAY_HOST, GO_ROUTE_DOMAIN,
+# GO_CP_HOST, GO_SANDBOX_COUNT, GO_CLIENT_ID, GO_SETTINGS_HASH, GO_CORE_SETTINGS_HASH (defaults to
+# GO_SETTINGS_HASH), GO_P4_IDS, GO_RELAY_HOST, GO_ROUTE_DOMAIN,
 # GO_TLS_SECRET, GO_HARNESS_IMAGE_ID, GO_SANDBOX_IMAGE_ID, GO_EGRESS_EXCEPT (space-separated CIDRs),
 # GO_NS and GO_SBX_NS (ocp-single's namespace; default setup.sh's own), GO_WORKLOAD_SANDBOXES,
 # GO_KUBE_API_EGRESS (the provisioner's egress list, JSON), GO_WORKLOAD_CLASSES and GO_OTHER_CLASSES
@@ -27,6 +28,12 @@ SH_SOURCE_ONLY=1 source "$here/../../../../../deploy/k8s/setup.sh"
   SH_SANDBOX_COUNT="${GO_SANDBOX_COUNT:?}"
   CLIENT_ID="${GO_CLIENT_ID-}"
   SETTINGS_HASH="${GO_SETTINGS_HASH:?}"
+  # write_overlay stamps moca-supervisor with the CORE hash -- moca-settings and the test-user
+  # digest, without sbx-settings -- so that an sbx-only change does not roll a pod that reads none
+  # of those keys. Every render this fixture drives is a harness one, where setup.sh computes the
+  # two as one value, so the default is what a real run would produce; GO_CORE_SETTINGS_HASH exists
+  # to render them DIFFERENT, which is the combined case.
+  CORE_SETTINGS_HASH="${GO_CORE_SETTINGS_HASH:-$SETTINGS_HASH}"
   P4_IDS="${GO_P4_IDS-}"
   RELAY_HOST="${GO_RELAY_HOST-}"
   ROUTE_DOMAIN="${GO_ROUTE_DOMAIN-}"
