@@ -1127,11 +1127,22 @@ export async function cmdDecide(rt: Runtime, io: Io, opts: DecideOptions): Promi
   const record = ledger.find(opts.sessionId);
 
   const transport = opts.transport ?? new LeafTransport(rt.harness, rt.fetchImpl);
+  // A row with no turn record was dispatched synchronously, and resumes by re-sending its envelope.
+  const syncRow = record !== undefined && record.turnId === undefined ? record : undefined;
   let gateId = opts.gateId;
-  if (gateId === undefined) {
-    // Read it rather than ask for it: at most one gate of a session is pending at a time, so the
-    // paused result names it exactly. `--gate N` is for the session whose result cannot be read --
-    // one spawned on another machine, or already aged out of the result store.
+  // Read it rather than ask for it: at most one gate of a session is pending at a time, so the
+  // paused result names it exactly. `--gate N` is for the session whose result cannot be read --
+  // one spawned on another machine, or already aged out of the result store.
+  //
+  // The sync path reads even when `--gate` names the gate, because nothing downstream checks it:
+  // the harness answers a decision for an already-answered gate by re-running the STORED
+  // decision's continuation (`gate.ts` `decideSeed`), so a repeat or a contradiction would act
+  // without a human's answer. The async path needs no read -- the control plane compares the id
+  // with the pending one itself and 409s on a mismatch.
+  // shortcut: a sync row whose result aged out of the store can no longer be answered with
+  // --gate N, because this read is what makes the id trustworthy. Upgrade by carrying the pending
+  // gate id in the ledger row if the result store's TTL turns out to be shorter than a gate's life.
+  if (gateId === undefined || syncRow !== undefined) {
     const read = await readLeafResult(
       rt,
       io,
@@ -1151,8 +1162,14 @@ export async function cmdDecide(rt: Runtime, io: Io, opts: DecideOptions): Promi
     if (status !== 'paused' || typeof pending !== 'number') {
       io.err(
         `session '${sanitizeRemote(opts.sessionId)}' is ${sanitizeRemote(status)}, not paused at ` +
-          'a gate; pass --gate N to answer a gate this client cannot read',
+          'a gate' +
+          (syncRow !== undefined ? '' : '; pass --gate N to answer a gate this client cannot read'),
       );
+      return 1;
+    }
+    // Same wording as the control plane's 409, so the two backends refuse a stale --gate alike.
+    if (gateId !== undefined && gateId !== pending) {
+      io.err(`gate ${gateId} is not pending; this session is paused at gate ${pending}`);
       return 1;
     }
     gateId = pending;
@@ -1163,8 +1180,8 @@ export async function cmdDecide(rt: Runtime, io: Io, opts: DecideOptions): Promi
     ...(opts.feedback !== undefined ? { feedback: opts.feedback } : {}),
   };
 
-  if (record !== undefined && record.turnId === undefined) {
-    return resumeSyncRow(rt, io, opts, ledger, record, decision);
+  if (syncRow !== undefined) {
+    return resumeSyncRow(rt, io, opts, ledger, syncRow, decision);
   }
   try {
     const { turnId } = await rt.cp.decideGate(opts.sessionId, decision);

@@ -172,11 +172,14 @@ propose what it would do, and the run parks `paused` at a numbered gate instead 
 down and sends the feedback back, so the subagent tries another route and may park at a second
 gate. Both print the handle the resumed run goes on under — a turn id for an `--async` row, a pid
 for a sync one — and both leave the ledger row `running`, so `subagents` and `watch` pick the
-resumed run up without being told. `--gate N` is only needed when this machine cannot read the
-paused result (a subagent spawned elsewhere, or one whose result has aged out): at most one gate of
-a session is pending at a time, so the number is otherwise read off the result. `--feedback` goes
-to the model verbatim and is capped at 4096 bytes. Answering a gate that is not pending — already
-answered, or answered by the deadline sweep — exits `1` and says which gate the session is at.
+resumed run up without being told. `--gate N` is rarely needed: at most one gate of a session is
+pending at a time, so the number is read off the paused result. It is there for an `--async`
+subagent whose result this machine cannot read — one spawned elsewhere, or one whose result has
+aged out — and the control plane checks the number itself. On a sync row `--gate N` is a
+cross-check rather than a short cut: the paused result is still read, because nothing behind this
+command would catch a stale number. `--feedback` goes to the model verbatim and is capped at 4096
+bytes. Answering a gate that is not pending — already answered, or answered by the deadline
+sweep — exits `1` and says which gate the session is at.
 
 A subagent spawned **without** `--async` is resumed from the machine that spawned it: the decision
 re-sends the stored envelope from a fresh detached worker, and only that machine's ledger holds it.

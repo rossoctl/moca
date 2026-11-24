@@ -25,9 +25,16 @@ describe('AsyncTurnTransport.submit', () => {
       // Neither travels: the session already carries the config, and a workload is a 501.
       configRef: 'sha256:' + 'a'.repeat(64),
       workloadId: 'demo',
+      // This one does: without it the leaf never parks, so `approve`/`reject` have no input.
+      requireApproval: true,
     });
     expect(turnId).toBe('turn-9');
-    expect(submitTurn).toHaveBeenCalledWith('s', { async: true, kind: 'prompt', prompt: 'hi' });
+    expect(submitTurn).toHaveBeenCalledWith('s', {
+      async: true,
+      kind: 'prompt',
+      prompt: 'hi',
+      requireApproval: true,
+    });
   });
 });
 
@@ -67,6 +74,8 @@ describe('AsyncTurnTransport.readTurnState', () => {
           result: {
             status: 'paused',
             reason: 'gate',
+            // `approve` reads the id from here when `--gate` is omitted, so it must survive.
+            gateId: 4,
             gate: { summary: 's', proposed_action: 'a' },
             summary: 'clipped',
             artifacts: [
@@ -79,6 +88,7 @@ describe('AsyncTurnTransport.readTurnState', () => {
     ).toEqual({
       status: 'paused',
       reason: 'gate',
+      gateId: 4,
       gate: { summary: 's', proposed_action: 'a' },
       artifacts: ['patch', 'text'],
     });

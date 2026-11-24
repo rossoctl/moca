@@ -119,6 +119,15 @@ describe('cmdDecide — refused before any network call', () => {
       feedback,
     });
   });
+  it('counts feedback in bytes, not characters', async () => {
+    const { rt, cp } = makeRt(scratch);
+    const { io, err } = makeIo();
+    // 2049 two-byte characters: under the bound counted in characters, over it counted in bytes.
+    const r = await cmdDecide(rt, io, opts({ gateId: 3, feedback: 'é'.repeat(2049) }));
+    expect(r).toBe(2);
+    expect(cp.decideGate).not.toHaveBeenCalled();
+    expect(err.join('\n')).toContain('--feedback is too large');
+  });
 });
 
 /* --- the async path: the decision route --- */
@@ -206,7 +215,14 @@ describe('cmdDecide — sync row', () => {
     const r = await cmdDecide(
       rt,
       io,
-      opts({ action: 'reject', gateId: 3, feedback: 'try the other branch', json: true, forkFn }),
+      opts({
+        action: 'reject',
+        gateId: 3,
+        feedback: 'try the other branch',
+        json: true,
+        forkFn,
+        transport: fakeTransport(PAUSED),
+      }),
     );
     expect(r).toBe(0);
     // The decision route cannot resolve a sync leaf, so it must not be called for one.
@@ -256,7 +272,9 @@ describe('cmdDecide — sync row', () => {
     const { io, err } = makeIo();
     ledger.append(row({ envelope: { kind: 'converge', prompt: 'legacy' } }));
     const forkFn = vi.fn(async () => 1);
-    expect(await cmdDecide(rt, io, opts({ gateId: 3, forkFn }))).toBe(1);
+    expect(
+      await cmdDecide(rt, io, opts({ gateId: 3, forkFn, transport: fakeTransport(PAUSED) })),
+    ).toBe(1);
     expect(forkFn).not.toHaveBeenCalled();
     expect(err.join('\n')).toContain('cannot resume');
   });
@@ -270,6 +288,7 @@ describe('cmdDecide — sync row', () => {
       io,
       opts({
         gateId: 3,
+        transport: fakeTransport(PAUSED),
         forkFn: async () => {
           throw new Error('no fork for you');
         },
@@ -278,6 +297,43 @@ describe('cmdDecide — sync row', () => {
     expect(r).toBe(1);
     expect(err.join('\n')).toContain('no fork for you');
     expect(ledger.find('sess-abc')?.lastKnownState).toBe('paused');
+  });
+  it('refuses a stale --gate instead of re-running the answered decision', async () => {
+    const { rt } = makeRt(scratch);
+    const { io, err } = makeIo();
+    ledger.append(row());
+    const forkFn = vi.fn(async () => 1);
+    // Nothing downstream checks the id on this path: the harness would re-run the gate's STORED
+    // decision and act without a human's answer, while this command printed the new action.
+    const r = await cmdDecide(
+      rt,
+      io,
+      opts({ action: 'reject', gateId: 9, forkFn, transport: fakeTransport(PAUSED) }),
+    );
+    expect(r).toBe(1);
+    expect(forkFn).not.toHaveBeenCalled();
+    expect(err.join('\n')).toContain('gate 9 is not pending; this session is paused at gate 3');
+  });
+
+  it('refuses a --gate decision once that gate has been answered', async () => {
+    const { rt } = makeRt(scratch);
+    const { io, err } = makeIo();
+    ledger.append(row());
+    const forkFn = vi.fn(async () => 1);
+    const r = await cmdDecide(
+      rt,
+      io,
+      opts({
+        gateId: 3,
+        forkFn,
+        transport: fakeTransport({ status: 'responded', text: 'pushed it' }),
+      }),
+    );
+    expect(r).toBe(1);
+    expect(forkFn).not.toHaveBeenCalled();
+    expect(err.join('\n')).toContain('not paused at a gate');
+    // On this path `--gate` is no escape hatch for an unreadable result, so do not offer it.
+    expect(err.join('\n')).not.toContain('pass --gate N');
   });
 });
 
