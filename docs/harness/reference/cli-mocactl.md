@@ -128,6 +128,16 @@ usage:
                                                  keeps the first turn's context; the result is
                                                  written to --out DIR (default: the current
                                                  directory) first, because a new turn overwrites it
+  mocactl cancel SESSIONID [--json]              stop a subagent dispatched with 'spawn --async': a
+                                                 queued turn never starts, a running one is asked to
+                                                 stop and 'mocactl get SESSIONID' reports how it
+                                                 ended (a subagent spawned without --async has no
+                                                 turn record, and cannot be cancelled)
+  mocactl mcp                                    serve the subagent commands (spawn, list, get,
+                                                 follow_up, approve, reject, cancel) to a coding
+                                                 agent as MCP tools over stdin/stdout, so it needs
+                                                 no shell and parses no output; add it with
+                                                 'claude mcp add moca -- mocactl mcp'
   mocactl workloads create --context FILE [--name NAME] [--json]
       [--sandboxes N [--mount read-only|writable]]
                                                  upload a context file (--context, made by
