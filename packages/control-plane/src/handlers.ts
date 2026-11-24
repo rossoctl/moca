@@ -79,6 +79,14 @@ import type { ProvenanceStore } from './provenance.js';
 import type { PresenceReader, TemplateBuild, TemplateCatalog } from './template-catalog.js';
 import type { PolicyStore } from './template-policy.js';
 import type { SandboxStore } from './sandbox-store.js';
+import {
+  RELEASE_BOUND_MS,
+  inBackground,
+  releaserOf,
+  withinBound,
+  type RelayReleaser,
+  type RelayReleaseTarget,
+} from './relay-release.js';
 import { SANDBOX_HANDLERS, requireActive, resolveForUse } from './sandbox-handlers.js';
 import type { TemplateHost } from './host-config.js';
 import { HOST_HANDLERS, type HostRegistry } from './host-handlers.js';
@@ -115,6 +123,12 @@ export interface CpConfig {
   routeProfile?: RouteProfile;
   /** The template hosts (SH_TEMPLATE_HOSTS, template lifecycle spec §6.1); absent or empty: none. */
   templateHosts?: TemplateHost[];
+  /**
+   * The relay's control listener and its release-only bearer (#338, relay-release.ts), from
+   * SH_RELAY_CONTROL_URL and MOCA_RELAY_RELEASE_TOKEN. Absent, nothing is released and no record
+   * changes; idle reclaim on the worker frees the workspace, as before.
+   */
+  relayRelease?: RelayReleaseTarget;
   /**
    * How many reverse proxies in front of the control plane append to X-Forwarded-For
    * (`SH_TRUSTED_PROXY_HOPS`); absent or 0 means none, and the socket peer is the source.
@@ -285,6 +299,13 @@ export interface CpDeps {
   close?: () => Promise<void>;
   /** The sandbox resource (SBX0 §5); present on the sandbox profile only. */
   sandboxes?: SandboxStore;
+  /**
+   * A releaser to use instead of the relay's control listener (`config.relayRelease`, #338): a
+   * test seam. Production leaves it absent and releaserOf builds the listener's from the config.
+   */
+  relayRelease?: RelayReleaser;
+  /** How long a release may hold up a DELETE or the sweep; RELEASE_BOUND_MS. A test seam. */
+  releaseBoundMs?: number;
   /** Per-sandbox egress logs, beside `sandboxes`; absent, the routes store nothing. */
   egress?: EgressStore;
   /**
@@ -336,6 +357,58 @@ export interface CpDeps {
    * receive grants over the authenticated exchange and never verify them.
    */
   grantVerifyKeys?: Map<string, KeyObject>;
+}
+
+/**
+ * A deleted session's workspace released on its worker (#338), keyed by its session id. The worker
+ * is the session's `sandboxPod`, else the `sandboxId` its last leased turn ran on (both
+ * self-reported into the runtime hash, read before the cascade); with neither there is nothing to
+ * send, and the audit says so (`no_worker`).
+ *
+ * The session id is the key of every turn that writes those fields: the harness's `/turn` paths
+ * (server.ts, through runtimeFieldsForTurn) lease with `workspace_key` = the session id
+ * (select-sandbox.ts). One case runs under another key: an internal leaf run whose agent writes in
+ * its context view on a worker with the workspace-subdir capability leases with `workspace_key: ''`
+ * (run-leaf.ts `agentWritesInContext`), the worker's shared workspace. That path writes no runtime
+ * fields, and `''` is not releasable (both worker tiers refuse an empty key, and it is not the
+ * session's alone), so that workspace is not sent here and falls back to the worker's idle reclaim.
+ *
+ * One `session_workspace_release` audit line either way, its outcome the worker's answer or
+ * `not_answered`, the worker under `worker` (it is a worker id, not a sandbox record, so not
+ * `sandboxId`): the session record is gone, so nothing retries it, and the worker's idle reclaim is
+ * the backstop. Never throws; the DELETE does not wait for it.
+ */
+async function releaseSessionWorkspace(
+  deps: CpDeps,
+  rec: SessionRecord,
+  runtime: Record<string, string>,
+): Promise<void> {
+  const worker = runtime.sandboxPod || runtime.sandboxId || '';
+  const line = (outcome: string) =>
+    auditBestEffort(deps, 'session_workspace_release', rec.sessionId, {
+      subject: rec.owner,
+      sessionId: rec.sessionId,
+      decision: 'session_workspace_release',
+      outcome,
+      ...(worker ? { worker } : {}),
+    });
+  if (!worker) {
+    await line('no_worker');
+    return;
+  }
+  await withinBound(deps.releaseBoundMs ?? RELEASE_BOUND_MS, async (signal) => {
+    let outcome: string;
+    try {
+      outcome = await releaserOf(deps)!.release(worker, rec.sessionId, signal);
+    } catch (err) {
+      console.error(
+        `[control-plane] the release of session ${rec.sessionId}'s workspace on ${worker} was not ` +
+          `answered: ${(err as Error).message} -- idle reclaim on the worker frees it`,
+      );
+      outcome = 'not_answered';
+    }
+    await line(outcome);
+  });
 }
 
 /** `deps.log` with the production default; keeps the field optional on `CpDeps`. */
@@ -1364,7 +1437,17 @@ export const HANDLERS: Record<string, Handler> = {
   deleteSession: async (ctx, deps) => {
     const rec = await assertOwner(ctx.params.id!, ctx.principal, deps);
     const inFlight = await turnInFlight(rec.sessionId, deps);
+    // #338: where the session's workspace lives, read BEFORE the cascade deletes the runtime hash.
+    const runtime = releaserOf(deps) ? await deps.index.getRuntime(rec.sessionId) : undefined;
     await deps.index.cascadeDelete(rec);
+    // Released only now that the delete has committed: a released key refuses new Execs, so a
+    // release before a delete that then failed would strand a live session. In the background,
+    // never awaited: it neither fails nor delays this DELETE, and has its own bound.
+    if (runtime) {
+      inBackground(`the release of session ${rec.sessionId}'s workspace`, () =>
+        releaseSessionWorkspace(deps, rec, runtime),
+      );
+    }
     // Reclaim this session's open async turns and their quota slots (F2): nothing else in the
     // design will ever move an orphaned queued/running turn to terminal, so without this a
     // submit-then-delete cycle burns a slot forever. `deps.turns` is absent on the sandbox profile,

@@ -42,6 +42,12 @@ export interface SandboxRecord {
   expiresAt: number;
   /** Set by delete; absent while live or after a plain expiry. */
   deletedAt?: number;
+  /**
+   * When the worker gave a terminal answer to the control plane's release of this ended sandbox's
+   * workspace (#338: released, kept_busy, unknown_key or unsupported). Absent until then, so the
+   * janitor's sweep sends the release again while the record is retained.
+   */
+  releasedAt?: number;
   /** `per-exec` unless the owner picked a lease mode. */
   mode: SandboxModeName;
   /** The owner's lease idle timeout in seconds; 0 = the worker's default. */
@@ -125,6 +131,20 @@ export interface SandboxStore {
     idleLifetimeS: number,
     retentionS: number,
   ): Promise<SandboxRecord | null>;
+  /**
+   * Records `releasedAt` on an ENDED (deleted or expired) record, keeping its retention; a later
+   * call keeps the first time. False for a missing or live one, which nothing releases.
+   */
+  markReleased(id: string, nowS: number): Promise<boolean>;
+  /**
+   * Claims the release of an ended, not yet released record for `ttlS` seconds, atomically, so a
+   * DELETE and a concurrent sweep (or two DELETEs) send it once. False when it is missing, live,
+   * released already, or claimed by another caller whose claim has not expired. A crashed claimer's
+   * claim expires, so the release is retried after it.
+   */
+  claimRelease(id: string, nowS: number, ttlS: number): Promise<boolean>;
+  /** Drops a claim (after an unanswered release), so the next sweep may send it at once. */
+  unclaimRelease(id: string): Promise<void>;
 }
 
 /** Live: not deleted and not yet expired. Quotas and name uniqueness count only these. */
@@ -223,6 +243,32 @@ export class MemorySandboxStore implements SandboxStore {
     if (!r || !isLive(r, nowS)) return null;
     r.expiresAt = Math.max(r.expiresAt, nowS + idleLifetimeS);
     return strip(r);
+  }
+
+  /** Release claims: id -> the second the claim expires (claimRelease). */
+  private readonly claims = new Map<string, number>();
+
+  // No await before the mutation, as create: the check and the claim are one step.
+  async claimRelease(id: string, nowS: number, ttlS: number): Promise<boolean> {
+    this.purge(nowS);
+    const r = this.recs.get(id);
+    if (!r || isLive(r, nowS) || r.releasedAt !== undefined) return false;
+    if ((this.claims.get(id) ?? -Infinity) > nowS) return false;
+    this.claims.set(id, nowS + ttlS);
+    return true;
+  }
+
+  async unclaimRelease(id: string): Promise<void> {
+    this.claims.delete(id);
+  }
+
+  // No await before the mutation, as setMode.
+  async markReleased(id: string, nowS: number): Promise<boolean> {
+    this.purge(nowS);
+    const r = this.recs.get(id);
+    if (!r || isLive(r, nowS)) return false;
+    r.releasedAt ??= nowS;
+    return true;
   }
 }
 

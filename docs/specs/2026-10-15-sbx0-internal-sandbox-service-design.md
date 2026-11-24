@@ -287,6 +287,59 @@ Harness callers are unchanged, and the worker is not changed.
     `sbx`: one running, and one waiting at the worker's per-workspace gate. It refuses more with
     `RESOURCE_EXHAUSTED`, "sandbox busy". One user cannot fill a template's worker.
 
+### 3.7 The control listener: releasing an ended workspace
+
+A worker keeps an ended sandbox's workspace, its standby VMs and its disk until idle reclaim or the
+janitor's wait (§8.3). A worker that advertises `sbx:release-v1` frees them on a `Release` for the
+workspace key instead, and refuses new Execs on it. `mocactl sbx rm` sends one with its own sandbox
+token before its DELETE. The control plane sends the rest, for an expiry and for any client that did
+not, through a second listener on the relay:
+
+- **Off unless `MOCA_RELAY_CONTROL_ADDR` is set.** Unset, the relay opens nothing more and reads no
+  more credentials. Set, it serves plain HTTP (Node `http`) with one route, `POST /v1/release
+{worker, workspaceKey}`, and forwards it through the same release routing a sandbox's own
+  `Release` takes (the worker's capability, the relay's timeout). Every other path is 404.
+- **Authorized by `MOCA_RELAY_RELEASE_TOKEN` alone**, a bearer that can do nothing but release. It
+  is a credential file, in its own Secret (`moca-relay-release`), mounted in the relay and the
+  control plane only. The relay refuses to boot when it equals any other bearer it holds (the exec
+  token, an attach token, a token in `SH_RELAY_TOKEN_DIR`); the control plane, when it equals one
+  of its own (exchange, janitor, installer, egress or host bearers).
+- **Reached by the control plane alone:** its own Service and a NetworkPolicy that admit the control
+  plane's pods to its port. The exec listener stays as it was: the control plane has no gRPC client
+  and no route to it.
+- **The answer is the worker's:** `200 {outcome}` with `released`, `kept_busy` or `unknown_key`, or
+  `release_unsupported` for a worker that predates release; these four are terminal. Anything else
+  is an error status (`503` no live worker, `504` the worker's silence, `502` a refused release,
+  `401` the bearer), which the caller may retry. One `sandbox_workspace_release` audit line per
+  call, `via: "control"`.
+
+The control plane (`SH_RELAY_CONTROL_URL`) sends a release, best-effort and within a short bound
+(5 s). A DELETE never waits for it: the release starts after the delete commits and runs in the
+background, every error caught. The janitor's sweep waits for its releases up to the bound, never
+longer, and never fails for them:
+
+1. **At a sandbox's delete**, after the record is marked deleted. A released key refuses new Execs,
+   so a release sent before a delete that then failed would strand a live sandbox.
+2. **From the janitor's sweep** (`GET /v1/janitor/sandboxes`), for every ended sandbox not yet
+   answered, whether or not provenance is recorded. Expiry is computed (§5.2), so an expired
+   sandbox's release is sent when the janitor first sweeps after its expiry; a deployment without
+   the host janitor has idle reclaim as its backstop.
+3. **At a session's delete** (combined profile), to the session's `sandboxPod`, else the
+   `sandboxId` its last leased turn ran on, keyed by the session id. Both are read before the
+   session's cascade and the release is sent only after it commits; with neither recorded, nothing
+   is sent and the audit says so (`no_worker`). The audit line names the worker as `worker`, not
+   `sandboxId`, which names a sandbox record. The session id is the workspace key of every turn
+   that records those fields. An internal leaf run whose agent writes in its context view leases
+   the worker's shared workspace (`workspace_key: ''`) instead: it records no worker, an empty key
+   is not releasable, and that workspace is the worker's idle reclaim's.
+
+A sandbox record gains `releasedAt` only on a terminal answer, so a transport failure leaves it
+unset and the next sweep sends the release again while the record is retained. A sender first
+claims the release atomically, for a minute, so a DELETE and a concurrent sweep (or two DELETEs)
+send it once; an unanswered release drops its claim, and a crashed sender's lapses. A sandbox's
+release is audited after `releasedAt` is written, so a failed write is not audited twice. The janitor's own
+removal (§8.3) is unchanged and still covers what a release did not reach.
+
 ## 4. Identity
 
 ### 4.1 The control plane's `sandbox` route profile
@@ -428,7 +481,8 @@ else `null`.
 
    This is documented for users. Immediate revocation is increment 3.
 
-4. **Disk is freed by the janitor** (§8.3), not by the worker's idle sweep. The janitor also covers
+4. **Disk is freed by the janitor** (§8.3), not by the worker's idle sweep, or sooner by a release
+   once the sandbox has ended (§3.7). The janitor also covers
    the workspaces a restarted worker no longer tracks. A worker restart keeps workspaces on disk, so
    a live sandbox's files survive it.
 

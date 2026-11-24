@@ -504,8 +504,10 @@ condition being partly met already.
 > from the shape above, because a workspace is not a per-dispatch derivation after all (#338 showed a
 > reclaimed one comes back empty): a release never cuts an Exec (with one in flight the workspace is freed
 > when it ends), and the key is then refused for new Execs (`released: …`) for `WorkspaceIdle`, so a turn
-> still running after its session ended cannot re-create an empty workspace. Who sends it (the relay, on a
-> sandbox's or session's end) is #338's follow-up work.
+> still running after its session ended cannot re-create an empty workspace. It is sent by `mocactl sbx rm`
+> with the sandbox's own token, and by the control plane through the relay's control listener at a sandbox's
+> delete or first sweep after its expiry and at a session's delete
+> ([SBX0 §3.7](2026-10-15-sbx0-internal-sandbox-service-design.md)).
 >
 > **Update (#338, a restarted worker).** A restarted worker's runs map starts empty, so the idle sweep
 > never reached what the previous process left. `New` now sweeps `WorkspaceRoot` once before serving:

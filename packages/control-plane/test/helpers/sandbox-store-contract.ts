@@ -345,5 +345,64 @@ export function sandboxStoreContract(name: string, make: MakeStore): void {
       expect('idleLifetimeS' in got).toBe(false);
       await done();
     });
+
+    it('markReleased records releasedAt on an ended record only, once, keeping its retention', async () => {
+      const { store, done } = await make();
+      const live = rec();
+      const gone = rec();
+      const aged = rec({ owner: 'github:2', expiresAt: T0 + 10 });
+      for (const r of [live, gone, aged]) expect(await store.create(r, LIMITS, T0)).toBe('ok');
+      expect(await store.get(gone.id, T0)).not.toHaveProperty('releasedAt');
+      // A live sandbox is never released, and a missing one is not created.
+      expect(await store.markReleased(live.id, T0)).toBe(false);
+      expect(await store.markReleased('sbx-missing', T0)).toBe(false);
+      expect(await store.get(live.id, T0)).not.toHaveProperty('releasedAt');
+      expect(await store.get('sbx-missing', T0)).toBeNull();
+      await store.markDeleted(gone.id, T0 + 1, LIMITS.retentionS);
+      expect(await store.markReleased(gone.id, T0 + 2)).toBe(true);
+      // The first answer's time stays.
+      expect(await store.markReleased(gone.id, T0 + 3)).toBe(true);
+      expect(await store.get(gone.id, T0 + 3)).toEqual({
+        ...gone,
+        deletedAt: T0 + 1,
+        releasedAt: T0 + 2,
+      });
+      // Expired by the clock alone (the boundary included) is ended too.
+      expect(await store.markReleased(aged.id, T0 + 9)).toBe(false);
+      expect(await store.markReleased(aged.id, T0 + 10)).toBe(true);
+      expect((await store.get(aged.id, T0 + 10))?.releasedAt).toBe(T0 + 10);
+      // Still listed, as retention keeps it: the mark does not move the purge.
+      expect((await store.listAll(T0 + 10)).map((r) => r.id)).toContain(gone.id);
+      await done();
+    });
+
+    it('claimRelease lets one caller send a release, until it is answered, dropped or lapses', async () => {
+      const { store, done } = await make();
+      const live = rec();
+      const gone = rec();
+      for (const r of [live, gone]) expect(await store.create(r, LIMITS, T0)).toBe('ok');
+      expect(await store.claimRelease(live.id, T0, 60)).toBe(false);
+      expect(await store.claimRelease('sbx-missing', T0, 60)).toBe(false);
+      await store.markDeleted(gone.id, T0 + 1, LIMITS.retentionS);
+      expect(await store.claimRelease(gone.id, T0 + 1, 60)).toBe(true);
+      // Held: a second sender (a concurrent DELETE or sweep) does not send.
+      expect(await store.claimRelease(gone.id, T0 + 1, 60)).toBe(false);
+      // Dropped after an unanswered release: the next one may send.
+      await store.unclaimRelease(gone.id);
+      expect(await store.claimRelease(gone.id, T0 + 1, 1)).toBe(true);
+      // A crashed sender's claim lapses (Redis by its key's real-time TTL, memory by nowS).
+      await new Promise((r) => setTimeout(r, 1100));
+      expect(await store.claimRelease(gone.id, T0 + 3, 60)).toBe(true);
+      // Answered: nobody claims it again; the record itself is unchanged by the claims.
+      await store.markReleased(gone.id, T0 + 3);
+      await store.unclaimRelease(gone.id);
+      expect(await store.claimRelease(gone.id, T0 + 3, 60)).toBe(false);
+      expect(await store.get(gone.id, T0 + 3)).toEqual({
+        ...gone,
+        deletedAt: T0 + 1,
+        releasedAt: T0 + 3,
+      });
+      await done();
+    });
   });
 }

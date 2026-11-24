@@ -49,13 +49,23 @@
 # sandbox keeps a session's workspace after its last command, as hours, minutes and seconds in that
 # order, e.g. 8h or 1h30m; empty means 8h, as deploy/microvm writes; also mirrored to ConfigMap
 # moca-sandbox-settings in the sandbox namespace, and a change restarts the sandbox pods; #338),
+# SH_RELAY_RELEASE_CONTROL=1 (kind, kind-ci and ocp: the relay's control listener, through which
+# the control plane releases a deleted session's workspace on its worker at once instead of leaving
+# it to the worker's idle reclaim; its release-only bearer, MOCA_RELAY_RELEASE_TOKEN, is generated
+# once into a Secret of its own, moca-relay-release, and its digest rolls the relay and the control
+# plane when it changes; off when unset or empty, and then the relay, its Services and
+# NetworkPolicies render as before, though the control plane's credentials volume names
+# moca-relay-release as an optional source whatever the switch (a one-time change that rolls the
+# control plane with the release that brings it);
+# turning it off leaves the Secret, the sandbox-relay-control Service and its two NetworkPolicies,
+# inert, in place; #338),
 # SH_SOURCE_ONLY=1 (define the functions and stop, for tests).
 #
 # Idempotent: a re-run converges and never rotates a secret. Inputs are sticky: a re-run keeps every
 # setting, --image, --sandbox-image (ocp), SH_SANDBOX_COUNT, SH_P4_SANDBOX_IDS,
 # SH_SANDBOX_DEFAULT_TIER (not kind), SH_SANDBOX_EGRESS_EXCEPT, SH_MODEL_CATALOG_HOSTS,
-# SH_WORKLOAD_SANDBOXES, SH_WORKLOAD_STORAGE_CLASSES, SH_ASYNC_DRAIN, LEAF_RESULT_TTL_SECONDS
-# and, on ocp-single, SH_ROUTE_DOMAIN and
+# SH_WORKLOAD_SANDBOXES, SH_WORKLOAD_STORAGE_CLASSES, SH_ASYNC_DRAIN, LEAF_RESULT_TTL_SECONDS,
+# SH_RELAY_RELEASE_CONTROL and, on ocp-single, SH_ROUTE_DOMAIN and
 # --tls-secret it is not given; an
 # explicitly empty variable (SH_ADMIN_SUBJECTS=) clears it. No secret value is ever put on
 # a command line -- values travel through pipes and through the environment of the one jq that
@@ -117,6 +127,12 @@ TLS_SECRET=''
 # load_setup_inputs; WORKLOAD_SANDBOXES_GIVEN: the variable was set (even to empty).
 WORKLOAD_SANDBOXES=''
 WORKLOAD_SANDBOXES_GIVEN=''
+# SH_RELAY_RELEASE_CONTROL (#338): 1 lists base/relay-release-control, '' does not. Sticky, resolved
+# in load_setup_inputs; RELEASE_CONTROL_GIVEN: the variable was set (even to empty).
+# RELEASE_TOKEN_HASH: a digest of moca-relay-release's data, set by ensure_release_secret.
+RELEASE_CONTROL=''
+RELEASE_CONTROL_GIVEN=''
+RELEASE_TOKEN_HASH=''
 # --delete-workload-sandboxes: turning SH_WORKLOAD_SANDBOXES off also deletes the workloads'
 # sandboxes, instead of refusing while any exist.
 DELETE_WORKLOAD_SANDBOXES=''
@@ -292,6 +308,15 @@ parse_args() {
   # share it with the supervisor's Secrets: the provisioner's isolation needs the sandbox namespace.
   [[ "$WORKLOAD_SANDBOXES" != 1 || "$TARGET" != ocp-single ]] ||
     die 'SH_WORKLOAD_SANDBOXES=1 needs a separate sandbox namespace: use --target kind, kind-ci or ocp'
+  RELEASE_CONTROL_GIVEN="${SH_RELAY_RELEASE_CONTROL+x}"
+  case "${SH_RELAY_RELEASE_CONTROL-}" in
+  '' | 1) RELEASE_CONTROL="${SH_RELAY_RELEASE_CONTROL-}" ;;
+  *) die "SH_RELAY_RELEASE_CONTROL='$SH_RELAY_RELEASE_CONTROL' must be 1 (on) or empty (off)" ;;
+  esac
+  # The component's objects name the base namespace, which ocp-single renames beneath the generated
+  # overlay, out of the component's reach.
+  [[ "$RELEASE_CONTROL" != 1 || "$TARGET" != ocp-single ]] ||
+    die 'SH_RELAY_RELEASE_CONTROL=1 is not supported on --target ocp-single: use --target kind, kind-ci or ocp'
   SH_WAIT_SECONDS="${SH_WAIT_SECONDS:-120}"
 }
 
@@ -632,6 +657,14 @@ load_setup_inputs() {
   [[ "$WORKLOAD_SANDBOXES" != 1 ]] || workload_storage_classes
   data="$(jq -nc --argjson d "$data" --arg w "$WORKLOAD_SANDBOXES" --arg c "${WORKLOAD_CLASSES_INPUT// /,}" \
     '($d + {SH_WORKLOAD_SANDBOXES: $w, SH_WORKLOAD_STORAGE_CLASSES: $c}) | with_entries(select(.value != ""))')"
+  # The relay's control listener (#338), sticky as the workload switch is; '' stores nothing.
+  [[ -n "$RELEASE_CONTROL_GIVEN" ]] || RELEASE_CONTROL="$(cm_value "$json" SH_RELAY_RELEASE_CONTROL)"
+  [[ "$RELEASE_CONTROL" == '' || "$RELEASE_CONTROL" == 1 ]] ||
+    die "moca-setup holds SH_RELAY_RELEASE_CONTROL='$RELEASE_CONTROL': re-run with it set to 1 or empty"
+  [[ "$RELEASE_CONTROL" != 1 || "$TARGET" != ocp-single ]] ||
+    die 'moca-setup holds SH_RELAY_RELEASE_CONTROL=1, which --target ocp-single cannot run: re-run with SH_RELAY_RELEASE_CONTROL='
+  data="$(jq -nc --argjson d "$data" --arg r "$RELEASE_CONTROL" \
+    '($d + {SH_RELAY_RELEASE_CONTROL: $r}) | with_entries(select(.value != ""))')"
   # The extra sandbox egress exceptions apply on every target, Kind too (#446).
   [[ -n "$EGRESS_EXCEPT_GIVEN" ]] || EGRESS_EXCEPT="$(normalize_egress_except "$(cm_value "$json" SH_SANDBOX_EGRESS_EXCEPT)")"
   data="$(jq -nc --argjson d "$data" --arg e "${EGRESS_EXCEPT// /,}" \
@@ -1050,6 +1083,48 @@ ensure_secrets() {
   ensure_mu1_secret
   ensure_test_user_secret
   ensure_provisioner_secret
+  ensure_release_secret
+}
+
+# The relay control listener's bearer (SH_RELAY_RELEASE_CONTROL=1 only, #338): MOCA_RELAY_RELEASE_TOKEN
+# in moca-relay-release, a Secret of its own so it never touches moca-mu1 or moca-relay. Generated
+# once and kept, like every Secret here; to rotate it, delete the key and re-run, and its digest
+# (RELEASE_TOKEN_HASH, on both pod templates) rolls the relay and the control plane, which read it
+# only at boot. It must differ from every other bearer either pod holds -- the relay refuses to boot
+# on one equal to its attach, exec or P4 tokens, the control plane on one equal to its exchange token
+# -- so a fresh one is drawn again on a clash and a kept one that clashes is refused, naming keys only.
+# in_lines VALUE LINES: VALUE is one of LINES. A builtin loop, so no value reaches an argv (a grep
+# would carry it in its pattern).
+in_lines() {
+  local l
+  while IFS= read -r l; do [[ "$l" != "$1" ]] || return 0; done <<<"$2"
+  return 1
+}
+ensure_release_secret() {
+  [[ "$RELEASE_CONTROL" == 1 ]] || return 0
+  local json tok others
+  json="$(secret_json moca-relay-release "$NS")"
+  tok="$(json_value "$json" MOCA_RELAY_RELEASE_TOKEN)"
+  others="$(
+    secret_json moca-relay "$NS" | jq -r '.data // {} | .[] | @base64d'
+    secret_json "$P4_TOKENS_SECRET" "$NS" | jq -r '.data // {} | .[] | @base64d'
+    secret_json moca-mu1 "$NS" | jq -r '.data // {} | (.SH_EXCHANGE_TOKEN // empty) | @base64d'
+  )"
+  if [[ -n "$tok" ]]; then
+    printf '%s' "$tok" | grep -qE '^[[:graph:]]{32,}$' ||
+      die 'moca-relay-release MOCA_RELAY_RELEASE_TOKEN is not 32+ printable characters: delete the key and re-run (this rotates it)'
+    ! in_lines "$tok" "$others" ||
+      die 'moca-relay-release MOCA_RELAY_RELEASE_TOKEN equals another bearer of the relay or the control plane: delete the key and re-run (this rotates it)'
+  else
+    log 'generating MOCA_RELAY_RELEASE_TOKEN'
+    tok="$(rand_hex)"
+    while in_lines "$tok" "$others"; do tok="$(rand_hex)"; done
+  fi
+  (
+    export S_0="$tok"
+    apply_secret moca-relay-release "$NS" MOCA_RELAY_RELEASE_TOKEN
+  )
+  RELEASE_TOKEN_HASH="$(printf '%s' "$tok" | sha256 | cut -c1-16)"
 }
 
 # --- Settings, TLS, SCC, the generated overlay, apply, wait (spec §4.1 steps 5-7) -----------------
@@ -1591,6 +1666,8 @@ write_overlay() {
     [[ "$TARGET" != ocp-single || -z "$ROUTE_DOMAIN" ]] || components+=(../../overlays/ocp-single/routes)
     [[ "$WORKLOAD_SANDBOXES" != 1 ]] || components+=(../../base/workload-sandboxes)
     [[ "$WORKLOAD_SANDBOXES" != 1 || "$TARGET" != ocp ]] || components+=(../../overlays/ocp/workload-sandboxes)
+    # The relay's control listener (#338), only with SH_RELAY_RELEASE_CONTROL=1.
+    [[ "$RELEASE_CONTROL" != 1 ]] || components+=(../../base/relay-release-control)
     if [[ ${#components[@]} -gt 0 ]]; then
       printf 'components:\n'
       printf '  - %s\n' "${components[@]}"
@@ -1614,6 +1691,16 @@ write_overlay() {
     if is_kind; then
       # The relay's pod template carries no annotations on kind (its only one is ocp's p4-relay).
       printf '  - target: { kind: Deployment, name: sandbox-relay }\n    patch: |-\n      - { op: add, path: /spec/template/metadata/annotations, value: { moca.dev/image-id: "%s" } }\n' "$HARNESS_IMAGE_ID"
+    fi
+    # The release bearer's digest (#338) on the two pods that read it at boot, so a rotated one rolls
+    # both. A strategic merge, so it joins whatever annotations each template already has; after the
+    # JSON patches above that create those maps, which would otherwise replace it.
+    if [[ "$RELEASE_CONTROL" == 1 ]]; then
+      local d
+      for d in sandbox-relay moca-control-plane; do
+        printf '  - patch: |-\n      apiVersion: apps/v1\n      kind: Deployment\n      metadata: { name: %s, namespace: moca }\n' "$d"
+        printf '      spec: { template: { metadata: { annotations: { moca.dev/release-token-hash: "%s" } } } }\n' "$RELEASE_TOKEN_HASH"
+      done
     fi
     # Workload sandboxes (the component's objects, which no base or target transformer reaches):
     # the namespace's pod quota, the shared pool plus 32 workload sandboxes so it never refuses the

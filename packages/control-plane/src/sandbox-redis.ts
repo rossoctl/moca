@@ -153,6 +153,34 @@ end
 return redis.call('HGETALL', KEYS[1])
 `;
 
+// KEYS: rec. ARGV: now.
+// Only on an ended record (deleted, or expired at now >= expiresAt), as DELETE judges it: a live one
+// is never released. HSETNX keeps the first time and the key's EXPIRE, so the record's retention is
+// unchanged, and a purged record is not recreated.
+const MARK_RELEASED = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+if redis.call('HEXISTS', KEYS[1], 'deletedAt') == 0 and
+  tonumber(ARGV[1]) < tonumber(redis.call('HGET', KEYS[1], 'expiresAt')) then return 0 end
+redis.call('HSETNX', KEYS[1], 'releasedAt', ARGV[1])
+return 1
+`;
+
+// KEYS: rec, claim. ARGV: now, ttl.
+// The release claim (claimRelease): only on an ended record not yet released, and only when no
+// unexpired claim exists. The claim is a key of its own with EX, so a crashed claimer's lapses; a
+// hash field could not carry its own TTL.
+const CLAIM_RELEASE = `
+if redis.call('EXISTS', KEYS[1]) == 0 then return 0 end
+if redis.call('HEXISTS', KEYS[1], 'releasedAt') == 1 then return 0 end
+if redis.call('HEXISTS', KEYS[1], 'deletedAt') == 0 and
+  tonumber(ARGV[1]) < tonumber(redis.call('HGET', KEYS[1], 'expiresAt')) then return 0 end
+if redis.call('SET', KEYS[2], '1', 'NX', 'EX', ARGV[2]) then return 1 end
+return 0
+`;
+
+// KEYS: claim.
+const UNCLAIM_RELEASE = `redis.call('DEL', KEYS[1]) return 1`;
+
 export class RedisSandboxStore implements SandboxStore {
   constructor(
     private readonly redis: SandboxRedisLike,
@@ -320,6 +348,39 @@ export class RedisSandboxStore implements SandboxStore {
       return fromHash(h);
     });
   }
+
+  claimRelease(id: string, nowS: number, ttlS: number): Promise<boolean> {
+    return this.guard(
+      async () =>
+        Number(
+          await this.redis.eval(CLAIM_RELEASE, {
+            keys: [this.recKey(id), `${this.recKey(id)}:releasing`],
+            arguments: [String(nowS), String(Math.max(1, Math.ceil(ttlS)))],
+          }),
+        ) === 1,
+    );
+  }
+
+  unclaimRelease(id: string): Promise<void> {
+    return this.guard(async () => {
+      await this.redis.eval(UNCLAIM_RELEASE, {
+        keys: [`${this.recKey(id)}:releasing`],
+        arguments: [],
+      });
+    });
+  }
+
+  markReleased(id: string, nowS: number): Promise<boolean> {
+    return this.guard(
+      async () =>
+        Number(
+          await this.redis.eval(MARK_RELEASED, {
+            keys: [this.recKey(id)],
+            arguments: [String(nowS)],
+          }),
+        ) === 1,
+    );
+  }
 }
 
 function toHash(r: SandboxRecord): Record<string, string> {
@@ -363,6 +424,7 @@ function fromHash(h: Record<string, string>): SandboxRecord | null {
     createdAt: Number(h.createdAt),
     expiresAt: Number(h.expiresAt),
     ...(h.deletedAt !== undefined ? { deletedAt: Number(h.deletedAt) } : {}),
+    ...(h.releasedAt !== undefined ? { releasedAt: Number(h.releasedAt) } : {}),
     // Absent on a hash written before the mode fields: per-exec, the worker's default, never set.
     // An unknown mode reads as per-exec too, the least a record can grant.
     mode: isSandboxModeName(h.mode) ? h.mode : 'per-exec',

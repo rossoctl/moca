@@ -136,6 +136,19 @@
 #                           (template lifecycle spec §6.1); one bearer each in the Secret
 #                           sbx-template-hosts, and a host-agent bundle each
 #   SBX_WORKSPACE_IMAGE_MB  optional; default 2048 (microvm-worker's SH_WORKSPACE_IMAGE_MB)
+#   SBX_RELEASE_CONTROL     optional; unset, 0 or 1 (#338). 1 turns on the relay's control listener
+#                           (deploy/k8s/base/relay-release-control): the control plane releases an
+#                           ended sandbox's workspace on its worker at its delete and when the janitor's
+#                           sweep first sees it expired, and a deleted session's on combined, instead of
+#                           leaving it to the worker's idle reclaim. Its release-only bearer,
+#                           MOCA_RELAY_RELEASE_TOKEN, is generated once and kept in the Secret
+#                           moca-relay-release, apart from every other Secret, and is in both pods'
+#                           hashes. Unset or 0: no Secret and no listener, and the relay, its hash,
+#                           Services and NetworkPolicies are as before. The control plane's
+#                           credentials volume names moca-relay-release as an optional source
+#                           (mounted only when the Secret exists) whatever the switch, a one-time
+#                           change that rolls the control plane with the release that brings it.
+#                           Turning it off later leaves moca-relay-release in place
 #   SBX_PROFILE             optional; sandbox (default) or combined. combined renders
 #                           deploy/k8s/overlays/ocp-combined instead of ocp-sbx: one control plane on
 #                           the combined route profile serving Moca Pi sessions (the supervisor and its
@@ -373,6 +386,7 @@ validate() {
   validate_egress
   validate_profile
   validate_store
+  validate_release
 
   local pair
   for pair in ATTACH EXEC API MOCA; do
@@ -436,6 +450,16 @@ validate_store() {
   done
   # shellcheck disable=SC2086 # one argument per host; ids hold no whitespace
   STORE_HOSTS_JSON="$(jq -nc '[$ARGS.positional[] | {id: .}]' --args $STORE_HOSTS)"
+}
+
+# SBX_RELEASE_CONTROL (#338). Sets RELEASE_ON.
+RELEASE_ON=''
+validate_release() {
+  case "${SBX_RELEASE_CONTROL:-}" in
+    '' | 0) ;;
+    1) RELEASE_ON=1 ;;
+    *) die 'SBX_RELEASE_CONTROL must be unset, 0 or 1' ;;
+  esac
 }
 
 # SBX_EGRESS_CREDENTIALS and what it takes (spec §4.3). Sets EGRESS_ON, EGRESS_IDS (host ids, in
@@ -1172,6 +1196,47 @@ apply_configmap() {
     --args "$@" | kc apply --server-side --force-conflicts --field-manager=sbx-setup -f - >/dev/null
 }
 
+# The relay control listener's bearer, moca-relay-release (SBX_RELEASE_CONTROL=1 only, #338):
+# MOCA_RELAY_RELEASE_TOKEN (rand_hex), generated once and kept, in a Secret of its own so it can
+# rotate (delete the key and re-run) without moving moca-mu1: it can only release, and only the
+# relay and the control plane mount it. It must differ from every other bearer either pod holds --
+# the relay refuses to boot on one equal to its attach or exec tokens, the control plane on one equal
+# to its janitor, installer, exchange, egress or host tokens -- so a fresh one is drawn again on a
+# clash and a kept one that clashes is refused, naming keys only. Runs after every other Secret's.
+# in_lines VALUE LINES: VALUE is one of LINES. A builtin loop, so no value reaches an argv (a grep
+# would carry it in its pattern).
+in_lines() {
+  local l
+  while IFS= read -r l; do [[ "$l" != "$1" ]] || return 0; done <<<"$2"
+  return 1
+}
+ensure_release_secret() {
+  [[ -n "$RELEASE_ON" ]] || return 0
+  local json tok others s
+  json="$(secret_json moca-relay-release)"
+  tok="$(json_value "$json" MOCA_RELAY_RELEASE_TOKEN)"
+  # Every other bearer's value, one per line, from the Secrets that hold them (never logged).
+  others="$(for s in moca-relay moca-relay-sandbox-tokens moca-mu1 sbx-egress sbx-template-hosts; do
+    secret_json "$s" | jq -r '.data // {} | to_entries[] |
+      select(.key | test("^(SH_RELAY_TOKEN|MOCA_RELAY_EXEC_TOKEN|SH_JANITOR_TOKEN|SH_INSTALLER_TOKEN|SH_EXCHANGE_TOKEN|SH_EGRESS_TOKEN_.*|SH_HOST_TOKEN_.*)$") or ($s == "moca-relay-sandbox-tokens")) |
+      .value | @base64d' --arg s "$s"
+  done)"
+  if [[ -n "$tok" ]]; then
+    [[ "$tok" =~ ^[[:graph:]]{32,}$ ]] ||
+      die 'moca-relay-release MOCA_RELAY_RELEASE_TOKEN is not 32+ printable characters: delete the key and re-run (this rotates it)'
+    ! in_lines "$tok" "$others" ||
+      die 'moca-relay-release MOCA_RELAY_RELEASE_TOKEN equals another bearer of the relay or the control plane: delete the key and re-run (this rotates it)'
+  else
+    log 'generating the relay release token (MOCA_RELAY_RELEASE_TOKEN)'
+    tok="$(rand_hex)"
+    while in_lines "$tok" "$others"; do tok="$(rand_hex)"; done
+  fi
+  (
+    export S_0="$tok"
+    apply_secret moca-relay-release MOCA_RELAY_RELEASE_TOKEN
+  )
+}
+
 # moca-settings (the keys base/control-plane.yaml reads) and sbx-settings (the sandbox profile's and
 # the relay's), then two hashes of what each pod reads at boot (write_overlay stamps them, so a change
 # rolls the pod that reads it): SETTINGS_HASH, the control plane's, covers every setting, the public
@@ -1180,7 +1245,7 @@ apply_configmap() {
 # change rolls the control plane alone and leaves running Execs be (docs/operate/sandbox-service/runbook.md §5). Runs after
 # route_cert: it reads exec-ca.crt.
 ensure_settings() {
-  local ca='' moca sbx relay keys attach_crt exec_crt moca_crt mu1 egress hosts
+  local ca='' moca sbx relay keys attach_crt exec_crt moca_crt mu1 egress hosts release
   [[ ! -f "$GEN/exec-ca.crt" ]] || ca="$(cat "$GEN/exec-ca.crt")"
   # The TTLs are '' (the control plane's defaults); the base reads both keys, so both must exist.
   # The identity block follows the provider: github writes only the client id (an empty
@@ -1254,10 +1319,14 @@ ensure_settings() {
   # With egress on, the Secret's data is hashed too (names and base64 values, sorted): a new host
   # token or KEK changes the pod template, so the control plane rolls and rereads its files.
   # With the store on, the host tokens' Secret likewise: a new or revoked host token rolls it.
+  # With the release listener on (#338), moca-relay-release goes into BOTH hashes, as both pods read
+  # its token at boot: a rotated one rolls each, and moca-mu1's data (and so its line here) is
+  # untouched. Off, neither hash has the line, so both are exactly as before.
   mu1="$(secret_json moca-mu1 | jq -cS '.data // {}')"
-  egress='' hosts=''
+  egress='' hosts='' release=''
   [[ -z "$EGRESS_ON" ]] || egress="$(secret_json sbx-egress | jq -cS '.data // {}')"
   [[ -z "$STORE_ON" ]] || hosts="$(secret_json sbx-template-hosts | jq -cS '.data // {}')"
+  [[ -z "$RELEASE_ON" ]] || release="$(secret_json moca-relay-release | jq -cS '.data // {}')"
   SETTINGS_HASH="$({
     printf '%s\n' "${moca[@]}" "${sbx[@]}"
     json_value "$keys" PUBLIC_KEYS
@@ -1267,6 +1336,7 @@ ensure_settings() {
     printf '%s\n' "$mu1"
     [[ -z "$EGRESS_ON" ]] || printf '%s\n' "$egress"
     [[ -z "$STORE_ON" ]] || printf '%s\n' "$hosts"
+    [[ -z "$RELEASE_ON" ]] || printf '%s\n' "$release"
   } | openssl dgst -sha256 -hex | awk '{print substr($NF, 1, 16)}')"
   [[ "$SETTINGS_HASH" =~ ^[0-9a-f]{16}$ ]] || die 'could not hash the settings (openssl dgst)'
   # The relay's env from sbx-settings, by key, as patch-relay.yaml names them.
@@ -1276,6 +1346,7 @@ ensure_settings() {
     json_value "$keys" PUBLIC_KEYS
     json_value "$attach_crt" tls.crt
     json_value "$exec_crt" tls.crt
+    [[ -z "$RELEASE_ON" ]] || printf '%s\n' "$release"
   } | openssl dgst -sha256 -hex | awk '{print substr($NF, 1, 16)}')"
   [[ "$RELAY_HASH" =~ ^[0-9a-f]{16}$ ]] || die 'could not hash the relay settings (openssl dgst)'
 }
@@ -1343,8 +1414,10 @@ write_overlay() {
     printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n'
     printf 'namespace: %s\nresources:\n  - %s\n' "$NS" "$OVERLAY_REL"
     # The combined overlay already holds the template store (and refuses egress, validate_profile).
-    if [[ -z "$COMBINED" ]] && [[ -n "$EGRESS_ON" || -n "$STORE_ON" ]]; then
+    if [[ -z "$COMBINED" && ( -n "$EGRESS_ON" || -n "$STORE_ON" ) ]] || [[ -n "$RELEASE_ON" ]]; then
       printf 'components:\n'
+    fi
+    if [[ -z "$COMBINED" ]] && [[ -n "$EGRESS_ON" || -n "$STORE_ON" ]]; then
       # Exactly one credential-store Component: both set SH_CREDENTIAL_STORE, so listing the two
       # would leave the later one deciding (moca#823). EGRESS_STORE is file unless asked otherwise.
       if [[ -n "$EGRESS_ON" ]]; then
@@ -1356,6 +1429,9 @@ write_overlay() {
       fi
       [[ -z "$STORE_ON" ]] || printf '  - %s/template-store\n' "$OVERLAY_REL"
     fi
+    # The relay's control listener (#338), on either profile. It patches no projected source (every
+    # overlay's credentials volume names moca-relay-release already), so its place in the list is free.
+    [[ -z "$RELEASE_ON" ]] || printf '  - ../../k8s/base/relay-release-control\n'
     printf 'patches:\n'
     printf '  - target: { kind: Route, name: moca-relay }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_ATTACH_HOST"
     printf '  - target: { kind: Route, name: sbx-exec }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_EXEC_HOST"
@@ -1603,6 +1679,7 @@ main() {
   ensure_signing_key
   ensure_egress_secrets
   ensure_store_secrets
+  ensure_release_secret
   route_cert moca-relay-tls "$SBX_ATTACH_HOST" "${SBX_ATTACH_TLS_CERT:-}" "${SBX_ATTACH_TLS_KEY:-}" "$GEN/attach-ca.crt"
   route_cert sbx-exec-tls "$SBX_EXEC_HOST" "${SBX_EXEC_TLS_CERT:-}" "${SBX_EXEC_TLS_KEY:-}" "$GEN/exec-ca.crt"
   # Combined: the supervisor's passthrough Route (Moca Pi turns) terminates TLS in its sidecar.

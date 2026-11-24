@@ -158,6 +158,13 @@ rule 5).
   `moca-sandbox-settings` and keeps the worker's 30-minute default. The reset is still silent when the sweep fires,
   and no session end frees its workspace early: both stay open in #338.
 
+- **The control plane's credentials volume names `moca-relay-release`
+  ([#338](https://github.com/rossoctl/moca/issues/338)).** Every overlay's control-plane Deployment gains an
+  optional source for the relay control listener's bearer (mounted only when the Secret exists), so the first
+  `setup.sh` run after the upgrade, of either `deploy/k8s` or `deploy/sbx`, rolls the control plane once, even with
+  `SH_RELAY_RELEASE_CONTROL` / `SBX_RELEASE_CONTROL` off. With the switch off nothing else changes: no Secret, no
+  listener, and the relay, its Services and NetworkPolicies as before.
+
 - **Login starts are bounded per client address (oidc only, [#716](https://github.com/rossoctl/moca/issues/716)).**
   Besides the 10,000 live login states in total, one client address may now hold at most
   `SH_OIDC_MAX_PENDING_PER_SOURCE` (default **20**); past that, that address gets `429 quota_exceeded` while other

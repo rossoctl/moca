@@ -103,6 +103,15 @@ export {
 export { formatEnvLines, generateMu1Secrets } from './genkeys.js';
 export { credentialValue, withCredentials } from './systemd-credentials.js';
 export {
+  RELEASE_BOUND_MS,
+  httpRelayReleaser,
+  relayReleaseFromEnv,
+  releaserOf,
+  type RelayReleaseTarget,
+  type ReleaseAnswer,
+  type RelayReleaser,
+} from './relay-release.js';
+export {
   AUDIT_MAXLEN,
   AUDIT_STREAM,
   DEFAULT_PAGE_SIZE,

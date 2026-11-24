@@ -1,0 +1,27 @@
+# The relay's control listener (#338): the control plane releases an ended sandbox's or session's
+# workspace on its worker through the relay. A Component, not part of the base: a setup script's
+# generated overlay lists it only behind its switch (deploy/sbx/setup.sh SBX_RELEASE_CONTROL=1,
+# deploy/k8s/setup.sh SH_RELAY_RELEASE_CONTROL=1), and every object of the feature is here, so a
+# stack without it renders the relay, its Services and its NetworkPolicies exactly as before. (The
+# control plane's credentials volume names moca-relay-release as an optional source in every
+# overlay, with or without it: a one-time change that rolls the control plane once.)
+#
+#   control.yaml               the listener's Service (sandbox-relay-control, 9445) and two
+#                              NetworkPolicies: the control plane's pods alone may reach 9445, and
+#                              the control plane may reach it (both policies are additive)
+#   patch-relay.yaml           MOCA_RELAY_CONTROL_ADDR, the `control` port, and the release bearer
+#                              as a file under CREDENTIALS_DIRECTORY
+#   patch-control-plane.yaml   SH_RELAY_CONTROL_URL (the bearer reaches the control plane as an
+#                              optional source of its /run/credentials volume, in every overlay)
+#
+# Needs the Secret moca-relay-release, key MOCA_RELAY_RELEASE_TOKEN (the setup scripts generate it,
+# apart from every other Secret, and the relay refuses to boot when it equals another bearer).
+# Plain HTTP inside the namespace, as the base's exec listener is: NetworkPolicy decides who
+# connects, and the bearer, which can only release, decides what a connection may do.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - control.yaml
+patches:
+  - path: patch-relay.yaml
+  - path: patch-control-plane.yaml

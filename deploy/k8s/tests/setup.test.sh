@@ -1742,6 +1742,93 @@ seed_control_plane_env '{"name": "SH_MODEL_CATALOG_HOSTS", "valueFrom": {"config
 ! grep -q ' set env deployment/moca-control-plane' "$MOCK_LOG" ||
   fail 'a valueFrom SH_MODEL_CATALOG_HOSTS (a stack this setup.sh applied) was stripped, rolling the control plane for nothing'
 pass 'the 0.8 upgrade carries a hand-patched SH_MODEL_CATALOG_HOSTS into moca-settings and strips the env before the apply, and strips nothing without one'
+echo "== the relay's control listener (SH_RELAY_RELEASE_CONTROL, #338)"
+# The generated overlay rendered with the real kubectl (this shell's PATH, not run_setup's), as JSON.
+release_render() {
+  kubectl kustomize "$REPO/deploy/k8s/.generated/$1" >"$TMP/rr.yaml" 2>"$TMP/rr.err" || { cat "$TMP/rr.err" >&2; fail "the $1 overlay does not render"; }
+  KUBECONFIG=/dev/null kubectl label --local -f "$TMP/rr.yaml" rr- -o json | jq -s . >"$TMP/rr.json"
+}
+rr_obj() { jq -c --arg k "$1" --arg n "$2" '.[] | select(.kind == $k and .metadata.name == $n)' "$TMP/rr.json"; }
+rr_relay() {
+  jq -cS '[.[] | select((.kind == "Deployment" and .metadata.name == "sandbox-relay") or
+    (.kind == "Service" and .spec.selector.app == "sandbox-relay") or
+    (.kind == "NetworkPolicy" and .spec.podSelector.matchLabels.app == "sandbox-relay"))]' "$TMP/rr.json"
+}
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+cp "$MOCK_STATE/applied-kustomization.yaml" "$TMP/release-off.yaml"
+release_render kind
+rr_relay >"$TMP/release-off-relay.json"
+! grep -q 'relay-release-control\|release-token-hash' "$TMP/release-off.yaml" || fail 'the generated overlay names the release listener with the feature off'
+[[ ! -f "$MOCK_STATE/moca__Secret__moca-relay-release.json" ]] || fail 'a moca-relay-release Secret was made with the feature off'
+! grep -q 'MOCA_RELAY_CONTROL_ADDR\|SH_RELAY_CONTROL_URL\|sandbox-relay-control' "$TMP/rr.yaml" || fail 'the off render has the control listener'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_RELAY_RELEASE_CONTROL=; expect_ok --target kind --skip-build)
+cmp -s "$TMP/release-off.yaml" "$MOCK_STATE/applied-kustomization.yaml" || fail 'SH_RELAY_RELEASE_CONTROL= differs from unset'
+pass 'off by default (unset or empty): no component, no Secret, no listener'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_RELAY_RELEASE_CONTROL=1; expect_ok --target kind --skip-build)
+grep -q '^  - ../../base/relay-release-control$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'the component is not listed'
+rtok="$(sv moca moca-relay-release MOCA_RELAY_RELEASE_TOKEN)"
+[[ "$rtok" =~ ^[0-9a-f]{64}$ ]] || fail 'no 64-hex release token'
+[[ "$(jq -c '.data | keys' "$MOCK_STATE/moca__Secret__moca-relay-release.json")" == '["MOCA_RELAY_RELEASE_TOKEN"]' ]] || fail 'moca-relay-release holds more than its token'
+for k in SH_RELAY_TOKEN MOCA_RELAY_EXEC_TOKEN; do [[ "$(sv moca moca-relay "$k")" != "$rtok" ]] || fail "the release token equals $k"; done
+! jq -e '.data | has("MOCA_RELAY_RELEASE_TOKEN")' "$MOCK_STATE/moca__Secret__moca-mu1.json" >/dev/null || fail 'the release token is in moca-mu1'
+assert_no_secret_in_argv
+release_render kind
+rh="$(printf '%s' "$rtok" | { sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-16)"
+for d in sandbox-relay moca-control-plane; do
+  [[ "$(rr_obj Deployment "$d" | jq -r '.spec.template.metadata.annotations["moca.dev/release-token-hash"]')" == "$rh" ]] || fail "$d does not carry the release token's digest"
+done
+# The kind relay's image-id annotation survives beside it.
+[[ "$(rr_obj Deployment sandbox-relay | jq -r '.spec.template.metadata.annotations | has("moca.dev/image-id")')" == true ]] || fail "the relay lost its image-id annotation"
+[[ "$(rr_obj Deployment sandbox-relay | jq -r '.spec.template.spec.containers[] | select(.name == "sandbox-relay") | .env[] | select(.name == "MOCA_RELAY_CONTROL_ADDR") | .value')" == 0.0.0.0:9445 ]] || fail 'the relay has no control address'
+[[ "$(rr_obj Deployment moca-control-plane | jq -r '.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[] | select(.secret.name == "moca-relay-release") | .secret.optional')" == true ]] || fail 'the control plane does not mount the release token'
+[[ "$(rr_obj NetworkPolicy sandbox-relay-control | jq -c '[.metadata.namespace, .spec.ingress[0].from[0].podSelector.matchLabels.app, .spec.ingress[0].ports[0].port]')" == '["moca","moca-control-plane",9445]' ]] || fail 'the control listener admits more than the control plane'
+pass 'SH_RELAY_RELEASE_CONTROL=1: a 64-hex token alone in moca-relay-release, never in argv or moca-mu1, the listener, and its digest on the relay and the control plane'
+
+: >"$MOCK_LOG"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+grep -q '^  - ../../base/relay-release-control$' "$MOCK_STATE/applied-kustomization.yaml" || fail 'SH_RELAY_RELEASE_CONTROL is not sticky'
+[[ "$(sv moca moca-relay-release MOCA_RELAY_RELEASE_TOKEN)" == "$rtok" ]] || fail 'a re-run rotated the release token'
+mu1="$(jq -cS .data "$MOCK_STATE/moca__Secret__moca-mu1.json")"
+jq 'del(.data.MOCA_RELAY_RELEASE_TOKEN)' "$MOCK_STATE/moca__Secret__moca-relay-release.json" >"$TMP/x" && mv "$TMP/x" "$MOCK_STATE/moca__Secret__moca-relay-release.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
+[[ "$(sv moca moca-relay-release MOCA_RELAY_RELEASE_TOKEN)" != "$rtok" ]] || fail 'deleting the key did not rotate it'
+release_render kind
+[[ "$(rr_obj Deployment sandbox-relay | jq -r '.spec.template.metadata.annotations["moca.dev/release-token-hash"]')" != "$rh" ]] || fail 'a rotated release token does not roll the relay'
+[[ "$(jq -cS .data "$MOCK_STATE/moca__Secret__moca-mu1.json")" == "$mu1" ]] || fail 'rotating the release token changed moca-mu1'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_RELAY_RELEASE_CONTROL=; expect_ok --target kind --skip-build)
+cmp -s "$TMP/release-off.yaml" "$MOCK_STATE/applied-kustomization.yaml" || fail 'turning the listener off does not give back the off overlay'
+release_render kind
+diff <(rr_relay) "$TMP/release-off-relay.json" >/dev/null || fail 'turning the listener off does not give back the off relay objects'
+[[ -f "$MOCK_STATE/moca__Secret__moca-relay-release.json" ]] || fail 'turning it off deleted moca-relay-release'
+pass 'sticky; kept on a re-run; deleting the key rotates it and rolls the pods, moca-mu1 untouched; empty turns it off, back to the off overlay'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_RELAY_RELEASE_CONTROL=1; expect_ok --target kind --skip-build)
+ex="$(sv moca moca-relay MOCA_RELAY_EXEC_TOKEN)"
+jq --arg v "$(printf '%s' "$ex" | base64 | tr -d '\n')" '.data.MOCA_RELAY_RELEASE_TOKEN = $v' \
+  "$MOCK_STATE/moca__Secret__moca-relay-release.json" >"$TMP/x" && mv "$TMP/x" "$MOCK_STATE/moca__Secret__moca-relay-release.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target kind --skip-build)
+expect_out 'MOCA_RELAY_RELEASE_TOKEN equals another bearer'
+! grep -qF -- "$ex" "$TMP/out" || fail 'the clash refusal printed the token'
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_RELAY_RELEASE_CONTROL=yes; expect_fail --target kind --skip-build)
+expect_out "SH_RELAY_RELEASE_CONTROL='yes' must be 1 (on) or empty (off)"
+reset_state
+(export SH_SINGLE_NAMESPACE=moca-single SH_GITHUB_CLIENT_ID=Iv1.a SH_RELAY_RELEASE_CONTROL=1; expect_fail --target ocp-single)
+expect_out 'SH_RELAY_RELEASE_CONTROL=1 is not supported on --target ocp-single'
+pass 'a kept release token equal to another bearer is refused, naming the key; a bad value and ocp-single are refused'
+
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_RELAY_RELEASE_CONTROL=1; expect_ok --target ocp)
+release_render ocp
+[[ "$(rr_obj Service sandbox-relay-control | jq -r '.spec.ports[0].port')" == 9445 ]] || fail 'ocp: no control Service'
+[[ -n "$(rr_obj Deployment sandbox-relay | jq -r '.spec.template.metadata.annotations["moca.dev/release-token-hash"] // empty')" ]] || fail 'ocp: the relay has no release digest'
+pass 'on ocp the listener renders too, with its digest on the relay'
+
 echo "== workload sandboxes (SH_WORKLOAD_SANDBOXES, workload sandboxes spec §4)"
 reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target kind --skip-build)
