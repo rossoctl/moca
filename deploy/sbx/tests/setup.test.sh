@@ -1919,8 +1919,10 @@ run_setup export SBX_TEST_USERS=5 SBX_TEST_USERS_ACK=i-know-this-is-not-for-prod
 [[ "$(cm moca-settings SH_TEST_USERS)" == 5 ]] || fail 'SH_TEST_USERS is not in moca-settings'
 [[ "$(cm sbx-settings SH_SANDBOX_TEST_USERS_ENROLLED)" == true ]] || fail 'the enrollment flag is not in sbx-settings'
 grep -q -- '- ../../k8s/overlays/ocp-sbx/test-users' "$K" || fail 'the test-users Component is not listed'
-render
+render; render_json
 grep -q 'SH_SANDBOX_TEST_USERS_ENROLLED' "$TMP/render.yaml" || fail 'the rendered control plane has no enrollment env'
+[[ "$(robj Deployment moca-control-plane | jq -r '.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[] | select(.secret.name == "moca-test-users") | .secret.optional')" == true ]] ||
+  fail 'the credentials volume does not project moca-test-users as an optional source'
 cp_hash="$(pod_hash moca-control-plane)"
 sec="$(secret_val moca-test-users SH_TEST_USER_SECRET)"
 pass 'test users on: a kept secret in moca-test-users alone, the count and the flag in the ConfigMaps, the Component listed and rendered'

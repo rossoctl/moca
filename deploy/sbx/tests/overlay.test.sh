@@ -146,8 +146,8 @@ for k in SH_SANDBOX_MODES_ALLOWED SH_SANDBOX_IDLE_CEILING_S; do
   [[ "$(cp_env "$k" | jq -r .valueFrom.configMapKeyRef.optional)" == true ]] ||
     fail "$k must be optional (the control plane defaults it)"
 done
-[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.projected) | {s: [.projected.sources[] | .secret.name], o: [.projected.sources[] | .secret.optional], k: [.projected.sources[] | .secret.items[]?.key]}]' <<<"$CP")" == '[{"s":["moca-mu1","moca-oidc","moca-relay-release"],"o":[null,true,true],"k":["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN","SH_INSTALLER_TOKEN","SH_OIDC_CLIENT_SECRET","MOCA_RELAY_RELEASE_TOKEN"]}]' ]] ||
-  fail "the control plane mounts more or less than its signing key, the janitor token, the optional oidc client secret and the optional release token (#338): $(jq -c '[.spec.template.spec.volumes[] | select(.projected)]' <<<"$CP")"
+[[ "$(jq -c '[.spec.template.spec.volumes[] | select(.projected) | {s: [.projected.sources[] | .secret.name], o: [.projected.sources[] | .secret.optional], k: [.projected.sources[] | .secret.items[]?.key]}]' <<<"$CP")" == '[{"s":["moca-mu1","moca-oidc","moca-relay-release","moca-test-users"],"o":[null,true,true,true],"k":["SH_SESSION_TOKEN_PRIVATE_KEY","SH_JANITOR_TOKEN","SH_INSTALLER_TOKEN","SH_OIDC_CLIENT_SECRET","MOCA_RELAY_RELEASE_TOKEN","SH_TEST_USER_SECRET"]}]' ]] ||
+  fail "the control plane mounts more or less than its signing key, the janitor token, the optional oidc client secret, the optional release token (#338) and the optional test-user secret (ADR-0045): $(jq -c '[.spec.template.spec.volumes[] | select(.projected)]' <<<"$CP")"
 [[ "$(jq -r .spec.template.spec.automountServiceAccountToken <<<"$CP")" == false ]] || fail 'the control plane still mounts a service account token'
 # Exactly ONE source type per volume. The base makes `credentials` a projected volume (ADR-0045);
 # volumes merge by name, so an overlay that supplies `secret:` without replacing `projected:` renders
