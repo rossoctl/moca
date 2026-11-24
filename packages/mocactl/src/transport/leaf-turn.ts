@@ -18,6 +18,14 @@ export interface LeafEnvelope {
   workloadId?: string;
   /** Give the run its own writable copy of the workload's context. */
   contextWritable?: boolean;
+  /** Make the leaf ask a human before it acts: it parks `paused` at a gate (#393). */
+  requireApproval?: boolean;
+  /**
+   * A human's answer to the gate this leaf is parked at, which makes this submission a RESUME: the
+   * leaf runs the continuation instead of its own prompt (ADR-0020). Only the sync path sends it —
+   * an async turn is resumed through `POST /v1/sessions/{id}/decision` instead.
+   */
+  decision?: { gateId: number; action: 'approve' | 'reject' | 'abort'; feedback?: string };
 }
 
 /**
@@ -32,7 +40,11 @@ export interface LeafResultBody {
   reason?: string;
   message?: string;
   gateId?: number;
-  gate?: { summary: string; proposed_action: string };
+  /**
+   * Both strings are optional: at `MOCA_TURN_SUMMARY_BYTES=0` the control plane's projection drops
+   * them and keeps the id (`clipFields`), so a gate can arrive reportable but unexplained.
+   */
+  gate?: { summary?: string; proposed_action?: string };
   usage?: Record<string, number>;
   /**
    * Async path only (`transport/async-turn.ts`): which of `text`/`patch` this result has bytes for,

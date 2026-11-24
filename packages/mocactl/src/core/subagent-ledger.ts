@@ -45,8 +45,10 @@ export interface LedgerRecord {
   /**
    * The async turn this row was dispatched as (`spawn --async`). Its presence is what says which
    * backend holds the leaf: a row with one is read and cancelled through the turn routes and has no
-   * local process at all, a row without one is the sync `/runs` path with a detached worker. Written
-   * once, at `append`.
+   * local process at all, a row without one is the sync `/runs` path with a detached worker.
+   *
+   * REPLACED when a gate decision resumes the row (`mocactl approve`): the resume is a new turn, and
+   * a row still naming the answered one would go on reporting `paused` for good.
    */
   turnId?: string;
   /** The detached worker's pid. Absent until the child is forked, and never on an async row. */
@@ -69,6 +71,8 @@ type LedgerLine =
       stateObservedAt: number;
       /** Set when the detached worker's pid is first known. */
       childPid?: number;
+      /** Set when a gate decision resumed an async row as a new turn. */
+      turnId?: string;
     };
 
 export interface Ledger {
@@ -76,7 +80,7 @@ export interface Ledger {
   updateState(
     sessionId: string,
     lastKnownState: HonestState,
-    opts?: { detail?: string; childPid?: number; now?: number },
+    opts?: { detail?: string; childPid?: number; turnId?: string; now?: number },
   ): void;
   readAll(): LedgerRecord[];
   find(sessionId: string): LedgerRecord | undefined;
@@ -99,6 +103,7 @@ export function openLedger(path: string, now: () => number = Date.now): Ledger {
         ...(opts.detail !== undefined ? { stateDetail: opts.detail } : {}),
         stateObservedAt: opts.now ?? now(),
         ...(opts.childPid !== undefined ? { childPid: opts.childPid } : {}),
+        ...(opts.turnId !== undefined ? { turnId: opts.turnId } : {}),
       });
     },
     readAll(): LedgerRecord[] {
@@ -163,6 +168,7 @@ function foldLines(lines: LedgerLine[]): LedgerRecord[] {
       if (line.stateDetail !== undefined) existing.stateDetail = line.stateDetail;
       else delete existing.stateDetail;
       if (line.childPid !== undefined) existing.childPid = line.childPid;
+      if (line.turnId !== undefined) existing.turnId = line.turnId;
     }
   }
   return [...byId.values()].sort((a, b) => a.submittedAt - b.submittedAt);

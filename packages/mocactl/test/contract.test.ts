@@ -87,6 +87,12 @@ const USED: Array<{ method: string; path: string; reads?: string[]; sends?: stri
     reads: ['turnId', 'state', 'attempts', 'result'],
   },
   { method: 'delete', path: '/v1/sessions/{id}/turns/{turnId}' },
+  {
+    method: 'post',
+    path: '/v1/sessions/{id}/decision',
+    reads: ['sessionId', 'turnId'],
+    sends: ['gateId', 'action', 'feedback'],
+  },
   // No `reads`: the body is the artifact's own bytes, not JSON.
   { method: 'get', path: '/v1/sessions/{id}/turns/{turnId}/artifacts/{kind}' },
   // Nor here: the body is an SSE stream, and the frame's own shape is `TurnEvent` (#392), which
@@ -319,7 +325,9 @@ describe('control-plane contract (docs/api/openapi.yaml)', () => {
       expect(op, `${method} ${path} missing from openapi.yaml`).toBeDefined();
       const schema = responseSchema(op);
       for (const f of reads ?? []) expect(Object.keys(schema?.properties ?? {})).toContain(f);
-      const req = op.requestBody?.content?.['application/json']?.schema;
+      // Resolved like the response: a body given as a `$ref` to a component (GateDecision) has no
+      // `properties` of its own, and an unresolved one would pass this check vacuously.
+      const req = resolveSchema(op.requestBody?.content?.['application/json']?.schema);
       for (const f of sends ?? []) expect(Object.keys(req?.properties ?? {})).toContain(f);
     },
   );
@@ -383,6 +391,7 @@ describe('control-plane contract (docs/api/openapi.yaml)', () => {
     await cProxy.getTurn('ID', 'TURN');
     await cProxy.getTurnArtifact('ID', 'TURN', 'patch');
     await cProxy.cancelTurn('ID', 'TURN');
+    await cProxy.decideGate('ID', { gateId: 0, action: 'approve', feedback: 'go on' });
     // Drained, not just opened: the request is made on the first `next()`.
     for await (const _e of cProxy.streamEvents()) break;
     const seen = calls.map((k) => {

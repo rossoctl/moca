@@ -25,6 +25,7 @@ import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
 import { openCallRecord, RUN_LENGTH_FIELDS, type CallRecorder } from './sbx/call-record.js';
 import { defaultSbxUrl, openSbxRuntime, sbxMain } from './sbx/cli.js';
 import {
+  cmdDecide,
   cmdGet,
   cmdSpawn,
   cmdSubagents,
@@ -67,6 +68,8 @@ the harness service:
   subagents      list spawned subagents and their state
   watch          follow subagents' state changes until they finish
   get            write a subagent's result files
+  approve        let a subagent paused for approval go ahead
+  reject         tell a subagent paused for approval to take another route
   promote        upload a directory's Claude Code skills and commands as a config bundle
   bundles        list or delete your promoted config bundles
   workloads      create, list, get or delete workloads (contexts for subagents)
@@ -156,6 +159,9 @@ export const USAGE = `usage:
   mocactl spawn "prompt" --async [...]            dispatch as a cancellable async turn instead of a
                                                  local worker process (needs SH_ASYNC_DRAIN on the
                                                  deployment; not available with --workload)
+  mocactl spawn "prompt" --require-approval [...]  park the subagent before it acts: it proposes
+                                                 what it would do and waits for 'mocactl approve'
+                                                 or 'mocactl reject'
   mocactl spawn "prompt" --max-concurrent N [...]
                                                  refuse the dispatch when N of your subagents are
                                                  already running (default 4)
@@ -173,6 +179,17 @@ export const USAGE = `usage:
                                                  exit 1 and status 'queued' if the
                                                  budget runs out, 'unknown' if the run is over
                                                  without one)
+  mocactl approve SESSIONID [--gate N] [--feedback TEXT] [--json]
+                                                 let a subagent paused for approval go ahead; prints
+                                                 the turn it resumed as ('mocactl get SESSIONID'
+                                                 shows what it proposed and the number --gate takes,
+                                                 which is read off the paused run when the flag is
+                                                 left out; --feedback: a note that reaches the
+                                                 subagent)
+  mocactl reject SESSIONID [--gate N] [--feedback TEXT] [--json]
+                                                 refuse what the subagent proposed, and it carries
+                                                 on from there (--feedback says what to do instead,
+                                                 at most 4096 bytes; --gate as for approve)
   mocactl workloads create --context FILE [--name NAME] [--json]
       [--sandboxes N [--mount read-only|writable]]
                                                  upload a context file (--context, made by
@@ -287,6 +304,9 @@ const OPTIONS = {
   workload: { type: 'string' },
   writable: { type: 'boolean' },
   async: { type: 'boolean' },
+  'require-approval': { type: 'boolean' },
+  gate: { type: 'string' },
+  feedback: { type: 'string' },
   context: { type: 'string' },
   name: { type: 'string' },
   sandboxes: { type: 'string' },
@@ -502,6 +522,15 @@ async function mainWith(
   }
   if (values.writable !== undefined && command !== 'spawn') {
     io.err(`--writable only applies to \`mocactl spawn\`\n${help}`);
+    return 2;
+  }
+  if (values['require-approval'] !== undefined && command !== 'spawn') {
+    io.err(`--require-approval only applies to \`mocactl spawn\`\n${help}`);
+    return 2;
+  }
+  const decideOnly = (['gate', 'feedback'] as const).find((f) => values[f] !== undefined);
+  if (decideOnly && command !== 'approve' && command !== 'reject') {
+    io.err(`--${decideOnly} only applies to \`mocactl approve\` and \`mocactl reject\`\n${help}`);
     return 2;
   }
   if (values['prompt-file'] !== undefined && command !== 'spawn') {
@@ -731,6 +760,7 @@ async function mainWith(
         workloadId: values.workload,
         writable: values.writable === true,
         async: values.async === true,
+        requireApproval: values['require-approval'] === true,
         ...(maxConcurrent !== undefined ? { maxConcurrent } : {}),
         json,
       });
@@ -759,6 +789,28 @@ async function mainWith(
         outDir: values.out,
         wait: values.wait === true,
         ...(timeoutS !== undefined ? { timeoutS } : {}),
+        json,
+        signal,
+      });
+    }
+    case 'approve':
+    case 'reject': {
+      const [sid, ...extra] = rest;
+      if (sid === undefined || extra.length > 0) return usage(io, help);
+      let gateId: number | undefined;
+      if (values.gate !== undefined) {
+        // Gate ids start at 0 and count up within a session, so `0` is a legitimate one.
+        if (!/^(0|[1-9][0-9]{0,4})$/.test(values.gate)) {
+          io.err(`--gate must be a whole gate number, as \`mocactl get\` reports it\n${help}`);
+          return 2;
+        }
+        gateId = Number(values.gate);
+      }
+      return cmdDecide(rt, io, {
+        sessionId: sid,
+        action: command,
+        ...(gateId !== undefined ? { gateId } : {}),
+        ...(values.feedback !== undefined ? { feedback: values.feedback } : {}),
         json,
         signal,
       });

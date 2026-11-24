@@ -90,10 +90,9 @@ printf %s "$KEY" | mocactl credentials add NAME --host HOST [--host HOST ...] \
 mocactl credentials delete NAME [--json]    # exit 1 if you own no credential of that name
 ```
 
-> **Preview.** `mocactl spawn`, `mocactl subagents`, `mocactl watch` and `mocactl get` are
-> implemented but not yet declared Stable; flags, ledger format, and output shapes may change.
-> One follow-up is still tracked under the subagent commands issue: `approve`/`reject` for a
-> subagent that stops at a gate.
+> **Preview.** `mocactl spawn`, `mocactl subagents`, `mocactl watch`, `mocactl get`,
+> `mocactl approve` and `mocactl reject` are implemented but not yet declared Stable; flags,
+> ledger format, and output shapes may change.
 
 ```bash
 mocactl spawn "prompt" [--config sha256:…] --kind prompt|solve \
@@ -103,6 +102,9 @@ mocactl subagents [--tag T] [--json]        # list spawned subagents + current h
 mocactl watch [--tag T] [--json]            # one line per state change, until all are finished
 mocactl get SESSIONID [--out DIR] [--json]  # write result files + bounded summary
 mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]  # run it on a workload's context
+mocactl spawn "prompt" --require-approval [...]        # park it at a gate before it acts
+mocactl approve SESSIONID [--gate N] [--feedback TEXT] [--json]  # let it go ahead
+mocactl reject SESSIONID [--gate N] [--feedback TEXT] [--json]   # refuse, and say what to do instead
 ```
 
 ```bash
@@ -162,6 +164,31 @@ nothing has to be parsed twice. Ctrl-C ends the watch; the subagents keep runnin
 normalized so `git apply` does not reject it), and `<sid>.verdict.json` if the server returned a
 verdict. A session that has not finished yet exits `1` with a hint; a `failed` body exits `1`
 with the status, reason, and detail on stderr.
+
+`mocactl spawn --require-approval` makes the subagent ask before it acts: its first move is to
+propose what it would do, and the run parks `paused` at a numbered gate instead of carrying on.
+`mocactl get SESSIONID` prints the gate's number, its summary and the proposed action;
+`mocactl approve SESSIONID` lets it go ahead and `mocactl reject SESSIONID --feedback "…"` turns it
+down and sends the feedback back, so the subagent tries another route and may park at a second
+gate. Both print the handle the resumed run goes on under — a turn id for an `--async` row, a pid
+for a sync one — and both leave the ledger row `running`, so `subagents` and `watch` pick the
+resumed run up without being told. `--gate N` is rarely needed: at most one gate of a session is
+pending at a time, so the number is read off the paused result. It is there for an `--async`
+subagent whose result this machine cannot read — one spawned elsewhere, or one whose result has
+aged out — and the control plane checks the number itself. On a sync row `--gate N` is a
+cross-check rather than a short cut: the paused result is still read, because nothing behind this
+command would catch a stale number. `--feedback` goes to the model verbatim and is capped at 4096
+bytes. Answering a gate that is not pending — already answered, or answered by the deadline
+sweep — exits `1` and says which gate the session is at. A gate can only be answered while the
+subagent is parked at it: on a sync row a second decision taken once the first one's run has
+started is refused and names the pid, because that run holds the only answer the gate has. Two
+decisions started at the same instant (`mocactl approve S & mocactl approve S`) can both get
+through — the check reads the ledger row, which the first decision only marks `running` after it
+forks — so answer a gate once and wait for the command to return.
+
+A subagent spawned **without** `--async` is resumed from the machine that spawned it: the decision
+re-sends the stored envelope from a fresh detached worker, and only that machine's ledger holds it.
+An `--async` one is resumed through the control plane, so any logged-in machine can answer its gate.
 
 `mocactl run` continues the session `--session` names, or starts a new one (`--new`, the default).
 An empty `--session ""` is refused (exit `2`), not taken as `--new`. When the harness has no
@@ -314,7 +341,8 @@ stable: fields may be added, but none is renamed or removed.
 | `spawn`              | `{"type":"session","sessionId","pid"}`                                                                                                              |
 | `subagents`          | `{"subagents":[{"sessionId","tag","kind","state","detail","bundle","workload","submittedAt"}]}`                                                     |
 | `watch`              | NDJSON, one event per line: `{"sessionId","tag","label"?,"kind","state","detail","at"}`                                                             |
-| `get`                | `{"sessionId","status","files":["<path>",…],"reason"?,"message"?}`                                                                                  |
+| `get`                | `{"sessionId","status","files":["<path>",…],"reason"?,"message"?,"gate"?:{"gateId","summary","proposed_action"}}`                                   |
+| `approve` / `reject` | `{"sessionId","gateId","action"}` plus `"turnId"` for an async row or `"pid"` for a sync one                                                        |
 | `workloads create`   | `{"workloadId","status","contextType","revision","files","bytes","sandboxes"?,"mount"?}`                                                            |
 | `workloads list`     | `{"workloads":[{"workloadId","status","contextType","workspace","createdAt","revision","sandboxes","error"?}]}`, `null` unset, `createdAt` ISO 8601 |
 | `workloads get`      | `{"workloadId","status","contextType","workspace","revision","sandboxes","error"?}`, `null` unset                                                   |

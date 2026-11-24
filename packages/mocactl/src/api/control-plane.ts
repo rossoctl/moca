@@ -10,6 +10,7 @@ import type {
   CredentialDescriptor,
   DeviceStart,
   Discovery,
+  GateDecisionRequest,
   Me,
   ModelList,
   PutCredentialRequest,
@@ -266,6 +267,12 @@ export class ControlPlaneClient implements ControlPlaneApi {
       'DELETE',
       `/v1/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}`,
     );
+  }
+
+  decideGate(sessionId: string, req: GateDecisionRequest): Promise<SubmittedTurn> {
+    return this.json('POST', `/v1/sessions/${encodeURIComponent(sessionId)}/decision`, {
+      body: req,
+    });
   }
 
   /**

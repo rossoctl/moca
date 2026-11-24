@@ -411,6 +411,31 @@ describe('cmdGet — paused is not success', () => {
     expect(r).toBe(1);
   });
 
+  // `MOCA_TURN_SUMMARY_BYTES=0` makes the control plane drop both gate strings and keep the id.
+  it('reports a gate that arrived with no summary, instead of throwing on it', async () => {
+    const { rt } = makeRt(scratch);
+    const { io, err } = makeIo();
+    const body = { status: 'paused', gateId: 7, gate: {} } as const;
+    const r = await cmdGet(rt, io, baseOpts({ transport: fakeTransport(body), outDir: scratch }));
+    expect(r).toBe(1);
+    expect(err).toContain('gate    7');
+    expect(err.join('\n')).not.toContain('propose');
+    expect(err.join('\n')).toContain('mocactl approve sess-abc');
+  });
+
+  it('--json leaves a dropped gate string out rather than emitting an empty one', async () => {
+    const { rt } = makeRt(scratch);
+    const { io, out } = makeIo();
+    const body = { status: 'paused', gateId: 7, gate: { proposed_action: 'push' } } as const;
+    const r = await cmdGet(
+      rt,
+      io,
+      baseOpts({ json: true, transport: fakeTransport(body), outDir: scratch }),
+    );
+    expect(r).toBe(1);
+    expect(JSON.parse(out[0]!.trim()).gate).toEqual({ gateId: 7, proposed_action: 'push' });
+  });
+
   it('--json on paused still emits the file list on stdout', async () => {
     const { rt } = makeRt(scratch);
     const { io, out } = makeIo();

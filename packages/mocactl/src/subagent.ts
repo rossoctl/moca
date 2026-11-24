@@ -1,14 +1,18 @@
-/** `mocactl spawn | subagents | watch | get`, built on the leaf-turn transport and subagent ledger. */
+/**
+ * `mocactl spawn | subagents | watch | get | approve | reject`, built on the leaf-turn transport
+ * and the subagent ledger.
+ */
 import { spawn as spawnChild } from 'node:child_process';
 import { writeFileSync, mkdirSync, existsSync, openSync, closeSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ApiError } from './api/errors.js';
 import { validWorkloadId, WorkloadsClient } from './api/workloads.js';
-import type {
-  ControlPlaneApi,
-  CreateSessionRequest,
-  SessionToken,
-  TurnEvent,
+import {
+  GATE_FEEDBACK_BYTES,
+  type ControlPlaneApi,
+  type CreateSessionRequest,
+  type SessionToken,
+  type TurnEvent,
 } from './api/types.js';
 import { describeError } from './core/messages.js';
 import { sanitizeRemote } from './core/sanitize.js';
@@ -100,6 +104,8 @@ export interface SpawnOptions {
   maxConcurrent?: number;
   /** Dispatch as an async turn (cancellable, no local worker) instead of the sync `/runs` path. */
   async?: boolean;
+  /** Park the subagent at a gate before it acts; answered with `mocactl approve`/`reject` (#393). */
+  requireApproval?: boolean;
   json: boolean;
   /** Test seams: fork + ledger injection. */
   forkFn?: (
@@ -319,6 +325,7 @@ function buildEnvelope(sessionId: string, opts: SpawnOptions): LeafEnvelope {
   // `/runs` reads configRef from the body (not the session); the harness builds the solve prompt
   // itself from `problemStatement`.
   if (opts.configRef) base.configRef = opts.configRef;
+  if (opts.requireApproval) base.requireApproval = true;
   if (opts.kind === 'prompt') {
     return {
       ...base,
@@ -933,6 +940,23 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
   const status = sanitizeRemote(raw.status);
   const reason = raw.reason ? sanitizeRemote(raw.reason) : undefined;
   const message = raw.message ? sanitizeRemote(raw.message) : undefined;
+  // The gate, when it is parked at one: a caller that cannot see what was asked, and under which
+  // id, cannot answer it (`mocactl approve --gate N`). Written to neither a file nor the summary --
+  // two short strings and a number belong in the status, beside the status they explain.
+  const gate =
+    raw.gate && typeof raw.gateId === 'number'
+      ? {
+          gateId: raw.gateId,
+          // Both strings can be absent: at `MOCA_TURN_SUMMARY_BYTES=0` the control plane drops them
+          // and keeps the id. The id is the part a decision needs, so report the gate either way
+          // rather than hide it, and leave a dropped string out as `reason`/`message` do above --
+          // an empty one would read as "the gate said nothing".
+          ...(raw.gate.summary ? { summary: sanitizeRemote(raw.gate.summary) } : {}),
+          ...(raw.gate.proposed_action
+            ? { proposed_action: sanitizeRemote(raw.gate.proposed_action) }
+            : {}),
+        }
+      : undefined;
   if (opts.json) {
     io.out(
       JSON.stringify({
@@ -941,6 +965,7 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
         files: written,
         ...(reason ? { reason } : {}),
         ...(message ? { message } : {}),
+        ...(gate ? { gate } : {}),
       }) + '\n',
     );
     return completed ? 0 : 1;
@@ -948,6 +973,11 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
   io.err(`status  ${status}`);
   if (reason) io.err(`reason  ${reason}`);
   if (message && message !== reason) io.err(`detail  ${message}`);
+  if (gate) {
+    io.err(`gate    ${gate.gateId}${gate.summary ? `  ${gate.summary}` : ''}`);
+    if (gate.proposed_action) io.err(`propose ${gate.proposed_action}`);
+    io.err(`answer  mocactl approve ${opts.sessionId}  (or reject, with --feedback)`);
+  }
   for (const p of written) io.err(`wrote   ${p}`);
   const summaryBody = raw.text ?? raw.patch ?? '';
   if (summaryBody) {
@@ -1038,6 +1068,281 @@ async function readLeafResult(
     // `sleep` resolves on abort rather than rejecting, so without this the loop would go round
     // once more and turn a Ctrl-C into a mint plus a failed read.
     if (opts.signal?.aborted === true) return 130;
+  }
+}
+
+// --- approve / reject ---
+
+const past = (action: 'approve' | 'reject'): string =>
+  action === 'approve' ? 'approved' : 'rejected';
+
+export interface DecideOptions {
+  sessionId: string;
+  /** `abort` is deliberately absent: ending a subagent is `mocactl cancel`'s job, not a decision's. */
+  action: 'approve' | 'reject';
+  /** `--gate N`. Omitted means "read the pending gate's id off the paused result". */
+  gateId?: number;
+  /** Reaches the model verbatim as part of the resumed turn's prompt. */
+  feedback?: string;
+  json: boolean;
+  signal?: AbortSignal;
+  /** Test seams, as `cmdGet`'s. */
+  ledger?: Ledger;
+  transport?: LeafTransport;
+  turns?: Pick<AsyncTurnTransport, 'readTurnState' | 'collect'>;
+  /** Test seam for the sync path's resume worker; the same contract as `spawn`'s. */
+  forkFn?: (
+    sessionId: string,
+    token: string,
+    envelope: LeafEnvelope,
+    cwd: string,
+  ) => number | Promise<number>;
+}
+
+/**
+ * `mocactl approve|reject SESSIONID`: answer the gate a subagent is parked at, so it carries on
+ * (#393). The two words are one command: the action is the only thing that differs.
+ *
+ * Two resume paths, chosen by the ledger row, because the two dispatch backends park a gate in
+ * different places and neither route can resolve the other's:
+ * - an async row (`spawn --async`) has a turn record, so `POST /v1/sessions/{id}/decision` resolves
+ *   it: the control plane copies the envelope and queues the resume, and no session token is needed;
+ * - a sync row re-sends its stored envelope with the decision inline (ADR-0020) from the same
+ *   detached worker `spawn` uses, so the resumed leaf outlives this command as the first one did.
+ */
+export async function cmdDecide(rt: Runtime, io: Io, opts: DecideOptions): Promise<number> {
+  if (!requireReady(rt, io)) return 2;
+  if (!SAFE_ID_RE.test(opts.sessionId)) {
+    io.err(`invalid sessionId '${sanitizeRemote(opts.sessionId)}'`);
+    return 2;
+  }
+  // Checked here, not only server-side: the sync path's harness does not bound it at all, and the
+  // same text must be refused on both backends or `--feedback` means two different things.
+  if (
+    opts.feedback !== undefined &&
+    Buffer.byteLength(opts.feedback, 'utf8') > GATE_FEEDBACK_BYTES
+  ) {
+    io.err(
+      `--feedback is too large (max ${GATE_FEEDBACK_BYTES} bytes); it goes to the model as part ` +
+        'of the resumed turn, so say less',
+    );
+    return 2;
+  }
+  initLedger(rt.paths.subagentsFile);
+  const ledger = opts.ledger ?? openLedger(rt.paths.subagentsFile, rt.now);
+  const record = ledger.find(opts.sessionId);
+
+  const transport = opts.transport ?? new LeafTransport(rt.harness, rt.fetchImpl);
+  // A row with no turn record was dispatched synchronously, and resumes by re-sending its envelope.
+  const syncRow = record !== undefined && record.turnId === undefined ? record : undefined;
+  // A live child means the leaf has not parked: either it has not reached its first gate, or a
+  // decision already answered this one and its resume is still running. The read below cannot tell
+  // the second case apart on its own -- `/runs/status` serves the PAUSED record for the whole life
+  // of the resume, because the sync worker writes its result only when the leaf returns (#1010
+  // review). Gated on a live child rather than on the row's state alone, so a worker that died
+  // before writing a result still falls through and leaves the gate answerable.
+  // shortcut: this is a read-then-act on a lock-free ledger, so two decisions started at once
+  // (`mocactl approve S & mocactl approve S`) can both pass it and both resume the leaf -- the row
+  // only turns `running` inside `resumeSyncRow`, after the fork. It closes the sequential case,
+  // which is the one a human hits. Upgrade when the harness makes a gate decision idempotent on the
+  // sync path too (the async path already keys on `${sessionId}:gate:${gateId}`); moving the row
+  // write earlier narrows the window without closing it.
+  if (
+    syncRow !== undefined &&
+    syncRow.lastKnownState !== 'paused' &&
+    syncRow.childPid !== undefined &&
+    isAlive(syncRow.childPid)
+  ) {
+    io.err(
+      `session '${sanitizeRemote(opts.sessionId)}' has a run in flight (pid ${syncRow.childPid}); ` +
+        'a gate can only be answered while the subagent is parked at it',
+    );
+    return 1;
+  }
+  let gateId = opts.gateId;
+  // Read it rather than ask for it: at most one gate of a session is pending at a time, so the
+  // paused result names it exactly. `--gate N` is for the session whose result cannot be read --
+  // one spawned on another machine, or already aged out of the result store.
+  //
+  // The sync path reads even when `--gate` names the gate, because nothing downstream checks it:
+  // the harness answers a decision for an already-answered gate by re-running the STORED
+  // decision's continuation (`gate.ts` `decideSeed`), so a repeat or a contradiction would act
+  // without a human's answer. The async path needs no read -- the control plane compares the id
+  // with the pending one itself and 409s on a mismatch.
+  // shortcut: a sync row whose result aged out of the store can no longer be answered with
+  // --gate N, because this read is what makes the id trustworthy. Upgrade by carrying the pending
+  // gate id in the ledger row if the result store's TTL turns out to be shorter than a gate's life.
+  if (gateId === undefined || syncRow !== undefined) {
+    const read = await readLeafResult(
+      rt,
+      io,
+      {
+        sessionId: opts.sessionId,
+        json: false,
+        signal: opts.signal,
+        ledger,
+        transport,
+        turns: opts.turns,
+      },
+      transport,
+    );
+    if (typeof read === 'number') return read;
+    const status = read === 'queued' ? 'queued' : read.status;
+    const pending = read === 'queued' ? undefined : read.gateId;
+    if (status !== 'paused' || typeof pending !== 'number') {
+      io.err(
+        `session '${sanitizeRemote(opts.sessionId)}' is ${sanitizeRemote(status)}, not paused at ` +
+          'a gate' +
+          (syncRow !== undefined ? '' : '; pass --gate N to answer a gate this client cannot read'),
+      );
+      return 1;
+    }
+    // Same wording as the control plane's 409, so the two backends refuse a stale --gate alike.
+    if (gateId !== undefined && gateId !== pending) {
+      io.err(`gate ${gateId} is not pending; this session is paused at gate ${pending}`);
+      return 1;
+    }
+    gateId = pending;
+  }
+  const decision = {
+    gateId,
+    action: opts.action,
+    ...(opts.feedback !== undefined ? { feedback: opts.feedback } : {}),
+  };
+
+  if (syncRow !== undefined) {
+    return resumeSyncRow(rt, io, opts, ledger, syncRow, decision);
+  }
+  try {
+    const { turnId } = await rt.cp.decideGate(opts.sessionId, decision);
+    // Re-point the row at the resume: the answered turn stays `paused` for good, so a row still
+    // naming it would report `paused` to `subagents` and `get` after a decision that worked.
+    if (record) {
+      ledger.updateState(opts.sessionId, 'running', {
+        detail: `${past(opts.action)} gate ${gateId}`,
+        turnId,
+        now: rt.now(),
+      });
+    }
+    report(io, opts, gateId, { turnId });
+    return 0;
+  } catch (err) {
+    io.err(describeError(err));
+    // The commonest cause by far: a sync-dispatched subagent has no turn record for the route to
+    // find, and its envelope lives only in the ledger of the machine that spawned it.
+    if (err instanceof ApiError && err.code === 'gate_not_pending' && record === undefined) {
+      io.err(
+        'a subagent spawned without --async is resumed from the machine that spawned it, which ' +
+          'holds its envelope',
+      );
+    }
+    return 1;
+  }
+}
+
+/** The sync path's resume: the stored envelope plus the decision, in a fresh detached worker. */
+async function resumeSyncRow(
+  rt: Runtime & Required<Pick<Runtime, 'cp' | 'harness'>>,
+  io: Io,
+  opts: DecideOptions,
+  ledger: Ledger,
+  record: LedgerRecord,
+  decision: NonNullable<LeafEnvelope['decision']>,
+): Promise<number> {
+  const envelope = resumeEnvelope(opts.sessionId, record.envelope, decision);
+  if (envelope === undefined) {
+    io.err(
+      `the ledger row for '${sanitizeRemote(opts.sessionId)}' has kind ` +
+        `'${sanitizeRemote(record.envelope.kind)}', which this client cannot resume`,
+    );
+    return 1;
+  }
+  let token: string;
+  try {
+    token = (await rt.cp.mintSessionToken(opts.sessionId)).token;
+  } catch (err) {
+    io.err(describeError(err));
+    return 1;
+  }
+  // Resolved in the parent so the child never re-discovers, exactly as `spawn` does.
+  let resolvedHarnessUrl: string | undefined;
+  try {
+    resolvedHarnessUrl = await rt.harness.baseUrl();
+  } catch {
+    resolvedHarnessUrl = rt.endpoints.harnessUrl;
+  }
+  const forkFn =
+    opts.forkFn ??
+    ((sid, tok, env, cwd) => defaultFork(sid, tok, env, cwd, rt, resolvedHarnessUrl));
+  let pid: number;
+  try {
+    pid = await forkFn(opts.sessionId, token, envelope, rt.paths.stateDir);
+  } catch (err) {
+    // The gate is still pending — nothing was sent — so the row stays `paused` and the decision can
+    // be made again once whatever stopped the fork is fixed.
+    io.err(describeError(err));
+    return 1;
+  }
+  ledger.updateState(opts.sessionId, 'running', {
+    detail: `${past(opts.action)} gate ${decision.gateId}`,
+    childPid: pid,
+    now: rt.now(),
+  });
+  report(io, opts, decision.gateId, { pid });
+  return 0;
+}
+
+/**
+ * The stored envelope as a resume submission. `requireApproval` is not re-sent: `decision` alone
+ * arms the harness's gate path and registers `request_approval`, so a rejected leaf can park again.
+ */
+function resumeEnvelope(
+  sessionId: string,
+  stored: LedgerEnvelope,
+  decision: NonNullable<LeafEnvelope['decision']>,
+): LeafEnvelope | undefined {
+  const base = {
+    sessionId,
+    decision,
+    ...(stored.configRef ? { configRef: stored.configRef } : {}),
+  };
+  if (stored.kind === 'prompt') {
+    return {
+      ...base,
+      kind: 'prompt',
+      prompt: stored.prompt ?? '',
+      ...(stored.workloadId ? { workloadId: stored.workloadId } : {}),
+      ...(stored.contextWritable ? { contextWritable: true } : {}),
+    };
+  }
+  if (stored.kind === 'solve' && stored.repoUrl && stored.ref) {
+    return {
+      ...base,
+      kind: 'solve',
+      problemStatement: stored.prompt ?? '',
+      repoUrl: stored.repoUrl,
+      ref: stored.ref,
+    };
+  }
+  // A legacy `converge` row, or a solve row missing its repo: the harness would refuse the
+  // submission, so say so here rather than fork a worker that only fails.
+  return undefined;
+}
+
+function report(
+  io: Io,
+  opts: DecideOptions,
+  gateId: number,
+  how: { turnId: string } | { pid: number },
+): void {
+  const where = 'turnId' in how ? `turn ${how.turnId}` : `pid ${how.pid}`;
+  io.err(`${past(opts.action)} gate ${gateId} on ${opts.sessionId}  (${where})`);
+  if (opts.json) {
+    io.out(
+      JSON.stringify({ sessionId: opts.sessionId, gateId, action: opts.action, ...how }) + '\n',
+    );
+  } else {
+    io.out(`${opts.sessionId}\n`);
   }
 }
 

@@ -617,6 +617,70 @@ describe('spawn / subagents / get', () => {
     });
   });
 
+  it('approve / reject route the sessionId, --gate and --feedback through to cmdDecide', async () => {
+    const stub = vi.fn(async (..._a: unknown[]) => 0);
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdDecide').mockImplementation(stub);
+    onTestFinished(() => spy.mockRestore());
+    expect(
+      await main(['approve', 'sess-1', '--gate', '0'], {}, io(), { buildRuntime: fakeBuild }),
+    ).toBe(0);
+    // Gate ids count from 0, so `--gate 0` must survive the parse.
+    expect(stub.mock.calls[0][2]).toMatchObject({
+      sessionId: 'sess-1',
+      action: 'approve',
+      gateId: 0,
+    });
+    expect(
+      await main(['reject', 'sess-1', '--feedback', 'use git log'], {}, io(), {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(0);
+    expect(stub.mock.calls[1][2]).toMatchObject({
+      sessionId: 'sess-1',
+      action: 'reject',
+      feedback: 'use git log',
+    });
+    expect(stub.mock.calls[1][2]).not.toHaveProperty('gateId');
+  });
+
+  it('refuses a non-numeric --gate, a missing sessionId, and --gate outside approve/reject', async () => {
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdDecide');
+    onTestFinished(() => spy.mockRestore());
+    const o = io();
+    expect(
+      await main(['approve', 'sess-1', '--gate', 'first'], {}, o, {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(2);
+    expect(o.errs.join('\n')).toContain('--gate must be a whole gate number');
+    expect(await main(['approve'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    expect(await main(['approve', 'a', 'b'], {}, io(), { buildRuntime: fakeBuild })).toBe(2);
+    const o2 = io();
+    expect(await main(['get', 's', '--gate', '1'], {}, o2, { buildRuntime: fakeBuild })).toBe(2);
+    expect(o2.errs.join('\n')).toContain('--gate only applies to');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('--require-approval reaches cmdSpawn, and only on spawn', async () => {
+    const stub = vi.fn(async (..._a: unknown[]) => 0);
+    const mod = await import('../src/subagent.js');
+    const spy = vi.spyOn(mod, 'cmdSpawn').mockImplementation(stub);
+    onTestFinished(() => spy.mockRestore());
+    expect(
+      await main(['spawn', 'p', '--kind', 'prompt', '--require-approval'], {}, io(), {
+        buildRuntime: fakeBuild,
+      }),
+    ).toBe(0);
+    expect(stub.mock.calls[0][2]).toMatchObject({ requireApproval: true });
+    const o = io();
+    expect(await main(['run', 'p', '--require-approval'], {}, o, { buildRuntime: fakeBuild })).toBe(
+      2,
+    );
+    expect(o.errs.join('\n')).toContain('--require-approval only applies to');
+  });
+
   it('spawn refuses an invalid --kind at the CLI level (never reaches cmdSpawn)', async () => {
     const mod = await import('../src/subagent.js');
     const spy = vi.spyOn(mod, 'cmdSpawn');
