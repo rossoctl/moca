@@ -183,8 +183,9 @@ export const USAGE = `usage:
                                                  let a subagent paused for approval go ahead; prints
                                                  the turn it resumed as ('mocactl get SESSIONID'
                                                  shows what it proposed and the number --gate takes,
-                                                 needed only when this client cannot read that;
-                                                 --feedback: a note that reaches the subagent)
+                                                 which is read off the paused run when the flag is
+                                                 left out; --feedback: a note that reaches the
+                                                 subagent)
   mocactl reject SESSIONID [--gate N] [--feedback TEXT] [--json]
                                                  refuse what the subagent proposed, and it carries
                                                  on from there (--feedback says what to do instead,
