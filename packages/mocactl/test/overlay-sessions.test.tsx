@@ -98,9 +98,10 @@ describe('SessionsOverlay', () => {
     });
     transcripts.appendPrompt('aaaaaaaa-1', 'This is a research task');
     transcripts.appendPrompt('cccccccc-3', 'This is a research task');
+    transcripts.appendPrompt('dddddddd-4', 'Follow up on dddddddd');
     const cp = fakeControlPlane({
       listSessions: async () => ({
-        sessions: [summary('aaaaaaaa-1'), summary('bbbbbbbb-2'), summary('cccccccc-3')],
+        sessions: ['aaaaaaaa-1', 'bbbbbbbb-2', 'cccccccc-3', 'dddddddd-4'].map((id) => summary(id)),
         nextCursor: null,
       }),
     });
@@ -122,6 +123,8 @@ describe('SessionsOverlay', () => {
     const f = lastFrame()!;
     expect(f).toContain('aaaaaaaa · 3h ago · 4 turns · local history');
     expect(f).toContain('cccccccc · 3h ago · 4 turns · local history');
+    // A local title that names the id is still not the fallback.
+    expect(f).toContain('Follow up on dddddddd dddddddd · 3h ago');
     // The fallback title already carries the id; it is not repeated.
     expect(f.match(/bbbbbbbb/g)).toHaveLength(1);
   });

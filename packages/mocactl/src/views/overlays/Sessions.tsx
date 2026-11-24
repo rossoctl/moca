@@ -11,12 +11,18 @@ import { formatRelative } from '../format.js';
 import { SelectList } from '../SelectList.js';
 import { Spinner } from '../Spinner.js';
 
+const shortSessionId = (s: SessionSummary): string => sanitizeRemote(s.sessionId).slice(0, 8);
+
+/** The title of a session with no local one: its creation time and short id. */
+function fallbackTitle(s: SessionSummary): string {
+  const when = new Date(s.createdAt).toISOString().slice(0, 16).replace('T', ' ');
+  return `${when} · ${shortSessionId(s)}`;
+}
+
 /** Terminal-safe: a local title is derived from a prompt, and the id is the server's. */
 export function sessionTitle(s: SessionSummary, transcripts?: TranscriptStore): string {
   const local = transcripts?.load(s.sessionId)?.title;
-  if (local) return sanitizeRemote(local);
-  const when = new Date(s.createdAt).toISOString().slice(0, 16).replace('T', ' ');
-  return `${when} · ${sanitizeRemote(s.sessionId).slice(0, 8)}`;
+  return local ? sanitizeRemote(local) : fallbackTitle(s);
 }
 
 interface Props {
@@ -79,10 +85,9 @@ export function SessionsOverlay({
     () =>
       (sessions ?? []).map((s) => {
         const title = sessionTitle(s, transcripts);
-        const shortId = sanitizeRemote(s.sessionId).slice(0, 8);
         const detail = [
           // Titles derived from the first prompt can repeat; the id tells the sessions apart.
-          title.endsWith(shortId) ? undefined : shortId,
+          title === fallbackTitle(s) ? undefined : shortSessionId(s),
           formatRelative(s.lastTurnAt ?? s.createdAt, now()),
           `${s.turns} turn${s.turns === 1 ? '' : 's'}`,
           s.sandboxTier ? sanitizeRemote(s.sandboxTier) : undefined,
