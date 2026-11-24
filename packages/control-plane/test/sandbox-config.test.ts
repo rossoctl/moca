@@ -7,7 +7,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { UnavailableCredentialStore, type CredentialStore } from '../src/credential-store.js';
 import { configFromEnv, depsFromEnv } from '../src/main.js';
 import { RedisSandboxStore } from '../src/sandbox-redis.js';
-import { parseTemplates, routeProfileFromEnv } from '../src/sandbox-config.js';
+import {
+  isEnrolled,
+  isEnrolledForSandbox,
+  parseTemplates,
+  routeProfileFromEnv,
+} from '../src/sandbox-config.js';
 import { MEMBER_SUBJECT_RE } from '../src/identity.js';
 
 const KEY = generateKeyPairSync('ed25519')
@@ -97,6 +102,41 @@ describe('the combined profile config (combined control plane spec §3.5)', () =
     ]) {
       expect(messageOf(() => configFromEnv(cenv({ [name]: undefined })))).toContain(name);
     }
+  });
+
+  // SH_SANDBOX_TEST_USERS_ENROLLED: the one setting that enrols test:1..N for the sandbox routes
+  // without naming each on the allow list (ADR-0045 range-checks rather than pre-minting).
+  it('reads SH_SANDBOX_TEST_USERS_ENROLLED as exactly "true", and defaults it off', () => {
+    const users = { SH_TEST_USERS: '1000', SH_TEST_USER_SECRET: 's'.repeat(32) }; // notsecret
+    expect(configFromEnv(cenv(users)).sandbox!.testUsersEnrolled).toBe(false);
+    expect(
+      configFromEnv(cenv({ ...users, SH_SANDBOX_TEST_USERS_ENROLLED: 'true' })).sandbox!
+        .testUsersEnrolled,
+    ).toBe(true);
+    // A near miss must not enrol a thousand subjects, as SH_ALLOW_OPERATOR_FALLBACK (main.ts).
+    for (const v of ['1', 'TRUE', 'yes', 'True', ' true']) {
+      expect(
+        configFromEnv(cenv({ ...users, SH_SANDBOX_TEST_USERS_ENROLLED: v })).sandbox!
+          .testUsersEnrolled,
+        v,
+      ).toBe(false);
+    }
+  });
+
+  it('refuses to boot when the test-user range is enrolled but no test user can log in', () => {
+    const msg = messageOf(() => configFromEnv(cenv({ SH_SANDBOX_TEST_USERS_ENROLLED: 'true' })));
+    expect(msg).toContain('SH_SANDBOX_TEST_USERS_ENROLLED');
+    expect(msg).toContain('SH_TEST_USERS');
+    // With the logins on, the same settings boot.
+    expect(
+      configFromEnv(
+        cenv({
+          SH_SANDBOX_TEST_USERS_ENROLLED: 'true',
+          SH_TEST_USERS: '1000',
+          SH_TEST_USER_SECRET: 's'.repeat(32), // notsecret
+        }),
+      ).sandbox!.testUsersEnrolled,
+    ).toBe(true);
   });
 
   it('builds the sandbox store and keeps the harness credential store', () => {

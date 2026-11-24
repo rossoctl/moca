@@ -82,6 +82,76 @@ describe('who may call what on the combined profile', () => {
     expect(isEnrolledForSandbox(tester.sub, ['admin'], noList.config)).toBe(true);
   });
 
+  // SH_SANDBOX_TEST_USERS_ENROLLED: the same intent as the case above for a dev stack running N
+  // test users, where naming each of 1000 on the allow list would undo ADR-0045's range check.
+  it('enrols test:1..N when SH_SANDBOX_TEST_USERS_ENROLLED is on, and nothing outside the range', () => {
+    const base = makeDeps().config.sandbox!;
+    const d = makeDeps({
+      config: {
+        routeProfile: 'combined',
+        testUsers: 1000,
+        sandbox: { ...base, allowedSubjects: [alice.sub], testUsersEnrolled: true },
+      },
+    });
+    for (const sub of ['test:1', 'test:2', 'test:999', 'test:1000'])
+      expect(isEnrolledForSandbox(sub, [], d.config), sub).toBe(true);
+    // The bound is the configured count, and a subject the login endpoint will not issue (test:0,
+    // out of range, or not an integer) is not enrolled here either.
+    for (const sub of ['test:0', 'test:1001', 'test:01x', 'test:', 'test:1.5', 'test:-1'])
+      expect(isEnrolledForSandbox(sub, [], d.config), sub).toBe(false);
+    // Everyone else is judged by the allow list exactly as before.
+    expect(isEnrolledForSandbox(outsider.sub, [], d.config)).toBe(false);
+    expect(isEnrolledForSandbox(alice.sub, [], d.config)).toBe(true);
+    // The flag off is the negative control: the same subjects, the same count, all refused.
+    const off = makeDeps({
+      config: {
+        routeProfile: 'combined',
+        testUsers: 1000,
+        sandbox: { ...base, allowedSubjects: [alice.sub] },
+      },
+    });
+    for (const sub of ['test:1', 'test:1000'])
+      expect(isEnrolledForSandbox(sub, [], off.config), sub).toBe(false);
+    // On the sandbox profile the same flag also admits the LOGIN, because there enrollment IS the
+    // authentication -- a test user that could not be enrolled could not log in either.
+    const sandbox = makeDeps({
+      config: {
+        routeProfile: 'sandbox',
+        testUsers: 1000,
+        sandbox: { ...base, allowedSubjects: [alice.sub], testUsersEnrolled: true },
+      },
+    });
+    expect(isEnrolled(tester.sub, [], sandbox.config)).toBe(true);
+    expect(isEnrolled('test:1001', [], sandbox.config)).toBe(false);
+    // And with the flag off, that profile refuses the login as it always did.
+    const closed = makeDeps({
+      config: {
+        routeProfile: 'sandbox',
+        testUsers: 1000,
+        sandbox: { ...base, allowedSubjects: [alice.sub] },
+      },
+    });
+    expect(isEnrolled(tester.sub, [], closed.config)).toBe(false);
+  });
+
+  it('serves a sandbox route to an enrolled test user, not just the gate function', async () => {
+    const base = makeDeps().config.sandbox!;
+    const d = makeDeps({
+      config: {
+        routeProfile: 'combined',
+        testUsers: 10,
+        sandbox: { ...base, allowedSubjects: [alice.sub], testUsersEnrolled: true },
+      },
+    });
+    expect(await outcome(() => HANDLERS.listSandboxes!(ctx({ principal: tester }), d))).not.toBe(
+      'not_enrolled',
+    );
+    const beyond = { ...alice, sub: 'test:11', tenant: 'test:11' };
+    expect(await codeOf(() => HANDLERS.listSandboxes!(ctx({ principal: beyond }), d))).toBe(
+      'not_enrolled',
+    );
+  });
+
   it('refuses every template write to them, and leaves the reads open', async () => {
     const d = combined();
     const writes = [
