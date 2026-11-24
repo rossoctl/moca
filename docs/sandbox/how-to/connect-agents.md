@@ -204,7 +204,7 @@ export BOB_API_KEY=...           # or let `bob chat` log you in interactively
 bob mcp list                     # expect: sandbox: mocactl sbx mcp | enabled | stdio | workspace
 
 # 4. run it, from the repository root, NAMING the sandbox tools (see below).
-#    Check `mocactl sbx templates` carries your language before asking for a build or test run.
+#    Check `mocactl sbx templates ls` carries your language before asking for a build or test run.
 bob chat
 #    then, in the session, something whose result you can check:
 #    "Using the sandbox bash and write tools, add a CHANGES.md at the top of /workspace
@@ -291,6 +291,6 @@ interactively and choose a trust level.`). Prefer choosing the level in `bob cha
 **Toolchains.** The sandbox templates carry the Pi toolchain — `bash`, `git`, Python 3, `ripgrep`,
 `curl` — and the VM reaches only the hosts on the egress allowlist, and none on a template without
 egress, so a toolchain the template lacks can be fetched only from an allowlisted host. Reading,
-grepping and editing work; compiling does not, for a language the template does not carry. Check `mocactl sbx templates` before asking Bob for a build or a test run, and expect it to report a
+grepping and editing work; compiling does not, for a language the template does not carry. Check `mocactl sbx templates ls` before asking Bob for a build or a test run, and expect it to report a
 missing compiler rather than produce one. (If it silently succeeds instead, check the tool names: it
 may have used your laptop's.)

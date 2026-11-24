@@ -120,7 +120,9 @@ export async function sweepGates(deps: CpDeps, limit = SWEEP_LIMIT): Promise<num
  */
 export function startGateSweep(deps: CpDeps, intervalMs = GATE_SWEEP_INTERVAL_MS): () => void {
   const timer = setInterval(() => {
-    void sweepGates(deps);
+    // Same fix as notify-sweep.ts's startNotifySweep: an unhandled rejection here terminates the
+    // process on Node 22 by default, so a Redis blip would restart the control plane every tick.
+    void sweepGates(deps).catch((err) => console.error('[gate-sweep]', err));
   }, intervalMs);
   timer.unref();
   return () => clearInterval(timer);

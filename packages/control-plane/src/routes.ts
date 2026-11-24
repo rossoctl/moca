@@ -363,6 +363,32 @@ export const ROUTES: readonly RouteSpec[] = [
     operationId: 'streamEvents',
   },
   {
+    // #394: the caller's own notification config. Not session-scoped, for the reason /v1/events is
+    // not: it is keyed by the token's subject.
+    method: 'GET',
+    path: '/v1/notifications',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: HARNESS,
+    operationId: 'getNotifications',
+  },
+  {
+    method: 'PUT',
+    path: '/v1/notifications',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: HARNESS,
+    operationId: 'putNotifications',
+  },
+  {
+    method: 'DELETE',
+    path: '/v1/notifications',
+    auth: 'api',
+    sessionScoped: false,
+    profiles: HARNESS,
+    operationId: 'deleteNotifications',
+  },
+  {
     method: 'GET',
     path: '/v1/credentials',
     auth: 'api',

@@ -214,7 +214,7 @@ the sandbox (`mocactl sbx rm <sandbox id>`).
 ## 7. Make it available to others
 
 **A new template is visible to everyone on the deployment by default** (`deployment` visibility):
-every user sees it in `mocactl sbx templates`, and can activate it and create sandboxes from it.
+every user sees it in `mocactl sbx templates ls`, and can activate it and create sandboxes from it.
 To keep it to yourself, create it with `--visibility private`, or change it later:
 
 ```bash

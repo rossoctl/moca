@@ -251,7 +251,7 @@ describe('mocactl sbx --record F', () => {
       });
     const seen: string[] = [];
     for (const argv of [
-      ['templates'],
+      ['templates', 'ls'],
       ['up', '--no-agent-config'],
       ['ls'],
       ['create', '--name', 'other'],

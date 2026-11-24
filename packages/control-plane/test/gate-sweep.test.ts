@@ -353,4 +353,23 @@ describe('sweepGates (#393, design §3)', () => {
       vi.useRealTimers();
     }
   });
+
+  it('a tick whose dueGates() rejects logs the error, with no unhandled rejection', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const dueGates = vi.spyOn(deps.turns, 'dueGates').mockRejectedValue(new Error('redis down'));
+    vi.useFakeTimers();
+    try {
+      const stop = startGateSweep(deps, 1_000);
+      try {
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(errSpy).toHaveBeenCalledWith('[gate-sweep]', expect.any(Error));
+      } finally {
+        stop();
+      }
+    } finally {
+      vi.useRealTimers();
+      errSpy.mockRestore();
+      dueGates.mockRestore();
+    }
+  });
 });

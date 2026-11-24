@@ -199,6 +199,12 @@ services:
       # Seconds a turn may sit paused at a human gate before the sweep answers it (#393). Unset = 0
       # = never, so a gate waits for a person.
       MOCA_GATE_DEADLINE_S:
+      # Notifications (#394). Unset MOCA_NOTIFY_ALLOW = off; it is the SSRF allowlist for sinks.
+      MOCA_NOTIFY_ALLOW:
+      MOCA_NOTIFY_BASE_URL:
+      MOCA_NOTIFY_MIN_INTERVAL_S:
+      MOCA_NOTIFY_PER_HOUR:
+      MOCA_NOTIFY_FAIL_MAX:
       # The result TTL the turn record's own TTL is derived from (+1 h margin).
       LEAF_RESULT_TTL_SECONDS:
     volumes:

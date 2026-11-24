@@ -92,7 +92,9 @@ import type { ResultRedisLike } from './turn-result.js';
 import type { TurnStore } from './turn-store.js';
 import type { EgressHost } from './egress-config.js';
 import type { EgressStore } from './egress-log.js';
-import { formatDestination, parseDestination } from './egress-destination.js';
+import { formatDestination, parseDestination, type Destination } from './egress-destination.js';
+import { NOTIFY_HANDLERS } from './notify-handlers.js';
+import type { NotifyStore } from './notify-store.js';
 
 /** A stored destination in normalized form; a legacy or corrupt entry compares as written. */
 function normalizeStored(h: string): string {
@@ -224,6 +226,18 @@ export interface CpConfig {
    * `MOCA_TENANCY=multi` (`checkGrantRedemption`), absent in every single-tenant deployment.
    */
   inferenceUrl?: string;
+  /**
+   * #394. `allow` is the SSRF control and is fail-closed: empty means notifications are off, and
+   * `PUT /v1/notifications` says so by name. The rest are the per-subject rate limits.
+   */
+  notify: {
+    allow: Destination[];
+    /** Public base url for the approval deep link. Absent means the link is omitted. */
+    baseUrl?: string;
+    minIntervalS: number;
+    perHour: number;
+    failMax: number;
+  };
 }
 
 export interface CpDeps {
@@ -303,6 +317,8 @@ export interface CpDeps {
   log?: AuditLog;
   /** The async turn record store (async spec §5.1); absent only in suites that never submit. */
   turns?: TurnStore;
+  /** #394's config store. Absent on a profile with no Redis, as `turns` is. */
+  notify?: NotifyStore;
   /** The leaf queue, holding turn ids and nothing else (§5.1). */
   turnQueue?: TurnQueue;
   /** Reads `leaf:result:<sid>:<turnId>` for the status route (§4.4); absent means no result. */
@@ -1673,4 +1689,5 @@ export const HANDLERS: Record<string, Handler> = {
   ...MEMBER_HANDLERS,
   ...EGRESS_HANDLERS,
   ...TURN_HANDLERS,
+  ...NOTIFY_HANDLERS,
 };

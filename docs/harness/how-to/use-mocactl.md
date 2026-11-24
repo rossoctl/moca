@@ -328,7 +328,7 @@ local history (the control plane stores no titles).
 ## Sandboxes and templates
 
 `mocactl sbx` is the sandbox service's client: log in with `mocactl sbx login`, list templates with
-`mocactl sbx templates`, and create a sandbox of one with `mocactl sbx create --template ID` (or
+`mocactl sbx templates ls`, and create a sandbox of one with `mocactl sbx create --template ID` (or
 `sbx up --template ID` in a repository). On a deployment with the template store,
 `mocactl sbx templates` also creates, follows, activates and retires your own templates. The
 [sandbox service user guide](../../sandbox/user-guide.md) has every command; turning a container image into a

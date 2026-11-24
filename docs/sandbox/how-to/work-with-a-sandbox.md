@@ -14,7 +14,7 @@ sidebar_position: 5
   allowlisted, through a proxy (anything else answers `403 destination_denied`); one without
   egress reaches nothing. A package installs only from a registry on the allowlist: the default
   one carries the common registries (PyPI, npm, crates.io, the Go module proxy), but your operator
-  may have changed it. The templates carry the toolchains: `mocactl sbx templates` lists them, with
+  may have changed it. The templates carry the toolchains: `mocactl sbx templates ls` lists them, with
   their tools, and `mocactl sbx policy` lists each profile's egress. A refused request's body says
   that the host is not on the sandbox's egress allowlist; retrying does not help. That body shows
   only for plain-HTTP requests and clients that print it: an HTTPS request is refused at its

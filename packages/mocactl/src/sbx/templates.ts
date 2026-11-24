@@ -12,7 +12,7 @@ import type {
   SbxTemplateCreate,
   SbxTemplateFull,
 } from './api.js';
-import { failed, refusalText, SBX_EXIT, type SbxCtx } from './commands.js';
+import { columns, failed, refusalText, SBX_EXIT, type SbxCtx } from './commands.js';
 import { dryRun } from './dry-run.js';
 import { openExec, type ExecFactory } from './exec.js';
 import { noticingExec } from './notices.js';
@@ -174,7 +174,8 @@ const UNAVAILABLE: Record<SbxReadinessReason, string> = {
 };
 
 /**
- * A build's readiness, with its capacity when it is active (`active (running 3, in use 1)`), why
+ * A build's readiness, with its capacity when it is active (`active (capacity 3, in use 1)`: the
+ * sandboxes its worker advertises it can hold, and its live ones now), why
  * it is unavailable (`unavailable (memory)`), its place in its host's start line (`activating
  * (queued at 3)`), or its idle grace (`deactivating (graced until ...)`).
  */
@@ -193,7 +194,7 @@ function readinessText(
   if (b.readiness === null) return '';
   const c = b.capacity;
   const cap = c
-    ? ` (running ${c.running ?? '?'}${c.inUse !== null ? `, in use ${c.inUse}` : ''})`
+    ? ` (capacity ${c.running ?? '?'}${c.inUse !== null ? `, in use ${c.inUse}` : ''})`
     : '';
   const extra = [
     ...(!c && b.readinessReason ? [sanitizeRemote(b.readinessReason)] : []),
@@ -219,12 +220,31 @@ function buildLine(b: SbxBuild): string {
   ].join('  ');
 }
 
-/** `templates show ID [--build B]`: a template and its builds, or one build. */
+/** The build table's header, and a build's row in it (empty fields as `-`; REASON only if some build has one). */
+function buildTable(bs: SbxBuild[]): string {
+  const withReason = bs.some((b) => b.reason);
+  const header = ['BUILD', 'STATUS', 'READINESS', 'TAGS', ...(withReason ? ['REASON'] : [])];
+  const rows = bs.map((b) => [
+    sanitizeRemote(
+      b.handle === undefined || b.handle === b.buildId ? b.buildId : `${b.handle} ${b.buildId}`,
+    ),
+    sanitizeRemote(b.status),
+    (b.readiness !== null ? readinessText(b) : '') || '-',
+    b.tags.map(sanitizeRemote).join(',') || '-',
+    ...(withReason ? [b.reason ? reasonText(b.reason) : '-'] : []),
+  ]);
+  return columns(header, rows);
+}
+
+/**
+ * `templates show ID [--build B]`: a template's fields, one labelled line each, then a table of its
+ * builds (newest first); or, with --build, that build's row alone.
+ */
 export async function cmdShowTemplate(c: SbxCtx, id: string, build?: string): Promise<number> {
   try {
     if (build !== undefined) {
       const b = await c.api.getTemplateBuild(id, build);
-      c.io.out(c.json ? JSON.stringify(b) + '\n' : buildLine(b) + '\n');
+      c.io.out(c.json ? JSON.stringify(b) + '\n' : buildTable([b]));
       return SBX_EXIT.ok;
     }
     const t = await c.api.getTemplate(id);
@@ -232,12 +252,27 @@ export async function cmdShowTemplate(c: SbxCtx, id: string, build?: string): Pr
       c.io.out(JSON.stringify(t) + '\n');
       return SBX_EXIT.ok;
     }
-    c.io.out(
-      `${sanitizeRemote(t.id)}  owner ${sanitizeRemote(t.owner ?? 'the deployment')}  ${sanitizeRemote(t.visibility)}` +
-        `  ${sanitizeRemote(t.onboarding ?? 'no build')}` +
-        `${t.readiness !== null ? `  ${readinessText({ readiness: t.readiness, readinessReason: t.readinessReason, capacity: null })}` : ''}\n`,
-    );
-    for (const b of t.builds) c.io.out(`  ${buildLine(b)}\n`);
+    const fields: [string, string][] = [
+      ['template', sanitizeRemote(t.id)],
+      ['owner', sanitizeRemote(t.owner ?? 'the deployment')],
+      ['visibility', sanitizeRemote(t.visibility)],
+      ['status', sanitizeRemote(t.onboarding ?? 'no build')],
+      ...(t.readiness !== null
+        ? [
+            [
+              'readiness',
+              readinessText({
+                readiness: t.readiness,
+                readinessReason: t.readinessReason,
+                capacity: null,
+              }),
+            ] as [string, string],
+          ]
+        : []),
+    ];
+    const width = Math.max(...fields.map(([k]) => k.length));
+    for (const [k, v] of fields) c.io.out(`${k.padEnd(width)}  ${v}\n`);
+    c.io.out('\n' + (t.builds.length ? buildTable(t.builds) : 'no builds\n'));
     return SBX_EXIT.ok;
   } catch (err) {
     return failed(c, err);

@@ -106,7 +106,7 @@ configured Claude Code, OpenCode and IBM Bob: .mcp.json, .claude/settings.json, 
 What `up` does:
 
 - It creates the sandbox from the `default` template. To list the other templates, run
-  `mocactl sbx templates`. To select one, add `--template <id>`.
+  `mocactl sbx templates ls`. To select one, add `--template <id>`.
 - It pushes your working tree. It does not push files that can hold secrets (`.env*`, `*.pem`,
   `*.key`, `id_*`).
 - It writes the agent configuration. It also records the binding in `.sbx/sandbox.json`.

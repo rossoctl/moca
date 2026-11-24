@@ -304,7 +304,7 @@ the credentials the host swaps in:
   mocactl sbx credentials delete NAME            delete one
 
 templates: what a sandbox is created from:
-  mocactl sbx templates [--json]                 the templates a sandbox can be created from, with
+  mocactl sbx templates ls [--json]              the templates a sandbox can be created from, with
                                                  their readiness and tags
   mocactl sbx quota [--json]                     your template quotas and use, and your live-sandbox cap
   mocactl sbx policy [--json]                    the deployment's template policy: profiles (envelope,
@@ -780,6 +780,7 @@ const TEMPLATE_ADMIN_SUBS = ['tag', 'untag', 'edit', 'transfer'];
 /** The `templates` subcommands; their arguments are checked one by one in sbxMain (`quota`: one
  * TARGET). */
 const TEMPLATE_SUBS = [
+  'ls',
   'create',
   'build',
   'show',
@@ -1230,7 +1231,7 @@ async function sbxMainWith(
     return SBX_EXIT.usage;
   }
   if (values.template !== undefined && !values.template.trim()) {
-    io.err(`sbx: --template needs a template id (see mocactl sbx templates)\n${usage}`);
+    io.err(`sbx: --template needs a template id (see mocactl sbx templates ls)\n${usage}`);
     return SBX_EXIT.usage;
   }
   if (
@@ -1246,14 +1247,18 @@ async function sbxMainWith(
     return SBX_EXIT.usage;
   }
   // `templates SUB ...` (template lifecycle spec §4), the owner's and admin's actions (§5.1-§5.2,
-  // retire among them; quota TARGET: §5.2), and activate and deactivate (§6.3); bare `templates`
-  // lists them.
+  // retire among them; quota TARGET: §5.2), and activate and deactivate (§6.3); `templates ls`
+  // lists the templates.
   if (sub !== undefined && !TEMPLATE_SUBS.includes(sub)) {
     io.err(`sbx: unknown templates command '${sanitizeRemote(sub)}'\n${usage}`);
     return SBX_EXIT.usage;
   }
   if (sub !== undefined && TEMPLATE_ADMIN_SUBS.includes(sub) && extra.some((x) => !x.trim())) {
     io.err(`sbx: templates ${sub} takes no empty argument\n${usage}`);
+    return SBX_EXIT.usage;
+  }
+  if (sub === 'ls' && extra.length > 0) {
+    io.err(`sbx: templates ls takes no argument\n${usage}`);
     return SBX_EXIT.usage;
   }
   if (sub === 'create' && extra.length > 0) {
@@ -1343,11 +1348,11 @@ async function sbxMainWith(
     sizes[flag] = n * 2 ** 20;
   }
   const { 'max-push': maxPush, 'max-file': maxFile } = sizes;
-  // Bare `credentials` lists its subcommands, as bare `sbx` does, first pointing an old script or
-  // habit (bare `credentials` once listed the credentials) at `credentials ls`.
-  if (command === 'credentials' && arg === undefined) {
+  // Bare `templates` and `credentials` list their subcommands, as bare `sbx` does, first pointing an
+  // old script or habit (bare, each once listed its own) at `templates ls` or `credentials ls`.
+  if ((command === 'templates' || command === 'credentials') && arg === undefined) {
     io.err(
-      `sbx: credentials needs a subcommand; to list the credentials, use 'mocactl sbx credentials ls'\n${usage}`,
+      `sbx: ${command} needs a subcommand; to list the ${command}, use 'mocactl sbx ${command} ls'\n${usage}`,
     );
     return SBX_EXIT.usage;
   }
