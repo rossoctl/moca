@@ -455,10 +455,17 @@ export function configFromEnv(env: NodeJS.ProcessEnv): CpConfig {
 /**
  * Combined control plane spec §3.5: everything the harness profile requires (above) AND the sandbox
  * profile's own settings, each refusal naming what is missing. Test users may stay (they log in and
- * use sessions; the sandbox routes refuse them, §3.2). The template list is the one list both read.
+ * use sessions; the sandbox routes refuse them unless SH_SANDBOX_TEST_USERS_ENROLLED enrols the
+ * range, §3.2). The template list is the one list both read.
  */
 function combinedProfileConfig(env: NodeJS.ProcessEnv, harness: CpConfig): CpConfig {
   const sandbox = sandboxConfigFromEnv(env, { kekIsShared: true });
+  // Enrolling a range nobody can log in as would be a silently dead setting: the sandbox routes
+  // would admit test:1..N while /v1/auth/test-user refuses every one of them (ADR-0045). Name both
+  // variables, neither value.
+  if (sandbox.testUsersEnrolled && harness.testUsers <= 0) {
+    throw new Error('SH_SANDBOX_TEST_USERS_ENROLLED needs SH_TEST_USERS: no test user can log in');
+  }
   // The members routes are served on this profile too, so the installer's bearer is read as on
   // the sandbox profile (#938).
   const installerToken = installerTokenFromEnv(env);

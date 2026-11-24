@@ -124,10 +124,19 @@ caller's own subject for the operator to enroll.
 
 A **test user on `combined`** is a case of its own. `mocactl sbx login --test-user N` logs it in
 (the login is open there, as on `harness`), but the sandbox routes still check enrollment, so the
-subject must also be in `SH_ALLOWED_SUBJECTS` — which admits `test:<n>`, unlike `/v1/subjects` — or
-in `SH_ADMIN_SUBJECTS`. Without one of those the login succeeds and `mocactl sbx up` answers
-`403 not_enrolled` naming `test:<n>`. On the `sandbox` profile there is nothing to configure: the
-control plane refuses to boot with `SH_TEST_USERS` set at all (ADR-0045).
+subject must also be enrolled, in one of three ways:
+
+| How                                   | What it enrols                                                    | When to use it                           |
+| ------------------------------------- | ----------------------------------------------------------------- | ---------------------------------------- |
+| `SH_ALLOWED_SUBJECTS=test:1,test:2`   | just those subjects (it admits `test:<n>`, unlike `/v1/subjects`) | a handful of test users                  |
+| `SH_ADMIN_SUBJECTS=test:1`            | that subject, with the admin role as well                         | testing the admin path                   |
+| `SH_SANDBOX_TEST_USERS_ENROLLED=true` | `test:1` … `test:SH_TEST_USERS`, as a range check                 | a stack running tens or hundreds of them |
+
+Without one of them the login succeeds and `mocactl sbx up` answers `403 not_enrolled` naming
+`test:<n>`. The range flag is for dev and test stacks only (ADR-0045): the control plane refuses it
+without `SH_TEST_USERS`, and reads it as exactly `true`, so a typo cannot enrol a thousand subjects.
+On the `sandbox` profile there is nothing to configure: the control plane refuses to boot with
+`SH_TEST_USERS` set at all (ADR-0045).
 
 ## When a user leaves
 

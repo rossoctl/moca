@@ -89,6 +89,9 @@ export function makeDeps(
     // Empty allow = notifications off, which is what every suite that is not about them wants.
     notify: { allow: [], minIntervalS: 5, perHour: 60, failMax: 10 },
     sandbox: {
+      // Off by default: the suites that want the test-user range enrolled say so (sandbox-config,
+      // combined-enrollment).
+      testUsersEnrolled: false,
       templates: [
         {
           id: 'default',

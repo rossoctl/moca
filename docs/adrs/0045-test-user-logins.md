@@ -92,7 +92,14 @@ server, because the seam already exists and `identity.ts` already anticipates a 
   neither mounts it nor boots with `SH_TEST_USERS`. The boundary above is unchanged; what is new is
   that `mocactl` can now fill `sbx-auth.json` without a browser. A login is not a sandbox: on
   `combined` the sandbox routes check enrollment, so the operator must also put the subject in
-  `SH_ALLOWED_SUBJECTS` (which admits `test:<n>`, unlike `/v1/subjects`) or `SH_ADMIN_SUBJECTS`.
+  `SH_ALLOWED_SUBJECTS` (which admits `test:<n>`, unlike `/v1/subjects`) or `SH_ADMIN_SUBJECTS` --
+  or cover the whole range with `SH_SANDBOX_TEST_USERS_ENROLLED=true`, which enrols
+  `test:1..SH_TEST_USERS` as a RANGE CHECK rather than a list. That is the decision this addition
+  turns on: naming a thousand subjects in `SH_ALLOWED_SUBJECTS` would re-materialise exactly the
+  identities this ADR chose not to pre-mint, so the range is checked the same way
+  `TestUserProvider.has` checks it at login. The control plane refuses the flag without
+  `SH_TEST_USERS`, since it would enrol a range nobody could log in as, and reads it as exactly
+  `true` so a typo cannot enrol a thousand subjects.
 - Follow-up owed: migrate `smoke.sh` off the in-pod mint; decide whether `mocactl` should grow a
   `--profile` flag, since today a second login in one `XDG_CONFIG_HOME` overwrites the first and the
   driver script works around it with a directory per user.
