@@ -1,0 +1,33 @@
+# The relay verifies sandbox tokens, which the harness path does not use (../ocp-combined's
+# patch-relay.yaml, same three settings). Additive: MOCA_RELAY_EXEC_TOKEN stays, so the supervisor
+# keeps its own exec path.
+#
+# The isolation cost, as recorded on the combined overlay: the harness exec token is not
+# sandbox-scoped, so a compromised supervisor can Exec into any attached worker, an enrolled user's
+# sandbox included. That is the price of one relay serving both, and it is why this profile is for
+# a dev or single-tenant namespace.
+#
+# The public keyset is the session signer's: the control plane mints sandbox tokens with the same
+# key it mints API tokens with, and keeps them apart by type, audience and issuer (spec §3.3).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-relay
+  namespace: moca-single
+spec:
+  template:
+    spec:
+      containers:
+        # The base's container name (base/relay.yaml), not "relay": a strategic-merge patch merges
+        # the container list BY NAME, so a wrong name silently adds a second, image-less container
+        # instead of patching this one.
+        - name: sandbox-relay
+          env:
+            - name: SH_SANDBOX_TOKEN_PUBLIC_KEYS
+              valueFrom: { secretKeyRef: { name: sbx-token-keys, key: PUBLIC_KEYS } }
+            - name: SH_SANDBOX_TOKEN_ISSUER
+              valueFrom: { configMapKeyRef: { name: sbx-settings, key: SH_SANDBOX_TOKEN_ISSUER } }
+            - name: SH_SANDBOX_MAX_INFLIGHT
+              valueFrom:
+                configMapKeyRef:
+                  { name: sbx-settings, key: SH_SANDBOX_MAX_INFLIGHT, optional: true }

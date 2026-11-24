@@ -1,0 +1,86 @@
+# The container-tier worker an sbx template can name. This is the one object with no precedent in
+# the repo, and the reason it has to exist:
+#
+# A template's `worker` must match /^[A-Za-z_][A-Za-z0-9_]*$/ (sandbox-config.ts WORKER_RE), because
+# the id becomes a token name (SH_RELAY_TOKEN_<id>). Every other in-cluster worker takes its
+# SANDBOX_ID from `fieldRef: metadata.name` -- moca-sandbox-0, a workload sandbox's pod -- so every
+# one of them is DASHED and can never back a template: the control plane refuses the setting at boot
+# with "worker must match ...". Hence a Deployment (one pod, no ordinal in the name) with the id as
+# a LITERAL, which is also why this is not simply a second StatefulSet.
+#
+# It is the sbx sandboxes' host: `sbx up` creates a workspace here and `sbx run` execs into it. The
+# shared pool (moca-sandbox) keeps serving harness sessions; nothing is moved.
+#
+# The isolation boundary this sets: ONE pod backs the `default` template, so every sandbox made from
+# it shares this container -- one kernel, one uid, one /workspace mount. Each sandbox gets its own
+# /workspace/<sandbox-id>, which is the cwd an Exec starts in, but that is a directory, not a
+# boundary: measured on avek2 (2026-11-23), a sandbox of test:6 read a file written by a sandbox of
+# test:5 as ../<other-sandbox-id>/secret.txt. Two consequences, both deliberate here and neither
+# acceptable beyond dev/test: the container tier gives no isolation BETWEEN sandboxes on one worker
+# (the per-Exec microVM tier, ADR-0035, is what does), and SH_SANDBOX_TEST_USERS_ENROLLED=true
+# therefore gives all of test:1..SH_TEST_USERS a shared filesystem. A deployment that needs sandboxes
+# isolated from each other gives each one its own worker, or uses the microVM tier.
+#
+# One worker serving many sandboxes also splits the workspace: `sbx push` lands in the worker's
+# shared root (/workspace/app.py) while an Exec for that sandbox starts in /workspace/<sandbox-id>,
+# so `sbx up` configures an agent that then sees an empty tree. Measured on avek2 with a correct,
+# non-empty token `wsk`. `login`, `create`, `run`, `ls` and `rm` are unaffected.
+#
+# Written in its ocp-single form, because a component's objects are not reached by this overlay's
+# patches: no explicit UID/GID/fsGroup (patch-strip-uids.yaml) and /workspace + /home/sandbox as
+# emptyDirs owned by the assigned fsGroup (patch-sandbox-emptydirs.yaml, whose reasoning applies
+# unchanged -- the image bakes both 1001:0 and an SCC-assigned UID owns neither).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sbx-worker
+  namespace: moca-single
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: sbx-worker } }
+  template:
+    metadata: { labels: { app: sbx-worker } }
+    spec:
+      # The shared pool's ServiceAccount: one namespace after the collapse, and this workload wants
+      # exactly the same (nothing) from the API server.
+      serviceAccountName: moca-sandbox
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: sandbox
+          # Named in full, like ../routes' ghostunnel sidecar and for the same reason: this
+          # component is applied above the overlay, so the base's image transformer has already run
+          # and the bare `moca-remote-worker` placeholder would never be rewritten (verified by
+          # rendering). setup.sh's generated overlay rewrites THIS name when --sandbox-image is
+          # given, so the worker and the shared pool always run the same image.
+          image: ghcr.io/rossoctl/moca-remote-worker:latest
+          env:
+            # A LITERAL id, matching WORKER_RE, and the value SH_SANDBOX_TEMPLATES' worker names.
+            - { name: SANDBOX_ID, value: sbx_default }
+            - { name: RELAY_ADDR, value: 'sandbox-relay-attach.moca-single.svc:9443' }
+            - { name: SANDBOX_TIER, value: container }
+            # The shared attach token: the relay resolves a per-id token first
+            # (SH_RELAY_TOKEN_DIR/<id>, then SH_RELAY_TOKEN_<id>) and falls back to this one, so an
+            # underscore id does not require its own secret to attach.
+            - name: SANDBOX_TOKEN
+              valueFrom: { secretKeyRef: { name: moca-relay-attach, key: SH_RELAY_TOKEN } }
+            - name: SH_WORKSPACE_IDLE
+              valueFrom:
+                configMapKeyRef:
+                  { name: moca-sandbox-settings, key: SH_WORKSPACE_IDLE, optional: true }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            # Writable root on purpose, as the shared pool: this is where agent tools run.
+            readOnlyRootFilesystem: false
+          resources:
+            requests: { cpu: 10m, memory: 64Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+            - { name: home, mountPath: /home/sandbox }
+      volumes:
+        - { name: workspace, emptyDir: {} }
+        - { name: home, emptyDir: {} }

@@ -1,0 +1,19 @@
+# The combined profile: this control plane serves the harness's routes AND the sandbox service's
+# (SH_ROUTE_PROFILE=combined; routes.ts mountsOn mounts a harness-listed route on combined too).
+# Everything else the sandbox half needs is in ../sbx-service, which this component lists.
+#
+# SH_CREDENTIAL_STORE and SH_CREDENTIAL_NAMESPACE stay as ocp-single sets them: this profile still
+# issues the harness's credentials. (../ocp-combined switches to the file store, which it needs
+# because it shares one namespace with an SBX0 deployment; nothing here does.)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moca-control-plane
+  namespace: moca-single
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - { name: SH_ROUTE_PROFILE, value: combined }
