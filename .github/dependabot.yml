@@ -16,8 +16,20 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # Minor and patch only: a major bump rides in its own PR. #1029 bundled
+      # TypeScript 5->7, vitest 2->5 and @types/node 22->26 with a yaml patch, so the
+      # patch could not land without three separate migrations.
       dev-dependencies:
         dependency-type: development
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # @types/node tracks the oldest supported runtime (engines: node >=22), not the
+      # newest release -- a higher major types APIs that Node 22 does not have.
+      - dependency-name: '@types/node'
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: docker
     directory: /
