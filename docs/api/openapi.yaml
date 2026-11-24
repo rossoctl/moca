@@ -2277,7 +2277,9 @@ paths:
         '409':
           description: |
             `gate_not_pending`: no turn of this session is paused at a gate, the `gateId` is not the
-            pending one, or the gate has already been answered.
+            pending one, or the gate has already been answered -- including by a concurrent decision
+            whose resume is still being created, which a retry a moment later answers `202` with
+            that resume's turn id.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }

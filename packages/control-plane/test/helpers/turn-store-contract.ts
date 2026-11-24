@@ -310,6 +310,45 @@ export function turnStoreContract(name: string, make: MakeTurnStore): void {
       await done();
     });
 
+    it('stamps a claim age once per holder and reports that same instant afterwards (#989)', async () => {
+      const { store, done } = await make();
+      expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-first')).toBe('t-first');
+      expect(await store.claimedAtOr('github:1234', 's-1', 't-first', 1_000)).toEqual({
+        at: 1_000,
+        heldBy: 't-first',
+      });
+      // The SECOND reader gets the first reader's instant, not its own: an age clock that every
+      // reader reset would never reach the grace, so an orphaned claim would wedge the key forever.
+      expect(await store.claimedAtOr('github:1234', 's-1', 't-first', 9_000)).toEqual({
+        at: 1_000,
+        heldBy: 't-first',
+      });
+      // PER HOLDER: a stamp left behind by one holder must not age the next one, or a reader past
+      // the grace would step over a claim made moments ago. A claim can change hands without the
+      // hash being deleted -- the holderless hash a release leaves behind is adopted by the next
+      // claim -- so this is not merely hypothetical.
+      expect(await store.claimedAtOr('github:1234', 's-1', 't-second', 9_000)).toEqual({
+        at: 9_000,
+        heldBy: 't-first',
+      });
+      // And the holder it reports is the one holding the key NOW, not the one asked about: a caller
+      // whose holder was stepped over in between reads its own fresh stamp on somebody else's claim,
+      // so the age alone would say "zero seconds old" about a turn that will never exist.
+      expect(await store.releaseIdempotencyKeyIf('github:1234', 's-1', 't-first')).toBe(true);
+      expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-winner')).toBe('t-winner');
+      expect(await store.claimedAtOr('github:1234', 's-1', 't-first', 20_000)).toEqual({
+        at: 20_000,
+        heldBy: 't-winner',
+      });
+      // Stamping does not claim: an unheld key still has no holder after it has been read.
+      expect(await store.claimedAtOr('github:9999', 's-1', 't-other', 5_000)).toEqual({
+        at: 5_000,
+        heldBy: null,
+      });
+      expect(await store.idempotencyHolder('github:9999', 's-1')).toBeNull();
+      await done();
+    });
+
     it('releases a key only while the expected turn still holds it (§4.3)', async () => {
       const { store, done } = await make();
       expect(await store.claimIdempotencyKey('github:1234', 's-1', 't-first')).toBe('t-first');

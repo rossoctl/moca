@@ -76,6 +76,15 @@ async function turnOnSession(
 }
 
 /**
+ * How long an idempotency claim with no readable record is treated as live (#989). Sized for the one
+ * round trip between `claimIdempotencyKey` and `turns.create`, not for a whole turn -- a holder that
+ * takes ten seconds to write its record has lost its Redis connection, not merely slowed down. Not a
+ * setting: the only visible effect is how long a duplicate submission is answered with an id that
+ * may never materialise.
+ */
+export const CLAIM_GRACE_MS = 10_000;
+
+/**
  * Claim `key`, stepping over a holder whose turn is already terminal. One retry, not a loop: the
  * second claim loses only to another submission winning the key in between, and returning that
  * submission's id is the right answer anyway.
@@ -98,29 +107,49 @@ async function turnOnSession(
  * with no record and no release -- and the default key is the session id, so every later turn of
  * that session would be answered with the ghost's id.
  *
- * shortcut: a stalled claimant and a crashed one are indistinguishable without a lease, and §5.1
- * rules out the Lua/WATCH/MULTI that would make claim-plus-record one step; upgrade when the key
- * carries a `claimedAt`, so an age past a grace that outlives the slowest turn means crashed and
- * anything younger means live -- which lets an unreadable holder be treated as live without the
- * wedge. NOT a TTL that is allowed to expire: that hands the key to the next submission while the
- * turn it names can still be running, which is the duplicate fan-out §4.3 exists to prevent and
- * nothing downstream refuses (`gate_pending` guards a gated submission, not a decision, and an
- * ordinary turn has only this claim). A TTL helps only if its remaining value is read as that same
- * age clock and never fires, which is `claimedAt` the long way round -- issue #989.
+ * An unreadable holder is therefore treated as live for CLAIM_GRACE_MS and stepped over after it
+ * (#989). The grace covers the only window that is actually narrow -- the round trip between
+ * `claimIdempotencyKey` and `create` -- so a holder mid-create reads as live and no second turn is
+ * created for its key, while a holder that crashed in that window, or whose record expired, still
+ * frees the key instead of wedging every later turn of the session.
+ *
+ * shortcut: a claimant that stalls between its claim and its create for longer than the grace is
+ * still stepped over, which needs a renewed lease to fix, and §5.1 rules out the Lua/WATCH/MULTI
+ * that would make claim-plus-record one step; upgrade when a turn can renew a lease on its own key.
+ * NOT a TTL that is allowed to expire: that hands the key to the next submission while the turn it
+ * names can still be running, which is the duplicate fan-out §4.3 exists to prevent and nothing
+ * downstream refuses (`gate_pending` guards a gated submission, not a decision, and an ordinary turn
+ * has only this claim). The grace is read as an age and never deletes anything on its own, which is
+ * why it is a `claimedAt` field and not an expiry.
  */
 async function claimKey(
   turns: TurnStore,
   owner: string,
   key: string,
   turnId: string,
+  now: number,
 ): Promise<{ turnId: string; fresh: boolean }> {
   const held = await turns.claimIdempotencyKey(owner, key, turnId);
   if (held === turnId) return { turnId, fresh: true };
   const existing = await turns.get(held);
   if (existing && !isTerminalState(existing.state)) return { turnId: held, fresh: false };
-  // The holder finished (or its record is gone -- see the window in the doc above): the key is
-  // stale, so release THAT holder and take it. The second claim re-reads the holder, so losing the
-  // compare and losing the claim converge.
+  if (!existing) {
+    const claim = await turns.claimedAtOr(owner, key, held, now);
+    // STILL the holder, and young: a holder between its claim and its create. Answered exactly like
+    // a live holder -- nothing created, nothing enqueued -- so the record it is about to write stays
+    // the only one for this key. The caller polls a 404 until it lands.
+    //
+    // The holder check is what keeps that promise true. Another submission can step this same holder
+    // over in the window above, and its release deletes the whole hash: the age we then read is a
+    // stamp this call just wrote on the WINNER's claim, zero seconds old, for a holder that no longer
+    // exists and never will. Answering with it would hand the client a turn id whose GET 404s
+    // forever. Falling through to the stepover converges on the winner's id instead.
+    if (claim.heldBy === held && now - claim.at < CLAIM_GRACE_MS)
+      return { turnId: held, fresh: false };
+  }
+  // The holder finished, or it is past the grace with no record (crashed mid-create, or expired):
+  // the key is stale, so release THAT holder and take it. The second claim re-reads the holder, so
+  // losing the compare and losing the claim converge.
   await turns.releaseIdempotencyKeyIf(owner, key, held);
   const second = await turns.claimIdempotencyKey(owner, key, turnId);
   return { turnId: second, fresh: second === turnId };
@@ -170,7 +199,7 @@ export async function submitResume(
   // on one turn when they race (design §3).
   const idempotencyKey = `${paused.sessionId}:gate:${decision.gateId}`;
   const candidate = `t-${deps.newId()}`;
-  const claim = await claimKey(turns, paused.owner, idempotencyKey, candidate);
+  const claim = await claimKey(turns, paused.owner, idempotencyKey, candidate, deps.now());
   // `created: false` is a REPLAY of somebody else's resume -- a double-clicked decision, or the
   // human and the sweep racing. Reported rather than hidden because the sweep counts gates it
   // expired, and counting a turn it did not create overstates that count (and its test asserts it).
@@ -403,7 +432,7 @@ export const TURN_HANDLERS: Record<string, Handler> = {
       );
     }
 
-    const claim = await claimKey(turns, rec.owner, idempotencyKey, candidate);
+    const claim = await claimKey(turns, rec.owner, idempotencyKey, candidate, deps.now());
     if (!claim.fresh) {
       // A resubmission on a live key returns the EXISTING turn and enqueues nothing (§4.3): a client
       // retrying a 202 it already received must not fan out twice. The reservation belongs to a turn
@@ -527,6 +556,11 @@ export const TURN_HANDLERS: Record<string, Handler> = {
     // both read `resumed: false`, and then one of them wins the gate key. Without the same
     // `sameDecision` test here the loser is 202'd with the winner's turn id, reporting that its own
     // different decision was accepted. `found.resumed` cannot catch this -- it was already false.
+    //
+    // A winner still inside `claimKey`'s grace has no readable record, so this refuses rather than
+    // replaying (#989): the control plane cannot see which decision won, and answering 202 would
+    // claim an approval was accepted when an abort may be what runs. The loser's retry replays
+    // normally once the winner's record lands.
     if (!created && !replays(await turns.get(turnId), found.paused.turnId, decision)) {
       await refusal(deps, rec, 'gate_not_pending');
       throw new CpError(
