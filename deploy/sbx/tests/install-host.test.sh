@@ -89,7 +89,8 @@ b="$(bundle sbx_bad)"; sed -i.bak 's/^SANDBOX_TOKEN=.*/SANDBOX_TOKEN=short/' "$b
 ! bash "$INSTALL" "$b" --snapshot default >"$TMP/out" 2>&1 || fail 'accepted a malformed token'
 ! grep -q 'short' "$TMP/out" || fail 'the refusal printed the token value'
 for extra in 'SH_WORKSPACE_IDLE=9d' 'SH_WORKSPACE_IDLE=0h' 'SH_WORKSPACE_IMAGE_MB=2g' 'SH_WORKSPACE_IMAGE_MB=0' 'SH_WORKSPACE_IMAGE_MB=2049' \
-  'SH_LEASE_IDLE_CEILING_S=30m' 'SH_LEASE_IDLE_CEILING_S=1.5' 'SH_LEASE_IDLE_CEILING_S=0' 'SH_LEASE_IDLE_CEILING_S=299' 'SH_LEASE_IDLE_CEILING_S=86401' 'SH_LEASE_IDLE_CEILING_S= '; do
+  'SH_LEASE_IDLE_CEILING_S=30m' 'SH_LEASE_IDLE_CEILING_S=1.5' 'SH_LEASE_IDLE_CEILING_S=0' 'SH_LEASE_IDLE_CEILING_S=299' 'SH_LEASE_IDLE_CEILING_S=86401' 'SH_LEASE_IDLE_CEILING_S= ' \
+  'SH_LEASE_CACHE_DROP_S=30s' 'SH_LEASE_CACHE_DROP_S=-1' 'SH_LEASE_CACHE_DROP_S=030' 'SH_LEASE_CACHE_DROP_S=86401' 'SH_LEASE_CACHE_DROP_S= '; do
   : >"$MOCK_LOG"
   # The bad line last: env_value takes the last one, so it overrides the valid idle before it.
   ! bash "$INSTALL" "$(bundle sbx_bad $'SH_WORKSPACE_IDLE=216h\n'"$extra"$'\n')" --snapshot default >"$TMP/out" 2>&1 || fail "accepted $extra"
@@ -107,12 +108,16 @@ grep -q 'SH_WORKSPACE_IDLE' "$TMP/out" && grep -q 'deploy/sbx/setup.sh' "$TMP/ou
   fail 'accepted a ceiling above 86400 s'
 grep -q 'SH_LEASE_IDLE_CEILING_S in .* must be a whole number of seconds, 300-86400' "$TMP/out" ||
   fail "the ceiling refusal does not name 300-86400: $(cat "$TMP/out")"
-pass 'refuses a missing snapshot, a missing --snapshot, a malformed token (without printing it), a missing or bad idle, a bad or too large (#907) image size or idle ceiling'
+! bash "$INSTALL" "$(bundle sbx_bad $'SH_WORKSPACE_IDLE=216h\nSH_LEASE_CACHE_DROP_S=86401\n')" --snapshot default >"$TMP/out" 2>&1 ||
+  fail 'accepted a cache drop above 86400 s'
+grep -q 'SH_LEASE_CACHE_DROP_S in .* must be a whole number of seconds, 0 (off) to 86400' "$TMP/out" ||
+  fail "the cache drop refusal does not name 0-86400: $(cat "$TMP/out")"
+pass 'refuses a missing snapshot, a missing --snapshot, a malformed token (without printing it), a missing or bad idle, a bad or too large (#907) image size, idle ceiling or cache drop'
 
 # py312 has a template record (template-build.sh's); default has none.
 mkdir -p "$SBX_SRV/templates" && printf '{\n  "schema": "moca-sbx-template/1",\n  "id": "py312",\n  "worker": "sbx_py312"\n}\n' >"$SBX_SRV/templates/py312.json"
 bash "$INSTALL" "$(bundle sbx_default)" --snapshot default >"$TMP/out" 2>&1 || fail 'install sbx_default'
-bash "$INSTALL" "$(bundle sbx_py312 $'SH_WORKSPACE_IDLE=240h\nSH_WORKSPACE_IMAGE_MB=1536\nSH_LEASE_IDLE_CEILING_S=3600\n')" --snapshot py312 --budget-mb 8192 \
+bash "$INSTALL" "$(bundle sbx_py312 $'SH_WORKSPACE_IDLE=240h\nSH_WORKSPACE_IMAGE_MB=1536\nSH_LEASE_IDLE_CEILING_S=3600\nSH_LEASE_CACHE_DROP_S=0\n')" --snapshot py312 --budget-mb 8192 \
   >"$TMP/out" 2>&1 || fail 'install sbx_py312'
 
 A="$SBX_ENV_DIR/workers/sbx_default.env" B="$SBX_ENV_DIR/workers/sbx_py312.env"
@@ -127,6 +132,9 @@ grep -qx 'SH_WORKSPACE_IMAGE_MB=1536' "$B" || fail "$B: SH_WORKSPACE_IMAGE_MB is
 grep -qx 'SH_LEASE_IDLE_CEILING_S=1800' "$A" || fail "$A: SH_LEASE_IDLE_CEILING_S is not the bundle's 1800"
 grep -qx 'SH_LEASE_IDLE_CEILING_S=3600' "$B" || fail "$B: SH_LEASE_IDLE_CEILING_S is not the bundle's 3600"
 [[ "$(grep -c '^SH_LEASE_IDLE_CEILING_S=' "$B")" == 1 ]] || fail "$B: SH_LEASE_IDLE_CEILING_S written twice"
+grep -qx 'SH_LEASE_CACHE_DROP_S=30' "$A" || fail "$A: SH_LEASE_CACHE_DROP_S is not the 30 default"
+grep -qx 'SH_LEASE_CACHE_DROP_S=0' "$B" || fail "$B: SH_LEASE_CACHE_DROP_S is not the bundle's 0"
+[[ "$(grep -c '^SH_LEASE_CACHE_DROP_S=' "$B")" == 1 ]] || fail "$B: SH_LEASE_CACHE_DROP_S written twice"
 [[ "$(grep -c '^SH_WORKSPACE_IDLE=' "$B")" == 1 ]] || fail "$B: SH_WORKSPACE_IDLE written twice"
 grep -qx 'SH_SNAPSHOT_IMAGE=py312' "$B" || fail 'snapshot not set'
 grep -qx 'SH_MAX_COMMITTED_MB=8192' "$B" || fail 'budget not set'
@@ -140,7 +148,7 @@ grep -qx "SH_TEMPLATE_RECORD=$SBX_SRV/templates/py312.json" "$B" || fail "$B: SH
 grep -qx 'SANDBOX_TEMPLATE=py312' "$B" || fail "$B: SANDBOX_TEMPLATE is not the record's id"
 ! grep -q '^SANDBOX_TEMPLATE=' "$A" || fail "$A: SANDBOX_TEMPLATE set with no record"
 grep -qx "SH_VERIFY_CACHE_DIR=$SBX_SRV/verify-cache" "$B" || fail 'the verify cache is not under SBX_SRV'
-pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle, image size and idle ceiling, the template record and its id as SANDBOX_TEMPLATE when there is one"
+pass "two workers: 0600 env files, own slice, jail and workspace root, the bundle's idle, image size, idle ceiling and cache drop, the template record and its id as SANDBOX_TEMPLATE when there is one"
 
 # The jail is keyed by a short digest of the worker id, so the longest worker id SBX0 can have
 # (a 31-character template) still fits the VMs' API socket paths; too long a SBX_SRV is refused.
@@ -222,6 +230,7 @@ pass "a reinstall and an uninstall remove the worker's own legacy jail <SBX_SRV>
 bash "$INSTALL" "$(bundle sbx_old $'SH_WORKSPACE_IDLE=216h\n')" --snapshot default >"$TMP/out" 2>&1 || fail 'install a bundle with no image size'
 grep -qx 'SH_WORKSPACE_IMAGE_MB=2048' "$SBX_ENV_DIR/workers/sbx_old.env" || fail 'SH_WORKSPACE_IMAGE_MB is not the 2048 default'
 grep -qx 'SH_LEASE_IDLE_CEILING_S=1800' "$SBX_ENV_DIR/workers/sbx_old.env" || fail 'SH_LEASE_IDLE_CEILING_S is not the 1800 default'
+grep -qx 'SH_LEASE_CACHE_DROP_S=30' "$SBX_ENV_DIR/workers/sbx_old.env" || fail 'SH_LEASE_CACHE_DROP_S is not the 30 default'
 bash "$INSTALL" --uninstall sbx_old >"$TMP/out" 2>&1 || fail 'uninstall sbx_old'
 pass 'a bundle without the image size or the idle ceiling gets the 2048 MiB and 1800 s defaults'
 

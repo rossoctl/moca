@@ -81,10 +81,11 @@ Optional inputs:
 ([lease-mode spec](../../specs/2026-11-08-sbx-lease-mode-design.md) §8.1). `setup.sh` writes
 them to `sbx-settings`, which the control plane reads:
 
-| Variable             | Default    | Rule                                                                                                                                                                                                                                                                                                                                                                               |
-| -------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SBX_MODES_ALLOWED`  | `per-exec` | the modes a user may pick (`SH_SANDBOX_MODES_ALLOWED`), a comma list of `per-exec`, `lease` and `lease+processes`, no spaces. `per-exec` is always allowed, listed or not. `lease` is experimental (below); keep `lease+processes` off                                                                                                                                             |
-| `SBX_IDLE_CEILING_S` | 1800       | 300-86400: the longest lease idle timeout an owner may set, in seconds (`SH_SANDBOX_IDLE_CEILING_S`). An owner who sets none gets the worker's default, 300 s. It also goes into every worker bundle as `SH_LEASE_IDLE_CEILING_S`, so the workers clamp alike: after a change, re-run `install-host.sh` with the new bundle on every host (a running worker keeps its old ceiling) |
+| Variable                 | Default    | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------ | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SBX_MODES_ALLOWED`      | `per-exec` | the modes a user may pick (`SH_SANDBOX_MODES_ALLOWED`), a comma list of `per-exec`, `lease` and `lease+processes`, no spaces. `per-exec` is always allowed, listed or not. `lease` is experimental (below); keep `lease+processes` off                                                                                                                                                                                                                |
+| `SBX_IDLE_CEILING_S`     | 1800       | 300-86400: the longest lease idle timeout an owner may set, in seconds (`SH_SANDBOX_IDLE_CEILING_S`). An owner who sets none gets the worker's default, 300 s. It also goes into every worker bundle as `SH_LEASE_IDLE_CEILING_S`, so the workers clamp alike: after a change, re-run `install-host.sh` with the new bundle on every host (a running worker keeps its old ceiling)                                                                    |
+| `SBX_LEASE_CACHE_DROP_S` | 30         | 0-86400: how long a lease stays idle, in seconds, before its guest drops its clean page cache, so the worker charges the lease its working set; 0 turns the drop off. Only the workers read it, from every bundle as `SH_LEASE_CACHE_DROP_S`: after a change, re-run `install-host.sh` with the new bundle on every host (a running worker keeps its old value). A lease's next command after a drop rereads its files, about 1.2-1.3× slower in E17c |
 
 **Lease mode is experimental and off by default.** In v0.11.0 an operator may opt in to level 1
 (`lease`) with `SBX_MODES_ALLOWED=per-exec,lease` and a re-run of `setup.sh`. It becomes supported,
@@ -98,7 +99,8 @@ you opt in:
   `balloon-fpr-v1`. A worker whose snapshot lacks the balloon still serves leases, but warns at
   start: its guests never return freed memory to the host.
 - **Workers.** Upgrade every worker host first, and re-run `install-host.sh` with the new bundle
-  whenever `SBX_IDLE_CEILING_S` changes (a running worker keeps its old ceiling).
+  whenever `SBX_IDLE_CEILING_S` or `SBX_LEASE_CACHE_DROP_S` changes (a running worker keeps its old
+  values).
 - **The janitor.** `SBX_JANITOR_WAIT_MINUTES` must exceed the token lifetime plus 30 s plus
   `SBX_IDLE_CEILING_S`, or `setup.sh` refuses (the janitor's wait, below). The defaults pass.
 
@@ -108,8 +110,8 @@ on bare metal (E17b), and none affects `per-exec` sandboxes:
 - **A lease VM's memory stays near its ceiling on an older snapshot.** With a golden snapshot built
   before v0.12.0, the guest keeps its page cache, so an idle lease is charged close to its full guest
   RAM, and on a memory-bound host leases fit fewer sessions than their working sets suggest. From
-  v0.12.0 the guest drops its page cache once a lease has been idle for `SH_LEASE_CACHE_DROP_S`
-  (default 30 s), and the worker no longer charges a lease for the host's cache of its workspace.
+  v0.12.0 the guest drops its page cache once a lease has been idle for `SBX_LEASE_CACHE_DROP_S`
+  (default 30 s; a worker's `SH_LEASE_CACHE_DROP_S`), and the worker no longer charges a lease for the host's cache of its workspace.
   Under pressure the worker reclaims the lease idle the longest before it refuses new work.
 - **Cancelling a running command ends its lease on an older snapshot.** With a golden snapshot
   built before v0.12.0, a client that aborts an Exec (Ctrl-C) ends the lease (`agent_dead`); the

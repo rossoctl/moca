@@ -71,6 +71,9 @@
 #                           may set, in seconds. Also every worker bundle's SH_LEASE_IDLE_CEILING_S, so
 #                           the control plane and the workers clamp alike; at least 300, the worker's
 #                           default idle timeout, which it refuses to start above its ceiling
+#   SBX_LEASE_CACHE_DROP_S  optional; 0-86400, default 30: how long a lease stays idle before its guest
+#                           drops its clean page cache (#974), in seconds; 0 turns the drop off. Every
+#                           worker bundle's SH_LEASE_CACHE_DROP_S; the control plane does not read it
 #   SBX_EGRESS_CREDENTIALS  optional; unset, 0 or 1 (SBX0.2b, spec §4.3). 1 turns on user-scoped egress
 #                           credentials: the control plane's file store (a PVC) and credential routes,
 #                           a KEK and one bearer per KVM host in the Secret sbx-egress, and an egress
@@ -209,7 +212,7 @@ OVERLAY_REL=../../k8s/overlays/ocp-sbx # from $GEN; ocp-combined with SBX_PROFIL
 # GEN is .generated-<namespace> with SBX_PROFILE=combined (validate), at the same depth, so OVERLAY_REL holds.
 API_ROUTE='sbx-api'
 HOSTS_TO_REINSTALL='' # workers whose SH_WORKSPACE_IDLE or SH_LEASE_IDLE_CEILING_S this run changes
-REINSTALL_SETTINGS='' # which of the two changed, for write_bundles' last warning (check_host_*)
+REINSTALL_SETTINGS='' # which of them changed, for write_bundles' last warning (check_host_*)
 IDLE_LOWERED_FROM_DAYS='' # set when this run lowers SH_WORKSPACE_IDLE: the old maximum, in days (check_host_idle)
 IDLE_LOWERED_BY='the run that lowered SBX_MAX_LIFETIME_DAYS' # since when the old maximum must have passed
 IDLE_KEPT='' # set when this run keeps SH_WORKSPACE_IDLE above what its maximum gives (check_host_idle)
@@ -313,7 +316,7 @@ validate() {
 
   : "${SBX_LIFETIME_DAYS:=7}" "${SBX_MAX_LIFETIME_DAYS:=30}" "${SBX_MAX_PER_SUBJECT:=3}" "${SBX_MAX_TOTAL:=40}" "${SBX_MAX_INFLIGHT:=2}"
   : "${SBX_WORKSPACE_IMAGE_MB:=2048}" "${SBX_TOKEN_TTL_MINUTES:=15}" "${SBX_RETENTION_DAYS:=14}"
-  : "${SBX_MODES_ALLOWED:=per-exec}" "${SBX_IDLE_CEILING_S:=1800}"
+  : "${SBX_MODES_ALLOWED:=per-exec}" "${SBX_IDLE_CEILING_S:=1800}" "${SBX_LEASE_CACHE_DROP_S:=30}"
   [[ "$SBX_LIFETIME_DAYS" =~ ^([1-9]|[12][0-9]|30)$ ]] || die 'SBX_LIFETIME_DAYS must be a whole number of days, 1-30'
   [[ "$SBX_MAX_LIFETIME_DAYS" =~ ^([1-9]|[12][0-9]|30|off)$ ]] ||
     die 'SBX_MAX_LIFETIME_DAYS must be a whole number of days, 1-30, or off'
@@ -347,6 +350,10 @@ validate() {
   # At most a day: the janitor's wait must outlast it when a lease mode is allowed (below).
   [[ "$SBX_IDLE_CEILING_S" =~ $COUNT6_RE ]] && ((SBX_IDLE_CEILING_S >= 300 && SBX_IDLE_CEILING_S <= 86400)) ||
     die "SBX_IDLE_CEILING_S must be a whole number of seconds, 300-86400 (a worker's ceiling must be at least its default idle timeout, 300 s)"
+  # microvm-worker's own bounds (vmpool.MaxLeaseCacheDrop); no leading zero, so the bundle compares
+  # as a string in check_host_cache_drop.
+  [[ "$SBX_LEASE_CACHE_DROP_S" =~ ^(0|[1-9][0-9]{0,4})$ ]] && ((SBX_LEASE_CACHE_DROP_S <= 86400)) ||
+    die 'SBX_LEASE_CACHE_DROP_S must be a whole number of seconds, 0 (off) to 86400'
   # A token minted just before a delete reaches the sandbox for its lifetime plus the relay's 30 s
   # leeway, and each Exec it sends restarts the lease's idle clock, so a lease can stay live that long
   # plus the idle timeout. The janitor must not free the workspace (and its lease state file) under
@@ -380,7 +387,7 @@ validate() {
   fi
   WORKSPACE_IDLE_H=$((longest_days * 24 + 48))
   ((WORKSPACE_IDLE_H * 3600 > longest_days * 86400)) || die 'SH_WORKSPACE_IDLE must exceed the longest sandbox lifetime'
-  # check_host_idle and check_host_ceiling run in preflight, once the live maximum is read.
+  # check_host_idle, check_host_ceiling and check_host_cache_drop run in preflight, once the live maximum is read.
 
   validate_templates
   validate_egress
@@ -656,6 +663,27 @@ check_host_ceiling() {
   log "WARNING: SH_LEASE_IDLE_CEILING_S changes from${olds} to ${SBX_IDLE_CEILING_S} for worker(s)${changed}, and a running worker keeps its old ceiling until deploy/sbx/install-host.sh is re-run on its host with the new bundle"
 }
 
+# And the SH_LEASE_CACHE_DROP_S it was installed with (#1011): a stale value only changes when an idle
+# lease's guest drops its page cache, so a change is a warning, as for the ceiling. A bundle from
+# before the setting carries none, and install-host.sh gives such a worker 30 s, the worker's default.
+check_host_cache_drop() {
+  local env id old changed='' olds=''
+  for env in "$GEN"/workers/*/worker.env; do
+    [[ -f "$env" ]] || continue
+    id="$(basename "$(dirname "$env")")"
+    [[ " $SBX_WORKERS " == *" $id "* ]] || continue
+    old="$( (grep -E '^SH_LEASE_CACHE_DROP_S=' "$env" || true) | tail -1 | cut -d= -f2-)"
+    old="${old:-30}"
+    [[ "$old" != "$SBX_LEASE_CACHE_DROP_S" ]] || continue
+    changed+=" $id"
+    [[ " $olds " == *" $old "* ]] || olds+=" $old"
+    [[ " $HOSTS_TO_REINSTALL " == *" $id "* ]] || HOSTS_TO_REINSTALL+="${HOSTS_TO_REINSTALL:+ }$id"
+  done
+  [[ -n "$changed" ]] || return 0
+  REINSTALL_SETTINGS+="${REINSTALL_SETTINGS:+ and }SH_LEASE_CACHE_DROP_S"
+  log "WARNING: SH_LEASE_CACHE_DROP_S changes from${olds} to ${SBX_LEASE_CACHE_DROP_S} for worker(s)${changed}, and a running worker keeps its old value until deploy/sbx/install-host.sh is re-run on its host with the new bundle"
+}
+
 # The rules of the control plane's parseTemplates (packages/control-plane/src/sandbox-config.ts),
 # checked here so a bad file is refused before anything is applied rather than as a pod that never
 # boots; plus SBX0 §8.1's: every template's worker is in SBX_WORKERS, one template per worker.
@@ -698,6 +726,7 @@ preflight() {
   read_live_max
   check_host_idle
   check_host_ceiling
+  check_host_cache_drop
   check_unknown_bundles
 }
 
@@ -1555,8 +1584,9 @@ write_bundles() {
       mkdir -p "$d"
       # SH_WORKSPACE_IDLE: the maximum lifetime plus two days (idle-lifetime spec §6.2); install-host.sh takes it from here.
       # SH_LEASE_IDLE_CEILING_S: the control plane's SH_SANDBOX_IDLE_CEILING_S, so both clamp alike.
-      printf 'RELAY_ADDR=%s:443\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\nSH_WORKSPACE_IDLE=%sh\nSH_WORKSPACE_IMAGE_MB=%s\nSH_LEASE_IDLE_CEILING_S=%s\n' \
-        "$SBX_ATTACH_HOST" "$id" "$tok" "$WORKSPACE_IDLE_H" "$SBX_WORKSPACE_IMAGE_MB" "$SBX_IDLE_CEILING_S" >"$d/worker.env"
+      # SH_LEASE_CACHE_DROP_S: SBX_LEASE_CACHE_DROP_S, the workers' alone (#1011).
+      printf 'RELAY_ADDR=%s:443\nRELAY_TLS=true\nSANDBOX_ID=%s\nSANDBOX_TOKEN=%s\nSH_WORKSPACE_IDLE=%sh\nSH_WORKSPACE_IMAGE_MB=%s\nSH_LEASE_IDLE_CEILING_S=%s\nSH_LEASE_CACHE_DROP_S=%s\n' \
+        "$SBX_ATTACH_HOST" "$id" "$tok" "$WORKSPACE_IDLE_H" "$SBX_WORKSPACE_IMAGE_MB" "$SBX_IDLE_CEILING_S" "$SBX_LEASE_CACHE_DROP_S" >"$d/worker.env"
       if [[ -f "$GEN/attach-ca.crt" ]]; then cp "$GEN/attach-ca.crt" "$d/relay-ca.crt"; else rm -f "$d/relay-ca.crt"; fi
     done
     chmod 700 "$GEN" "$GEN"/workers "$GEN"/workers/* 2>/dev/null || true
