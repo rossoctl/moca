@@ -57,6 +57,22 @@ Use moca-delegate-task with ./repo as context. Review each package under package
 errors, one task per package, and summarize the findings with file references.
 ```
 
+## As MCP tools instead of shell commands
+
+`mocactl mcp` serves the same subagent commands over MCP, so an agent that speaks MCP calls them as
+tools — `spawn`, `list`, `get`, `follow_up`, `approve`, `reject`, `cancel` — instead of running a
+shell and parsing its output. In Claude Code:
+
+```bash
+claude mcp add moca -- mocactl mcp
+```
+
+Each tool is the command of the same name, so both routes behave identically: `get` writes the
+reply, any patch and any verdict to files and returns their paths, which keeps a large result out of
+the agent's context. There is no waiting tool, because a blocking call would hold the agent's turn —
+run `mocactl watch` as a background command when you want to be told that a subagent has finished.
+The skill above still uses the CLI; both reach the same deployment and can be mixed.
+
 ## More
 
 - [`SKILL.md`](../../../skills/moca-delegate-task/SKILL.md): the instructions the agent follows.

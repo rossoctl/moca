@@ -24,7 +24,9 @@ import { DiscoveringHarness } from './api/discovery.js';
 import { buildRuntime, ensureRuntimeAuth, type Runtime } from './runtime.js';
 import { openCallRecord, RUN_LENGTH_FIELDS, type CallRecorder } from './sbx/call-record.js';
 import { defaultSbxUrl, openSbxRuntime, sbxMain } from './sbx/cli.js';
+import { stdioTransport } from './sbx/mcp.js';
 import {
+  cmdCancel,
   cmdDecide,
   cmdFollowUp,
   cmdGet,
@@ -34,6 +36,7 @@ import {
   MAX_PROMPT_BYTES,
   runSpawnWorker,
 } from './subagent.js';
+import { serveSubagentMcp } from './subagent-mcp.js';
 import { WORKLOAD_MOUNTS, type WorkloadMount } from './api/workloads.js';
 import {
   cmdWorkloadCreate,
@@ -72,6 +75,8 @@ the harness service:
   approve        let a subagent paused for approval go ahead
   reject         tell a subagent paused for approval to take another route
   follow-up      send a finished subagent a second turn on the same session
+  cancel         stop a subagent dispatched with \`spawn --async\`
+  mcp            serve the subagent commands to a coding agent as MCP tools
   promote        upload a directory's Claude Code skills and commands as a config bundle
   bundles        list or delete your promoted config bundles
   workloads      create, list, get or delete workloads (contexts for subagents)
@@ -197,6 +202,16 @@ export const USAGE = `usage:
                                                  keeps the first turn's context; the result is
                                                  written to --out DIR (default: the current
                                                  directory) first, because a new turn overwrites it
+  mocactl cancel SESSIONID [--json]              stop a subagent dispatched with 'spawn --async': a
+                                                 queued turn never starts, a running one is asked to
+                                                 stop and 'mocactl get SESSIONID' reports how it
+                                                 ended (a subagent spawned without --async has no
+                                                 turn record, and cannot be cancelled)
+  mocactl mcp                                    serve the subagent commands (spawn, list, get,
+                                                 follow_up, approve, reject, cancel) to a coding
+                                                 agent as MCP tools over stdin/stdout, so it needs
+                                                 no shell and parses no output; add it with
+                                                 'claude mcp add moca -- mocactl mcp'
   mocactl workloads create --context FILE [--name NAME] [--json]
       [--sandboxes N [--mount read-only|writable]]
                                                  upload a context file (--context, made by
@@ -811,6 +826,17 @@ async function mainWith(
         json,
         signal,
       });
+    }
+    case 'cancel': {
+      const [sid, ...extra] = rest;
+      if (sid === undefined || extra.length > 0) return usage(io, help);
+      return cmdCancel(rt, io, { sessionId: sid, json });
+    }
+    case 'mcp': {
+      if (rest.length > 0) return usage(io, help);
+      // Nothing is printed: stdout is the protocol's, and a message on it would break the client.
+      await serveSubagentMcp(rt, await stdioTransport(), { signal });
+      return 0;
     }
     case 'approve':
     case 'reject': {

@@ -1,6 +1,6 @@
 /**
- * `mocactl spawn | subagents | watch | get | approve | reject | follow-up`, built on the leaf-turn
- * transport and the subagent ledger.
+ * `mocactl spawn | subagents | watch | get | approve | reject | follow-up | cancel`, built on the
+ * leaf-turn transport and the subagent ledger.
  */
 import { spawn as spawnChild } from 'node:child_process';
 import { writeFileSync, mkdirSync, existsSync, openSync, closeSync } from 'node:fs';
@@ -9,6 +9,7 @@ import { ApiError } from './api/errors.js';
 import { validWorkloadId, WorkloadsClient } from './api/workloads.js';
 import {
   GATE_FEEDBACK_BYTES,
+  type CancelledTurn,
   type ControlPlaneApi,
   type CreateSessionRequest,
   type SessionToken,
@@ -1583,4 +1584,79 @@ async function dispatchFollowUp(
     io.err(describeError(err));
     return 1;
   }
+}
+
+// --- cancel ---
+
+export interface CancelOptions {
+  sessionId: string;
+  json: boolean;
+  /** Test seam, as `cmdGet`'s. */
+  ledger?: Ledger;
+}
+
+/**
+ * `mocactl cancel SESSIONID`: stop a subagent dispatched with `spawn --async` (#391).
+ *
+ * The answer says which of two things happened, because the route's 202 body does: a `queued` turn
+ * is `cancelled` and never starts, while a `running` one is only ASKED to stop and the worker
+ * holding the leaf finalizes it — so `mocactl get` stays the thing that reports the end state.
+ *
+ * The ledger is deliberately not written: a cancel is a request, and an async row's state is read
+ * back off the turn record by `subagents` and `get` anyway, so a row updated here could only
+ * disagree with the server.
+ *
+ * A row with no `turnId` was dispatched synchronously and has no cancel route — ADR-0040's
+ * interactive cancel rides the turn's own connection, which this process does not share with the
+ * detached worker. Refused with that reason rather than killing the local child, which would leave
+ * the server-side leaf running (the A1 contract, #380).
+ */
+export async function cmdCancel(rt: Runtime, io: Io, opts: CancelOptions): Promise<number> {
+  if (!requireReady(rt, io)) return 2;
+  if (!SAFE_ID_RE.test(opts.sessionId)) {
+    io.err(`invalid sessionId '${sanitizeRemote(opts.sessionId)}'`);
+    return 2;
+  }
+  initLedger(rt.paths.subagentsFile);
+  const ledger = opts.ledger ?? openLedger(rt.paths.subagentsFile, rt.now);
+  const record = ledger.find(opts.sessionId);
+  if (record === undefined) {
+    io.err(`no ledger row for '${sanitizeRemote(opts.sessionId)}'`);
+    // The turn id lives only in the row, and the cancel route needs it.
+    io.err('a subagent is cancelled from the machine that spawned it, which holds its row');
+    return 1;
+  }
+  if (record.turnId === undefined) {
+    io.err(
+      `'${sanitizeRemote(opts.sessionId)}' was spawned without --async, so it has no turn record ` +
+        'to cancel; it ends on its own budget (`mocactl get --wait` follows it there)',
+    );
+    return 1;
+  }
+  let cancelled: CancelledTurn;
+  try {
+    cancelled = await rt.cp.cancelTurn(opts.sessionId, record.turnId);
+  } catch (err) {
+    io.err(describeError(err));
+    return 1;
+  }
+  const asked = cancelled.cancelRequested === true;
+  io.err(
+    asked
+      ? `asked turn ${cancelled.turnId} to stop; \`mocactl get ${opts.sessionId}\` reports the end`
+      : `cancelled ${opts.sessionId}  (turn ${cancelled.turnId}, ${cancelled.state})`,
+  );
+  if (opts.json) {
+    io.out(
+      JSON.stringify({
+        sessionId: opts.sessionId,
+        turnId: cancelled.turnId,
+        state: cancelled.state,
+        ...(asked ? { cancelRequested: true } : {}),
+      }) + '\n',
+    );
+  } else {
+    io.out(`${opts.sessionId}\n`);
+  }
+  return 0;
 }
