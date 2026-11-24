@@ -461,3 +461,56 @@ for (const [target, ns] of [
     },
   );
 }
+
+/**
+ * The two settings stamps are not one value on a profile that serves sbx: setup.sh hashes
+ * moca-settings plus the test-user digest into CORE_SETTINGS_HASH for the supervisor, and folds
+ * sbx-settings in on top for the control plane and the relay, so a changed template or quota does
+ * not roll a supervisor that reads none of those keys. Rendered here because the bash suite checks
+ * the generated TEXT: only kustomize says whether two different "add annotations" patches against
+ * two Deployments both survive, and an earlier cut of this split stamped the supervisor from a
+ * variable nothing set, which rendered an empty annotation that every text-level check accepted.
+ */
+describe.skipIf(NO_KUBECTL)('the generated overlay with a distinct core settings hash', () => {
+  const CORE_DIR = resolve(K8S_DIR, '.generated/test-ocp-core-hash');
+  const CORE_HASH = 'a'.repeat(64);
+  let objs: K8sObject[] = [];
+  beforeAll(() => {
+    execFileSync('bash', [WRITER, CORE_DIR], {
+      env: {
+        ...process.env,
+        GO_TARGET: 'ocp',
+        GO_SANDBOX_COUNT: '2',
+        GO_CLIENT_ID: 'Iv1.core-hash-test',
+        GO_SETTINGS_HASH: HASH,
+        GO_CORE_SETTINGS_HASH: CORE_HASH,
+        GO_WORKSPACE_IDLE: '8h',
+      },
+      stdio: ['ignore', 'ignore', 'inherit'],
+    });
+    const out = execFileSync('kubectl', ['kustomize', CORE_DIR], { encoding: 'utf8' });
+    objs = parseAllDocuments(out)
+      .map((d) => d.toJS() as K8sObject | null)
+      .filter((o): o is K8sObject => o !== null);
+  });
+  afterAll(() => {
+    rmSync(CORE_DIR, { recursive: true, force: true });
+  });
+
+  it('stamps the supervisor with the core hash and the control plane with the full one', () => {
+    expect(
+      find(objs, 'Deployment', 'moca-supervisor', 'moca').spec.template.metadata.annotations,
+    ).toEqual({ 'moca.dev/settings-hash': CORE_HASH });
+    expect(
+      find(objs, 'Deployment', 'moca-control-plane', 'moca').spec.template.metadata.annotations,
+    ).toEqual({ 'moca.dev/settings-hash': HASH });
+    // Neither is empty, which is the shape of the bug this case exists for: an unset variable
+    // renders `settings-hash: ""`, which is a stamp that never changes and so never rolls anything.
+    for (const name of ['moca-supervisor', 'moca-control-plane']) {
+      const stamp = find(objs, 'Deployment', name, 'moca').spec.template.metadata.annotations[
+        'moca.dev/settings-hash'
+      ];
+      expect(stamp, name).toMatch(/^[0-9a-f]{64}$/);
+    }
+  });
+});
