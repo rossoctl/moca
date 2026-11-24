@@ -1335,8 +1335,15 @@ route_cert() {
   (
     trap 'rm -rf "$dir"' EXIT
     chmod 700 "$dir"
+    # The CN is the host's FIRST LABEL, not the whole host: a CN is an X.509 DirectoryString
+    # capped at 64 bytes, and a Route host can exceed that on its own -- a ROKS-style
+    # moca-relay-<ns>.<cluster>-<hash>-0000.<region>.containers.appdomain.cloud is 77 characters,
+    # which makes openssl refuse the certificate outright ("string too long", maxsize=64) and so
+    # makes Routes impossible on such a cluster. The authoritative name is the SAN below, which has
+    # no such limit and is what every current client verifies against (RFC 6125: the CN is legacy
+    # and ignored when a subjectAltName is present).
     # openssl's stderr is progress noise on success; on failure it is the reason, so show it.
-    if ! openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=$host" \
+    if ! openssl req -x509 -newkey rsa:2048 -nodes -days 825 -subj "/CN=${host%%.*}" \
       -addext "subjectAltName=DNS:$host" -keyout "$dir/tls.key" -out "$ca" 2>"$dir/openssl.err"; then
       cat "$dir/openssl.err" >&2
       die "openssl could not create the self-signed certificate for $host"

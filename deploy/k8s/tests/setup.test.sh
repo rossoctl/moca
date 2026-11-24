@@ -1049,7 +1049,15 @@ pass 'a failed GET of moca-relay-sandbox-tokens aborts the run and rotates nothi
 
 reset_state
 p4_ok moca_microvm_0
-grep -q '^openssl req -x509 .*CN=moca-relay-moca.apps.example.test' "$MOCK_LOG" || fail 'no self-signed relay certificate for the relay Route host'
+# The SAN carries the whole host; the CN carries only its first label, because a CN is capped at
+# 64 bytes and a Route host can be longer than that on its own (a ROKS-style one is 77 characters,
+# which made openssl refuse the certificate outright). The SAN is what clients verify.
+grep -q '^openssl req -x509 .*subjectAltName=DNS:moca-relay-moca.apps.example.test' "$MOCK_LOG" ||
+  fail 'no self-signed relay certificate for the relay Route host'
+grep -q '^openssl req -x509 .*CN=moca-relay-moca ' "$MOCK_LOG" ||
+  fail 'the relay certificate CN is not the hostname first label'
+grep -q '^openssl req -x509 .*CN=moca-relay-moca\.apps' "$MOCK_LOG" &&
+  fail 'the relay certificate CN still carries the whole host, which can exceed the 64-byte cap'
 [[ -f "$MOCK_STATE/moca__Secret__moca-relay-tls.json" ]] || fail 'no moca-relay-tls Secret'
 [[ -s "$RCA" ]] || fail 'the relay CA file is missing'
 : >"$MOCK_LOG"
