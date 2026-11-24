@@ -266,6 +266,22 @@ describe.skipIf(!havePython)('verify-provenance.py agrees with verifyExport', ()
     expect(r.status).toBe(0);
   });
 
+  it('refuses a lone surrogate as canonicalJson does, never with a traceback', async () => {
+    const s = store();
+    await onboard(s);
+    const doc = JSON.parse(JSON.stringify(await s.export(['template/demo-app'])));
+    // JSON.stringify writes a lone surrogate as a "\ud800" escape, which Python's json.loads reads back
+    // as one: canonicalJson refuses it (LONE_SURROGATE_RE), so the verifier must too.
+    doc.records[0].body = { ...doc.records[0].body, note: 'x\ud800y' };
+    expect(() => canonicalJson(doc.records[0])).toThrow(/lone surrogate/);
+    const r = runVerifier(doc);
+    expect(r.out).toContain(
+      'is not canonical JSON: canonical JSON refuses a string holding a lone surrogate',
+    );
+    expect(r.out).not.toContain('Traceback');
+    expect(r.status).toBe(1);
+  });
+
   it('verifies a store holding the sandbox kind, with its lease a record digest', async () => {
     const s = store();
     await onboard(s);
