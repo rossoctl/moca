@@ -169,10 +169,12 @@ export const ROUTES: readonly RouteSpec[] = [
     // Unmounted unless SH_TEST_USERS > 0, so the path is genuinely unrouted when the feature is
     // off -- not merely 404'd by the handler after the body has already been validated.
     feature: 'testUsers',
-    // HARNESS, not BOTH: main.ts refuses to boot test users on the sandbox profile (it admits only
-    // enrolled subjects, SBX0 §4.2), so the route is not mounted there at all. One fewer
-    // place for the invariant to be broken later.
-    profiles: HARNESS,
+    // BOTH, so a sandbox-only stack can serve test logins as well. That profile admits only
+    // ENROLLED subjects (SBX0 §4.2), which a synthetic test:<n> is not by default -- so mounting
+    // the route is not by itself a way in: the login still has to pass the enrollment gate, by
+    // SH_ALLOWED_SUBJECTS naming the subject or by SH_SANDBOX_TEST_USERS_ENROLLED enrolling the
+    // range (sandbox-config.ts). The `feature` gate above keeps it unrouted without SH_TEST_USERS.
+    profiles: BOTH,
     operationId: 'testUserToken',
   },
   // The OIDC provider's browser redirect target (oidc.ts): the URL registered with the provider,
