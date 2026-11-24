@@ -105,6 +105,18 @@ describe('cmdFollowUp — refusals', () => {
     expect(err.join('\n')).toContain('mocactl get --wait sess-abc');
   });
 
+  // Within the grace a dead child may still be writing its result, so the refusal stands.
+  it('refuses a running row whose child died inside the 60 s grace', async () => {
+    const { rt } = makeRt(scratch);
+    const { io, err } = makeIo();
+    const forkFn = vi.fn(async () => 123);
+    ledger.append(row({ lastKnownState: 'running', childPid: 0x7fffffff, stateObservedAt: 1 }));
+    const r = await cmdFollowUp(rt, io, opts({ forkFn }));
+    expect(r).toBe(1);
+    expect(forkFn).not.toHaveBeenCalled();
+    expect(err.join('\n')).toContain('is still running');
+  });
+
   // A follow-up prompt is not an answer to a gate: dispatching one would leave the gate pending.
   it('refuses a row parked at a gate, and says to answer the gate instead', async () => {
     const { rt } = makeRt(scratch);
@@ -209,6 +221,48 @@ describe('cmdFollowUp — a sync row', () => {
     expect(r).toBe(0);
     expect(forkFn).toHaveBeenCalledTimes(1);
     expect(err.join('\n')).toContain('no result to preserve');
+  });
+
+  // The ledger never self-corrects a sync row: `get` persists a state only for an async row, so a
+  // refusal read off `lastKnownState` would lock this session out for good (#1037 review).
+  it('follows up on a row the ledger still calls running once the child is gone', async () => {
+    const { rt } = makeRt(scratch);
+    const { io } = makeIo();
+    const forkFn = vi.fn(async () => 4321);
+    ledger.append(
+      row({ lastKnownState: 'running', childPid: 0x7fffffff, stateObservedAt: -600_000 }),
+    );
+    const r = await cmdFollowUp(rt, io, opts({ forkFn }));
+    expect(r).toBe(0);
+    expect(forkFn).toHaveBeenCalledTimes(1);
+    expect(ledger.find('sess-abc')!.childPid).toBe(4321);
+  });
+
+  // A caller who asked the subagent to stop before acting means the whole session, not turn one.
+  it('re-sends requireApproval and keeps it on the new row', async () => {
+    const { rt } = makeRt(scratch);
+    const { io } = makeIo();
+    let sent: LeafEnvelope | undefined;
+    const forkFn = vi.fn(async (_s: string, _t: string, env: LeafEnvelope) => {
+      sent = env;
+      return 4321;
+    });
+    ledger.append(
+      row({ envelope: { kind: 'prompt', prompt: 'do the thing', requireApproval: true } }),
+    );
+    const r = await cmdFollowUp(rt, io, opts({ forkFn }));
+    expect(r).toBe(0);
+    expect(sent?.requireApproval).toBe(true);
+    expect(ledger.find('sess-abc')!.envelope.requireApproval).toBe(true);
+  });
+
+  it('mints one session token for the result read and the fork', async () => {
+    const { rt, cp } = makeRt(scratch);
+    const { io } = makeIo();
+    ledger.append(row());
+    const r = await cmdFollowUp(rt, io, opts({ forkFn: async () => 4321 }));
+    expect(r).toBe(0);
+    expect(cp.mintSessionToken).toHaveBeenCalledTimes(1);
   });
 
   it('replaces the ledger row so a later gate decision resends the follow-up text', async () => {

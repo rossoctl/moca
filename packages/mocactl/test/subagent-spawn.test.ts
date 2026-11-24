@@ -501,6 +501,16 @@ describe('cmdSpawn — --workload', () => {
     expect(row.envelope.contextWritable).toBe(true);
   });
 
+  // The row is the only place a later `follow-up` can learn the caller wanted a gate.
+  it('records requireApproval on the ledger row', async () => {
+    const { rt } = makeRt();
+    const ledger = withLedger(rt);
+    const { io } = makeIo();
+    const r = await cmdSpawn(rt, io, baseOpts({ requireApproval: true, forkFn: () => 7, ledger }));
+    expect(r).toBe(0);
+    expect(openLedger(ledgerPath).readAll()[0]!.envelope.requireApproval).toBe(true);
+  });
+
   it('a read-only workload run sends no contextWritable and records no writable', async () => {
     const { rt } = makeRt();
     const ledger = withLedger(rt);

@@ -204,10 +204,16 @@ turns keeps its own artifacts for seven days, so the next turn overwrites none o
 
 The follow-up is always a prompt turn, including on a `--kind solve` subagent — the session already
 holds the repository workspace, so no `--repo`/`--ref` is needed — and it inherits the subagent's
-bundle and workload. It needs the subagent's ledger row on this machine, as a gate decision on a
-sync row does, and it is refused (exit `1`) while the subagent is still `running` (wait with
-`mocactl get --wait`) or parked at a gate (answer it with `mocactl approve`/`reject`; a follow-up
-prompt is not an answer to a gate). After it returns, the ledger row describes the new turn: the
+bundle, workload and `--require-approval`, so a subagent asked to park before it acts parks on its
+second turn too. (Rows written by a `mocactl` older than this command's release did not record
+`--require-approval`; a follow-up on one of those runs ungated. `mocactl subagents` is the way to
+tell: re-spawn rather than follow up if the gate matters.) It needs the subagent's ledger row on
+this machine, as a gate decision on a sync row does, and it is refused (exit `1`) while the
+subagent is still `running` (wait with `mocactl get --wait`) or parked at a gate (answer it with
+`mocactl approve`/`reject`; a follow-up prompt is not an answer to a gate). A sync subagent whose
+worker died without writing a result is _not_ refused once its process is gone and the 60-second
+grace has passed: the ledger still says `running`, but liveness decides, so the context survives a
+crashed first turn. After it returns, the ledger row describes the new turn: the
 same `tag` and `--label`, a new pid or turn id, and the follow-up's prompt as the envelope a later
 `approve` would re-send.
 

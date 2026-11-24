@@ -346,6 +346,7 @@ function envelopeForLedger(opts: SpawnOptions): LedgerEnvelope {
     ...(opts.configRef ? { configRef: opts.configRef } : {}),
     ...(opts.workloadId ? { workloadId: opts.workloadId } : {}),
     ...(opts.writable ? { contextWritable: true } : {}),
+    ...(opts.requireApproval ? { requireApproval: true } : {}),
   };
 }
 
@@ -1441,7 +1442,19 @@ export async function cmdFollowUp(rt: Runtime, io: Io, opts: FollowUpOptions): P
     );
     return 1;
   }
-  if (!isTerminalState(record.lastKnownState) && record.lastKnownState !== 'unknown') {
+  // Liveness decides, not the stored state: a sync row left `running` by a child that died without
+  // writing a result keeps that state for good (`cmdGet` persists one only for an async row), so
+  // refusing on `lastKnownState` alone would refuse this session forever — and a crashed first turn
+  // is exactly when its context is worth following up on. `noResultComing` is the same liveness +
+  // grace mapping `subagents` applies, so all three commands agree on when a row is spent.
+  // shortcut: a dead worker whose server-side leaf is still running reads as spent, so this can put
+  // a second turn on a live session; the result record reads `queued` whether the leaf is running or
+  // its 24 h record expired, so the client cannot tell. Upgrade when a run-lease probe exists.
+  if (
+    !isTerminalState(record.lastKnownState) &&
+    record.lastKnownState !== 'unknown' &&
+    noResultComing(record, rt.now()) === undefined
+  ) {
     io.err(
       `'${sanitizeRemote(opts.sessionId)}' is still ${sanitizeRemote(record.lastKnownState)}; ` +
         `a second turn would queue behind it — \`mocactl get --wait ${opts.sessionId}\` first`,
@@ -1451,22 +1464,32 @@ export async function cmdFollowUp(rt: Runtime, io: Io, opts: FollowUpOptions): P
 
   // Always a prompt, even on a solve row: the session holds the repo workspace already (#461), so
   // the follow-up needs no repo or ref, and a legacy `converge` row follows up as readily as any.
+  // `requireApproval` carries over because the harness arms its gate path per submission: dropping
+  // it would let a second turn act where the caller asked the first one to stop and ask.
   const nextEnvelope: LedgerEnvelope = {
     kind: 'prompt',
     prompt: opts.prompt,
     ...(record.envelope.configRef ? { configRef: record.envelope.configRef } : {}),
     ...(record.envelope.workloadId ? { workloadId: record.envelope.workloadId } : {}),
     ...(record.envelope.contextWritable ? { contextWritable: true } : {}),
+    ...(record.envelope.requireApproval ? { requireApproval: true } : {}),
   };
   const envelope: LeafEnvelope = { sessionId: opts.sessionId, ...nextEnvelope, kind: 'prompt' };
 
   // Copied before the dispatch, never after: otherwise the overwriting turn races this read.
   let written: string[] = [];
+  // One mint for both the read and the fork below — the same session, moments apart.
+  let token: string | undefined;
   if (record.turnId === undefined) {
+    try {
+      token = (await rt.cp.mintSessionToken(opts.sessionId)).token;
+    } catch (err) {
+      io.err(describeError(err));
+      return 1;
+    }
     const transport = opts.transport ?? new LeafTransport(rt.harness, rt.fetchImpl);
     let previous: LeafResultBody | 'queued';
     try {
-      const token = (await rt.cp.mintSessionToken(opts.sessionId)).token;
       previous = await transport.readLeafState(opts.sessionId, token, opts.signal);
     } catch (err) {
       // Refused rather than dispatched: this command promises to preserve the result first, and a
@@ -1481,7 +1504,7 @@ export async function cmdFollowUp(rt: Runtime, io: Io, opts: FollowUpOptions): P
     for (const p of written) io.err(`wrote   ${p}`);
   }
 
-  const next = await dispatchFollowUp(rt, io, opts, envelope, record);
+  const next = await dispatchFollowUp(rt, io, opts, envelope, record, token);
   if (typeof next === 'number') return next;
 
   // A fresh `record` line, not an update: `foldLines` replaces the folded row with the later one,
@@ -1523,6 +1546,8 @@ async function dispatchFollowUp(
   opts: FollowUpOptions,
   envelope: LeafEnvelope,
   record: LedgerRecord,
+  /** The session token already minted for the result read, on the sync path. */
+  token?: string,
 ): Promise<{ turnId: string } | { pid: number } | number> {
   if (record.turnId !== undefined) {
     try {
@@ -1533,12 +1558,13 @@ async function dispatchFollowUp(
       return 1;
     }
   }
-  let token: string;
-  try {
-    token = (await rt.cp.mintSessionToken(opts.sessionId)).token;
-  } catch (err) {
-    io.err(describeError(err));
-    return 1;
+  if (token === undefined) {
+    try {
+      token = (await rt.cp.mintSessionToken(opts.sessionId)).token;
+    } catch (err) {
+      io.err(describeError(err));
+      return 1;
+    }
   }
   // Resolved in the parent so the child never re-discovers, exactly as `spawn` does.
   let resolvedHarnessUrl: string | undefined;

@@ -28,6 +28,13 @@ export interface LedgerEnvelope {
   configRef?: string;
   workloadId?: string;
   contextWritable?: boolean;
+  /**
+   * The run was dispatched with `spawn --require-approval`. Recorded so a second turn on the same
+   * session (`mocactl follow-up`) parks at a gate too: a caller who asked the subagent to stop
+   * before it acts means that for the whole session, not only its first turn. Absent on rows
+   * written before this field existed, whose follow-up turns run ungated.
+   */
+  requireApproval?: boolean;
 }
 
 export interface LedgerRecord {
