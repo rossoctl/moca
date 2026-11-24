@@ -9,6 +9,7 @@ import { MemoryTurnQueue } from '../src/turn-queue.js';
 import { turnKey, type TurnRecord } from '../src/turn-record.js';
 import { leafResultKey } from '../src/turn-result.js';
 import { TurnStore } from '../src/turn-store.js';
+import { CLAIM_GRACE_MS } from '../src/turn-handlers.js';
 import { alice, ctx, makeDeps, pausedResult, seedCredential } from './helpers/deps.js';
 import { fakeRedis } from './helpers/fake-redis.js';
 
@@ -295,6 +296,25 @@ describe('sweepGates (#393, design §3)', () => {
     expect(await sweepGates(deps)).toBe(0);
     // And no second turn was built: the claim replayed the human's.
     expect(deps.turnQueue.ids).toEqual([]);
+  });
+
+  it('hands the gate back when its key is held by a resume with no record YET (#989)', async () => {
+    // Since #989 an unreadable holder is answered with ITS turn id inside the grace instead of being
+    // stepped over, so `submitResume` returns `created: false` and does NOT throw -- the catch path
+    // never sees it. `claimGate` has already taken the member out by then, and the member is the only
+    // pointer back to this gate: if that claimant really died between its claim and its create,
+    // nothing would ever answer the gate and `onTimeout` would silently never fire.
+    const paused = await pausedTurn();
+    const ghost = 't-ghost';
+    expect(await deps.turns.claimIdempotencyKey(paused.owner, 's-1:gate:0', ghost)).toBe(ghost);
+    expect(await sweepGates(deps)).toBe(0);
+    expect(deps.turnQueue.ids).toEqual([]);
+    expect(await deps.turns.dueGates(deps.nowOf())).toEqual(['t-1']);
+    // And the pass that comes back once the claim is past the grace answers it: the deadline was
+    // deferred, not lost. The clock starts when the pass above first read the claim.
+    deps.setNow(deps.nowOf() + CLAIM_GRACE_MS + 1);
+    expect(await sweepGates(deps)).toBe(1);
+    expect((await deps.turns.get(deps.turnQueue.ids[0]!))?.resumeOf).toBe(paused.turnId);
   });
 
   it('two passes racing on one gate resume it once', async () => {

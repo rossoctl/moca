@@ -5,6 +5,7 @@ import { MemoryTurnQueue } from '../src/turn-queue.js';
 import { TurnStore } from '../src/turn-store.js';
 import { idempotencyKeyKey, sessionTurnsKey } from '../src/turn-record.js';
 import { leafResultKey } from '../src/turn-result.js';
+import { CLAIM_GRACE_MS } from '../src/turn-handlers.js';
 import {
   alice,
   bob,
@@ -229,7 +230,7 @@ describe('decideGate (#393, design §2)', () => {
     await d.turns.claimIdempotencyKey('github:1234', `${sid}:gate:0`, 't-ghost');
     d.fake.hashes.set(idempotencyKeyKey('github:1234', `${sid}:gate:0`), {
       turnId: 't-ghost',
-      'claimedAt:t-ghost': String(NOW_MS - 600_000),
+      'claimedAt:t-ghost': String(NOW_MS - CLAIM_GRACE_MS - 1),
     });
     const res = await decide(d, sid, { gateId: 0, action: 'approve' });
     expect(res.status).toBe(202);

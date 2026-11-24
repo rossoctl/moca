@@ -192,6 +192,10 @@ export class TurnStore {
    * would then age the new holder from the old one's stamp, and a reader past the grace would step
    * over a LIVE claim -- the exact duplicate fan-out this grace exists to prevent. A per-holder field
    * cannot be misattributed; a stale one is a few dead bytes until the key's eventual release.
+   *
+   * shortcut: a holder releasing the key DURING this call leaves a stamp-only hash that nothing
+   * releases (`releaseIdempotencyKeyIf` deletes only on a holder match), so ~40 bytes leak per
+   * occurrence; upgrade when idempotency keys get a TTL of their own.
    */
   async claimedAtOr(owner: string, key: string, held: string, now: number): Promise<number> {
     const k = idempotencyKeyKey(this.tag(owner), key);

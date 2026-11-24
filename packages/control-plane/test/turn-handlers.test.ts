@@ -7,6 +7,7 @@ import { MemoryTurnQueue } from '../src/turn-queue.js';
 import { TurnStore } from '../src/turn-store.js';
 import { idempotencyKeyKey, isMintedTurnId, turnKey } from '../src/turn-record.js';
 import { asyncCounters, resetAsyncCounters } from '../src/counters.js';
+import { CLAIM_GRACE_MS } from '../src/turn-handlers.js';
 import { alice, bob, codeOf, ctx, makeDeps, NOW_MS, seedCredential } from './helpers/deps.js';
 import { fakeRedis } from './helpers/fake-redis.js';
 
@@ -402,7 +403,7 @@ describe('submitTurn (spec §4.1)', () => {
     // every later turn of this session with a turn id that does not exist.
     d.fake.hashes.set(idempotencyKeyKey('github:1234', sid), {
       turnId: 't-ghost',
-      'claimedAt:t-ghost': String(NOW_MS - 600_000),
+      'claimedAt:t-ghost': String(NOW_MS - CLAIM_GRACE_MS - 1),
     });
     const res = await submit(d, sid, { item, async: true });
     const turnId = (res.body as { turnId: string }).turnId;
