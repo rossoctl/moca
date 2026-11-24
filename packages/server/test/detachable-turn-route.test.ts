@@ -269,6 +269,26 @@ describe('POST /v1/turn detachable', () => {
     err.mockRestore();
   });
 
+  it('answers a model config error 400 with its message, and logs it for the operator', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const e = Object.assign(new Error('Unknown model "anthropic/x"'), { name: 'ModelConfigError' });
+    vi.mocked(executeTurn).mockRejectedValueOnce(e);
+    const res = await sse(
+      { sessionId, prompt: 'p', detachable: true },
+      { Authorization: `Bearer ${mint(sessionId)}` },
+    );
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.raw)).toEqual({
+      error: 'model_config_invalid',
+      message: e.message,
+      sessionId,
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(`[turn:detach] 400 ModelConfigError for session ${sessionId}`),
+    );
+    warn.mockRestore();
+  });
+
   it('ignores detachable without SH_TURN_DETACH, without a token, and without SSE', async () => {
     delete process.env.SH_TURN_DETACH;
     vi.mocked(executeTurn).mockResolvedValueOnce({

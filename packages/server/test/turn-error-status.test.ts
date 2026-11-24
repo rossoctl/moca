@@ -6,6 +6,8 @@ import {
   SandboxCapacityRefusedError,
   BundleNotFoundError,
   BundleFormatError,
+  ModelConfigError,
+  requireModel,
 } from '@moca/harness/run-turn';
 import {
   turnErrorStatus,
@@ -14,7 +16,7 @@ import {
   turnErrorMessage,
   clientErrorText,
   HOST_REFUSAL_MESSAGE,
-  logTurnCapacity,
+  logTurnRefusal,
 } from '../src/server.js';
 
 // /turn now leases a sandbox from the pool (it used to run tool calls in the harness process), so
@@ -86,10 +88,12 @@ describe('turnErrorStatus', () => {
     expect(new SandboxPoolEmptyError('app=sandbox').name).toBe('SandboxPoolEmptyError');
     // This one sets `name` in its own constructor for exactly this reason: it crosses a
     // package boundary (k8s-sandbox → harness → here), so `instanceof` is unsound and the
-    // string is the whole contract (#452).
+    // string is the whole contract (#452). ModelConfigError crosses the same boundary for the
+    // same reason.
     expect(new SandboxCapacityRefusedError('memory-budget: x').name).toBe(
       'SandboxCapacityRefusedError',
     );
+    expect(new ModelConfigError('m').name).toBe('ModelConfigError');
   });
 });
 
@@ -162,10 +166,48 @@ describe('an expired config bundle', () => {
   });
 
   it('answers a stable code for every status, never the exception text', () => {
+    expect(turnErrorCode(400)).toBe('model_config_invalid');
     expect(turnErrorCode(404)).toBe('session_not_found');
     expect(turnErrorCode(422)).toBe('config_bundle_unsupported');
     expect(turnErrorCode(503)).toBe('sandbox_unavailable');
     expect(turnErrorCode(500)).toBe('internal_error');
+  });
+});
+
+describe("a deployment model config the harness can't resolve", () => {
+  it('is 400 model_config_invalid with the fix in the body, not a bare 500', () => {
+    // A misconfigured SH_MODEL* is the operator's to fix, not a server fault; before the named
+    // error it answered 500 {"error":"internal_error"} and the one actionable sentence (set
+    // SH_MODEL_CUSTOM, or pick a registry id) lived only in the container log.
+    const err = new ModelConfigError(
+      'Unknown model "anthropic/claude-sonnet-9-9" — not in the pi-ai registry. ' +
+        'A custom endpoint is configured (SH_MODEL_BASE_URL/ANTHROPIC_BASE_URL); ' +
+        'set SH_MODEL_CUSTOM=1 to send this id to it as-is. Did you mean: claude-sonnet-4-6?',
+    );
+    const status = turnErrorStatus(err);
+    expect(status).toBe(400);
+    expect(turnErrorCode(status)).toBe('model_config_invalid');
+    expect(turnErrorMessage(status, err).message).toMatch(/set SH_MODEL_CUSTOM=1/);
+    expect(turnErrorHeaders(status, err)).not.toHaveProperty('Retry-After');
+  });
+
+  it('keeps a message-shaped plain Error at 500 — only the named error is a 400', () => {
+    expect(turnErrorStatus(new Error('Unknown model "anthropic/x" — not in the registry'))).toBe(
+      500,
+    );
+  });
+
+  it('keeps the SH_MODEL_CUSTOM remedy inside the 500-char body budget', () => {
+    // SH_MODEL has no length limit, and the known-ids list is long: the id is capped and the
+    // remedy precedes the list, or the slice cuts the one actionable sentence.
+    let err: unknown;
+    try {
+      requireModel('anthropic', 'x'.repeat(400), { ANTHROPIC_BASE_URL: 'https://gw.example' });
+    } catch (e) {
+      err = e;
+    }
+    expect(turnErrorStatus(err)).toBe(400);
+    expect(turnErrorMessage(400, err).message).toContain('set SH_MODEL_CUSTOM=1');
   });
 });
 
@@ -188,11 +230,11 @@ describe('a config bundle in a format this harness does not read (#510)', () => 
   });
 });
 
-describe('logTurnCapacity', () => {
+describe('logTurnRefusal', () => {
   it('logs one line naming the 503 cause, the session and the reason, on one line', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      logTurnCapacity('turn', 'sess-1', new SandboxPoolEmptyError('app=sandbox', 'container'));
+      logTurnRefusal('turn', 503, 'sess-1', new SandboxPoolEmptyError('app=sandbox', 'container'));
       expect(warn).toHaveBeenCalledTimes(1);
       const line = String(warn.mock.calls[0][0]);
       expect(line).toContain('[turn] 503 SandboxPoolEmptyError for session sess-1:');
@@ -206,7 +248,7 @@ describe('logTurnCapacity', () => {
   it('keeps a multi-line or hostile session id on one line', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      logTurnCapacity('turn:sse', 'a\nb', new SandboxPoolSaturatedError('app=sandbox'));
+      logTurnRefusal('turn:sse', 503, 'a\nb', new SandboxPoolSaturatedError('app=sandbox'));
       expect(String(warn.mock.calls[0][0])).not.toContain('\n');
     } finally {
       warn.mockRestore();

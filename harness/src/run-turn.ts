@@ -855,6 +855,19 @@ function parseModelHeaders(env: NodeJS.ProcessEnv): Record<string, string> {
   return out;
 }
 
+/**
+ * The model configuration cannot serve a turn: an id outside the pi-ai registry, an unknown
+ * provider, an unknown or unimplemented SH_MODEL_API, or SH_MODEL_CUSTOM=1 with no endpoint. Named
+ * so /turn can answer 400 with this text: every message names only ids and env-var names, never a
+ * secret. SH_MODEL_HEADERS errors stay plain Errors, because they echo the value.
+ */
+export class ModelConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ModelConfigError';
+  }
+}
+
 function synthesizeCustomModel(
   modelId: string,
   env: NodeJS.ProcessEnv,
@@ -862,7 +875,7 @@ function synthesizeCustomModel(
   // SH_MODEL_BASE_URL is the protocol-neutral knob; ANTHROPIC_BASE_URL is the back-compat fallback.
   const baseUrl = env.SH_MODEL_BASE_URL || env.ANTHROPIC_BASE_URL;
   if (!baseUrl) {
-    throw new Error(
+    throw new ModelConfigError(
       `SH_MODEL_CUSTOM=1 (anthropic) requires SH_MODEL_BASE_URL or ANTHROPIC_BASE_URL (the Anthropic-compatible endpoint to send "${modelId}" to).`,
     );
   }
@@ -912,7 +925,7 @@ function synthesizeOpenAICompletionsModel(
 ): Model<'openai-completions'> {
   const baseUrl = env.SH_MODEL_BASE_URL || env.OPENAI_BASE_URL;
   if (!baseUrl) {
-    throw new Error(
+    throw new ModelConfigError(
       `SH_MODEL_CUSTOM=1 with SH_MODEL_API=openai-completions requires SH_MODEL_BASE_URL or OPENAI_BASE_URL (the OpenAI-compatible endpoint to send "${modelId}" to).`,
     );
   }
@@ -967,6 +980,7 @@ export function requireModel(
   provider: string,
   modelId: string,
   env: NodeJS.ProcessEnv = process.env,
+  endpoint: string | undefined = env.SH_MODEL_BASE_URL || env.ANTHROPIC_BASE_URL,
 ) {
   if (env.SH_MODEL_CUSTOM === '1') {
     const api = env.SH_MODEL_API ?? 'anthropic';
@@ -977,11 +991,11 @@ export function requireModel(
       case 'openai-completions':
         return synthesizeOpenAICompletionsModel(modelId, env);
       case 'openai-responses':
-        throw new Error(
+        throw new ModelConfigError(
           `SH_MODEL_API=openai-responses is not yet implemented (deferred; see docs/specs/2026-08-20-multi-protocol-model-provider-design.md §7). Use openai-completions.`,
         );
       default:
-        throw new Error(
+        throw new ModelConfigError(
           `Unknown SH_MODEL_API "${api}". Expected: anthropic | openai-completions | openai-responses.`,
         );
     }
@@ -990,7 +1004,7 @@ export function requireModel(
   if (model) return model;
   const providers = getProviders() as string[];
   if (!providers.includes(provider)) {
-    throw new Error(
+    throw new ModelConfigError(
       `Unknown model provider "${provider}". Known providers: ${providers.join(', ')}.`,
     );
   }
@@ -1001,7 +1015,25 @@ export function requireModel(
   const hint = suggestions.length
     ? `Did you mean: ${suggestions.join(', ')}?`
     : `Known "${provider}" ids include: ${ids.slice(0, 12).join(', ')}${ids.length > 12 ? ', …' : ''}.`;
-  throw new Error(`Unknown model "${provider}/${modelId}" — not in the pi-ai registry. ${hint}`);
+  // A gateway names models pi has never heard of, and SH_MODEL_CUSTOM=1 bypasses the registry for
+  // them. api.anthropic.com serves only registry ids, so the knob cannot help there. An openai id
+  // goes through openai-completions, which reads its own endpoint, not the Anthropic one.
+  const openai = provider === 'openai';
+  const target = openai ? env.SH_MODEL_BASE_URL || env.OPENAI_BASE_URL : endpoint;
+  const custom = Boolean(target && URL.parse(target)?.hostname !== 'api.anthropic.com');
+  // The remedy precedes the id list, and the id is capped: /turn truncates this text to 500
+  // chars, and an unbounded SH_MODEL value or the long id list would eat the tail — the one
+  // actionable sentence must survive.
+  const shown = (s: string) => (s.length > 64 ? `${s.slice(0, 64)}…` : s);
+  throw new ModelConfigError(
+    `Unknown model "${shown(provider)}/${shown(modelId)}" — not in the pi-ai registry.` +
+      (!custom
+        ? ''
+        : openai
+          ? ' To send this id to the endpoint as-is, set SH_MODEL_CUSTOM=1 and SH_MODEL_API=openai-completions.'
+          : ' The endpoint is not api.anthropic.com; set SH_MODEL_CUSTOM=1 to send this id to it as-is.') +
+      ` ${hint}`,
+  );
 }
 
 /**
@@ -1017,7 +1049,7 @@ export function sessionModelFor(
 ): ReturnType<typeof requireModel> {
   if (baseUrl && URL.parse(baseUrl)?.hostname === 'api.anthropic.com') {
     const { SH_MODEL_CUSTOM: _custom, ...registryEnv } = env;
-    return requireModel('anthropic', m.id, registryEnv);
+    return requireModel('anthropic', m.id, registryEnv, baseUrl);
   }
   const base = requireModel(env.SH_MODEL_PROVIDER ?? 'anthropic', m.id, {
     ...env,
@@ -1603,7 +1635,7 @@ async function executeTurnCore(
   const { provider, modelId } = input.selection ?? resolveModelSelection(config);
   const baseModel = config?.sessionModel
     ? sessionModelFor(config.sessionModel, config.anthropicBaseUrl)
-    : requireModel(provider, modelId);
+    : requireModel(provider, modelId, process.env, config?.anthropicBaseUrl || undefined);
   const model = applyModelGateway(baseModel, config);
 
   // An Anthropic OAuth token takes pi's own OAuth client path, not model.headers alone (#595).

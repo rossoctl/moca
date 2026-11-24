@@ -411,3 +411,32 @@ describe('POST /turn with a session config bundle', () => {
     });
   }
 });
+
+describe('POST /turn with a model config the harness cannot resolve', () => {
+  const auth = { Authorization: `Bearer ${token}` };
+  for (const [label, headers] of [
+    ['sync', auth],
+    ['SSE', { ...auth, Accept: 'text/event-stream' }],
+  ] as const) {
+    it(`${label}: 400s model_config_invalid with the fix, and logs it for the operator`, async () => {
+      // run-turn is mocked above, so the error is built by name, as ModelConfigError names itself.
+      const err = new Error('Unknown model "anthropic/m" — not in the pi-ai registry.');
+      err.name = 'ModelConfigError';
+      vi.mocked(executeTurn).mockRejectedValueOnce(err);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const res = await postRaw('/turn', { sessionId: 'sid-1', prompt: 'hi' }, headers);
+        expect(res.status).toBe(400);
+        expect(JSON.parse(res.text)).toMatchObject({
+          error: 'model_config_invalid',
+          message: err.message,
+        });
+        expect(warn.mock.calls.map((c) => String(c[0]))).toContainEqual(
+          expect.stringContaining('400 ModelConfigError for session sid-1: Unknown model'),
+        );
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }
+});

@@ -8,6 +8,7 @@ that shipped it ("The data plane's twin … goes to"):
 
 | `harness-openapi.yaml` | Shipped with                   |
 | ---------------------- | ------------------------------ |
+| 1.9.0                  | [1.38.0](#1380)                |
 | 1.8.0                  | [1.36.0](#1360)                |
 | 1.7.0                  | [1.31.0](#1310)                |
 | 1.6.0                  | [1.30.0](#1300)                |
@@ -60,6 +61,10 @@ authenticated and scoped to the caller's own subject.
   `failures` climb.
 - A push with a gate on it links to an approval page that 404s until the login-gated approval page
   ([#467/B8b](https://github.com/rossoctl/moca/issues/467)) lands.
+- The data plane's twin, [harness-openapi.yaml](harness-openapi.yaml), goes to 1.9.0: `/v1/turn`
+  and `/turn` answer `400 model_config_invalid`, not `500 internal_error`, for a model config the
+  harness cannot resolve, with a `message` naming the fix. `/runs` and async turns still report a
+  generic failure.
 
 ## 1.37.0
 

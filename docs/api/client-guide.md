@@ -135,6 +135,7 @@ and no `Retry-After`.
 | 400    | `endpoint_unresolved`                                                       | both          | the inference credential has no endpoint, and the deployment sets no default                                                                          | give the credential an endpoint                                                                                     |
 | 400    | `session_mismatch`, `subject_conflict`                                      | both          | the session token names another session; `X-SH-Subject` contradicts the token                                                                         | mint the token for this session; drop the header                                                                    |
 | 400    | `prompt_required`, `sessionId_required`                                     | harness       | a turn without a `prompt`; an attach, cancel or status read without a `sessionId`                                                                     | fix the request; never retry it as is                                                                               |
+| 400    | `model_config_invalid`                                                      | harness       | model config names an id outside pi-ai's registry, an unknown provider or protocol, or no endpoint for `SH_MODEL_CUSTOM=1` (not `model_unavailable`)  | tell the operator; the message names the fix                                                                        |
 | 400    | `tenant_not_allowed`                                                        | harness       | an authenticated read named a tenant (the session token alone scopes it)                                                                              | drop the tenant parameter                                                                                           |
 | 401    | `token_required`, `token_invalid`, `token_expired`                          | both          | no, a bad or an expired API or session token                                                                                                          | refresh the token, then retry once                                                                                  |
 | 401    | `unauthorized`                                                              | control plane | a device-flow start the identity provider refused, or a test user on the device flow                                                                  | do not retry as is; show the message                                                                                |
@@ -246,8 +247,8 @@ run` and `put` retry 4 times by default (`MOCACTL_SBX_BUSY_RETRIES`, at most 20)
   4 and 8 s with jitter, then exit 75. Each wait spends the sandbox token's lifetime.
 - **Never retry as is:** anything after an Exec's first event (the command may have run);
   `DEADLINE_EXCEEDED`; a `4xx` that names a rule, a quota you must free, or a conflict;
-  `422 config_bundle_unsupported`; `500 internal_error`; `501 workload_runs_unavailable`;
-  `502 identity_provider_misconfigured`.
+  `400 model_config_invalid`; `422 config_bundle_unsupported`; `500 internal_error`;
+  `501 workload_runs_unavailable`; `502 identity_provider_misconfigured`.
 
 A detachable turn whose stream dropped is not sent again: attach to it with `GET /v1/turn` and the
 last event id received, as in

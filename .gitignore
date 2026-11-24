@@ -66,3 +66,6 @@ docs/api/examples/sandbox/
 /opencode.jsonc
 /AGENTS.md
 /.sbx/
+
+# Compose's auto-loaded per-developer override; it may hold endpoints and tokens.
+docker-compose.override.yml
