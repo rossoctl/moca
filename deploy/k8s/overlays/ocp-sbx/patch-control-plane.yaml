@@ -93,4 +93,14 @@ spec:
                   optional: true
                   items:
                     - { key: MOCA_RELAY_RELEASE_TOKEN, path: MOCA_RELAY_RELEASE_TOKEN }
+              # ADR-0045 test users: the shared secret, optional the same two ways -- only a stack
+              # with SBX_TEST_USERS on (deploy/sbx/setup.sh) has the Secret moca-test-users, and
+              # this source re-listing (above) is what drops the base's own optional source for it,
+              # so it must be here. A one-time roll for existing deployments, like the release
+              # bearer's source before it.
+              - secret:
+                  name: moca-test-users
+                  optional: true
+                  items:
+                    - { key: SH_TEST_USER_SECRET, path: SH_TEST_USER_SECRET }
             defaultMode: 256 # 0400

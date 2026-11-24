@@ -147,6 +147,15 @@ case "${1-} ${2-}" in
 # workloads' own. Deleting the StatefulSets clears MOCK_WORKLOAD_STS's stand-in.
 "delete statefulsets,services,secrets,persistentvolumeclaims") rm -f "$MOCK_STATE/workload-sts" ;;
 "delete deployment/moca-provisioner" | "delete role/moca-provisioner" | "delete validatingadmissionpolicybinding/moca-provisioner") : ;;
+# The sandbox half, removed when the profile goes back to harness: both are --ignore-not-found, and
+# the stored object (if any) goes with them so a later run cannot read a stale endpoint.
+"delete configmap" | "delete secret")
+  rm -f "$(store "$ns" "$([[ "$2" == configmap ]] && echo ConfigMap || echo Secret)" "$3")" ;;
+# The sandbox service's RENDERED objects, removed by name when the profile goes back to harness,
+# because `kubectl apply -k` does not prune. The mock keeps no file for these (they are applied
+# through the kustomization, not one at a time), so the assertions read $MOCK_LOG; this case exists
+# so the calls are handled rather than reported as unhandled.
+"delete deployment" | "delete service" | "delete route" | "delete networkpolicy") : ;;
 # A workload's StatefulSets, PVCs and Secrets in moca-sandbox: one name per line in $MOCK_STATE/workload-sts.
 "get statefulsets,persistentvolumeclaims,secrets") [[ ! -f "$MOCK_STATE/workload-sts" ]] || cat "$MOCK_STATE/workload-sts" ;;
 # The provisioner, while the last apply listed the component; stopped (and started again) on disable.
@@ -189,7 +198,11 @@ case "${1-} ${2-}" in
   if [[ -n "${MOCK_NO_API_ENDPOINTS-}" ]]; then echo '{"items":[]}'
   else echo '{"items":[{"endpoints":[{"addresses":["172.18.0.2"]}],"ports":[{"name":"https","port":6443,"protocol":"TCP"}]}]}'; fi ;;
 "rollout status" | "rollout restart") : ;;
-"exec redis-0") echo "${MOCK_RECORDS:-2}" ;;
+"exec redis-0")
+  # Two different waits reach redis: wait_records counts the shared pool's presence records, and
+  # wait_sbx_attached asks whether the one sbx worker's field is there (1 or 0, not a count), so the
+  # mock has to tell them apart by the redis-cli command rather than by the pod name.
+  if [[ "$*" == *HEXISTS* ]]; then echo "${MOCK_SBX_ATTACHED:-1}"; else echo "${MOCK_RECORDS:-2}"; fi ;;
 "get namespace")
   # ocp-single's existence check. MOCK_NO_NAMESPACE=NAME fails NAME's GET (NotFound).
   if [[ -n "${MOCK_NO_NAMESPACE-}" && "$MOCK_NO_NAMESPACE" == "$3" ]]; then
@@ -2016,6 +2029,211 @@ reset_state
 (export SH_GITHUB_CLIENT_ID=Iv1.a SH_WORKLOAD_SANDBOXES=1; expect_ok --target kind --skip-build)
 ! grep -q 'overlays/ocp/workload-sandboxes' "$MOCK_STATE/applied-kustomization.yaml" || fail 'kind got the ocp DNS rule'
 pass 'SH_WORKLOAD_SANDBOXES: a bad value and ocp-single are refused before any apply; ocp grants the provisioner and workload sandboxes their SCC and adds their openshift-dns rule'
+
+echo "== --profile combined: the sbx-serving profile (docs/operate/harness/kubernetes.md §12.6)"
+
+# Every refusal lands BEFORE anything touches a cluster, so a mistyped profile is never recorded in
+# moca-setup and a re-run cannot inherit it.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_fail --target ocp-single --profile bogus)
+expect_out "unknown --profile 'bogus'"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_fail --target kind --profile combined)
+expect_out 'needs --target ocp-single'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_fail --target ocp --profile combined)
+expect_out 'needs --target ocp-single'
+# The combined profile needs a Route host for the exec path and someone enrolled to use it.
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ALLOWED_SUBJECTS=github:1; expect_fail --target ocp-single --profile combined)
+expect_out 'needs SH_ROUTE_DOMAIN'
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_fail --target ocp-single --profile combined)
+expect_out 'needs SH_ALLOWED_SUBJECTS'
+# The enrolment flag is meaningless without sandbox routes to enrol for.
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_TEST_USERS=5 \
+  SH_TEST_USERS_ACK=i-know-this-is-not-for-production SH_SANDBOX_TEST_USERS_ENROLLED=true
+  expect_fail --target ocp-single)
+expect_out 'SH_SANDBOX_TEST_USERS_ENROLLED needs --profile'
+[[ ! -e "$MOCK_STATE/moca-single__ConfigMap__sbx-settings.json" ]] ||
+  fail 'a refused run still wrote sbx-settings'
+if [[ -e "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json" ]] &&
+  jq -e '.data | has("SH_ROUTE_PROFILE")' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json" >/dev/null 2>&1; then
+  fail 'a refused --profile was recorded in moca-setup'
+fi
+pass 'the combined profile: a bad name, a wrong target and the missing inputs are refused, recording nothing'
+
+# A harness run is untouched by any of this: no sbx-settings, no keyset, and -- the guard that
+# matters -- moca-settings still holds exactly its twenty keys, so every harness stack's settings
+# hash is byte-identical to one computed before this feature existed.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test; expect_ok --target ocp-single)
+[[ ! -e "$MOCK_STATE/moca-single__ConfigMap__sbx-settings.json" ]] || fail 'a harness run wrote sbx-settings'
+[[ ! -e "$MOCK_STATE/moca-single__Secret__sbx-token-keys.json" ]] || fail 'a harness run wrote sbx-token-keys'
+[[ "$(jq -c '.data | keys | length' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")" == 20 ]] ||
+  fail 'a harness run no longer holds exactly twenty moca-settings keys'
+! gen | grep -q 'overlays/ocp-single/combined$' || fail 'a harness run rendered an sbx component'
+grep -q 'delete configmap sbx-settings' "$MOCK_LOG" &&
+  fail 'a harness stack that never served sandboxes still issued a delete'
+grep -qE 'delete (deployment sbx-worker|service sbx-relay-exec-tls|route sbx-exec|networkpolicy sbx-worker)' "$MOCK_LOG" &&
+  fail 'a harness stack that never served sandboxes deleted sandbox objects'
+# The hash is a pod-template annotation in the generated overlay, not a settings key (:582).
+h_hash="$(grep -o 'settings-hash: "[0-9a-f]*"' "$MOCK_STATE/applied-kustomization.yaml" | head -1)"
+[[ -n "$h_hash" ]] || fail 'could not read the harness settings-hash'
+# ...and it is the same VALUE the formula produced before this feature existed: the settings JSON
+# and the test-user digest, two fields, NO trailing newline. Recomputed here rather than merely
+# counted, because the twenty-key check cannot see a changed hash INPUT -- and
+# `printf '%s\n%s\n%s' A B ''` is "A\nB\n", which would roll the control plane and the supervisor
+# on every deployed harness stack at upgrade. Empty digest: this run sets no SH_TEST_USERS.
+pre_json="$(jq -cS '.data | del(.SH_WORKSPACE_IDLE)' "$MOCK_STATE/moca-single__ConfigMap__moca-settings.json")"
+# Piped straight into the digest, never through a variable: `$(printf ...)` would strip the
+# trailing newline the two-field form ends with, and the hash would differ for that reason alone.
+pre_hash="$(printf '%s\n%s' "$pre_json" '' | shasum -a 256 | cut -d' ' -f1)"
+[[ "$h_hash" == "settings-hash: \"$pre_hash\"" ]] ||
+  fail "a harness stack's settings hash is no longer the pre-feature one: $h_hash, expected $pre_hash"
+pass 'a harness run writes no sbx object, renders no sbx component, keeps its twenty keys and its pre-feature hash'
+
+# combined: the component is rendered, the four required sbx-settings keys are written, the exec
+# Route host is patched to the namespace-qualified name, and the keyset is derived from moca-mu1.
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test SH_ALLOWED_SUBJECTS=github:1648338
+  expect_ok --target ocp-single --profile combined)
+gen | grep -q '^  - ../../overlays/ocp-single/combined$' || fail 'the generated overlay does not list the combined component'
+sbx() { jq -r --arg k "$1" '.data[$k] // empty' "$MOCK_STATE/moca-single__ConfigMap__sbx-settings.json"; }
+[[ "$(sbx SH_ALLOWED_SUBJECTS)" == github:1648338 ]] || fail 'sbx-settings lacks SH_ALLOWED_SUBJECTS'
+[[ "$(sbx SH_SANDBOX_EXEC_ENDPOINT)" == 'moca-exec-moca-single.example.test:443' ]] ||
+  fail "sbx-settings has the wrong exec endpoint: $(sbx SH_SANDBOX_EXEC_ENDPOINT)"
+# DEFAULT_SANDBOX_ISSUER (sandbox-token.ts) and deploy/sbx/setup.sh both use this name: the two
+# installers share one contract for these settings, so one token type must not have two issuers.
+[[ "$(sbx SH_SANDBOX_TOKEN_ISSUER)" == sbx-control-plane ]] ||
+  fail "sbx-settings must carry the code's own issuer, got '$(sbx SH_SANDBOX_TOKEN_ISSUER)'"
+# The template names a worker id WORKER_RE accepts (sandbox-config.ts): no dashes, or the control
+# plane crash-loops on SH_SANDBOX_TEMPLATES[0].
+[[ "$(sbx SH_SANDBOX_TEMPLATES)" == *'"worker":"sbx_default"'* ]] ||
+  fail "the generated template does not name worker sbx_default: $(sbx SH_SANDBOX_TEMPLATES)"
+[[ "$(sbx SH_SANDBOX_TEMPLATES)" != *-* ]] ||
+  fail 'the generated template worker id has a dash, which WORKER_RE refuses'
+[[ -n "$(sv moca-single sbx-token-keys PUBLIC_KEYS)" ]] || fail 'no sbx-token-keys for the relay'
+[[ "$(sv moca-single sbx-token-keys PUBLIC_KEYS)" == "$(sv moca-single moca-mu1 SH_SESSION_TOKEN_PUBLIC_KEYS)" ]] ||
+  fail 'the relay keyset is not the session signer public keys'
+[[ -n "$(sv moca-single sbx-exec-tls tls.crt)" ]] || fail 'no certificate for the exec Route'
+gen | grep -q 'kind: Route, name: sbx-exec' || fail 'the generated overlay does not patch the exec Route host'
+# The self-signed exec certificate is handed to clients as the CA, or no sbx client can connect.
+[[ "$(sbx SH_SANDBOX_EXEC_CA)" == *'BEGIN CERTIFICATE'* ]] || fail 'sbx-settings carries no exec CA'
+expect_out 'SELF-SIGNED'
+# The sandbox half changes the settings hash, so a changed template or endpoint rolls the pods.
+c_hash="$(grep -o 'settings-hash: "[0-9a-f]*"' "$MOCK_STATE/applied-kustomization.yaml" | head -1)"
+[[ -n "$c_hash" && "$c_hash" != "$h_hash" ]] || fail 'the combined profile did not change SETTINGS_HASH'
+pass 'combined: the component, the four sbx-settings keys, the exec Route host, the keyset and the hash'
+
+# The profile is sticky: a re-run with no --profile keeps serving sandboxes.
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single)
+gen | grep -q '^  - ../../overlays/ocp-single/combined$' || fail 'the stored profile was not honoured on a re-run'
+[[ "$(jq -r '.data.SH_ROUTE_PROFILE' "$MOCK_STATE/moca-single__ConfigMap__moca-setup.json")" == combined ]] ||
+  fail 'moca-setup does not record the profile'
+# ...and turning it off removes the settings, so a later combined run cannot inherit a stale
+# endpoint from a stack that has been reshaped since.
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single --profile harness)
+grep -q 'delete configmap sbx-settings' "$MOCK_LOG" || fail 'going back to harness kept sbx-settings'
+! gen | grep -q 'overlays/ocp-single/combined' || fail 'the harness re-run still rendered the component'
+# Dropping the component from the render is not enough: `kubectl apply -k` does not prune, so each
+# object has to be deleted by name. Measured on a real cluster, where the worker Deployment kept
+# running and the exec Route kept answering after a switch back to harness.
+for obj in 'delete deployment sbx-worker' 'delete service sbx-relay-exec-tls' 'delete route sbx-exec'; do
+  grep -q "$obj" "$MOCK_LOG" || fail "going back to harness left an orphan: no '$obj'"
+done
+grep -q 'delete networkpolicy sbx-worker sbx-worker-dns sbx-relay-exec-from-router sbx-relay-attach-from-worker' "$MOCK_LOG" ||
+  fail 'going back to harness left the sandbox NetworkPolicies behind'
+# The certificate Secret is deliberately kept: it may hold an operator certificate this installer
+# did not mint, as moca-supervisor-tls is kept when Routes are turned off.
+! grep -q 'delete secret sbx-exec-tls' "$MOCK_LOG" || fail 'going back to harness deleted the exec certificate Secret'
+pass 'the profile is sticky, and going back to harness removes every sandbox object it rendered'
+
+# --profile combined with test users: the enrolment flag has to reach sbx-settings spelled exactly
+# as the control plane reads it, or `sbx login --test-user N` logs in and then cannot touch a
+# sandbox. This is the one place the installer and the control plane's range check meet.
+reset_state
+(export SH_ROUTE_DOMAIN=example.test SH_ALLOWED_SUBJECTS=github:1648338 SH_TEST_USERS=1000 \
+  SH_TEST_USERS_ACK=i-know-this-is-not-for-production SH_SANDBOX_TEST_USERS_ENROLLED=true \
+  SH_GITHUB_CLIENT_ID=Iv1.a
+  expect_ok --target ocp-single --profile combined)
+[[ "$(jq -r '.data.SH_SANDBOX_TEST_USERS_ENROLLED' "$MOCK_STATE/moca-single__ConfigMap__sbx-settings.json")" == true ]] ||
+  fail 'the enrolment flag did not reach sbx-settings'
+expect_out 'test:1..test:1000 may create and exec into sandboxes'
+# Sticky, like the profile itself: a re-run that passes neither keeps both.
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single)
+[[ "$(jq -r '.data.SH_SANDBOX_TEST_USERS_ENROLLED' "$MOCK_STATE/moca-single__ConfigMap__sbx-settings.json")" == true ]] ||
+  fail 'the enrolment flag is not sticky'
+pass 'combined with test users: the enrolment flag reaches sbx-settings, is announced, and is sticky'
+
+# combined with --tls-secret: a preinstalled SUPERVISOR certificate must not skip the EXEC one.
+# ensure_exec_tls once sat below that branch's `return 0`, so this supported pair rendered a relay
+# whose tls-exec sidecar mounted a Secret nothing had created: deployment/sandbox-relay stayed in
+# ContainerCreating and the install failed on wait_ready's 300s timeout, naming nothing. On a
+# re-run whose Secret already existed it "passed" with SH_SANDBOX_EXEC_CA empty instead, which
+# fails every client exec at the handshake. The suite exercised neither half of the pair.
+reset_state
+jq -nc '{apiVersion: "v1", kind: "Secret", metadata: {name: "op-cert", namespace: "moca-single"},
+  type: "kubernetes.io/tls", data: {"tls.crt": "Y3J0", "tls.key": "a2V5"}}' >"$MOCK_STATE/moca-single__Secret__op-cert.json"
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test SH_ALLOWED_SUBJECTS=github:1648338
+  expect_ok --target ocp-single --profile combined --tls-secret op-cert)
+[[ -n "$(sv moca-single sbx-exec-tls tls.crt)" ]] ||
+  fail '--profile combined with --tls-secret created no exec certificate, so the relay cannot start'
+[[ "$(sbx SH_SANDBOX_EXEC_CA)" == *'BEGIN CERTIFICATE'* ]] ||
+  fail '--profile combined with --tls-secret left SH_SANDBOX_EXEC_CA empty: every client exec fails the handshake'
+gen | grep -q 'secretName: op-cert' || fail "--tls-secret did not reach the supervisor's sidecar volume"
+[[ ! -e "$MOCK_STATE/moca-single__Secret__moca-supervisor-tls.json" ]] ||
+  fail '--tls-secret still minted a supervisor certificate'
+pass 'combined with --tls-secret: the preinstalled supervisor certificate still gets an exec certificate and its CA'
+
+# "The sandboxes" means every sandbox: an egress exception the operator set has to reach the sbx
+# worker's policy as well as the shared pool's, and the worker needs the pool's SH_WORKSPACE_IDLE
+# stamp. Without the first, SH_SANDBOX_EGRESS_EXCEPT blocks the pool and leaves every sbx sandbox
+# free to reach the range -- while the operator believes it is blocked everywhere.
+# `|| true` inside each helper: an unmatched grep in a `$(...)` assignment would abort the suite
+# under `set -e` with no FAIL line, so the bug would be caught and reported as a crash.
+in_target() {
+  gen | awk -v t="$1 }" '/^  - target: /{ on = index($0, t) > 0; next } /^[^ ]/{ on = 0 } on' || true
+}
+reset_state
+(export SH_GITHUB_CLIENT_ID=Iv1.a SH_ROUTE_DOMAIN=example.test SH_ALLOWED_SUBJECTS=github:1648338
+  export SH_SANDBOX_EGRESS_EXCEPT=203.0.113.0/24 SH_WORKSPACE_IDLE=45m
+  expect_ok --target ocp-single --profile combined)
+for np in moca-sandbox sbx-worker; do
+  in_target "kind: NetworkPolicy, name: $np" | grep -q 'except/-, value: 203.0.113.0/24' ||
+    fail "SH_SANDBOX_EGRESS_EXCEPT did not reach the $np policy"
+  in_target "kind: NetworkPolicy, name: $np" | grep -q 'op: test, path: /spec/egress/1/to/0/ipBlock/cidr' ||
+    fail "the $np egress patch has no test op, so it would silently patch the wrong rule"
+done
+w_idle="$(in_target 'kind: Deployment, name: sbx-worker' | grep -o 'moca.dev/workspace-idle: "[^"]*"' | cut -d'"' -f2 || true)"
+[[ "$w_idle" == 45m ]] ||
+  fail "the sbx worker carries no SH_WORKSPACE_IDLE stamp ('$w_idle'), so a changed idle rolls the pool and leaves it behind"
+pass 'combined: the egress exceptions and the idle stamp reach the sbx worker, not only the shared pool'
+
+# The relay loads the sandbox token keyset once, at container start, so its pod template carries a
+# stamp of its own: rotating the session signer must roll the relay, or it keeps verifying against
+# a keyset the control plane no longer signs with. A harness render stamps nothing on the relay, so
+# nothing about an existing harness rollout changes.
+reset_state
+# `|| true`: with no stamp rendered the grep pipeline fails, and under `set -e` a bare assignment
+# would abort the whole suite with no FAIL line -- the case would "catch" the bug while reporting
+# nothing, which is indistinguishable from a crash.
+relay_stamp() { gen | grep -A3 'name: sandbox-relay }' | grep -o 'settings-hash: "[0-9a-f]*"' | head -1 || true; }
+(export SH_ROUTE_DOMAIN=example.test SH_ALLOWED_SUBJECTS=github:1648338 SH_GITHUB_CLIENT_ID=Iv1.a
+  expect_ok --target ocp-single --profile combined)
+r1="$(relay_stamp)"
+[[ -n "$r1" ]] || fail 'the combined render does not stamp the relay pod template'
+# An unchanged re-run must not roll it, or every run would restart the relay for nothing.
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single)
+[[ "$(relay_stamp)" == "$r1" ]] || fail 'an unchanged combined re-run moved the relay stamp'
+# Rotating the signer must. The keyset is a COPY of moca-mu1's public half, and nothing else in the
+# settings changes here, so only the keyset digest can move the stamp.
+mu1="$MOCK_STATE/moca-single__Secret__moca-mu1.json"
+jq --arg v "$(printf 'rotated-public-keyset' | base64)" \
+  '.data.SH_SESSION_TOKEN_PUBLIC_KEYS = $v' "$mu1" >"$mu1.rotated"
+mv "$mu1.rotated" "$mu1"
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single)
+[[ "$(relay_stamp)" != "$r1" ]] ||
+  fail 'a rotated signing keyset did not move the relay stamp, so the relay would keep verifying against the old one'
+(export SH_GITHUB_CLIENT_ID=Iv1.a; expect_ok --target ocp-single --profile harness)
+! gen | grep -A3 'name: sandbox-relay }' | grep -q 'settings-hash' || fail 'a harness render stamps the relay'
+pass 'the relay is stamped on the combined profile, moves when the signing keyset rotates, and is untouched on harness'
 
 echo "== #440: the bash 3.2 wiring that runs this suite on macOS still exists"
 # Without this, the arrangement is a claim with nothing behind it: a workflow or Makefile edit

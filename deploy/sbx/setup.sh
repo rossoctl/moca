@@ -34,6 +34,23 @@
 #   SBX_ALLOWED_SUBJECTS    required; comma-separated github:<numeric id> or oidc:<provider sub>,
 #                           who may log in
 #   SBX_ADMIN_SUBJECTS      optional; comma-separated github:<numeric id> or oidc:<provider sub>
+#   SBX_TEST_USERS          optional; 1-1000: how many synthetic test:<n> logins the control plane
+#                           serves behind a shared secret (ADR-0045, dev/test only), so
+#                           `mocactl sbx login --test-user N` (#1004) works browser-free. The secret
+#                           is generated once and kept in the Secret moca-test-users; unset or 0
+#                           serves none, and a re-run deletes the Secret. Needs SBX_TEST_USERS_ACK.
+#                           Not supported with SBX_PROFILE=combined (this installer keeps test users
+#                           off there)
+#   SBX_TEST_USERS_ACK      required with SBX_TEST_USERS: the literal i-know-this-is-not-for-production,
+#                           the acknowledgement deploy/k8s/setup.sh asks for on --target ocp (the
+#                           shared-cluster target): a stale export in the env file would quietly
+#                           keep a password-gated login path alive, so the switch names its own risk
+#   SBX_TEST_USERS_ENROLLED optional; unset or 1: also enrol test:1..SBX_TEST_USERS for the sandbox
+#                           routes (SH_SANDBOX_TEST_USERS_ENROLLED, #1018), without naming each one
+#                           in SBX_ALLOWED_SUBJECTS. On this profile ENROLLMENT IS THE LOGIN GATE:
+#                           every holder of the shared secret gets a working account that may create
+#                           and exec into sandboxes -- dev/test only. Needs SBX_TEST_USERS, exactly
+#                           as the control plane refuses the flag without a count at boot (#1023)
 #   SBX_TEMPLATES_FILE      required; JSON list [{id, worker, description, tools}], every worker in
 #                           SBX_WORKERS
 #   SBX_WORKSPACE_FS_GIB    required; the KVM host's workspace filesystem size, for the disk check
@@ -314,6 +331,32 @@ validate() {
   [[ -z "${SBX_ADMIN_SUBJECTS:-}" || "$SBX_ADMIN_SUBJECTS" =~ $SUBJECTS_RE ]] ||
     die 'SBX_ADMIN_SUBJECTS must be comma-separated github:<numeric id> or oidc:<provider sub>, no spaces'
 
+  # ADR-0045 test users (SBX_TEST_USERS, SBX_TEST_USERS_ENROLLED). Sets TEST_USERS and
+  # TEST_USERS_ENROLLED. identity.ts caps the count (TEST_USERS_MAX=1000) and the control plane
+  # reads the enrollment flag as exactly 'true'; the shell refuses near-misses first, so a typo
+  # cannot enrol a thousand subjects and a dead flag cannot come up looking configured.
+  TEST_USERS="${SBX_TEST_USERS:-0}"
+  [[ "$TEST_USERS" =~ ^(0|[1-9][0-9]{0,2}|1000)$ ]] ||
+    die "SBX_TEST_USERS must be a whole number of users, 0-1000 (got '$TEST_USERS')"
+  case "${SBX_TEST_USERS_ENROLLED:-}" in
+    '') TEST_USERS_ENROLLED='' ;;
+    1) TEST_USERS_ENROLLED=1 ;;
+    *) die "SBX_TEST_USERS_ENROLLED must be unset or 1 (got '$SBX_TEST_USERS_ENROLLED')" ;;
+  esac
+  # The same refusal the control plane makes at boot (#1023): the flag without a count enrols a
+  # range nobody can log in as, a silently dead setting.
+  [[ -z "$TEST_USERS_ENROLLED" || "$TEST_USERS" -gt 0 ]] ||
+    die 'SBX_TEST_USERS_ENROLLED needs SBX_TEST_USERS: no test user could log in to use the sandboxes it enrols'
+  # The acknowledgement deploy/k8s/setup.sh asks for on --target ocp, the shared-cluster target:
+  # this installer's every target is one. A stale export in the env file would quietly keep a
+  # password-gated login path alive, so the switch names its own risk.
+  if [[ "$TEST_USERS" -gt 0 && "${SBX_TEST_USERS_ACK:-}" != 'i-know-this-is-not-for-production' ]]; then
+    die "SBX_TEST_USERS=$TEST_USERS: test users are a dev/test feature and this is a shared-cluster deployment. Re-run with SBX_TEST_USERS_ACK=i-know-this-is-not-for-production to confirm, or SBX_TEST_USERS= (or unset) to turn them off"
+  fi
+  if [[ -n "$TEST_USERS_ENROLLED" ]]; then
+    log "WARNING: SBX_TEST_USERS_ENROLLED=1: test:1..test:$TEST_USERS may log in and use sandboxes (dev/test only, ADR-0045)"
+  fi
+
   : "${SBX_LIFETIME_DAYS:=7}" "${SBX_MAX_LIFETIME_DAYS:=30}" "${SBX_MAX_PER_SUBJECT:=3}" "${SBX_MAX_TOTAL:=40}" "${SBX_MAX_INFLIGHT:=2}"
   : "${SBX_WORKSPACE_IMAGE_MB:=2048}" "${SBX_TOKEN_TTL_MINUTES:=15}" "${SBX_RETENTION_DAYS:=14}"
   : "${SBX_MODES_ALLOWED:=per-exec}" "${SBX_IDLE_CEILING_S:=1800}" "${SBX_LEASE_CACHE_DROP_S:=30}"
@@ -414,6 +457,13 @@ validate_profile() {
   *) die 'SBX_PROFILE must be sandbox or combined' ;;
   esac
   COMBINED=1
+  # This installer keeps test users off the combined profile (its moca-settings carries a
+  # hardcoded SH_TEST_USERS=0): refuse the knobs rather than ignore them, the same reasoning as
+  # the oidc-only knobs above -- a silently ignored SBX_TEST_USERS would look like a deployment
+  # that has them.
+  [[ "$TEST_USERS" == 0 ]] ||
+    die 'SBX_TEST_USERS is not supported with SBX_PROFILE=combined (this installer keeps test users off there); unset it'
+  [[ -z "$TEST_USERS_ENROLLED" ]] || die 'SBX_TEST_USERS_ENROLLED needs SBX_TEST_USERS, refused above with SBX_PROFILE=combined'
   OVERLAY_REL=../../k8s/overlays/ocp-combined
   API_ROUTE='moca-api'
   [[ "${SBX_MOCA_HOST:-}" =~ $HOST_RE ]] || die 'SBX_MOCA_HOST is required with SBX_PROFILE=combined (the supervisor Route host)'
@@ -1266,6 +1316,36 @@ ensure_release_secret() {
   )
 }
 
+# The test users' shared secret, moca-test-users (ADR-0045; SBX_TEST_USERS > 0 only): one random
+# printable line, generated once and kept, like the janitor's token. A Secret of its own because the
+# control plane's credentials volume projects it as an OPTIONAL source (base/control-plane.yaml): an
+# absent file reads as unset, an empty key would crash-loop identity.ts at boot. Off, the Secret is
+# deleted, so the file is absent again -- exactly the shape the base's comment promises.
+ensure_test_users() {
+  if [[ "$TEST_USERS" == 0 ]]; then
+    if [[ -n "$(secret_json moca-test-users)" ]]; then
+      log 'deleting moca-test-users (SBX_TEST_USERS is 0 or unset)'
+      kc delete secret moca-test-users -n "$NS" >/dev/null
+    fi
+    return 0
+  fi
+  local json sec
+  json="$(secret_json moca-test-users)"
+  sec="$(json_value "$json" SH_TEST_USER_SECRET)"
+  if [[ -z "$sec" ]]; then
+    log 'generating the test-user secret (SH_TEST_USER_SECRET)'
+    sec="$(openssl rand -base64 48 | tr -d '\n')"
+  fi
+  # identity.ts TEST_USER_SECRET_MIN_CHARS is 16; 32+ printable, no space, is the janitor token's
+  # shape, and this secret guards a login the same way.
+  [[ "$sec" =~ ^[[:graph:]]{32,}$ ]] ||
+    die 'moca-test-users SH_TEST_USER_SECRET is not 32+ printable characters: delete the Secret and re-run (this rotates it)'
+  (
+    export S_0="$sec"
+    apply_secret moca-test-users SH_TEST_USER_SECRET
+  )
+}
+
 # moca-settings (the keys base/control-plane.yaml reads) and sbx-settings (the sandbox profile's and
 # the relay's), then two hashes of what each pod reads at boot (write_overlay stamps them, so a change
 # rolls the pod that reads it): SETTINGS_HASH, the control plane's, covers every setting, the public
@@ -1306,9 +1386,18 @@ ensure_settings() {
   # the harness's public URL the supervisor Route serves; no operator key fallback, no tiers.
   [[ -z "$COMBINED" ]] || moca+=("SH_PUBLIC_HARNESS_URL=https://$SBX_MOCA_HOST" 'SH_ALLOW_OPERATOR_FALLBACK=false'
     'SH_SANDBOX_TIERS=' 'SH_SANDBOX_DEFAULT_TIER=' 'SH_MODEL_CATALOG_HOSTS=' 'SH_TEST_USERS=0')
+  # SBX0: the count mounts the test-login route (#1023) and bounds which test:<n> exists. Written
+  # only with test users on, so an off run is byte-identical to today's (the base's env ref for
+  # SH_TEST_USERS is optional; absent reads as 0 in the control plane) and a later off run's apply
+  # prunes the key again.
+  [[ -n "$COMBINED" || "$TEST_USERS" == 0 ]] || moca+=("SH_TEST_USERS=$TEST_USERS")
   sbx=("SH_ALLOWED_SUBJECTS=$SBX_ALLOWED_SUBJECTS" "SH_SANDBOX_TEMPLATES=$TEMPLATES_JSON"
     "SH_SANDBOX_EXEC_ENDPOINT=$SBX_EXEC_HOST:443" 'SH_SANDBOX_TOKEN_ISSUER=sbx-control-plane'
     "SH_SANDBOX_LIFETIME_SECONDS=$LIFETIME_S")
+  # Absent with test users not enrolled: the control plane's default (off). apply_configmap's
+  # server-side apply removes the key on a re-run that turns enrollment off, so an off run is not
+  # sticky.
+  [[ -z "$TEST_USERS_ENROLLED" ]] || sbx+=("SH_SANDBOX_TEST_USERS_ENROLLED=true")
   # Absent with SBX_MAX_LIFETIME_DAYS=off: idle lifetimes stay off (the absolute lifetime).
   [[ -z "$MAX_LIFETIME_S" ]] || sbx+=("SH_SANDBOX_MAX_LIFETIME_SECONDS=$MAX_LIFETIME_S")
   sbx+=("SH_SANDBOX_TOKEN_TTL_SECONDS=$TOKEN_TTL_S"
@@ -1351,8 +1440,12 @@ ensure_settings() {
   # With the release listener on (#338), moca-relay-release goes into BOTH hashes, as both pods read
   # its token at boot: a rotated one rolls each, and moca-mu1's data (and so its line here) is
   # untouched. Off, neither hash has the line, so both are exactly as before.
+  # With test users on (ADR-0045), moca-test-users likewise: the control plane reads its shared
+  # secret once at start, so a rotated one (the Secret deleted and re-run) must roll it. Off, the
+  # line is absent, so a deployment that never had test users hashes exactly as before.
   mu1="$(secret_json moca-mu1 | jq -cS '.data // {}')"
-  egress='' hosts='' release=''
+  egress='' hosts='' release='' testusers=''
+  [[ "$TEST_USERS" == 0 ]] || testusers="$(secret_json moca-test-users | jq -cS '.data // {}')"
   [[ -z "$EGRESS_ON" ]] || egress="$(secret_json sbx-egress | jq -cS '.data // {}')"
   [[ -z "$STORE_ON" ]] || hosts="$(secret_json sbx-template-hosts | jq -cS '.data // {}')"
   [[ -z "$RELEASE_ON" ]] || release="$(secret_json moca-relay-release | jq -cS '.data // {}')"
@@ -1366,6 +1459,7 @@ ensure_settings() {
     [[ -z "$EGRESS_ON" ]] || printf '%s\n' "$egress"
     [[ -z "$STORE_ON" ]] || printf '%s\n' "$hosts"
     [[ -z "$RELEASE_ON" ]] || printf '%s\n' "$release"
+    [[ "$TEST_USERS" == 0 ]] || printf '%s\n' "$testusers"
   } | openssl dgst -sha256 -hex | awk '{print substr($NF, 1, 16)}')"
   [[ "$SETTINGS_HASH" =~ ^[0-9a-f]{16}$ ]] || die 'could not hash the settings (openssl dgst)'
   # The relay's env from sbx-settings, by key, as patch-relay.yaml names them.
@@ -1443,7 +1537,8 @@ write_overlay() {
     printf 'apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\n'
     printf 'namespace: %s\nresources:\n  - %s\n' "$NS" "$OVERLAY_REL"
     # The combined overlay already holds the template store (and refuses egress, validate_profile).
-    if [[ -z "$COMBINED" && ( -n "$EGRESS_ON" || -n "$STORE_ON" ) ]] || [[ -n "$RELEASE_ON" ]]; then
+    if [[ -z "$COMBINED" && ( -n "$EGRESS_ON" || -n "$STORE_ON" ) ]] || [[ -n "$RELEASE_ON" ]] ||
+      [[ -n "$TEST_USERS_ENROLLED" ]]; then
       printf 'components:\n'
     fi
     if [[ -z "$COMBINED" ]] && [[ -n "$EGRESS_ON" || -n "$STORE_ON" ]]; then
@@ -1461,6 +1556,10 @@ write_overlay() {
     # The relay's control listener (#338), on either profile. It patches no projected source (every
     # overlay's credentials volume names moca-relay-release already), so its place in the list is free.
     [[ -z "$RELEASE_ON" ]] || printf '  - ../../k8s/base/relay-release-control\n'
+    # Test-user enrollment (#1018), sandbox only (validate_profile refuses the knobs on combined).
+    # The base already wires SH_TEST_USERS and the moca-test-users volume source, so this Component
+    # alone is what the flag needs.
+    [[ -z "$TEST_USERS_ENROLLED" ]] || printf '  - %s/test-users\n' "$OVERLAY_REL"
     printf 'patches:\n'
     printf '  - target: { kind: Route, name: moca-relay }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_ATTACH_HOST"
     printf '  - target: { kind: Route, name: sbx-exec }\n    patch: |-\n      - { op: replace, path: /spec/host, value: %s }\n' "$SBX_EXEC_HOST"
@@ -1710,6 +1809,7 @@ main() {
   ensure_egress_secrets
   ensure_store_secrets
   ensure_release_secret
+  ensure_test_users
   route_cert moca-relay-tls "$SBX_ATTACH_HOST" "${SBX_ATTACH_TLS_CERT:-}" "${SBX_ATTACH_TLS_KEY:-}" "$GEN/attach-ca.crt"
   route_cert sbx-exec-tls "$SBX_EXEC_HOST" "${SBX_EXEC_TLS_CERT:-}" "${SBX_EXEC_TLS_KEY:-}" "$GEN/exec-ca.crt"
   # Combined: the supervisor's passthrough Route (Moca Pi turns) terminates TLS in its sidecar.

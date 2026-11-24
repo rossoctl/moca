@@ -1,0 +1,14 @@
+# Test-user enrollment for the SBX0 control plane (ADR-0045, #1018). A Component, not part of the
+# overlay: deploy/sbx/setup.sh lists it only behind SBX_TEST_USERS_ENROLLED=1, so a stack without
+# the switch renders exactly as before.
+#   patch-control-plane.yaml   SH_SANDBOX_TEST_USERS_ENROLLED, from sbx-settings (setup.sh writes
+#                              it as exactly 'true'; absent is the control plane's off default)
+# Nothing else is needed: the BASE already wires SH_TEST_USERS from moca-settings (an optional ref)
+# and projects the Secret moca-test-users into /run/credentials as an optional source, so a stack
+# with test users on but not enrolled mounts the login route and renders as before. On this profile
+# enrollment is the login gate (SBX0 §4.2): the flag hands every holder of the shared secret a
+# working account -- dev/test only.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - path: patch-control-plane.yaml

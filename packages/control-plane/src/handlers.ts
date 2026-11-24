@@ -1025,8 +1025,10 @@ export const HANDLERS: Record<string, Handler> = {
     const fromProvider = provider.principalFor(index);
     const m = await membershipNow(deps, fromProvider.subject, fromProvider.roles);
     const principal = { ...fromProvider, roles: m.roles };
-    // SBX0 §4.2's enrolment gate still applies: main.ts refuses to boot test users on the sandbox
-    // profile, and this keeps the invariant even if that guard were ever relaxed.
+    // SBX0 §4.2's enrolment gate applies to a test login as to any other, and on the sandbox
+    // profile it IS the authentication: a test user that nothing enrols is refused HERE, at login,
+    // rather than later at the sandbox routes. main.ts refuses to boot a positive SH_TEST_USERS
+    // that nothing enrols, so this answers a stack whose enrolment changed under it.
     if (!isEnrolled(principal.subject, principal.roles, deps.config, m.enrolled)) {
       throw notEnrolled(principal.subject);
     }

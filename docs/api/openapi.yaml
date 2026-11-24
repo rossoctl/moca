@@ -1464,8 +1464,10 @@ paths:
 
         The reply is the SAME body as `/v1/auth/device/token`: a test user gets a refresh family,
         the configured token TTLs and its roles from `SH_ADMIN_SUBJECTS`, so it is configured
-        exactly like a GitHub user everywhere downstream. Refused on the sandbox profile, which
-        the control plane will not even boot with test users enabled.
+        exactly like a GitHub user everywhere downstream. Served on the sandbox profile too, where
+        enrollment is the login gate: a `test:<n>` that neither
+        `SH_SANDBOX_TEST_USERS_ENROLLED` nor `SH_ALLOWED_SUBJECTS`/`SH_ADMIN_SUBJECTS` enrols is
+        refused here, at login, instead of at the sandbox routes.
       security: []
       requestBody:
         required: true

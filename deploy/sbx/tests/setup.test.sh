@@ -1923,3 +1923,69 @@ render; render_json
 [[ "$(robj Deployment moca-control-plane | jq -r '.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[] | select(.secret.name == "moca-relay-release") | .secret.optional')" == true ]] || fail "combined's control plane does not mount the release token"
 GEN="$GEN0"
 pass 'SBX_PROFILE=combined with SBX_RELEASE_CONTROL=1 renders the listener in its namespace and mounts the token in the control plane'
+
+# 20. Test users (ADR-0045) behind SBX_TEST_USERS and SBX_TEST_USERS_ENROLLED: the shared secret
+#     in moca-test-users alone (kept, never in argv), the count in moca-settings, the enrollment
+#     flag in sbx-settings with its Component, the hashes rolling on rotation, off back to today's
+#     objects, and the knobs refused on combined.
+refuse_each reset_state '' \
+  'export SBX_TEST_USERS=x => SBX_TEST_USERS must be a whole number of users, 0-1000' \
+  'export SBX_TEST_USERS=1001 => SBX_TEST_USERS must be a whole number of users, 0-1000' \
+  'export SBX_TEST_USERS=-1 => SBX_TEST_USERS must be a whole number of users, 0-1000' \
+  'export SBX_TEST_USERS_ENROLLED=2 => SBX_TEST_USERS_ENROLLED must be unset or 1' \
+  'export SBX_TEST_USERS_ENROLLED=true => SBX_TEST_USERS_ENROLLED must be unset or 1' \
+  'export SBX_TEST_USERS_ENROLLED=yes => SBX_TEST_USERS_ENROLLED must be unset or 1' \
+  'export SBX_TEST_USERS_ENROLLED=1 => SBX_TEST_USERS_ENROLLED needs SBX_TEST_USERS' \
+  'export SBX_TEST_USERS=5 => SBX_TEST_USERS_ACK=i-know-this-is-not-for-production'
+pass 'the test-user knobs are refused before anything applies: a bad count, a near-miss switch, the flag without a count'
+
+reset_state
+run_setup export SBX_TEST_USERS=5 SBX_TEST_USERS_ACK=i-know-this-is-not-for-production SBX_TEST_USERS_ENROLLED=1 || fail "test users on failed: $(cat "$TMP/out")"
+[[ -f "$MOCK_STATE/secret-moca-test-users.json" ]] || fail 'no moca-test-users Secret'
+[[ "$(secret_val moca-test-users SH_TEST_USER_SECRET)" =~ ^[[:graph:]]{32,}$ ]] || fail 'no kept 32+ printable test-user secret'
+! grep -qF -- "$(secret_val moca-test-users SH_TEST_USER_SECRET)" "$MOCK_LOG" "$TMP/out" || fail 'the test-user secret reached argv or the log'
+[[ "$(cm moca-settings SH_TEST_USERS)" == 5 ]] || fail 'SH_TEST_USERS is not in moca-settings'
+[[ "$(cm sbx-settings SH_SANDBOX_TEST_USERS_ENROLLED)" == true ]] || fail 'the enrollment flag is not in sbx-settings'
+grep -q -- '- ../../k8s/overlays/ocp-sbx/test-users' "$K" || fail 'the test-users Component is not listed'
+render; render_json
+grep -q 'SH_SANDBOX_TEST_USERS_ENROLLED' "$TMP/render.yaml" || fail 'the rendered control plane has no enrollment env'
+[[ "$(robj Deployment moca-control-plane | jq -r '.spec.template.spec.volumes[] | select(.name == "credentials") | .projected.sources[] | select(.secret.name == "moca-test-users") | .secret.optional')" == true ]] ||
+  fail 'the credentials volume does not project moca-test-users as an optional source'
+cp_hash="$(pod_hash moca-control-plane)"
+sec="$(secret_val moca-test-users SH_TEST_USER_SECRET)"
+pass 'test users on: a kept secret in moca-test-users alone, the count and the flag in the ConfigMaps, the Component listed and rendered'
+
+# A re-run keeps the secret and the hashes; rotating it (the Secret deleted) rolls the control plane.
+run_setup export SBX_TEST_USERS=5 SBX_TEST_USERS_ACK=i-know-this-is-not-for-production SBX_TEST_USERS_ENROLLED=1 || fail 'the test-users re-run failed'
+[[ "$(secret_val moca-test-users SH_TEST_USER_SECRET)" == "$sec" ]] || fail 'a re-run rotated the test-user secret'
+render
+[[ "$(pod_hash moca-control-plane)" == "$cp_hash" ]] || fail 'a re-run rolled the control plane'
+rm "$MOCK_STATE/secret-moca-test-users.json"
+run_setup export SBX_TEST_USERS=5 SBX_TEST_USERS_ACK=i-know-this-is-not-for-production SBX_TEST_USERS_ENROLLED=1 || fail 'the rotation run failed'
+[[ "$(secret_val moca-test-users SH_TEST_USER_SECRET)" != "$sec" ]] || fail 'a deleted Secret was not regenerated'
+render
+[[ "$(pod_hash moca-control-plane)" != "$cp_hash" ]] || fail 'a rotated test-user secret did not roll the control plane'
+! grep -qF -- "$sec" "$MOCK_LOG" || fail 'the old test-user secret reached argv'
+pass 'a re-run keeps the secret and the hash; deleting the Secret regenerates it and rolls the control plane'
+
+# Turning test users off deletes the Secret, prunes both keys, drops the Component, and renders as
+# an off run always did.
+run_setup true || fail 'the off run failed'
+[[ ! -e "$MOCK_STATE/secret-moca-test-users.json" ]] || fail 'test users off left the moca-test-users Secret'
+[[ "$(cm moca-settings SH_TEST_USERS)" == '' ]] || fail 'test users off left SH_TEST_USERS in moca-settings'
+[[ "$(cm sbx-settings SH_SANDBOX_TEST_USERS_ENROLLED)" == '' ]] || fail 'test users off left the enrollment flag'
+! grep -q 'test-users' "$K" || fail 'test users off left the Component listed'
+render
+! grep -q 'SH_SANDBOX_TEST_USERS_ENROLLED' "$TMP/render.yaml" || fail 'test users off left the enrollment env rendered'
+pass 'test users off: the Secret deleted, both keys pruned, the Component and its env gone'
+
+# On combined the knobs are refused (this installer keeps test users off there), before anything
+# is applied.
+reset_state
+RW="ghcr.io/example/moca-remote-worker@sha256:$(printf 'a%.0s' {1..64})"
+MI="ghcr.io/example/moca@sha256:$(printf 'b%.0s' {1..64})"
+! run_setup eval "export SBX_PROFILE=combined SBX_MOCA_HOST=moca.apps.example.invalid SBX_NAMESPACE=moca-sbx-combined-test SBX_SANDBOX_IMAGE=$RW SBX_IMAGE=$MI SBX_TEST_USERS=5 SBX_TEST_USERS_ACK=i-know-this-is-not-for-production" ||
+  fail 'SBX_TEST_USERS was accepted on combined'
+grep -q 'SBX_TEST_USERS is not supported with SBX_PROFILE=combined' "$TMP/out" || fail "the combined refusal: $(tail -2 "$TMP/out")"
+! grep -qE 'apply|patch|delete' "$MOCK_LOG" || fail 'the combined refusal changed something first'
+pass 'SBX_TEST_USERS with SBX_PROFILE=combined: refused before anything applies'

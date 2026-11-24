@@ -1185,11 +1185,82 @@ The §12.3 tenant verified all of it: the operator's Let's Encrypt wildcard for
 controller's default certificate), a namespace-scoped ingress controller admitted by the
 `policy-group.network.openshift.io/ingress` selector, and mocactl logins and turns over the Routes.
 
+### 12.6 The sandbox service, opt-in (`--profile combined`)
+
+This target can also serve the **sandbox service** -- the `mocactl sbx` commands -- from the same
+namespace, beside the harness:
+
+| `--profile`         | Serves                | The control plane's own routes |
+| ------------------- | --------------------- | ------------------------------ |
+| `harness` (default) | harness sessions only | yes                            |
+| `combined`          | both                  | yes                            |
+
+It needs `SH_ROUTE_DOMAIN` (§12.5), because an `sbx` client reaches the Exec path over its own
+Route, and `SH_ALLOWED_SUBJECTS` -- who may use the sandbox routes, besides admins:
+
+```bash
+SH_SINGLE_NAMESPACE=<ns> SH_ROUTE_DOMAIN=<domain> SH_ALLOWED_SUBJECTS=github:<id> \
+  deploy/k8s/setup.sh --target ocp-single --profile combined
+```
+
+The run adds, beyond the harness objects: ConfigMap `sbx-settings` (the template list, the Exec
+endpoint and its CA, the token issuer), Secret `sbx-token-keys` (the signer's public keys, so the
+relay can verify sandbox tokens), Secret `sbx-exec-tls` and a `tls-exec` ghostunnel sidecar on the
+relay with a passthrough Route `sbx-exec` at `moca-exec-<ns>.<domain>`, and `deployment/sbx-worker`
+-- the container-tier worker the generated `default` template names, with the NetworkPolicies that
+let the worker resolve DNS, reach the relay's attach port, be reached by the router, and **be
+accepted by the relay**: under the namespace's default-deny both directions of that attach need a
+rule, and a missing one is a timeout rather than a refusal, which reads as a broken relay.
+
+The run waits for the worker to appear in the relay's presence hash, not merely for its pod to be
+Ready: a Ready pod has only started dialing, so without that wait the install can report success on
+a stack where `sbx run` answers `no live worker`.
+
+The profile is sticky in `moca-setup`. `--profile harness` removes every one of those objects by
+name -- `kubectl apply -k` does not prune, so dropping them from the render would leave the worker
+running and the Exec Route answering for a backend that is gone. Secret `sbx-exec-tls` is the one
+exception and is kept, because it may hold a certificate you supplied.
+
+The Exec Route is TLS passthrough, so it needs a certificate valid for its own host. The installer
+generates a self-signed one and ships it to every `sbx` client as `SH_SANDBOX_EXEC_CA`. An existing
+`sbx-exec-tls` Secret is never replaced, so you can install your own pair by hand; passing one as a
+flag, and rolling the relay when the certificate changes, is a follow-up. The relay's pod template
+does carry a digest of the **token keyset**, so rotating the signer rolls it rather than leaving it
+verifying against a keyset nobody signs with.
+
+An identity provider is still required: the control plane does not boot without
+`SH_GITHUB_CLIENT_ID` (or `SH_OIDC_ISSUER`), and `SH_TEST_USERS` does not substitute for one. With
+neither set, the control plane is installed at 0 replicas and the run says so.
+
+`SH_TEST_USERS` works on this profile, but a test user is not enrolled by `SH_ALLOWED_SUBJECTS`
+at scale -- naming a thousand of them is ~10 KB of ConfigMap. Enrol the whole range instead:
+
+```bash
+SH_TEST_USERS=1000 SH_SANDBOX_TEST_USERS_ENROLLED=true   # test:1..test:1000 may use sbx
+```
+
+Three things this does **not** give you, all dev/test-only by design:
+
+- **No isolation between sandboxes.** One `sbx-worker` pod backs the `default` template, so every
+  sandbox made from it shares a container, a uid and a `/workspace` mount. Each sandbox's Exec
+  starts in its own `/workspace/<sandbox-id>`, but one sandbox can read another's by relative path
+  -- including across users. Isolation between sandboxes is the per-Exec microVM tier's job
+  (ADR-0035).
+- **No template store**, so `sbx quota` and template publishing fail (`SH_PROVENANCE_DIR` is
+  unset).
+- **`sbx up`'s files are not what `sbx run` sees.** A push writes into the worker's shared workspace
+  root (`/workspace/app.py`), while an Exec for that sandbox starts in `/workspace/<sandbox-id>` --
+  the per-key directory `WorkspaceRunner` derives from the token's `wsk`, which is correct and
+  non-empty. So `push`, `pull` and an Exec disagree about the workspace, and an agent pointed at
+  this sandbox sees an empty tree. `login`, `create`, `run`, `ls` and `rm` are unaffected. Only
+  reproduced with one worker serving many sandboxes, which is what this component installs.
+
 ## 13. Test users, for unattended multi-user testing (`SH_TEST_USERS`)
 
 > **Preview.** Test-user logins are implemented but not yet declared Stable; interfaces and limits
-> may change. Known limits: dev and test only, container tier only, and not available on the
-> sandbox profile (see below and [ADR-0045](../../adrs/0045-test-user-logins.md)).
+> may change. Known limits: dev and test only, container tier only, and on the sandbox profile
+> only for subjects that are enrolled (see below and
+> [ADR-0045](../../adrs/0045-test-user-logins.md)).
 
 Every login is GitHub's device flow, which needs a person and a browser. `SH_TEST_USERS=N` adds N
 synthetic subjects `test:1` … `test:N` that log in with a shared secret instead, so a script can
@@ -1200,8 +1271,11 @@ issues the same refresh family and the same token lifetimes, so rotation, roles
 
 **It is off unless asked for,** and gated by a secret, because the endpoint issues a real login for
 an arbitrary subject: without one, anyone who can reach the control plane is every test user.
-`POST /v1/auth/test-token` answers 404 while `SH_TEST_USERS` is unset, the route is not mounted on
-the sandbox profile, and the control plane refuses to boot if the two are combined.
+`POST /v1/auth/test-token` answers 404 while `SH_TEST_USERS` is unset -- on every profile: the
+route is declared for the harness, sandbox and combined profiles but is only mounted by a positive
+count. On the sandbox profile enrollment is additionally the login gate, so a count whose subjects
+nothing enrols is refused at boot rather than served as a login that always says `not_enrolled`
+(section 12.6).
 
 ### 13.1 Bring it up
 
