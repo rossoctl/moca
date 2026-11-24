@@ -949,9 +949,12 @@ export async function cmdGet(rt: Runtime, io: Io, opts: GetOptions): Promise<num
           gateId: raw.gateId,
           // Both strings can be absent: at `MOCA_TURN_SUMMARY_BYTES=0` the control plane drops them
           // and keeps the id. The id is the part a decision needs, so report the gate either way
-          // rather than hide it -- and never hand `sanitizeRemote` an undefined.
-          summary: sanitizeRemote(raw.gate.summary ?? ''),
-          proposed_action: sanitizeRemote(raw.gate.proposed_action ?? ''),
+          // rather than hide it, and leave a dropped string out as `reason`/`message` do above --
+          // an empty one would read as "the gate said nothing".
+          ...(raw.gate.summary ? { summary: sanitizeRemote(raw.gate.summary) } : {}),
+          ...(raw.gate.proposed_action
+            ? { proposed_action: sanitizeRemote(raw.gate.proposed_action) }
+            : {}),
         }
       : undefined;
   if (opts.json) {
