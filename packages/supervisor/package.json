@@ -19,7 +19,7 @@
     "@types/node": "^22.20.5",
     "redis": "^6.3.1",
     "tsx": "^4.23.15",
-    "typescript": "^5.5.0",
+    "typescript": "^7.0.2",
     "vitest": "^2.0.0",
     "yaml": "^2.9.1"
   }
