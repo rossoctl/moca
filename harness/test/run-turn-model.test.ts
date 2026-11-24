@@ -82,6 +82,19 @@ describe('requireModel', () => {
     ).toThrowError(/set SH_MODEL_CUSTOM=1 to send this id to it as-is/);
   });
 
+  it('suggests the openai-completions path for an openai id at an OPENAI_BASE_URL gateway', () => {
+    // That path reads OPENAI_BASE_URL, not the turn's Anthropic endpoint, and SH_MODEL_CUSTOM=1
+    // alone would pick the Anthropic protocol.
+    expect(() =>
+      requireModel(
+        'openai',
+        'gpt-9-ultra',
+        { OPENAI_BASE_URL: 'https://gw.example' },
+        'https://api.anthropic.com',
+      ),
+    ).toThrowError(/set SH_MODEL_CUSTOM=1 and SH_MODEL_API=openai-completions/);
+  });
+
   it('omits the SH_MODEL_CUSTOM hint when no custom endpoint is configured', () => {
     // Anchored past the registry sentence: the hint (Known ids / Did you mean) follows directly,
     // with no custom-endpoint sentence in between.

@@ -1016,17 +1016,22 @@ export function requireModel(
     ? `Did you mean: ${suggestions.join(', ')}?`
     : `Known "${provider}" ids include: ${ids.slice(0, 12).join(', ')}${ids.length > 12 ? ', …' : ''}.`;
   // A gateway names models pi has never heard of, and SH_MODEL_CUSTOM=1 bypasses the registry for
-  // them. api.anthropic.com serves only registry ids, so the knob cannot help there.
-  const custom = Boolean(endpoint && URL.parse(endpoint)?.hostname !== 'api.anthropic.com');
+  // them. api.anthropic.com serves only registry ids, so the knob cannot help there. An openai id
+  // goes through openai-completions, which reads its own endpoint, not the Anthropic one.
+  const openai = provider === 'openai';
+  const target = openai ? env.SH_MODEL_BASE_URL || env.OPENAI_BASE_URL : endpoint;
+  const custom = Boolean(target && URL.parse(target)?.hostname !== 'api.anthropic.com');
   // The remedy precedes the id list, and the id is capped: /turn truncates this text to 500
   // chars, and an unbounded SH_MODEL value or the long id list would eat the tail — the one
   // actionable sentence must survive.
   const shown = (s: string) => (s.length > 64 ? `${s.slice(0, 64)}…` : s);
   throw new ModelConfigError(
     `Unknown model "${shown(provider)}/${shown(modelId)}" — not in the pi-ai registry.` +
-      (custom
-        ? ' The endpoint is not api.anthropic.com; set SH_MODEL_CUSTOM=1 to send this id to it as-is.'
-        : '') +
+      (!custom
+        ? ''
+        : openai
+          ? ' To send this id to the endpoint as-is, set SH_MODEL_CUSTOM=1 and SH_MODEL_API=openai-completions.'
+          : ' The endpoint is not api.anthropic.com; set SH_MODEL_CUSTOM=1 to send this id to it as-is.') +
       ` ${hint}`,
   );
 }
