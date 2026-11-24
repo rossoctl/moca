@@ -175,6 +175,37 @@ export class TurnStore {
   }
 
   /**
+   * When `held`'s claim on `key` started its age clock: the stored instant, or `now` once this call
+   * stamps it. HSETNX, so two readers stamping at once agree on one instant rather than one of them
+   * resetting the clock the other is about to measure.
+   *
+   * The READER stamps, not the claimant: this is read only by `claimKey`'s unreadable-holder branch
+   * (#989), so `claimIdempotencyKey` keeps its single round trip on the path every submission takes.
+   * The cost is that a claim orphaned by a crash starts its clock when the next submission first
+   * looks at it rather than when it was made, so the key frees a grace after the first duplicate
+   * attempt instead of a grace after the crash. It still frees, and it never frees EARLY, which is
+   * the side that would hand a live turn's key to a second submission.
+   *
+   * The stamp is a field PER HOLDER, because a claim can change hands without the hash being deleted
+   * in between: a holder releasing the key (its `del`) between a caller's read of its record and this
+   * stamp leaves a holderless hash that the next submission's claim adopts. One shared `claimedAt`
+   * would then age the new holder from the old one's stamp, and a reader past the grace would step
+   * over a LIVE claim -- the exact duplicate fan-out this grace exists to prevent. A per-holder field
+   * cannot be misattributed; a stale one is a few dead bytes until the key's eventual release.
+   */
+  async claimedAtOr(owner: string, key: string, held: string, now: number): Promise<number> {
+    const k = idempotencyKeyKey(this.tag(owner), key);
+    const field = `claimedAt:${held}`;
+    const stamped = await this.guard(() => this.redis.hSetNX(k, field, String(now)));
+    if (stamped) return now;
+    const fields = await this.guard(() => this.redis.hGetAll(k));
+    const at = Number(fields[field]);
+    // A field that vanished between the two calls (the holder's release) reads as `now`: the caller
+    // then treats the holder as live for one grace, and its own next claim wins the freed key.
+    return Number.isFinite(at) ? at : now;
+  }
+
+  /**
    * Who holds `key` right now, WITHOUT claiming it (#393). The decision route's replay check: the
    * claim itself cannot answer it, because claiming an unheld key takes it.
    */

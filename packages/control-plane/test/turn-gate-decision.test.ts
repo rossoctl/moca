@@ -3,7 +3,7 @@ import { HANDLERS } from '../src/handlers.js';
 import { OwnershipIndex } from '../src/ownership.js';
 import { MemoryTurnQueue } from '../src/turn-queue.js';
 import { TurnStore } from '../src/turn-store.js';
-import { sessionTurnsKey } from '../src/turn-record.js';
+import { idempotencyKeyKey, sessionTurnsKey } from '../src/turn-record.js';
 import { leafResultKey } from '../src/turn-result.js';
 import {
   alice,
@@ -202,6 +202,40 @@ describe('decideGate (#393, design §2)', () => {
     );
     // ...and no second resume fanned out: the abort is still the only queued turn.
     expect(d.turnQueue.ids).toEqual([winner]);
+  });
+
+  it('fans out NO second resume when the gate key is held by a turn still being created (#989)', async () => {
+    // One step earlier than the race above: the winner has claimed the gate key but has not written
+    // its record at all, so the loser cannot read it. Both resumes carry the same decision, and the
+    // second leaf finds the gate already decided and re-derives the same continuation -- so a
+    // stepover here runs one human approval TWICE. The claim is treated as live for its grace, and
+    // the answer is the same 409 a readable winner gives: nothing created, nothing enqueued.
+    const d = turnDeps();
+    const sid = await session(d);
+    await paused(d, sid);
+    await d.turns.claimIdempotencyKey('github:1234', `${sid}:gate:0`, 't-ghost');
+    expect(await codeOf(() => decide(d, sid, { gateId: 0, action: 'approve' }))).toBe(
+      'gate_not_pending',
+    );
+    expect(d.turnQueue.ids).toEqual([]);
+  });
+
+  it('resumes the gate once the orphaned claim on its key is past the grace (#989)', async () => {
+    // The other half: a claimant that died before writing its record must not hold the gate shut
+    // forever. Past CLAIM_GRACE_MS the claim is stepped over and the decision resumes normally.
+    const d = turnDeps();
+    const sid = await session(d);
+    const pausedId = await paused(d, sid);
+    await d.turns.claimIdempotencyKey('github:1234', `${sid}:gate:0`, 't-ghost');
+    d.fake.hashes.set(idempotencyKeyKey('github:1234', `${sid}:gate:0`), {
+      turnId: 't-ghost',
+      'claimedAt:t-ghost': String(NOW_MS - 600_000),
+    });
+    const res = await decide(d, sid, { gateId: 0, action: 'approve' });
+    expect(res.status).toBe(202);
+    const turnId = (res.body as { turnId: string }).turnId;
+    expect((await d.turns.get(turnId))?.resumeOf).toBe(pausedId);
+    expect(d.turnQueue.ids).toEqual([turnId]);
   });
 
   it('409s when the session has no paused turn', async () => {

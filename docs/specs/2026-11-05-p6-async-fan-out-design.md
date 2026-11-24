@@ -222,6 +222,12 @@ The quota lands in M1 (§9), with the drain loop it exists to protect.
 state returns `202` with the **existing** `turnId` rather than enqueueing a second copy — a
 misbehaving client retrying a 202 it already received must not fan out twice.
 
+A claim is written a round trip before the record it names, so a resubmission can find a key held by
+a turn it cannot yet read. Such a claim counts as held for a short grace (`CLAIM_GRACE_MS`, 10 s) and
+is stepped over after it: inside the grace the answer is the holder's `turnId`, whose `GET` can 404
+until the record lands; past it, the claim is treated as orphaned by a crash, so a dead claimant
+cannot wedge the key — and since the default key is the session id, cannot wedge the session (#989).
+
 Two consequences of that default, stated because each could be read the other way:
 
 - **A fan-out of N leaves is N sessions, not N turns in one session.** Each leaf already gets its own
