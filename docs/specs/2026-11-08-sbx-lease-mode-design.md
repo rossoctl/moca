@@ -1210,7 +1210,10 @@ that points to ADR-0048. The read-coalescing exception in ADR-0035 is unaffected
    1 GiB, and a cache-heavy lease VM reaches its guest RAM sooner. E17 reports its memory results at
    both sizes (E17 §6).
 4. **Per-`Exec` under the same unprivileged uid.** §3.3 keeps per-`Exec` as root in v1. Moving it to
-   the Exec uid would give one guest model and one workspace ownership. The security review decides.
+   the Exec uid would give one guest model and one workspace ownership. **Decided (user, as security
+   owner, 2026-11-24): per-`Exec` stays root in v1.** A uid change would also change the workspace
+   ownership of every existing per-`Exec` sandbox, and lease mode ships allowed without it. A later
+   release can take it up.
 5. **Free-page reporting support (v0.2; checked 2026-11-12).**
    - **Firecracker v1.17.0** (pinned by P4 and by the E15 rig; also what the SBX0 host runs) has it:
      `"free_page_reporting": true` on `PUT /balloon`. Reported ranges are `madvise(MADV_DONTNEED)`d.
