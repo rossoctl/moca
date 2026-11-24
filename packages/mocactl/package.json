@@ -19,7 +19,7 @@
     "@moca/config-bundle": "workspace:*",
     "@moca/sandbox-client": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "chalk": "^5.4.0",
+    "chalk": "^6.0.1",
     "clipboardy": "^5.3.2",
     "ink": "^8.0.0",
     "jsonc-parser": "3.3.1",
