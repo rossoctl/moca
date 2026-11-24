@@ -227,7 +227,8 @@ func (p *pool) sweepLeases(now time.Time) {
 		standbys, freed = p.shedStandbysLocked(order, over)
 		over -= freed
 	}
-	vs = append(vs, p.reclaimLeasesLocked(now, over)...)
+	reclaimed, _ := p.reclaimLeasesLocked(now, over)
+	vs = append(vs, reclaimed...)
 	if len(vs) == 0 && len(standbys) == 0 {
 		p.mu.Unlock()
 		return

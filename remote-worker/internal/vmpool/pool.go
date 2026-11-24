@@ -689,8 +689,11 @@ func (p *pool) acquire(ctx context.Context, key string, lease bool) (VM, *runPoo
 				// asynchronously, so MemAvailable is unchanged at the re-check and
 				// the standbys would be burned for a refusal either way.
 				if ReasonOf(err) == RefuseMemoryBudget {
-					p.evictForPromotionLocked(rp, vm, price)
+					out := p.evictForPromotionLocked(rp, vm, price)
 					err = p.admitPromotionAtLocked(vm, price)
+					if ReasonOf(err) == RefuseMemoryBudget {
+						out.log(key, cap(p.reclaimQ))
+					}
 				}
 				if err != nil {
 					p.mu.Unlock()
@@ -740,7 +743,7 @@ func (p *pool) acquire(ctx context.Context, key string, lease bool) (VM, *runPoo
 		if lease {
 			admit = p.admitLeaseOrEvictLocked
 		}
-		if err := admit(false); err != nil {
+		if err := admit(key, false); err != nil {
 			p.mu.Unlock()
 			return nil, nil, "", p.countRefusal(err)
 		}
@@ -886,7 +889,7 @@ func (p *pool) runAtLocked(key string, price int64) (*runPool, bool, error) {
 	// admitOrEvictLocked, not admitLocked: a new workspace_key on a full host is #452's
 	// own repro ("create more distinct P4 sessions than the budget holds VMs"), and its
 	// refusal reaches a transcript, so a coldest idle standby is shed first.
-	if err := p.admitOrEvictAtLocked(true, price); err != nil {
+	if err := p.admitOrEvictAtLocked(key, true, price); err != nil {
 		return nil, false, err
 	}
 	dir, err := p.workspaceDir(key)

@@ -1,6 +1,7 @@
 package vmpool
 
 import (
+	"log"
 	"math"
 	"sort"
 )
@@ -75,20 +76,21 @@ type leaseFootprinter interface {
 // first inside admitLocked and a MaxRuns refusal returns here untouched, so a victim
 // parked on the memory path can never retroactively widen the MaxRuns ceiling for the
 // caller that caused the eviction.
-func (p *pool) admitOrEvictLocked(newRun bool) error {
-	return p.admitOrEvictAtLocked(newRun, p.perVMBytes())
+func (p *pool) admitOrEvictLocked(key string, newRun bool) error {
+	return p.admitOrEvictAtLocked(key, newRun, p.perVMBytes())
 }
 
 // admitLeaseOrEvictLocked is admitOrEvictLocked for a new lease VM, priced at
 // LeaseStartBytes (spec §6, "Order when a lease Exec needs a VM"): admit (item 1), else
 // shed standbys and then idle leases, idle-longest first (item 2, evictForAdmissionLocked),
 // else refuse memory-budget (item 3). Caller holds p.mu.
-func (p *pool) admitLeaseOrEvictLocked(newRun bool) error {
-	return p.admitOrEvictAtLocked(newRun, p.cfg.LeaseStartBytes)
+func (p *pool) admitLeaseOrEvictLocked(key string, newRun bool) error {
+	return p.admitOrEvictAtLocked(key, newRun, p.cfg.LeaseStartBytes)
 }
 
-// admitOrEvictAtLocked is admitOrEvictLocked for one VM priced at price. Caller holds p.mu.
-func (p *pool) admitOrEvictAtLocked(newRun bool, price int64) error {
+// admitOrEvictAtLocked is admitOrEvictLocked for one VM priced at price, for key. Caller
+// holds p.mu.
+func (p *pool) admitOrEvictAtLocked(key string, newRun bool, price int64) error {
 	err := p.admitAtLocked(newRun, price)
 	if ReasonOf(err) != RefuseMemoryBudget {
 		// Deliberately NOT RefuseHostMemory too. Eviction funds an admission's
@@ -102,18 +104,61 @@ func (p *pool) admitOrEvictAtLocked(newRun bool, price int64) error {
 		// standbys at.
 		return err
 	}
-	p.evictForBudgetLocked(price)
+	out := p.evictForBudgetLocked(price)
 	// Re-admitted, not assumed: eviction is best-effort (nothing idle to take, or the
 	// reclaim queue already saturated), and a refusal must describe the host as it is
 	// AFTER the attempt or its numbers send an operator to the wrong knob.
-	return p.admitAtLocked(newRun, price)
+	err = p.admitAtLocked(newRun, price)
+	if ReasonOf(err) == RefuseMemoryBudget {
+		out.log(key, cap(p.reclaimQ))
+	}
+	return err
+}
+
+// evictOutcome is what evictForAdmissionLocked found and did, for the log line of a
+// memory-budget refusal that follows it (#1005): with an idle lease alive, the refusal
+// says which of the reasons below kept it. why is one of
+//
+//   - "closed": the pool is closing (Close took p.mu between the admission and the
+//     eviction), so nothing was detached
+//   - "reclaim-queue-full": reclamation is behind, so nothing was detached
+//   - "futile": the standbys and the free-gated idle leases together could not cover
+//     short_by, so nothing was detached (an idle lease whose gate is held counts in
+//     idle_leases and gate_held, not in lease_bytes)
+//   - "gates-taken": every idle lease counted was taken by an Exec before the take
+//   - "evicted": victims were queued, and the re-check refused anyway (freed is short
+//     of short_by when MaxReclaimsPerScan capped the leases taken)
+//
+// "fits" (the admission fitted when the eviction looked) is set but never logged: under
+// the same p.mu hold the re-check uses the eviction's own arithmetic (committed + need
+// against the budget, need being perVM less the standby's charge on the promotion path),
+// so it admits.
+type evictOutcome struct {
+	why                  string
+	shortBy              int64 // bytes short before the eviction, 0 when it fitted
+	standbyBytes         int64 // what idle runs' standbys could shed
+	leaseBytes           int64 // what free-gated idle leases could free (reclaimableLeasesLocked)
+	idleLeases, gateHeld int
+	shedStandbys, leases int
+	freed                int64 // the charges of the victims queued
+	queueLen             int   // reclaimQ's depth when the eviction returned, its own batch included
+}
+
+// log writes o as one line for a memory-budget refusal of key's admission, beside the
+// refusal's own numbers on the exec line. queueCap is reclaimQ's capacity.
+func (o evictOutcome) log(key string, queueCap int) {
+	log.Printf("vmpool: memory-budget refusal workspace_key=%q why=%s short_by=%d standby_bytes=%d "+
+		"idle_leases=%d gate_held=%d lease_bytes=%d shed_standbys=%d leases_taken=%d freed=%d reclaim_queue=%d/%d",
+		key, o.why, o.shortBy, o.standbyBytes, o.idleLeases, o.gateHeld, o.leaseBytes,
+		o.shedStandbys, o.leases, o.freed, o.queueLen, queueCap)
 }
 
 // evictForBudgetLocked funds one admission (a warming charge or a new key's first
 // VM, priced at price) by reclaiming standbys from idle runs. Caller holds p.mu.
-// Best-effort and silent: admitOrEvictLocked re-measures rather than trusting a result.
-func (p *pool) evictForBudgetLocked(price int64) {
-	p.evictForAdmissionLocked(price, nil)
+// Best-effort: admitOrEvictLocked re-measures rather than trusting a result, and logs the
+// outcome only if it still refuses.
+func (p *pool) evictForBudgetLocked(price int64) evictOutcome {
+	return p.evictForAdmissionLocked(price, nil)
 }
 
 // evictForPromotionLocked funds one warm acquire: popping vm re-prices it from its
@@ -123,14 +168,14 @@ func (p *pool) evictForBudgetLocked(price int64) {
 // (acquire marks inFlight only after the pop), so nothing else would keep the loop
 // from handing the very standby being promoted to reclaimQ out from under the
 // caller. Caller holds p.mu.
-func (p *pool) evictForPromotionLocked(rp *runPool, vm VM, price int64) {
-	p.evictForAdmissionLocked(price-p.standbyChargeLocked(vm), rp)
+func (p *pool) evictForPromotionLocked(rp *runPool, vm VM, price int64) evictOutcome {
+	return p.evictForAdmissionLocked(price-p.standbyChargeLocked(vm), rp)
 }
 
 // evictForAdmissionLocked makes `need` bytes of budget headroom by reclaiming
 // standbys from the least-recently-used IDLE runs, `exclude` never a victim.
-// Caller holds p.mu. Best-effort and silent: every caller re-measures rather than
-// trusting a result.
+// Caller holds p.mu. Best-effort: every caller re-measures rather than trusting a
+// result, and the evictOutcome is only for the log line of a refusal that follows.
 //
 // AS MUCH AS THE ADMISSION NEEDS, NOT ONE VM (#644). Under the pre-#644 full-RAM
 // charge one standby WAS one VM's worth of budget, so a single eviction always
@@ -177,7 +222,8 @@ func (p *pool) evictForPromotionLocked(rp *runPool, vm VM, price int64) {
 // that makes self-eviction impossible at all three call sites — runLocked's key has
 // no runPool yet, and acquire's two paths pass either a busy run (its second warm
 // acquire) or the excluded promoting run (its first).
-func (p *pool) evictForAdmissionLocked(need int64, exclude *runPool) {
+func (p *pool) evictForAdmissionLocked(need int64, exclude *runPool) (out evictOutcome) {
+	out.queueLen = len(p.reclaimQ)
 	// The send below happens UNDER p.mu and must not block, which this check is what
 	// guarantees. Every sender (here and sweep) holds p.mu, so they are totally ordered
 	// against each other, and reclaimLoop only ever drains — so capacity observed here
@@ -185,24 +231,36 @@ func (p *pool) evictForAdmissionLocked(need int64, exclude *runPool) {
 	// already behind, which is precisely the state where detaching more VMs would not
 	// free memory any sooner: refuse instead. Checked BEFORE anything leaves a ready
 	// list, so a full queue costs nothing rather than losing a batch.
-	if p.closed || len(p.reclaimQ) >= cap(p.reclaimQ) {
-		return
-	}
 	budget := p.cfg.MaxCommittedBytes - p.cfg.MemoryReserveBytes
 	shortfall := budget - p.committedLocked() - need
+	out.shortBy = max(-shortfall, 0)
+	if p.closed {
+		out.why = "closed"
+		return out
+	}
+	if len(p.reclaimQ) >= cap(p.reclaimQ) {
+		out.why = "reclaim-queue-full"
+		// Counted for the log line only: nothing is taken.
+		out.idleLeases, out.gateHeld, out.leaseBytes = p.reclaimableLeasesLocked()
+		return out
+	}
 	if shortfall >= 0 {
 		// The admission fits already; nothing to fund. (Reachable on the promotion
 		// path, where need is perVM minus the standby's own charge.)
-		return
+		out.why = "fits"
+		return out
 	}
 
 	// The donor runs coldest-first and what they could shed. The same pass serves the
 	// futility check: if evictable < shortfall there is no point detaching anything.
 	order, evictable := p.standbyDonorsLocked(exclude)
+	out.standbyBytes = evictable
 	// Idle leases are the second source (spec §6), so the futility check counts what
 	// reclaimLeasesLocked could take too. Zero on a pool with no lease.
-	if evictable+p.reclaimableLeaseBytesLocked() < -shortfall {
-		return
+	out.idleLeases, out.gateHeld, out.leaseBytes = p.reclaimableLeasesLocked()
+	if evictable+out.leaseBytes < -shortfall {
+		out.why = "futile"
+		return out
 	}
 	batch, freed := p.shedStandbysLocked(order, -shortfall)
 	// Standbys first, then idle leases (spec §6): a standby costs its run a cold acquire,
@@ -211,13 +269,19 @@ func (p *pool) evictForAdmissionLocked(need int64, exclude *runPool) {
 	// shortfall or the futility check returned.
 	var leases []*leaseVictim
 	if freed < -shortfall {
-		leases = p.reclaimLeasesLocked(p.clk.Now(), -shortfall-freed)
+		var leaseFreed int64
+		leases, leaseFreed = p.reclaimLeasesLocked(p.clk.Now(), -shortfall-freed)
+		freed += leaseFreed
 	}
+	out.shedStandbys, out.leases, out.freed = len(batch), len(leases), freed
 	if len(batch) == 0 && len(leases) == 0 {
-		return // every idle lease's gate was taken since it was counted
+		out.why = "gates-taken" // every idle lease's gate was taken since it was counted
+		return out
 	}
 	// One slot for both: doReclaim destroys the leases first, each under its gate.
 	p.reclaimQ <- reclaimBatch{vms: batch, leases: leases}
+	out.why, out.queueLen = "evicted", len(p.reclaimQ)
+	return out
 }
 
 // standbyDonorsLocked is every idle run holding standbys, exclude never one of them,
