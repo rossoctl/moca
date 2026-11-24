@@ -156,6 +156,10 @@ credentials)
   # MOCK_CRED_LIST_FAIL=1: the listing itself fails (a refused connection, an expired session, a
   # proxy error page), which the cleanup must not read as "nothing is stored".
   ls | list)
+    # Like mocactl, the listing takes no argument but --json: a caller passing a name fails here.
+    for a in "${args[@]:1}"; do
+      [[ "$a" == --json ]] || { echo "sbx: too many arguments for credentials" >&2; exit 2; }
+    done
     [[ "${MOCK_CRED_LIST_FAIL:-}" != 1 ]] || { echo 'sbx: connection reset' >&2; exit 1; }
     sep='' out='{"credentials":['
     for f in "$MOCK_DIR"/cred-*.owner; do

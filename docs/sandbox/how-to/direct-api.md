@@ -69,7 +69,7 @@ ExecRequest { sandbox_id, exec: Exec { req_id, command, stdin, timeout_s, stream
 
 ```bash
 mocactl sbx login --control-plane-url https://<api host>   # GitHub device flow, once
-mocactl sbx templates                                      # what a sandbox can be created from
+mocactl sbx templates ls                                   # what a sandbox can be created from
 mocactl sbx create --template <id>                         # prints the sandbox id and its expiry
 eval "$(mocactl sbx env <sandbox id>)"
 ```

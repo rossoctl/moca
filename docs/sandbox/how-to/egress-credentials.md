@@ -10,7 +10,7 @@ sidebar_position: 6
 The sandbox has no network of its own, but your operator may allow it to reach a few services
 (GitHub, say) through a proxy on the host. **Credential injection** lets those calls carry _your_
 token without the token ever entering the sandbox. You store the token once with `mocactl sbx
-credentials`; the host's proxy adds it to requests for the services you stored it for, and only
+credentials add`; the host's proxy adds it to requests for the services you stored it for, and only
 for your sandboxes. A second user's sandbox gets none of it.
 
 Inside the sandbox, tools see only the placeholder `moca-placeholder` (in `GH_TOKEN`, for
@@ -37,7 +37,7 @@ egress allowlist: the operator must add it, or the preset gets `403 destination_
 ## List and delete
 
 ```bash
-mocactl sbx credentials            # names and destinations, never the secret (--json for scripts)
+mocactl sbx credentials ls         # names and destinations, never the secret (--json for scripts)
 mocactl sbx credentials delete github
 ```
 
