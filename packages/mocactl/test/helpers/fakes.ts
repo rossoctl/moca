@@ -90,6 +90,7 @@ export function fakeControlPlane(
       turnId,
       state: 'cancelled' as const,
     }),
+    decideGate: async (sessionId: string) => ({ sessionId, turnId: 't-resume' }),
     // A control plane with nothing to report: the stream ends at once, so a `watch` over this fake
     // behaves exactly as it did before #392 -- everything from the safety-net sweep.
     // eslint-disable-next-line require-yield

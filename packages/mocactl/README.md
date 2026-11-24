@@ -12,7 +12,9 @@ so it works the same whatever runs behind those URLs. Design:
 ## Documentation
 
 - [Use mocactl](../../docs/harness/how-to/use-mocactl.md): install, keys, headless commands,
-  delegation, sandboxes, files and troubleshooting.
+  delegation, approving a subagent's gate, sandboxes, files and troubleshooting. Every command's
+  `--json` shape is one table in its
+  [Headless](../../docs/harness/how-to/use-mocactl.md#headless) section.
 - [Set up mocactl against the Compose trial](../../docs/harness/how-to/set-up-mocactl.md): from
   nothing to a streamed reply.
 - [`mocactl` command reference](../../docs/harness/reference/cli-mocactl.md).

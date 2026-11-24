@@ -45,6 +45,7 @@ export class AsyncTurnTransport {
         : {}),
       ...(envelope.repoUrl !== undefined ? { repoUrl: envelope.repoUrl } : {}),
       ...(envelope.ref !== undefined ? { ref: envelope.ref } : {}),
+      ...(envelope.requireApproval ? { requireApproval: true } : {}),
     };
     return (await this.cp.submitTurn(envelope.sessionId, req)).turnId;
   }
@@ -111,6 +112,9 @@ function bodyFromTurn(turn: TurnStatus): LeafResultBody | 'queued' {
     status: (result.status as LeafResultBody['status']) || turn.state,
     ...(result.reason ? { reason: result.reason } : {}),
     ...(result.gate ? { gate: result.gate as LeafResultBody['gate'] } : {}),
+    // Carried, not dropped: the id is what a decision must name, and `approve` with no `--gate`
+    // reads it from here. Without it an async row's gate could only be answered by guessing.
+    ...(typeof result.gateId === 'number' ? { gateId: result.gateId } : {}),
     // `summary` is deliberately dropped: it is a clipped line derived from fields already here (the
     // text, the gate's summary, the diffstat, the reason), and `get` writes files from the bytes.
     artifacts: (result.artifacts ?? []).map((a) => a.kind),

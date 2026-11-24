@@ -111,6 +111,12 @@ export interface SubmitTurnRequest {
   idempotencyKey?: string;
   /** Both enforced by the worker (#391). No `costUsd`: the control plane 400s it, unpriceable. */
   caps?: { tokens?: number; wallClock?: number };
+  /**
+   * Make the turn ask a human before it acts (#393): the leaf's first move is `request_approval`,
+   * and the turn parks `paused` until `POST /v1/sessions/{id}/decision` answers the gate. Refused
+   * (400) on a turn kind that cannot gate.
+   */
+  requireApproval?: boolean;
 }
 
 export interface SubmittedTurn {
@@ -159,9 +165,27 @@ export interface TurnStatus {
     artifacts?: { kind: string; bytes: number; sha256?: string }[];
     workspace?: Record<string, unknown>;
     gate?: Record<string, unknown>;
+    /** The pending gate's id, which a decision must name. Beside `gate`, not inside it. */
+    gateId?: number;
     reason?: string;
   };
 }
+
+/**
+ * A human's answer to a pending gate (#393). The envelope is NOT here: the control plane copies it
+ * from the paused record, so a decision can neither change the turn's inputs nor need its token.
+ *
+ * `feedback` reaches the model as part of the resumed turn's prompt, and the control plane bounds it
+ * at GATE_FEEDBACK_BYTES; the client checks the same bound before sending.
+ */
+export interface GateDecisionRequest {
+  gateId: number;
+  action: 'approve' | 'reject' | 'abort';
+  feedback?: string;
+}
+
+/** The control plane's bound on `feedback`, in bytes (`GATE_FEEDBACK_BYTES`). */
+export const GATE_FEEDBACK_BYTES = 4096;
 
 /**
  * One turn state transition from `GET /v1/events` (#392). `cursor` is its own position in the
@@ -289,6 +313,16 @@ export interface ControlPlaneApi {
    * connection; this one stops an async turn through its record. Neither can do the other's job.
    */
   cancelTurn(sessionId: string, turnId: string): Promise<CancelledTurn>;
+  /**
+   * Answer the gate a turn of this session is paused at (#393); the resumed turn's id comes back.
+   * Throws ApiError `gate_not_pending` (409) when no turn is paused, when the gate has already been
+   * answered, and when `gateId` names a gate other than the pending one -- the message says which.
+   *
+   * ASYNC TURNS ONLY: the route finds the paused turn in the turn store, so a leaf dispatched over
+   * the sync `/runs` path has nothing for it to find. That one resumes by re-sending its envelope
+   * with the decision inline (ADR-0020), which is what `mocactl approve` does for a sync row.
+   */
+  decideGate(sessionId: string, req: GateDecisionRequest): Promise<SubmittedTurn>;
   /** The caller's own turn transitions as they happen (#392); see the client for the frame rules. */
   streamEvents(opts?: {
     since?: string;

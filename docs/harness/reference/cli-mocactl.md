@@ -92,6 +92,9 @@ usage:
   mocactl spawn "prompt" --async [...]            dispatch as a cancellable async turn instead of a
                                                  local worker process (needs SH_ASYNC_DRAIN on the
                                                  deployment; not available with --workload)
+  mocactl spawn "prompt" --require-approval [...]  park the subagent before it acts: it proposes
+                                                 what it would do and waits for 'mocactl approve'
+                                                 or 'mocactl reject'
   mocactl spawn "prompt" --max-concurrent N [...]
                                                  refuse the dispatch when N of your subagents are
                                                  already running (default 4)
@@ -109,6 +112,16 @@ usage:
                                                  exit 1 and status 'queued' if the
                                                  budget runs out, 'unknown' if the run is over
                                                  without one)
+  mocactl approve SESSIONID [--gate N] [--feedback TEXT] [--json]
+                                                 let a subagent paused for approval go ahead; prints
+                                                 the turn it resumed as ('mocactl get SESSIONID'
+                                                 shows what it proposed and the number --gate takes,
+                                                 needed only when this client cannot read that;
+                                                 --feedback: a note that reaches the subagent)
+  mocactl reject SESSIONID [--gate N] [--feedback TEXT] [--json]
+                                                 refuse what the subagent proposed, and it carries
+                                                 on from there (--feedback says what to do instead,
+                                                 at most 4096 bytes; --gate as for approve)
   mocactl workloads create --context FILE [--name NAME] [--json]
       [--sandboxes N [--mount read-only|writable]]
                                                  upload a context file (--context, made by
