@@ -327,7 +327,11 @@ longer, and never fails for them:
 3. **At a session's delete** (combined profile), to the session's `sandboxPod`, else the
    `sandboxId` its last leased turn ran on, keyed by the session id. Both are read before the
    session's cascade and the release is sent only after it commits; with neither recorded, nothing
-   is sent and the audit says so (`no_worker`).
+   is sent and the audit says so (`no_worker`). The audit line names the worker as `worker`, not
+   `sandboxId`, which names a sandbox record. The session id is the workspace key of every turn
+   that records those fields. An internal leaf run whose agent writes in its context view leases
+   the worker's shared workspace (`workspace_key: ''`) instead: it records no worker, an empty key
+   is not releasable, and that workspace is the worker's idle reclaim's.
 
 A sandbox record gains `releasedAt` only on a terminal answer, so a transport failure leaves it
 unset and the next sweep sends the release again while the record is retained. A sender first

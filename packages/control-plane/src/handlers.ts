@@ -344,14 +344,23 @@ export interface CpDeps {
 }
 
 /**
- * A deleted session's workspace released on its worker (#338), keyed by its session id (the
- * workspace key every leased turn of it sent; harness select-sandbox.ts). The worker is the
- * session's `sandboxPod`, else the `sandboxId` its last leased turn ran on (both self-reported into
- * the runtime hash, read before the cascade); with neither there is nothing to send, and the audit
- * says so (`no_worker`). One `session_workspace_release` audit line either way, its outcome the
- * worker's answer or `not_answered`, the worker under `worker` (a worker id, not a sandbox record,
- * so not `sandboxId`): the session record is gone, so nothing retries it, and the worker's idle
- * reclaim is the backstop. Never throws; the DELETE does not wait for it.
+ * A deleted session's workspace released on its worker (#338), keyed by its session id. The worker
+ * is the session's `sandboxPod`, else the `sandboxId` its last leased turn ran on (both
+ * self-reported into the runtime hash, read before the cascade); with neither there is nothing to
+ * send, and the audit says so (`no_worker`).
+ *
+ * The session id is the key of every turn that writes those fields: the harness's `/turn` paths
+ * (server.ts, through runtimeFieldsForTurn) lease with `workspace_key` = the session id
+ * (select-sandbox.ts). One case runs under another key: an internal leaf run whose agent writes in
+ * its context view on a worker with the workspace-subdir capability leases with `workspace_key: ''`
+ * (run-leaf.ts `agentWritesInContext`), the worker's shared workspace. That path writes no runtime
+ * fields, and `''` is not releasable (both worker tiers refuse an empty key, and it is not the
+ * session's alone), so that workspace is not sent here and falls back to the worker's idle reclaim.
+ *
+ * One `session_workspace_release` audit line either way, its outcome the worker's answer or
+ * `not_answered`, the worker under `worker` (it is a worker id, not a sandbox record, so not
+ * `sandboxId`): the session record is gone, so nothing retries it, and the worker's idle reclaim is
+ * the backstop. Never throws; the DELETE does not wait for it.
  */
 async function releaseSessionWorkspace(
   deps: CpDeps,

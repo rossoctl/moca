@@ -1444,8 +1444,11 @@ instead: through the relay's control listener (`base/relay-release-control`: the
 admits the control plane alone), to the sandbox the session last ran on (its `sandboxPod`, else its
 last `sandboxId`), after the delete has committed. It is best-effort, within 5 s, and the delete neither waits for
 it nor fails for it; a worker that predates release answers `release_unsupported`, and the decision log
-records every outcome as `session_workspace_release` (`no_worker` when the session never ran on
-one). Idle reclaim stays the backstop.
+records every outcome as `session_workspace_release`, with the session id and the worker under
+`worker` (`no_worker` when the session never ran on one). The release names the session id, the
+workspace key of every interactive turn; an internal leaf run whose agent writes in its context view
+uses the worker's shared workspace instead, which is not the session's to release, and idle reclaim
+frees what it leaves. Idle reclaim stays the backstop.
 
 ```bash
 SH_RELAY_RELEASE_CONTROL=1 deploy/k8s/setup.sh --target kind --skip-build
