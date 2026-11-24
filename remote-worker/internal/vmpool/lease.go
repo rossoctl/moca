@@ -1292,10 +1292,10 @@ func (p *pool) leaseEndDueLocked(l *vmLease, now time.Time, graceOver bool) Leas
 // gate (an Exec in Run, or queued past the gate, or a lease being started or ended) is
 // skipped, never waited on. The gate stays held, and the run pinned, until the VM is
 // destroyed. A lease carrying a cut may be taken: endLeaseLocked records the cut's reason.
-func (p *pool) reclaimLeasesLocked(now time.Time, need int64) []*leaseVictim {
+func (p *pool) reclaimLeasesLocked(now time.Time, need int64) ([]*leaseVictim, int64) {
 	cands := p.idleLeaseRunsLocked(now)
 	if len(cands) == 0 {
-		return nil // no MemAvailable read on a pool with no idle lease
+		return nil, 0 // no MemAvailable read on a pool with no idle lease
 	}
 	want := max(need, p.leaseMemDeficitLocked())
 	var (
@@ -1318,36 +1318,36 @@ func (p *pool) reclaimLeasesLocked(now time.Time, need int64) []*leaseVictim {
 		out = append(out, v)
 		freed += charge
 	}
-	return out
+	return out, freed
 }
 
-// reclaimableLeaseBytesLocked is what reclaimLeasesLocked could free right now for an
-// admission: the charges of the first MaxReclaimsPerScan idle leases whose gate is free,
-// idle-longest first. evictForAdmissionLocked's futility check adds it to the standbys'.
-// Caller holds p.mu.
+// reclaimableLeasesLocked is what reclaimLeasesLocked could free right now for an
+// admission, as bytes: the charges of the first MaxReclaimsPerScan idle leases whose gate
+// is free, idle-longest first. evictForAdmissionLocked's futility check adds it to the
+// standbys'. idle counts every idle lease and held those whose gate an Exec (or a start or
+// an end) holds, for the log line of a refusal (#1005). Caller holds p.mu.
 //
 // The gate is probed (a non-blocking send, then the receive) rather than kept, so a
 // waiting Exec may take it between this count and the take; the take then skips that
 // lease, and the admission's re-check refuses on the real numbers.
-func (p *pool) reclaimableLeaseBytesLocked() int64 {
-	var (
-		n     int
-		total int64
-	)
-	for _, rp := range p.idleLeaseRunsLocked(p.clk.Now()) {
-		if n >= p.cfg.MaxReclaimsPerScan {
-			break
-		}
+func (p *pool) reclaimableLeasesLocked() (idle, held int, bytes int64) {
+	var n int
+	runs := p.idleLeaseRunsLocked(p.clk.Now())
+	for _, rp := range runs {
 		select {
 		case rp.execGate <- struct{}{}:
 			<-rp.execGate
 		default:
+			held++
 			continue
 		}
+		if n >= p.cfg.MaxReclaimsPerScan {
+			continue // counted for held only; the take would stop here too
+		}
 		n++
-		total += p.leaseChargeLocked(rp.lease)
+		bytes += p.leaseChargeLocked(rp.lease)
 	}
-	return total
+	return len(runs), held, bytes
 }
 
 // idleLeaseRunsLocked is every run whose lease has started and runs no Exec, idle-longest
