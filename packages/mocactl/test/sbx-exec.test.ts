@@ -1920,6 +1920,11 @@ describe('the flight recorder, format 2 (TRAJECTORY-JOINER §9)', () => {
       req_id: relay.seen[0]!.req.exec!.reqId,
       exit: 3,
       outcome: 'ok',
+      // 'SECRET-OUTPUT\n': its byte count, never its bytes.
+      out_bytes: 14,
+      err_bytes: 0,
+      grpc_status: null,
+      wire_code: null,
       run: 'rep-7',
     });
     expect(line!.start).toMatch(/^\d{4}-\d\d-\d\dT.*Z$/);

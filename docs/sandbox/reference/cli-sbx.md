@@ -338,9 +338,9 @@ admins only:
 --record F (every command that calls the API but token, login, logout and credentials): one
 NDJSON line per HTTP attempt appended to F (0600), with no token, host or free text in it.
 Every command's sandbox commands are also recorded in the flight recorder,
-<state dir>/sbx/<id>.log (0600): one line per attempt (req_id, start, ms, exit, outcome; never
-the command or its output), per tool call for `sbx mcp`. MOCACTL_SBX_RUN_ID (optional) labels
-them.
+<state dir>/sbx/<id>.log (0600): one line per attempt (req_id, start, ms, exit, outcome, the
+output byte counts, a failure's gRPC status and wire code; never the command or its output), per
+tool call for `sbx mcp`. MOCACTL_SBX_RUN_ID (optional) labels them.
 --json: print the result as JSON on stdout, for a script.
 SANDBOX (or --sandbox SANDBOX) is a sandbox's id or its name (create's or up's --name; a name
 that looks like an id is taken as one), and defaults to the sandbox in the nearest .sbx/sandbox.json. The control plane

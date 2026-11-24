@@ -27,6 +27,7 @@ import {
   CALL_ID_HEADER,
   CALL_ID_RE,
   CLIENT_CHANNEL_OPTIONS,
+  type ExecAttempt,
   ExecAbortedError,
   ExecMachineryError,
   ExecRefusedError,
@@ -1714,8 +1715,17 @@ describe('SandboxExecConn: what a client records (TRAJECTORY-JOINER §9)', () =>
     const id = r.seen[0]!.req.exec!.reqId;
     expect(res.reqIds).toEqual([id]);
     expect(attempts).toEqual([
-      { reqId: id, start: NOW_S * 1000, ms: 0, exit: null, outcome: 'refused_before_start' },
-      { reqId: id, start: NOW_S * 1000, ms: 0, exit: 3, outcome: 'ok' },
+      {
+        reqId: id,
+        start: NOW_S * 1000,
+        ms: 0,
+        exit: null,
+        outcome: 'refused_before_start',
+        outBytes: 0,
+        errBytes: 0,
+        grpcStatus: status.UNAUTHENTICATED,
+      },
+      { reqId: id, start: NOW_S * 1000, ms: 0, exit: 3, outcome: 'ok', outBytes: 3, errBytes: 3 },
     ]);
   });
 
@@ -1749,6 +1759,69 @@ describe('SandboxExecConn: what a client records (TRAJECTORY-JOINER §9)', () =>
     expect(attempts.map((a) => [a.exit, a.outcome])).toEqual([
       [null, 'timeout'],
       [null, 'machinery'],
+    ]);
+  });
+
+  it("counts each attempt's output bytes, stdout as the relay counts it, then stderr", async () => {
+    const r = await fakeRelay((call) => {
+      call.write(chunk('12345'));
+      call.write(chunk('ab', 2));
+      call.write(chunk('678'));
+      call.write({ end: { reqId: 0, exitCode: 0, truncated: false } } as ExecEvent);
+      call.end();
+    });
+    const { c } = conn(r.addr);
+    const attempts: ExecAttempt[] = [];
+    await c.exec('x', { onAttempt: (a) => attempts.push(a) });
+    expect(attempts.map((a) => [a.outBytes, a.errBytes, a.grpcStatus, a.wireCode])).toEqual([
+      [8, 2, undefined, undefined],
+    ]);
+  });
+
+  it("keeps a failure's gRPC status and its wire code, never the text after the code", async () => {
+    const r = await fakeRelay((call, n) =>
+      n === 1
+        ? execError('timeout:5')(call, n)
+        : n === 2
+          ? execError('stale_mode: token epoch 1 < stored 2 SECRET')(call, n)
+          : n === 3
+            ? fail(status.RESOURCE_EXHAUSTED, 'memory-budget: 4096 MiB over SECRET')(call, n)
+            : n === 4
+              ? fail(status.UNAVAILABLE, 'Worker Gone: SECRET')(call, n)
+              : fail(status.UNAVAILABLE, 'localhost:8443 connection refused')(call, n),
+    );
+    const { c } = conn(r.addr);
+    const attempts: ExecAttempt[] = [];
+    const onAttempt = (a: ExecAttempt) => attempts.push(a);
+    await c.exec('x', { onAttempt });
+    // n 2 is a stale_mode refusal, retried as n 3 under a fresh req_id: both are attempts.
+    for (let i = 0; i < 3; i++) {
+      await expect(c.exec('x', { onAttempt })).rejects.toBeInstanceOf(ExecMachineryError);
+    }
+    expect(attempts.map((a) => [a.outcome, a.grpcStatus, a.wireCode])).toEqual([
+      // The fake relay ends an in-stream ExecError with INTERNAL, carrying the same text.
+      ['timeout', status.INTERNAL, 'timeout'],
+      ['refused_before_start', status.INTERNAL, 'stale_mode'],
+      ['template_busy', status.RESOURCE_EXHAUSTED, 'memory-budget'],
+      ['machinery', status.UNAVAILABLE, undefined],
+      // A host:port leading a gRPC detail is never taken for a code.
+      ['machinery', status.UNAVAILABLE, undefined],
+    ]);
+    expect(JSON.stringify(attempts)).not.toContain('SECRET');
+    expect(JSON.stringify(attempts)).not.toContain('8443');
+    expect(JSON.stringify(attempts)).not.toContain('localhost');
+  });
+
+  it("never pairs a command's end with a status that came after it", async () => {
+    const r = await fakeRelay((call, n) => {
+      call.write({ end: { reqId: 0, exitCode: 0, truncated: false } } as ExecEvent);
+      fail(status.INTERNAL, 'stale_mode: late')(call, n);
+    });
+    const { c } = conn(r.addr);
+    const attempts: ExecAttempt[] = [];
+    await c.exec('x', { onAttempt: (a) => attempts.push(a) });
+    expect(attempts.map((a) => [a.exit, a.outcome, a.grpcStatus, a.wireCode])).toEqual([
+      [0, 'ok', undefined, undefined],
     ]);
   });
 

@@ -1822,7 +1822,15 @@ describe('the flight record, format 2 (TRAJECTORY-JOINER §9)', () => {
     const seen: (string | undefined)[] = [];
     const exec: Exec = async (_cmd, opts) => {
       seen.push(opts?.callId);
-      opts?.onAttempt?.({ reqId: 11, start: 1_700_000_000_000, ms: 5, exit: 0, outcome: 'ok' });
+      opts?.onAttempt?.({
+        reqId: 11,
+        start: 1_700_000_000_000,
+        ms: 5,
+        exit: 0,
+        outcome: 'ok',
+        outBytes: 4,
+        errBytes: 2,
+      });
       return res({ reqIds: [11] });
     };
     const { client, records, server } = await connect({ exec });
@@ -1836,7 +1844,17 @@ describe('the flight record, format 2 (TRAJECTORY-JOINER §9)', () => {
     );
     expect(records[0]!.rpc_id).not.toEqual(records[1]!.rpc_id);
     expect(records[0]!.exec).toEqual([
-      { req_id: 11, start: '2023-11-14T22:13:20.000Z', ms: 5, exit: 0, outcome: 'ok' },
+      {
+        req_id: 11,
+        start: '2023-11-14T22:13:20.000Z',
+        ms: 5,
+        exit: 0,
+        outcome: 'ok',
+        out_bytes: 4,
+        err_bytes: 2,
+        grpc_status: null,
+        wire_code: null,
+      },
     ]);
     // The correlation id each Exec carries names this call: the relay's audit joins on it.
     expect(seen).toEqual([`${server.mcpSession}:1`, `${server.mcpSession}:2`]);
@@ -1851,6 +1869,10 @@ describe('the flight record, format 2 (TRAJECTORY-JOINER §9)', () => {
         ms: 1,
         exit: null,
         outcome: 'machinery',
+        outBytes: 0,
+        errBytes: 0,
+        grpcStatus: 14,
+        wireCode: 'vmpool',
       });
       throw new ExecMachineryError('sandbox failure: boom');
     };
@@ -1863,7 +1885,9 @@ describe('the flight record, format 2 (TRAJECTORY-JOINER §9)', () => {
     expect(records[0]).toMatchObject({
       ok: false,
       execs: 1,
-      exec: [{ req_id: 21, exit: null, outcome: 'machinery' }],
+      exec: [
+        { req_id: 21, exit: null, outcome: 'machinery', grpc_status: 14, wire_code: 'vmpool' },
+      ],
       meta_tool_use_id: 'tu_1',
     });
   });

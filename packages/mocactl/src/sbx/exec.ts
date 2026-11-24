@@ -1,4 +1,5 @@
 import {
+  execEntry,
   execFailureText,
   ExecMachineryError,
   SandboxExecConn,
@@ -339,11 +340,7 @@ function execTagger(r: ExecRecordTarget | undefined, sandboxId: string) {
           sbx: sandboxId,
           command: r.command,
           invocation: r.invocation,
-          req_id: a.reqId,
-          start: new Date(a.start).toISOString(),
-          ms: a.ms,
-          exit: a.exit,
-          outcome: a.outcome,
+          ...execEntry(a),
           run: r.run ?? null,
         });
         opts?.onAttempt?.(a);
