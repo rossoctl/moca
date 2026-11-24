@@ -784,6 +784,10 @@ async function select(
       // optional only because `sessionPodCwd` takes `SandboxRecord | undefined`.
       const rec = grpcById.get(name);
       const make = deps.makeTransport ?? GrpcRelayTransport;
+      // The control plane releases a deleted session's workspace by its session id, on the worker
+      // its runtime fields name (handlers.ts releaseSessionWorkspace). That holds because only
+      // executeTurn's paths report runtime fields, and they never set agentWritesInContext: if a
+      // leaf run ever reports them, its `''` key here would be missed by that release.
       const workspaceKey =
         agentWritesInContext && rec?.capabilities.includes(WORKSPACE_SUBDIR_CAPABILITY)
           ? ''
