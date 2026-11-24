@@ -26,6 +26,7 @@ import { openCallRecord, RUN_LENGTH_FIELDS, type CallRecorder } from './sbx/call
 import { defaultSbxUrl, openSbxRuntime, sbxMain } from './sbx/cli.js';
 import {
   cmdDecide,
+  cmdFollowUp,
   cmdGet,
   cmdSpawn,
   cmdSubagents,
@@ -70,6 +71,7 @@ the harness service:
   get            write a subagent's result files
   approve        let a subagent paused for approval go ahead
   reject         tell a subagent paused for approval to take another route
+  follow-up      send a finished subagent a second turn on the same session
   promote        upload a directory's Claude Code skills and commands as a config bundle
   bundles        list or delete your promoted config bundles
   workloads      create, list, get or delete workloads (contexts for subagents)
@@ -190,6 +192,11 @@ export const USAGE = `usage:
                                                  refuse what the subagent proposed, and it carries
                                                  on from there (--feedback says what to do instead,
                                                  at most 4096 bytes; --gate as for approve)
+  mocactl follow-up SESSIONID "prompt" [--out DIR] [--json]
+                                                 send a second turn to a finished subagent, which
+                                                 keeps the first turn's context; the result is
+                                                 written to --out DIR (default: the current
+                                                 directory) first, because a new turn overwrites it
   mocactl workloads create --context FILE [--name NAME] [--json]
       [--sandboxes N [--mount read-only|writable]]
                                                  upload a context file (--context, made by
@@ -493,8 +500,9 @@ async function mainWith(
     io.err(`--label only applies to \`mocactl spawn\`\n${help}`);
     return 2;
   }
-  if (values.out !== undefined && command !== 'get') {
-    io.err(`--out only applies to \`mocactl get\`\n${help}`);
+  // `follow-up` writes the result it is about to overwrite, so it takes `get`'s destination flag.
+  if (values.out !== undefined && command !== 'get' && command !== 'follow-up') {
+    io.err(`--out only applies to \`mocactl get\` and \`mocactl follow-up\`\n${help}`);
     return 2;
   }
   const getOnly = (['wait', 'timeout'] as const).find((f) => values[f] !== undefined);
@@ -789,6 +797,17 @@ async function mainWith(
         outDir: values.out,
         wait: values.wait === true,
         ...(timeoutS !== undefined ? { timeoutS } : {}),
+        json,
+        signal,
+      });
+    }
+    case 'follow-up': {
+      const [sid, prompt, ...extra] = rest;
+      if (sid === undefined || prompt === undefined || extra.length > 0) return usage(io, help);
+      return cmdFollowUp(rt, io, {
+        sessionId: sid,
+        prompt,
+        outDir: values.out,
         json,
         signal,
       });

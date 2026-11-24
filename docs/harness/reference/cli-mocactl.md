@@ -123,6 +123,11 @@ usage:
                                                  refuse what the subagent proposed, and it carries
                                                  on from there (--feedback says what to do instead,
                                                  at most 4096 bytes; --gate as for approve)
+  mocactl follow-up SESSIONID "prompt" [--out DIR] [--json]
+                                                 send a second turn to a finished subagent, which
+                                                 keeps the first turn's context; the result is
+                                                 written to --out DIR (default: the current
+                                                 directory) first, because a new turn overwrites it
   mocactl workloads create --context FILE [--name NAME] [--json]
       [--sandboxes N [--mount read-only|writable]]
                                                  upload a context file (--context, made by

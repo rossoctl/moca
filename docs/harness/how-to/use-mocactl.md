@@ -91,8 +91,8 @@ mocactl credentials delete NAME [--json]    # exit 1 if you own no credential of
 ```
 
 > **Preview.** `mocactl spawn`, `mocactl subagents`, `mocactl watch`, `mocactl get`,
-> `mocactl approve` and `mocactl reject` are implemented but not yet declared Stable; flags,
-> ledger format, and output shapes may change.
+> `mocactl approve`, `mocactl reject` and `mocactl follow-up` are implemented but not yet declared
+> Stable; flags, ledger format, and output shapes may change.
 
 ```bash
 mocactl spawn "prompt" [--config sha256:…] --kind prompt|solve \
@@ -105,6 +105,7 @@ mocactl spawn "prompt" --kind prompt --workload ID [--writable] [...]  # run it 
 mocactl spawn "prompt" --require-approval [...]        # park it at a gate before it acts
 mocactl approve SESSIONID [--gate N] [--feedback TEXT] [--json]  # let it go ahead
 mocactl reject SESSIONID [--gate N] [--feedback TEXT] [--json]   # refuse, and say what to do instead
+mocactl follow-up SESSIONID "prompt" [--out DIR] [--json]  # a second turn on the same session; saves the result first
 ```
 
 ```bash
@@ -189,6 +190,32 @@ forks — so answer a gate once and wait for the command to return.
 A subagent spawned **without** `--async` is resumed from the machine that spawned it: the decision
 re-sends the stored envelope from a fresh detached worker, and only that machine's ledger holds it.
 An `--async` one is resumed through the control plane, so any logged-in machine can answer its gate.
+
+`mocactl follow-up SESSIONID "prompt"` sends a finished subagent a second turn on the same session,
+so it keeps the first turn's context — `get` the result, read it, then ask for the next thing
+without paying for the first turn again. It writes the current result to `--out DIR` (default: the
+current directory) **before** dispatching, because a sync subagent keeps one result record per
+session and the new turn overwrites it; the files are the same `SESSIONID.text`,
+`SESSIONID.verdict.json` and `SESSIONID.patch` that `get` writes, and `--json` lists them under
+`files`. A record that has already aged out of its 24 hours prints `no result to preserve` and the
+follow-up goes ahead; a result that could not be _read_ refuses the follow-up instead, so a
+transport problem never costs you the result. An `--async` subagent is copied nothing: each of its
+turns keeps its own artifacts for seven days, so the next turn overwrites none of them.
+
+The follow-up is always a prompt turn, including on a `--kind solve` subagent — the session already
+holds the repository workspace, so no `--repo`/`--ref` is needed — and it inherits the subagent's
+bundle, workload and `--require-approval`, so a subagent asked to park before it acts parks on its
+second turn too. (Rows written by a `mocactl` older than this command's release did not record
+`--require-approval`; a follow-up on one of those runs ungated. `mocactl subagents` is the way to
+tell: re-spawn rather than follow up if the gate matters.) It needs the subagent's ledger row on
+this machine, as a gate decision on a sync row does, and it is refused (exit `1`) while the
+subagent is still `running` (wait with `mocactl get --wait`) or parked at a gate (answer it with
+`mocactl approve`/`reject`; a follow-up prompt is not an answer to a gate). A sync subagent whose
+worker died without writing a result is _not_ refused once its process is gone and the 60-second
+grace has passed: the ledger still says `running`, but liveness decides, so the context survives a
+crashed first turn. After it returns, the ledger row describes the new turn: the
+same `tag` and `--label`, a new pid or turn id, and the follow-up's prompt as the envelope a later
+`approve` would re-send.
 
 `mocactl run` continues the session `--session` names, or starts a new one (`--new`, the default).
 An empty `--session ""` is refused (exit `2`), not taken as `--new`. When the harness has no
