@@ -91,6 +91,44 @@ describe('SessionsOverlay', () => {
     expect(f).toContain('1 turn');
   });
 
+  it('tells apart sessions titled by the same first prompt by their short ids', async () => {
+    const transcripts = new TranscriptStore(mkdtempSync(join(tmpdir(), 'mocactl-ov-')), {
+      subject: 'github:1',
+      controlPlaneUrl: 'http://cp',
+    });
+    transcripts.appendPrompt('aaaaaaaa-1', 'This is a research task');
+    transcripts.appendPrompt('cccccccc-3', 'This is a research task');
+    transcripts.appendPrompt('dddddddd-4', 'Follow up on dddddddd');
+    const cp = fakeControlPlane({
+      listSessions: async () => ({
+        sessions: ['aaaaaaaa-1', 'bbbbbbbb-2', 'cccccccc-3', 'dddddddd-4'].map((id) => summary(id)),
+        nextCursor: null,
+      }),
+    });
+    const { lastFrame } = render(
+      withTheme(
+        <SessionsOverlay
+          cp={cp}
+          transcripts={transcripts}
+          now={() => NOW}
+          remove={vi.fn()}
+          onResume={vi.fn()}
+          onNew={vi.fn()}
+          onDeleted={vi.fn()}
+          onCancel={vi.fn()}
+        />,
+      ),
+    );
+    await waitFor(() => (lastFrame() ?? '').includes('research task'), 1000, lastFrame);
+    const f = lastFrame()!;
+    expect(f).toContain('aaaaaaaa · 3h ago · 4 turns · local history');
+    expect(f).toContain('cccccccc · 3h ago · 4 turns · local history');
+    // A local title that names the id is still not the fallback.
+    expect(f).toContain('Follow up on dddddddd dddddddd · 3h ago');
+    // The fallback title already carries the id; it is not repeated.
+    expect(f.match(/bbbbbbbb/g)).toHaveLength(1);
+  });
+
   it('shows the sandbox tier a session runs in, and none for an untiered one (P6.3)', async () => {
     const cp = fakeControlPlane({
       listSessions: async () => ({
