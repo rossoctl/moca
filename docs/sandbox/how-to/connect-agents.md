@@ -17,7 +17,7 @@ much `up` can take away:
 | **OpenCode**                | `up` writes `opencode.json`                                                         | Denied (`tools.<name>: false`)                                       |
 | **[Codex CLI](#codex-cli)** | `mocactl sbx codex`, per run — it reads no project config                           | Shell tool off; `unified_exec` cannot be disabled                    |
 | **[IBM Bob](#ibm-bob)**     | `up` writes `.bob/mcp.json` + `.bob/settings.json`                                  | **Not denied, and preferred** — name the sandbox tools in the prompt |
-| **Pi**                     | `up` writes `.pi/mcp.json` + `.pi/settings.json`                                    | Denied (`defaultTools` selects none), once the project is trusted    |
+| **Pi**                      | `up` writes `.pi/mcp.json` + `.pi/settings.json`                                    | Denied (`defaultTools` selects none), once the project is trusted    |
 
 Claude Code, OpenCode and Pi need nothing beyond `up`, so start them as you normally do:
 

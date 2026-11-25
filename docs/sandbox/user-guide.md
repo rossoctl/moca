@@ -36,7 +36,7 @@ handling](concepts/isolation.md).
 | Page                                                                      | What it covers                                                                |
 | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | [Install, log in and bring a repository up](how-to/set-up.md)             | `mocactl` and `sbx` versions, login, `sbx up`, templates, lifetime, worktrees |
-| [Run your coding agent](how-to/connect-agents.md)                         | Claude Code, OpenCode, Codex CLI, IBM Bob and Pi against the sandbox           |
+| [Run your coding agent](how-to/connect-agents.md)                         | Claude Code, OpenCode, Codex CLI, IBM Bob and Pi against the sandbox          |
 | [Take the work back, and send more](how-to/push-and-pull.md)              | `sbx pull`, `pull --apply`, and what a patch may not touch                    |
 | [What `sbx up` changes in your repository](how-to/agent-configuration.md) | the agent configuration it writes, `--cortex`, and undoing it with `sbx rm`   |
 | [Work with a sandbox](how-to/work-with-a-sandbox.md)                      | `push`, `run`, `put`, `ls`, the shell, and what persists between calls        |
