@@ -42,7 +42,7 @@ RUN npm run build -w packages/ai && \
 WORKDIR /app
 
 # The test runner is not shipped: nothing at runtime imports vite or vitest, and only vite uses
-# rolldown and lightningcss. The check fails the build if an esbuild older than 0.25 is in the
+# rolldown and lightningcss. The check fails the build if an esbuild 0.20 to 0.24 is in the
 # tree: those binaries carry an old Go stdlib with critical CVEs (0.21.x: Go 1.20.12,
 # CVE-2024-24790), and a cluster admission policy that blocks images with old critical CVEs (RHACS
 # "Block Critical CVE older than 180 days") then refuses every deployment of the image, rollbacks
