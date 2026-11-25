@@ -5,7 +5,14 @@ import { ApiError } from '../api/errors.js';
 import { describeError } from '../core/messages.js';
 import { sanitizeRemote } from '../core/sanitize.js';
 import { ensureRuntimeAuth } from '../runtime.js';
-import { CLAUDE_MIN_VERSION, checkAgentConfig, claudeTooOld, cortexMode } from './agent-config.js';
+import {
+  CLAUDE_MIN_VERSION,
+  PI_MIN_VERSION,
+  checkAgentConfig,
+  claudeTooOld,
+  cortexMode,
+  piTooOld,
+} from './agent-config.js';
 import {
   agentopProblem,
   CORTEX_INSTALL,
@@ -180,6 +187,40 @@ export async function installedClaudeVersion(): Promise<string | undefined> {
 }
 
 /**
+ * `pi --version`'s output, or undefined when Pi is not on PATH (or did not answer). Asynchronous,
+ * so a slow `pi` never blocks the event loop; the Windows shell note of `claude` applies here too.
+ */
+export async function installedPiVersion(): Promise<string | undefined> {
+  try {
+    const { stdout } = await execFileAsync('pi', ['--version'], {
+      encoding: 'utf8',
+      timeout: 10_000,
+      shell: process.platform === 'win32',
+    });
+    return stdout.trim();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A Pi too old for the two project files (no MCP support, no `defaultTools`): a failing check;
+ * undefined otherwise. Older than the floor and Pi runs with its local tools and no sandbox
+ * server, while the configuration `up` wrote looks correct.
+ */
+function piVersionCheck(version: string | undefined): DoctorCheck | undefined {
+  if (version === undefined || !piTooOld(version)) return undefined;
+  return {
+    name: 'pi',
+    ok: false,
+    detail:
+      `${version.split('\n')[0]} is older than ${PI_MIN_VERSION}: it reads no .pi/mcp.json and has ` +
+      'no defaultTools setting, so it runs with its local tools and no sandbox server',
+    fix: 'update Pi (pi update --self)',
+  };
+}
+
+/**
  * A Claude Code too old for the deny list (`CLAUDE_DENY` names only current tools, so an older
  * one keeps `MultiEdit`, `LS` and `NotebookRead`): a failing check; undefined otherwise.
  */
@@ -273,12 +314,14 @@ function configCheck(root: string, mode: SandboxModeName | undefined): DoctorChe
         name: 'agent config',
         ok: true,
         detail: cortexMode(root)
-          ? "Claude Code, OpenCode and IBM Bob use the sandbox MCP server; Claude Code's local " +
+          ? "Claude Code, OpenCode, IBM Bob and Pi use the sandbox MCP server; Claude Code's local " +
             "tools left to Cortex, OpenCode's disabled in this repository's project config; " +
-            'Bob has no deny list, so its own tools stay available'
-          : 'Claude Code, OpenCode and IBM Bob use the sandbox MCP server, with every local tool ' +
-            "denied in this repository's project config except Bob's, which has no deny list, so " +
-            'its own tools stay available; user-level and managed settings are not checked',
+            'Bob has no deny list, so its own tools stay available; Pi reads its project files ' +
+            'only once the project is trusted'
+          : 'Claude Code, OpenCode, IBM Bob and Pi use the sandbox MCP server, with every local ' +
+            "tool denied in this repository's project config except Bob's, which has no deny list, so " +
+            'its own tools stay available; Pi reads its project files only once the project is ' +
+            'trusted; user-level and managed settings are not checked',
       };
 }
 
@@ -404,6 +447,8 @@ export async function runDoctor(
   factory?: ExecFactory,
   /** `claude --version`'s output (default: asked of the `claude` on PATH); tests pass their own. */
   claudeVersion: () => Promise<string | undefined> | string | undefined = installedClaudeVersion,
+  /** `pi --version`'s output (default: asked of the `pi` on PATH); tests pass their own. */
+  piVersion: () => Promise<string | undefined> | string | undefined = installedPiVersion,
   agentop: AgentopExec = runAgentop,
 ): Promise<DoctorCheck[]> {
   const out: DoctorCheck[] = [];
@@ -430,6 +475,8 @@ export async function runDoctor(
     if (cortexMode(root)) out.push(await cortexCheck(agentop));
     const old = claudeVersionCheck(await claudeVersion());
     if (old) out.push(old);
+    const oldPi = piVersionCheck(await piVersion());
+    if (oldPi) out.push(oldPi);
     const mem = autoMemoryEnvCheck();
     if (mem) out.push(mem);
   }
@@ -445,9 +492,10 @@ export async function cmdDoctor(
   id: string | undefined,
   factory?: ExecFactory,
   claudeVersion?: () => Promise<string | undefined> | string | undefined,
+  piVersion?: () => Promise<string | undefined> | string | undefined,
   agentop?: AgentopExec,
 ): Promise<number> {
-  const checks = await runDoctor(c, root, id, factory, claudeVersion, agentop);
+  const checks = await runDoctor(c, root, id, factory, claudeVersion, piVersion, agentop);
   const ok = checks.every((k) => k.ok);
   const clean = (k: DoctorCheck): DoctorCheck => ({
     ...k,

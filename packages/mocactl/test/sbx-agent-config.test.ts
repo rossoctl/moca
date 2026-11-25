@@ -24,9 +24,13 @@ import {
   MARK_BEGIN,
   MARK_END,
   OPENCODE_OFF,
+  PI_MIN_VERSION,
+  PI_OFF,
   RULES,
   checkAgentConfig,
   claudeTooOld,
+  piLocalToolsOn,
+  piTooOld,
   removeAgentConfig,
   takeBackAgentConfig,
   writeAgentConfig,
@@ -52,6 +56,8 @@ const FILES = [
   // Bob gets both filenames: which one it reads depends on its version (#676).
   '.bob/settings.json',
   '.bob/mcp.json',
+  '.pi/mcp.json',
+  '.pi/settings.json',
   'CLAUDE.md',
   'AGENTS.md',
 ];
@@ -93,6 +99,16 @@ describe('agent configuration (SBX0 §6.3)', () => {
       command: 'mocactl',
       args: ['sbx', 'mcp'],
     });
+    // Pi reads the same `mcpServers` shape from .pi/mcp.json (only in a project it has been
+    // trusted for), with `exposure: direct` so its tools are declared like built-ins; and its
+    // local tools are switched off by `defaultTools` modifiers, which survive a global
+    // `defaultTools` where an empty array would not.
+    expect(json(d, '.pi/mcp.json').mcpServers.sandbox).toEqual({
+      command: 'mocactl',
+      args: ['sbx', 'mcp'],
+      exposure: 'direct',
+    });
+    expect(json(d, '.pi/settings.json').defaultTools).toEqual([...PI_OFF]);
     for (const f of ['CLAUDE.md', 'AGENTS.md']) {
       const md = text(d, f);
       expect(md).toBe(`${MARK_BEGIN}\n${RULES}\n${MARK_END}\n`);
@@ -217,6 +233,153 @@ describe('agent configuration (SBX0 §6.3)', () => {
     expect(lstatSync(join(d, '.bob/mcp.json')).isSymbolicLink()).toBe(true);
   });
 
+  describe('Pi (.pi/mcp.json and .pi/settings.json)', () => {
+    it('keeps what the developer has, and takes back only ours', () => {
+      const d = dir();
+      mkdirSync(join(d, '.pi'), { recursive: true });
+      writeFileSync(
+        join(d, '.pi/mcp.json'),
+        JSON.stringify({ mcpServers: { mine: { command: 'x' } } }, null, 2) + '\n',
+      );
+      // A defaultTools that already denies every tool pi starts with is kept as it is.
+      writeFileSync(
+        join(d, '.pi/settings.json'),
+        JSON.stringify(
+          { theme: 'light', defaultTools: ['-read', '-bash', '-edit', '-write'] },
+          null,
+          2,
+        ) + '\n',
+      );
+      writeAgentConfig(d);
+      const m = json(d, '.pi/mcp.json');
+      expect(m.mcpServers.sandbox).toEqual({
+        command: 'mocactl',
+        args: ['sbx', 'mcp'],
+        exposure: 'direct',
+      });
+      expect(m.mcpServers.mine).toEqual({ command: 'x' });
+      const s = json(d, '.pi/settings.json');
+      expect(s.theme).toBe('light');
+      expect(s.defaultTools).toEqual(['-read', '-bash', '-edit', '-write']);
+      expect(checkAgentConfig(d)).toEqual([]);
+      removeAgentConfig(d);
+      expect(json(d, '.pi/mcp.json')).toEqual({ mcpServers: { mine: { command: 'x' } } });
+      expect(json(d, '.pi/settings.json')).toEqual({
+        theme: 'light',
+        defaultTools: ['-read', '-bash', '-edit', '-write'],
+      });
+    });
+
+    it('deletes the .pi directory it created, when rm leaves nothing in it', () => {
+      const d = dir();
+      writeAgentConfig(d);
+      expect(existsSync(join(d, '.pi/settings.json'))).toBe(true);
+      removeAgentConfig(d);
+      expect(existsSync(join(d, '.pi'))).toBe(false);
+    });
+
+    it('refuses a defaultTools that selects a local tool, and says which', () => {
+      const d = dir();
+      mkdirSync(join(d, '.pi'), { recursive: true });
+      writeFileSync(
+        join(d, '.pi/settings.json'),
+        JSON.stringify({ defaultTools: ['read', 'grep'] }) + '\n',
+      );
+      const e = conflictOf(() => writeAgentConfig(d));
+      expect(e.file).toBe('.pi/settings.json');
+      expect(e.key).toBe('defaultTools');
+      expect(e.message).toContain("selects pi's local built-in tools (read, grep)");
+    });
+
+    it('refuses a modifiers-only defaultTools, which inherits the defaults it does not remove', () => {
+      const d = dir();
+      mkdirSync(join(d, '.pi'), { recursive: true });
+      // `+codemode` alone leaves read, bash, edit and write selected.
+      writeFileSync(
+        join(d, '.pi/settings.json'),
+        JSON.stringify({ defaultTools: ['+codemode'] }) + '\n',
+      );
+      expect(conflictOf(() => writeAgentConfig(d)).key).toBe('defaultTools');
+      // So does a `-name` that leaves one of the four on.
+      writeFileSync(
+        join(d, '.pi/settings.json'),
+        JSON.stringify({ defaultTools: ['-bash'] }) + '\n',
+      );
+      expect(conflictOf(() => writeAgentConfig(d)).key).toBe('defaultTools');
+    });
+
+    it('refuses a defaultTools that is not a list, and a foreign server under our name', () => {
+      const d = dir();
+      mkdirSync(join(d, '.pi'), { recursive: true });
+      writeFileSync(join(d, '.pi/settings.json'), JSON.stringify({ defaultTools: 'read' }) + '\n');
+      expect(conflictOf(() => writeAgentConfig(d)).message).toContain('not a list');
+      writeFileSync(join(d, '.pi/settings.json'), '{}\n');
+      writeFileSync(
+        join(d, '.pi/mcp.json'),
+        JSON.stringify({ mcpServers: { sandbox: { command: 'other' } } }) + '\n',
+      );
+      expect(conflictOf(() => writeAgentConfig(d)).message).toContain('names another server');
+    });
+
+    it('resolves defaultTools the way pi does (piLocalToolsOn)', () => {
+      // Absent: pi's own defaults, four of the eight built-ins.
+      expect(piLocalToolsOn(undefined)).toEqual(['read', 'bash', 'edit', 'write']);
+      expect(piLocalToolsOn({})).toEqual(['read', 'bash', 'edit', 'write']);
+      // An empty list selects nothing; a plain-name list replaces the defaults; modifiers apply
+      // in order to either; non-strings are ignored, as pi ignores them.
+      expect(piLocalToolsOn({ defaultTools: [] })).toEqual([]);
+      expect(piLocalToolsOn({ defaultTools: ['codemode'] })).toEqual([]);
+      expect(piLocalToolsOn({ defaultTools: ['read', 'grep'] })).toEqual(['read', 'grep']);
+      expect(piLocalToolsOn({ defaultTools: ['read', '+grep', '-read'] })).toEqual(['grep']);
+      expect(piLocalToolsOn({ defaultTools: ['read', 42, null] })).toEqual(['read']);
+      // Ours: every built-in named off, whatever the global selection is.
+      expect(piLocalToolsOn({ defaultTools: [...PI_OFF] })).toEqual([]);
+    });
+
+    it('accepts the entry `pi mcp add -l` writes by hand', () => {
+      const d = dir();
+      mkdirSync(join(d, '.pi'), { recursive: true });
+      const byHand = {
+        mcpServers: { sandbox: { command: 'mocactl', args: ['sbx', 'mcp'] } },
+      };
+      writeFileSync(join(d, '.pi/mcp.json'), JSON.stringify(byHand, null, 2) + '\n');
+      expect(() => writeAgentConfig(d)).not.toThrow();
+      expect(json(d, '.pi/mcp.json')).toEqual(byHand);
+      expect(checkAgentConfig(d)).toEqual([]);
+    });
+
+    it('doctor reports a missing server and a local tool left on, and nothing once up has run', () => {
+      const d = dir();
+      writeAgentConfig(d);
+      rmSync(join(d, '.pi/mcp.json'));
+      expect(checkAgentConfig(d).join('\n')).toContain(
+        'Pi: .pi/mcp.json has no sandbox MCP server',
+      );
+      writeFileSync(join(d, '.pi/mcp.json'), JSON.stringify({ mcpServers: {} }) + '\n');
+      writeFileSync(
+        join(d, '.pi/settings.json'),
+        JSON.stringify({ defaultTools: ['-bash'] }) + '\n',
+      );
+      const problems = checkAgentConfig(d).join('\n');
+      expect(problems).toContain(
+        'Pi: .pi/settings.json defaultTools leaves local built-in tools on:',
+      );
+      expect(problems).toContain('read');
+      // Once up has merged again (over files back to the developer's own), nothing is left.
+      rmSync(join(d, '.pi/mcp.json'));
+      rmSync(join(d, '.pi/settings.json'));
+      writeAgentConfig(d);
+      expect(checkAgentConfig(d)).toEqual([]);
+    });
+
+    it('tells a Pi older than the two files work on', () => {
+      expect(piTooOld('1.4.9')).toBe(true);
+      expect(piTooOld('1.5.0')).toBe(false);
+      expect(piTooOld(PI_MIN_VERSION)).toBe(false);
+      expect(piTooOld('unreadable')).toBe(false);
+    });
+  });
+
   it('holds the spec §6.3 lists verbatim', () => {
     expect(CLAUDE_DENY).toEqual([
       'Bash',
@@ -255,6 +418,18 @@ describe('agent configuration (SBX0 §6.3)', () => {
       'multiedit',
       // Reads the laptop's SKILL.md files into the session (found by running OpenCode 1.18.35).
       'skill',
+    ]);
+    // A `-name` modifier per built-in, alphabetical, and nothing else: the list must stay a list
+    // of modifiers only, or a global `defaultTools` would survive it (PI_OFF's comment).
+    expect(PI_OFF).toEqual([
+      '-bash',
+      '-edit',
+      '-find',
+      '-grep',
+      '-ls',
+      '-powershell',
+      '-read',
+      '-write',
     ]);
     for (const s of [
       'remote sandbox at `/workspace`',

@@ -406,7 +406,7 @@ export async function cmdUp(
       const { changed } = writeAgentConfig(root, { cortex, mode: s.mode });
       if (cortex) c.io.err(CORTEX_NOTE);
       if (changed.length) {
-        c.io.err(`configured Claude Code, OpenCode and IBM Bob: ${changed.join(', ')}`);
+        c.io.err(`configured Claude Code, OpenCode, IBM Bob and Pi: ${changed.join(', ')}`);
         // enabledMcpjsonServers does not suppress the prompt on a first session (#577), and its
         // highlighted default declines, which leaves the agent with no tools at all. Say so here:
         // by the time it appears, this output is the only place the recovery was ever named.

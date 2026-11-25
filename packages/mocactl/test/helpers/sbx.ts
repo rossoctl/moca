@@ -428,6 +428,9 @@ export function workspaces(o: Parameters<typeof localWorkspace>[0] = {}) {
 /** A `claude --version` the deny list covers: doctor never asks the real one in a test. */
 export const CLAUDE_CURRENT = () => '2.1.304 (Claude Code)';
 
+/** A `pi --version` the two project files work on: doctor never asks the real one in a test. */
+export const PI_CURRENT = () => '1.5.0';
+
 export function harness(
   o: {
     boxes?: ReturnType<typeof sandbox>[];
@@ -438,6 +441,8 @@ export function harness(
     noLifetimes?: boolean;
     /** `claude --version`'s output for doctor (default: CLAUDE_CURRENT). */
     claudeVersion?: SbxDeps['claudeVersion'];
+    /** `pi --version`'s output for doctor (default: PI_CURRENT). */
+    piVersion?: SbxDeps['piVersion'];
   } = {},
 ) {
   const s = setup();
@@ -457,6 +462,7 @@ export function harness(
       execFactory: ws.factory,
       agentop,
       claudeVersion: o.claudeVersion ?? CLAUDE_CURRENT,
+      piVersion: o.piVersion ?? PI_CURRENT,
     });
   };
   const err = () => s.io.errs.join('\n');

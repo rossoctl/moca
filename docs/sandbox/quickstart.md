@@ -2,7 +2,7 @@
 title: Sandbox service quickstart
 sidebar_label: Quickstart
 sidebar_position: 1
-description: Point Claude Code or OpenCode at the moca sandbox service, let it work in a fresh VM per command, and take its work back as a patch.
+description: Point Claude Code, OpenCode or Pi at the moca sandbox service, let it work in a fresh VM per command, and take its work back as a patch.
 doc_type: tutorial
 audience: [sandbox-user]
 capability: sandbox
@@ -36,7 +36,7 @@ You need:
   [deploy one](../operate/sandbox-service/install.md), or ask whoever runs yours.
 - A GitHub account that whoever runs the deployment has **added to its access list**. If your
   account is not on the list, step 2 shows the ID to send them.
-- Claude Code or OpenCode. (Codex and IBM Bob work too. See
+- Claude Code, OpenCode or Pi. (Codex and IBM Bob work too. See
   [the user guide](how-to/connect-agents.md#codex-cli).)
 
 ## Set your variables
@@ -99,7 +99,7 @@ mocactl sbx up
 sbx: not pushed, as they may hold secrets (--include-secrets pushes them): .env
 created sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a (default)
 pushed 214 files (3.2 MiB) to sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a
-configured Claude Code, OpenCode and IBM Bob: .mcp.json, .claude/settings.json, opencode.json, .bob/settings.json, .bob/mcp.json, CLAUDE.md, AGENTS.md
+configured Claude Code, OpenCode, IBM Bob and Pi: .mcp.json, .claude/settings.json, opencode.json, .bob/settings.json, .bob/mcp.json, .pi/mcp.json, .pi/settings.json, CLAUDE.md, AGENTS.md
 …
 ```
 
@@ -172,11 +172,11 @@ laptop. It is for a setup you configure by hand.
 
 ## 4. Run your agent
 
-Start Claude Code or OpenCode in the **repository root**:
+Start Claude Code, OpenCode or Pi in the **repository root**:
 
 ```bash
 cd $REPO_DIR
-claude        # or: opencode
+claude        # or: opencode, or: pi
 ```
 
 Claude Code asks one time whether to use the project's `sandbox` MCP server. Select **"Use this MCP

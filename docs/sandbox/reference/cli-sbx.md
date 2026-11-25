@@ -23,8 +23,8 @@ For the commands in context, start at the [user guide](../user-guide.md).
 ```text
 An sbx sandbox is a workspace on the sandbox service, made from a template, where your coding
 agent's commands run in isolated VMs. In a git repository, `mocactl sbx up` creates or reuses one,
-copies the working tree into its /workspace and points Claude Code, OpenCode and IBM Bob, in this
-repository, at the sandbox's tools: their reads, edits and commands then run in the sandbox
+copies the working tree into its /workspace and points Claude Code, OpenCode, IBM Bob and Pi, in
+this repository, at the sandbox's tools: their reads, edits and commands then run in the sandbox
 service's VMs, not on this machine (Bob's local tools stay available: it has no deny list). Your
 source files stay as they are, apart from the agent configuration `up` adds. The copy is not kept
 in sync: `mocactl sbx push` sends later local edits, and `mocactl sbx pull --apply` applies the
@@ -48,12 +48,13 @@ a repository's sandbox, in the order you use it:
                  [--no-agent-config] [--cortex] [--lifetime DURATION]
                                                  in a git repository: create or reuse its sandbox,
                                                  push the working tree, bind it in .sbx/sandbox.json,
-                                                 and point Claude Code, OpenCode and IBM Bob at the
-                                                 sandbox's MCP tools, with their local tools denied
-                                                 (Bob's cannot be: it has no deny list) (merged
-                                                 into .mcp.json, .claude/settings.json,
+                                                 and point Claude Code, OpenCode, IBM Bob and Pi at
+                                                 the sandbox's MCP tools, with their local tools
+                                                 denied (Bob's cannot be: it has no deny list)
+                                                 (merged into .mcp.json, .claude/settings.json,
                                                  opencode.json, .bob/settings.json, .bob/mcp.json,
-                                                 CLAUDE.md, AGENTS.md; a value there that conflicts
+                                                 .pi/mcp.json, .pi/settings.json, CLAUDE.md,
+                                                 AGENTS.md; a value there that conflicts
                                                  stops up before anything is done)
                                                  (a reused sandbox with changes not yet pulled is
                                                  left unpushed, with a warning, and up exits 0)

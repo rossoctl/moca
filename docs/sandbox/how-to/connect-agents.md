@@ -17,8 +17,9 @@ much `up` can take away:
 | **OpenCode**                | `up` writes `opencode.json`                                                         | Denied (`tools.<name>: false`)                                       |
 | **[Codex CLI](#codex-cli)** | `mocactl sbx codex`, per run — it reads no project config                           | Shell tool off; `unified_exec` cannot be disabled                    |
 | **[IBM Bob](#ibm-bob)**     | `up` writes `.bob/mcp.json` + `.bob/settings.json`                                  | **Not denied, and preferred** — name the sandbox tools in the prompt |
+| **Pi**                      | `up` writes `.pi/mcp.json` + `.pi/settings.json`                                    | Denied (`defaultTools` selects none), once the project is trusted    |
 
-Claude Code and OpenCode need nothing beyond `up`, so start them as you normally do:
+Claude Code, OpenCode and Pi need nothing beyond `up`, so start them as you normally do:
 
 ```bash
 claude
@@ -30,11 +31,19 @@ or
 opencode
 ```
 
+or
+
+```bash
+pi
+```
+
 Start it in the repository root, not a subdirectory. Claude Code asks once to approve the
 project's `sandbox` MCP server: choose **"Use this MCP server"** — the highlighted default
 declines and leaves the agent with no tools at all
 ([The first `claude` asks about the sandbox server](agent-configuration.md#the-first-claude-asks-about-the-sandbox-server)). If it asks whether you trust the
-folder, accept that too. Then ask for work as usual ("the tests fail, fix them"). The agent's tools are now `sandbox`'s
+folder, accept that too. Pi likewise asks whether to trust the project, and records the answer
+per folder (`~/.pi/agent/trust.json`), so a fresh clone or worktree — a new directory — asks its
+one question again. Then ask for work as usual ("the tests fail, fix them"). The agent's tools are now `sandbox`'s
 (`bash`, `read`, `write`, `edit`, `grep`, `find`, `ls` and `sandbox_info`); its local tools are
 denied.
 
