@@ -36,7 +36,7 @@ false`, after the env files, units, Redis and the network are already in place. 
 - systemd 247 or newer (`LoadCredential=`). `setup-vm.sh` checks and refuses an older one (RHEL 8
   ships 239), which would ignore the key and leave the control plane without its secrets.
 - `nft` (nftables), which loads the sandbox network's firewall
-- Node.js 22+ and pnpm 9+ on the VM (the supervisor and relay run directly via
+- Node.js 22.12+ and pnpm 9+ on the VM (the supervisor and relay run directly via
   `node --import tsx`, not containerized)
 - A user able to install systemd units under `/etc/systemd/system` and run as root (see
   "Bring it up" below)

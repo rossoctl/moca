@@ -1,5 +1,5 @@
 import { createServer, type AddressInfo, type Server, type Socket } from 'node:net';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
 /**
  * Defect B (#423, Task 16b): `makeRuntimeReporter` built its node-redis client with no `'error'`
@@ -59,7 +59,7 @@ async function droppingServer(): Promise<{ port: number; close: () => Promise<vo
 
 let uncaught: unknown[];
 const onUncaught = (e: unknown) => void uncaught.push(e);
-let errorLog: ReturnType<typeof vi.spyOn>;
+let errorLog: MockInstance<typeof console.error>;
 
 beforeEach(() => {
   created.length = 0;

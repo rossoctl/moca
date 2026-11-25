@@ -16,6 +16,11 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # vite is a required peer of vitest, so the two move together, majors included.
+      vitest:
+        patterns:
+          - 'vitest'
+          - 'vite'
       # Minor and patch only: a major bump rides in its own PR. #1029 bundled
       # TypeScript 5->7, vitest 2->5 and @types/node 22->26 with a yaml patch, so the
       # patch could not land without three separate migrations.

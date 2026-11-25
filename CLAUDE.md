@@ -66,7 +66,7 @@ pre-commit install
 
 ## Code Style
 
-- TypeScript (strict mode), Node.js 22+
+- TypeScript (strict mode), Node.js 22.12+
 - pnpm 9+ workspace monorepo
 - Prettier for formatting (see .prettierrc)
 - Shellcheck for shell scripts in deploy/
@@ -75,7 +75,7 @@ pre-commit install
 
 ## Testing
 
-- vitest 2.x for all test suites
+- vitest 5.x for all test suites
 - Redis required for session-backend and `@moca/server` workload tests
 - Live smoke tests gated by env vars (M3_LIVE_SMOKE, etc.)
 
