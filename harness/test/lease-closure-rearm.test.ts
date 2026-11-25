@@ -45,7 +45,8 @@ vi.mock('../src/sandbox-lease.js', async (importOriginal) => {
     ...actual,
     // Models the one property that makes the bug reachable: once closed, every command rejects
     // `ClientClosedError` for good — node-redis's real behaviour past a close or the reconnect bound.
-    RedisLeaseStore: vi.fn().mockImplementation(() => {
+    // A function, not an arrow: the code under test calls it with `new`.
+    RedisLeaseStore: vi.fn().mockImplementation(function () {
       let isClosed = false;
       const rejectIfClosed = async () => {
         if (isClosed)

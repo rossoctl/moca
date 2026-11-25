@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 import { acquireTurnSandbox } from '../src/run-turn.js';
 import type { LeaseStore } from '../src/sandbox-lease.js';
 import { TEMPLATE_LABEL, type AffinityStore } from '../src/sandbox-affinity.js';
@@ -69,7 +69,7 @@ const fakeRecords = (recs: SandboxRecord[]): RecordStore => ({
 });
 
 /** An ExecClientLike whose `close` is observable — the call the leak never made. */
-function spyExecClient(): ExecClientLike & { close: ReturnType<typeof vi.fn> } {
+function spyExecClient(): ExecClientLike & { close: Mock<() => void> } {
   return {
     exec: () => ({ on: () => ({}), cancel: () => {} }) as never,
     abort: (_req, cb) => {

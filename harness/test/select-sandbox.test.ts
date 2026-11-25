@@ -34,7 +34,8 @@ vi.mock('../src/pool-records.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/pool-records.js')>();
   return {
     ...actual,
-    RedisRecordStore: vi.fn().mockImplementation(() => {
+    // A function, not an arrow: the code under test calls it with `new`.
+    RedisRecordStore: vi.fn().mockImplementation(function () {
       const store = {
         put: vi.fn(async () => {}),
         remove: vi.fn(async () => {}),

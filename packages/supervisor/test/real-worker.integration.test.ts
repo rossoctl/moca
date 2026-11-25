@@ -31,7 +31,7 @@ import { startSupervisor, DEFAULT_WORKER_ENTRY, type Supervisor } from '../src/m
  *
  * It also depends on vitest's default per-file process isolation (`pool: 'forks'`,
  * `isolate: true` -- neither this package's `vitest.config.ts` nor any workspace-root
- * config overrides either, so both are vitest 2.x's defaults, not a setting pinned here).
+ * config overrides either, so both are vitest's defaults, not a setting pinned here).
  * `withRealWorker` below mutates `process.execArgv` directly on the running process rather
  * than threading a test-only option through `startSupervisor`; that mutation is safe only
  * because vitest gives each test file its own process. A future move to `pool: 'threads'`

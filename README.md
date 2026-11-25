@@ -4,7 +4,7 @@
 laptop, or on a harness that runs the agent sessions themselves.**
 
 ![status](https://img.shields.io/badge/status-preview-yellow)
-![node](https://img.shields.io/badge/node-22%2B-green)
+![node](https://img.shields.io/badge/node-22.12%2B-green)
 ![license](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 Moca has two capabilities. Use either one on its own, or both together:

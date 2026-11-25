@@ -4,7 +4,7 @@
 
 ### Prerequisites
 
-- Node.js 22+
+- Node.js 22.12+
 - pnpm 9+
 - Redis (for the session-backend and `@moca/server` workload tests)
 - Docker (for container builds, and for the hadolint pre-commit hook)

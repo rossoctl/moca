@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import http from 'node:http';
 
 // Mock runTurn before importing server
@@ -301,13 +301,6 @@ describe('GET /runs/status', () => {
 });
 
 describe('POST /turn — back-compat & streaming', () => {
-  // Isolate call-count assertions (not.toHaveBeenCalled) from prior tests: this package's vitest
-  // config sets no clearMocks, so clear per test. Implementations are set inside each test after this.
-  beforeEach(() => {
-    mockedExecuteTurn.mockClear();
-    mockedRunTurn.mockClear();
-  });
-
   it('no Accept header → golden byte-for-byte sync JSON (the back-compat linchpin)', async () => {
     const result = { sessionId: 'gold-1', response: 'Hi there', stopReason: 'end_turn' };
     mockedRunTurn.mockResolvedValueOnce(result as any);
