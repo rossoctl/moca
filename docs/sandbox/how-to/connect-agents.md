@@ -17,7 +17,7 @@ much `up` can take away:
 | **OpenCode**                | `up` writes `opencode.json`                                                         | Denied (`tools.<name>: false`)                                       |
 | **[Codex CLI](#codex-cli)** | `mocactl sbx codex`, per run — it reads no project config                           | Shell tool off; `unified_exec` cannot be disabled                    |
 | **[IBM Bob](#ibm-bob)**     | `up` writes `.bob/mcp.json` + `.bob/settings.json`                                  | **Not denied, and preferred** — name the sandbox tools in the prompt |
-| **[Pi](#pi)**               | `up` writes `.pi/mcp.json` + `.pi/settings.json`                                    | Denied (`defaultTools` selects none), once the project is trusted    |
+| **Pi**                     | `up` writes `.pi/mcp.json` + `.pi/settings.json`                                    | Denied (`defaultTools` selects none), once the project is trusted    |
 
 Claude Code, OpenCode and Pi need nothing beyond `up`, so start them as you normally do:
 
@@ -41,8 +41,9 @@ Start it in the repository root, not a subdirectory. Claude Code asks once to ap
 project's `sandbox` MCP server: choose **"Use this MCP server"** — the highlighted default
 declines and leaves the agent with no tools at all
 ([The first `claude` asks about the sandbox server](agent-configuration.md#the-first-claude-asks-about-the-sandbox-server)). If it asks whether you trust the
-folder, accept that too. Pi asks once whether to trust the project — the one prompt between it
-and the files `up` wrote ([below](#pi)). Then ask for work as usual ("the tests fail, fix them"). The agent's tools are now `sandbox`'s
+folder, accept that too. Pi likewise asks whether to trust the project, and records the answer
+per folder (`~/.pi/agent/trust.json`), so a fresh clone or worktree — a new directory — asks its
+one question again. Then ask for work as usual ("the tests fail, fix them"). The agent's tools are now `sandbox`'s
 (`bash`, `read`, `write`, `edit`, `grep`, `find`, `ls` and `sandbox_info`); its local tools are
 denied.
 
@@ -302,49 +303,3 @@ egress, so a toolchain the template lacks can be fetched only from an allowliste
 grepping and editing work; compiling does not, for a language the template does not carry. Check `mocactl sbx templates ls` before asking Bob for a build or a test run, and expect it to report a
 missing compiler rather than produce one. (If it silently succeeds instead, check the tool names: it
 may have used your laptop's.)
-
-## Pi
-
-Start to finish, in a repository you have already run `mocactl sbx up` in:
-
-```bash
-# 1. install Pi (1.5.0 or later: older ones read no .pi/mcp.json)
-curl -fsSL https://pi.dev/install.sh | sh
-pi --version
-
-# 2. give it credentials — its own account, not your sandbox login
-pi auth login                  # or export ANTHROPIC_API_KEY=..., and see `pi auth`
-
-# 3. run it, from the repository root, and answer its one trust question
-pi
-#    the first run asks: trust this project? — answer yes (or start with `pi -a`)
-
-# 4. ask for work, then bring it back
-#    "the tests fail, fix them"
-mocactl sbx pull --apply
-```
-
-**The trust question is the one thing to answer.** Pi loads `.pi/mcp.json` and
-`.pi/settings.json` — the two files `up` wrote — only in a project it has been trusted for, so
-the first `pi` in a repository asks once, before it reads either file. Answer yes, and the
-answer is saved in `~/.pi/agent/trust.json` and never returns for that folder; `pi -a` answers
-yes for one run, `pi -na` ignores the files for one run. Declining is the state a declined
-Claude Code prompt leaves: Pi runs with its local tools and no sandbox server, on your laptop.
-`mocactl sbx doctor` reports a Pi older than 1.5.0, which does the same thing for a different
-reason — it cannot read the files at all.
-
-There is no `mocactl sbx pi` launcher, because there is nothing to pass: Pi reads its servers
-only from its two `mcp.json` files, so per-run configuration has no flag the launcher could
-carry. `up` writes them, as it does for Claude Code and OpenCode.
-
-**Its local tools are denied, like Claude Code's and OpenCode's.** `.pi/settings.json` gets a
-`defaultTools` list with a `-name` modifier for each of Pi's built-ins (`read`, `bash`, `edit`,
-`write`, `grep`, `find`, `ls`, `powershell`), so none of them starts; the sandbox's tools, named
-`mcp__sandbox__*`, are the tools the model sees. `.pi/mcp.json` names the server with
-`exposure: direct`, so those tools are declared to the model like built-ins rather than left
-behind Pi's `codemode` scripting tool.
-
-Pi passes its whole environment to a stdio MCP server, as Claude Code and OpenCode do (Codex is
-the one that does not), so `MOCACTL_SBX_URL` and your login reach `mocactl sbx mcp` unaided.
-Inside a session, `/mcp` shows the `sandbox` server, its tools and its connection state — the
-check worth running when you are not sure.

@@ -100,9 +100,7 @@ Other messages:
   the `sandbox` tools. Note `mocactl sbx doctor`'s `agent config` check covers Claude Code,
   OpenCode, IBM Bob and Pi (for Bob, only that the server is there), but not Codex: Codex has
   nothing in your repository for it to check, and its `unified_exec` tool cannot be disabled, so
-  add `-c sandbox_mode="read-only"` if you want its own confinement too. A Pi that edits files on
-  your laptop instead is usually the trust question declined (or a Pi older than 1.5.0): see
-  [Pi](connect-agents.md#pi).
+  add `-c sandbox_mode="read-only"` if you want its own confinement too.
 
 **Logging out.** `mocactl sbx logout` ends this login and deletes `sbx-auth.json` (in
 `~/.config/mocactl/`). It is kept apart from `mocactl login`'s moca login: you can have both, and

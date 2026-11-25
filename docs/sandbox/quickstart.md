@@ -180,9 +180,7 @@ claude        # or: opencode, or: pi
 ```
 
 Claude Code asks one time whether to use the project's `sandbox` MCP server. Select **"Use this MCP
-server"**. The highlighted default refuses the server, and the agent then has no tools. Pi instead
-asks one time whether to trust the project folder — its own prompt, before it reads `.pi/mcp.json`
-and `.pi/settings.json` — and you can start it with `pi -a` to answer yes for one run.
+server"**. The highlighted default refuses the server, and the agent then has no tools.
 
 Then ask for work as usual, for example "the tests fail, fix them".
 
@@ -247,8 +245,7 @@ To read why this design is safer, see [Isolation and data handling](concepts/iso
 
 ## Next
 
-- **Do more:** [Use Codex](how-to/connect-agents.md#codex-cli), [IBM Bob](how-to/connect-agents.md#ibm-bob) or
-  [Pi](how-to/connect-agents.md#pi),
+- **Do more:** [Use Codex](how-to/connect-agents.md#codex-cli) or [IBM Bob](how-to/connect-agents.md#ibm-bob),
   [Use egress credentials](how-to/egress-credentials.md),
   [Keep a guest between commands (lease mode)](how-to/lease-mode.md). To set the control plane for
   one shell instead of logging in again, use `MOCACTL_SBX_URL`.

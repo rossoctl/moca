@@ -18,7 +18,7 @@ move it to `.claude/settings.local.json`, which `up` leaves alone, or delete it.
 | `.claude/settings.json`               | `permissions.allow`: `mcp__sandbox__*`; `permissions.deny`: Claude Code's local tools (`Bash`, `Read`, `Edit`, `Write`, `Glob`, `Grep`, `NotebookEdit`, `WebFetch`, `WebSearch`, `Agent`, `Task`, …); `enabledMcpjsonServers`: `sandbox`; `autoMemoryEnabled`: `false` (below)                |
 | `opencode.json`                       | `mcp.sandbox`: `mocactl sbx mcp`; `tools.<name>: false` for OpenCode's local tools (`bash`, `read`, `edit`, `write`, `patch`, `apply_patch`, `glob`, `grep`, `list`, `lsp`, `webfetch`, `websearch`, `task`, `multiedit`, `skill`)                                                            |
 | `.bob/settings.json`, `.bob/mcp.json` | `mcpServers.sandbox`: `mocactl sbx mcp`, the same entry `.mcp.json` gets, in both files — which one Bob reads depends on its version (2.0.9 reads `mcp.json`). Bob has no deny list, so its local tools are **not** denied, and it prefers them unless the prompt names the sandbox's (below) |
-| `.pi/mcp.json`                        | `mcpServers.sandbox`: `mocactl sbx mcp` with `exposure: direct`, so Pi declares the sandbox's tools like its own. Pi reads the file only in a project you have told it to trust, so its first run in a repository asks once (below)                                                          |
+| `.pi/mcp.json`                        | `mcpServers.sandbox`: `mocactl sbx mcp` with `exposure: direct`, so Pi declares the sandbox's tools like its own. Pi reads the file only in a project it has been trusted for                                                          |
 | `.pi/settings.json`                   | `defaultTools`: a `-name` modifier for each of Pi's local tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`, `powershell`), so none of them starts. Modifiers, not an empty list, because Pi merges an all-modifier `defaultTools` into the selection of `~/.pi/agent/settings.json`: a global list would survive `[]`, not `-name` |
 | `CLAUDE.md`, `AGENTS.md`              | A block between `<!-- sbx:begin -->` and `<!-- sbx:end -->` telling the agent how the sandbox works (below)                                                                                                                                                                                   |
 | `.sbx/`                               | `sandbox.json`, the binding (your sandbox's id and the service URL), and `agent-config.json`, the record of what `up` added. `.sbx/` is listed in `.git/info/exclude`, never in your `.gitignore`                                                                                             |
@@ -120,21 +120,6 @@ server but the sandbox's. Run `claude` yourself, answer the two questions once, 
 session started in the root has your own servers too and asks nothing. Neither flag affects
 the local tools: the launcher denies those with `--disallowed-tools`
 ([First run](set-up.md)), so they stay off wherever it is started.
-
-## The first `pi` asks whether to trust the project
-
-Pi reads `.pi/mcp.json` and `.pi/settings.json` only in a project it has been trusted for, so
-the first `pi` in a repository — a fresh clone, say — asks once, before it loads either file.
-Answer yes (or start it with `pi -a` to answer yes for one run, or `pi -na` to ignore the files
-for one run). The answer is saved in `~/.pi/agent/trust.json`, outside your working tree, and
-never returns for that folder; declining leaves Pi with its local tools and no sandbox server,
-which is the state a declined Claude Code prompt leaves, so check `mocactl sbx doctor` after a
-session that looked tool-less. `AGENTS.md` loads regardless of trust, so the sandbox rules
-block `up` wrote is read either way.
-
-Pi 1.5.0 or later is needed: older ones read no `.pi/mcp.json` and have no `defaultTools`
-setting, so they run with their local tools and no sandbox server while the files `up` wrote
-look correct. `mocactl sbx doctor` fails on a Pi older than that, when one is on your `PATH`.
 
 **To undo it**, delete the sandbox:
 
