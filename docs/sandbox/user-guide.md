@@ -15,7 +15,7 @@ problem, its [Reproducing a member's issue](../operate/sandbox-service/runbook.m
 
 ## What you get
 
-Your coding agent (Claude Code, OpenCode, Codex or IBM Bob) still runs on your laptop, but **every
+Your coding agent (Claude Code, OpenCode, Codex, IBM Bob or Pi) still runs on your laptop, but **every
 command it runs runs in the sandbox service**, each one in a fresh virtual machine (VM). It reads,
 edits and tests your code there, in a copy of your repository at `/workspace`. (IBM Bob has no
 deny list, so its local tools stay available: see [IBM Bob](how-to/connect-agents.md#ibm-bob).) **Your laptop's source
@@ -36,7 +36,7 @@ handling](concepts/isolation.md).
 | Page                                                                      | What it covers                                                                |
 | ------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | [Install, log in and bring a repository up](how-to/set-up.md)             | `mocactl` and `sbx` versions, login, `sbx up`, templates, lifetime, worktrees |
-| [Run your coding agent](how-to/connect-agents.md)                         | Claude Code, OpenCode, Codex CLI and IBM Bob against the sandbox              |
+| [Run your coding agent](how-to/connect-agents.md)                         | Claude Code, OpenCode, Codex CLI, IBM Bob and Pi against the sandbox           |
 | [Take the work back, and send more](how-to/push-and-pull.md)              | `sbx pull`, `pull --apply`, and what a patch may not touch                    |
 | [What `sbx up` changes in your repository](how-to/agent-configuration.md) | the agent configuration it writes, `--cortex`, and undoing it with `sbx rm`   |
 | [Work with a sandbox](how-to/work-with-a-sandbox.md)                      | `push`, `run`, `put`, `ls`, the shell, and what persists between calls        |

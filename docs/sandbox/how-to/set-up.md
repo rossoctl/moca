@@ -61,7 +61,7 @@ mocactl sbx up
 sbx: not pushed, as they may hold secrets (--include-secrets pushes them): .env
 created sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a (default)
 pushed 214 files (3.2 MiB) to sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a
-configured Claude Code, OpenCode and IBM Bob: .mcp.json, .claude/settings.json, opencode.json, .bob/settings.json, .bob/mcp.json, CLAUDE.md, AGENTS.md
+configured Claude Code, OpenCode, IBM Bob and Pi: .mcp.json, .claude/settings.json, opencode.json, .bob/settings.json, .bob/mcp.json, .pi/mcp.json, .pi/settings.json, CLAUDE.md, AGENTS.md
 sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a
 sandbox sbx-0f3a9c2e7b1d4a5f6e8c0b2d4a (default), expires 2026-10-26T09:00:00.000Z, after 7 d without use; bound in .sbx/sandbox.json
 ```

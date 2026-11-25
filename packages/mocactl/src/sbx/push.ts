@@ -165,7 +165,8 @@ const AGENT_DIRS: Record<string, string> = {
   '.opencode': 'OpenCode configuration and plugins',
   '.codex': 'Codex CLI configuration, which can start MCP servers',
   '.agents': "Codex CLI's repo skills, whose scripts it runs on this machine",
-  '.pi': 'Pi extensions, skills and prompts, which it loads as code from the project',
+  '.pi':
+    'Pi settings, MCP servers, extensions, skills and prompts, which it loads from the project',
   '.bob': "IBM Bob's settings, which can start MCP servers",
   '.husky': 'git hooks',
 };

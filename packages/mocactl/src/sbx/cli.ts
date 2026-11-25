@@ -578,6 +578,8 @@ export interface SbxDeps {
   now?: () => number;
   /** `doctor`'s `claude --version` (default: asked of the `claude` on PATH). */
   claudeVersion?: () => Promise<string | undefined> | string | undefined;
+  /** `doctor`'s `pi --version` (default: asked of the `pi` on PATH). */
+  piVersion?: () => Promise<string | undefined> | string | undefined;
   /** Cortex's agentop, for `up --cortex` and `doctor` in Cortex mode (default: the one on PATH). */
   agentop?: AgentopExec;
   /** `mcp`'s transport (default stdio). */
@@ -1825,7 +1827,15 @@ async function sbxMainWith(
       }
       return arg === 'delete' ? deleteCredential(ctx, extra[0]!) : listCredentials(ctx);
     case 'doctor':
-      return cmdDoctor(ctx, root, id, deps.execFactory, deps.claudeVersion, deps.agentop);
+      return cmdDoctor(
+        ctx,
+        root,
+        id,
+        deps.execFactory,
+        deps.claudeVersion,
+        deps.piVersion,
+        deps.agentop,
+      );
     case 'token':
       return cmdToken(ctx, id!, renewEvery);
     case 'egress':

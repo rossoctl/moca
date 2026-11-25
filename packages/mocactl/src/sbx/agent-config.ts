@@ -29,7 +29,7 @@ import {
 } from './json-edit.js';
 
 /**
- * The agent configuration `sbx up` writes (SBX0 spec §6.3): Claude Code, OpenCode and IBM Bob
+ * The agent configuration `sbx up` writes (SBX0 spec §6.3): Claude Code, OpenCode, IBM Bob and Pi
  * pointed at the sandbox MCP server, with every local built-in tool that would act on the laptop
  * denied — except Bob's, which has no deny mechanism to use (see BOB_SERVER).
  *
@@ -84,13 +84,21 @@ export const CLAUDE_RETIRED: readonly string[] = Object.freeze(['MultiEdit', 'LS
  */
 export const CLAUDE_MIN_VERSION = '2.0.0';
 
+/** Whether `version` (`2.1.304`, or an agent's `--version` whole line) is older than `min`. */
+function versionBelow(version: string, min: string): boolean {
+  const parts = (v: string) => (/(\d+)\.(\d+)\.(\d+)/.exec(v) ?? []).slice(1).map(Number);
+  const [have, floor] = [parts(version), parts(min)];
+  if (have.length !== 3) return false; // unreadable: not a reason to fail
+  for (let i = 0; i < 3; i++) if (have[i] !== floor[i]) return have[i]! < floor[i]!;
+  return false;
+}
 /** Whether `version` (`2.1.304`, or `claude --version`'s whole line) is older than the floor. */
 export function claudeTooOld(version: string): boolean {
-  const parts = (v: string) => (/(\d+)\.(\d+)\.(\d+)/.exec(v) ?? []).slice(1).map(Number);
-  const [have, min] = [parts(version), parts(CLAUDE_MIN_VERSION)];
-  if (have.length !== 3) return false; // unreadable: not a reason to fail
-  for (let i = 0; i < 3; i++) if (have[i] !== min[i]) return have[i]! < min[i]!;
-  return false;
+  return versionBelow(version, CLAUDE_MIN_VERSION);
+}
+/** Whether `version` (`pi --version`'s `1.5.0`) is older than Pi's floor. */
+export function piTooOld(version: string): boolean {
+  return versionBelow(version, PI_MIN_VERSION);
 }
 /** OpenCode's built-ins that act on the laptop: `tools.<t> = false` (spec §6.3). */
 export const OPENCODE_OFF: readonly string[] = Object.freeze([
@@ -113,6 +121,33 @@ export const OPENCODE_OFF: readonly string[] = Object.freeze([
   // session: laptop content the sandboxed agent should not see, as in a benchmark run.
   'skill',
 ]);
+/** Pi's built-ins that act on the laptop (pi 1.5.0's list): switched off by the `defaultTools` modifiers below. */
+export const PI_TOOLS: readonly string[] = Object.freeze([
+  'read',
+  'bash',
+  'edit',
+  'write',
+  'grep',
+  'find',
+  'ls',
+  'powershell',
+]);
+/**
+ * The `defaultTools` `up` writes into Pi's project settings: a `-name` modifier for every local
+ * built-in. Modifiers, not the empty array the setting's documentation suggests for "no built-in
+ * tools", because Pi merges an all-modifier list — and `[]` is one, vacuously — into the selection
+ * of `~/.pi/agent/settings.json`: a global `defaultTools` would survive an empty array, while
+ * `-name` applies to whatever that selection is. The modifiers name the eight built-ins exactly
+ * (the setting takes exact names, no patterns), and Pi's MCP tools are `mcp__sandbox__*`, so the
+ * sandbox's tools stay on.
+ */
+export const PI_OFF: readonly string[] = Object.freeze([...PI_TOOLS].sort().map((t) => `-${t}`));
+/**
+ * The oldest Pi the two project files work on: 1.5.0 is the oldest checked (`mcpServers` read from
+ * `.pi/mcp.json` in a trusted project, and the `defaultTools` setting). Older ones have no MCP
+ * support at all, so Pi would run with its local tools and no sandbox server, unnoticed.
+ */
+export const PI_MIN_VERSION = '1.5.0';
 export const MARK_BEGIN = '<!-- sbx:begin -->';
 export const MARK_END = '<!-- sbx:end -->';
 /**
@@ -155,6 +190,17 @@ export const CLAUDE_ALLOW = 'mcp__sandbox__*';
  * available and nothing here can take them away (#593's lesson, applied).
  */
 const BOB_SERVER = Object.freeze({ command: 'mocactl', args: ['sbx', 'mcp'] });
+/**
+ * Pi's server, in `.pi/mcp.json`. The shape is `.mcp.json`'s (Pi reads the same `mcpServers` form),
+ * plus `exposure`, which decides how the model reaches the server's tools: `direct` declares them
+ * like built-ins, as every other agent sees them, while Pi's own default (`codemode`) would leave
+ * them reachable only from its scripts.
+ */
+const PI_SERVER = Object.freeze({
+  command: 'mocactl',
+  args: ['sbx', 'mcp'],
+  exposure: 'direct',
+});
 
 const MCP_JSON = '.mcp.json';
 const SETTINGS = '.claude/settings.json';
@@ -181,6 +227,9 @@ const MEMORY_WHY =
  */
 const BOB_SETTINGS = '.bob/settings.json';
 const BOB_MCP = '.bob/mcp.json';
+/** Pi's two project files, both plain JSON, both read only once the project is trusted. */
+const PI_MCP = '.pi/mcp.json';
+const PI_SETTINGS = '.pi/settings.json';
 const SETTINGS_LOCAL = '.claude/settings.local.json';
 const MANIFEST = '.sbx/agent-config.json';
 /** What --no-agent-config does, said wherever it is offered. */
@@ -285,6 +334,46 @@ function isOpencodeServer(v: unknown): boolean {
 
 /** A Claude Code permission rule's tool: `Bash(npm test)` is `Bash`. */
 const ruleTool = (r: unknown) => (typeof r === 'string' ? r.replace(/\(.*$/s, '').trim() : '');
+
+/** `mocactl sbx mcp` as Pi's server, with its tools declared to the model (`direct` exposure). */
+function isPiServer(v: unknown): boolean {
+  return (
+    isObj(v) &&
+    v.command === PI_SERVER.command &&
+    same(v.args, PI_SERVER.args) &&
+    (v.exposure === undefined || v.exposure === 'direct') &&
+    (v.type === undefined || v.type === 'stdio') &&
+    emptyOrNone(v.env) &&
+    onlyKeys(v, ['command', 'args', 'type', 'env', 'exposure', 'description', 'timeout', 'cwd'])
+  );
+}
+
+/**
+ * The local built-ins Pi starts with, per `defaultTools` in `.pi/settings.json`: Pi resolves the
+ * project list exactly this way (plain names replace its defaults `read`, `bash`, `edit`,
+ * `write`; `+name`/`-name` then add and remove in order; an absent key, and an empty list, mean
+ * the defaults; non-strings it ignores). A list of only modifiers changes the selection of
+ * `~/.pi/agent/settings.json`, which this repository cannot see: for such a list the answer is
+ * what pi's own defaults leave on, so a modifier that fails to name a local tool counts as on.
+ */
+export function piLocalToolsOn(data: Json | undefined): string[] {
+  const raw = data?.defaultTools;
+  // An absent key means pi's own defaults; an empty list selects nothing (pi's rule: with no
+  // plain name the base is the defaults, unless the list is empty, when it is nothing).
+  if (raw === undefined) return ['read', 'bash', 'edit', 'write'];
+  const list = Array.isArray(raw) ? raw : [];
+  const str = list.filter((e): e is string => typeof e === 'string');
+  const mod = (e: string) => e.startsWith('+') || e.startsWith('-');
+  const plain = str.filter((e) => !mod(e));
+  const selected = new Set(
+    plain.length || str.length === 0 ? plain : ['read', 'bash', 'edit', 'write'],
+  );
+  for (const e of str.filter(mod)) {
+    if (e[0] === '+') selected.add(e.slice(1));
+    else selected.delete(e.slice(1));
+  }
+  return PI_TOOLS.filter((t) => selected.has(t));
+}
 
 // ---------------------------------------------------------------------------------------------
 // Files
@@ -893,9 +982,18 @@ function loadManifest(root: string): { m?: Manifest; bad?: string } {
 }
 
 /** The JSON and Markdown files `sbx up` writes, and the directory it may create. */
-const JSON_FILES = [MCP_JSON, SETTINGS, 'opencode.json', 'opencode.jsonc', BOB_SETTINGS, BOB_MCP];
+const JSON_FILES = [
+  MCP_JSON,
+  SETTINGS,
+  'opencode.json',
+  'opencode.jsonc',
+  BOB_SETTINGS,
+  BOB_MCP,
+  PI_MCP,
+  PI_SETTINGS,
+];
 const MD_FILES = ['CLAUDE.md', 'AGENTS.md'];
-const DIRS = [dirname(SETTINGS), dirname(BOB_SETTINGS)];
+const DIRS = [dirname(SETTINGS), dirname(BOB_SETTINGS), dirname(PI_MCP)];
 
 /**
  * The files a record may name: the ones `sbx up` writes, and where each of them leads now if it
@@ -1022,6 +1120,8 @@ export function writeAgentConfig(
   const oc = loadDoc(root, opencodeFile(root), true);
   const bob = loadDoc(root, BOB_SETTINGS, false);
   const bobMcp = loadDoc(root, BOB_MCP, false);
+  const piMcp = loadDoc(root, PI_MCP, false);
+  const piSettings = loadDoc(root, PI_SETTINGS, false);
   const local = readLocalSettings(root);
 
   needObjects(mcp, ['mcpServers']);
@@ -1043,6 +1143,35 @@ export function writeAgentConfig(
       bobMcp.rel,
       `mcpServers.${SERVER}`,
       'is there and names another server',
+    );
+  }
+
+  // Pi reads its two project files only in a project it has been trusted for, so the first run in
+  // a repository asks once whether to trust it — Pi's own prompt, as Claude Code's folder-trust and
+  // MCP-server questions are its. Unlike Codex there is nothing to launch: `up` configures Pi like
+  // Claude Code and OpenCode, by file. Cortex mode does not change this: Cortex wraps Claude Code
+  // (agentop), not Pi, so Pi's local tools are denied in it too.
+  needObjects(piMcp, ['mcpServers']);
+  const piHave = at(piMcp.data, ['mcpServers', SERVER]);
+  if (piHave !== undefined && !isPiServer(piHave)) {
+    throw new ConfigConflict(
+      piMcp.rel,
+      `mcpServers.${SERVER}`,
+      'is there and names another server',
+    );
+  }
+  const piTools = at(piSettings.data, ['defaultTools']);
+  if (piTools !== undefined && !Array.isArray(piTools)) {
+    throw new ConfigConflict(piSettings.rel, 'defaultTools', 'is there but not a list');
+  }
+  // Only a key that is there can contradict ours: an absent one is what `up` is about to write.
+  const piOn = piTools === undefined ? [] : piLocalToolsOn(piSettings.data);
+  if (piOn.length) {
+    throw new ConfigConflict(
+      piSettings.rel,
+      'defaultTools',
+      `selects pi's local built-in tools (${piOn.join(', ')}), which would act on this machine`,
+      'remove the entries naming them',
     );
   }
 
@@ -1123,6 +1252,10 @@ export function writeAgentConfig(
   if (have === undefined) setKey(mcp, ['mcpServers', SERVER], { ...CLAUDE_SERVER }, recs);
   if (bobHave === undefined) setKey(bob, ['mcpServers', SERVER], { ...BOB_SERVER }, recs);
   if (bobMcpHave === undefined) setKey(bobMcp, ['mcpServers', SERVER], { ...BOB_SERVER }, recs);
+  if (piHave === undefined) setKey(piMcp, ['mcpServers', SERVER], { ...PI_SERVER }, recs);
+  if (at(piSettings.data, ['defaultTools']) === undefined) {
+    setKey(piSettings, ['defaultTools'], [...PI_OFF], recs);
+  }
   addItems(
     settings,
     ['permissions', 'allow'],
@@ -1174,7 +1307,7 @@ export function writeAgentConfig(
   // it twice would name it twice in what `up` prints and write it a second time for nothing.
   // Seen, not "already in writes": the first of the pair may be skipped as unchanged below.
   const seenDocs = new Set<string>();
-  for (const d of [mcp, settings, oc, bob, bobMcp]) {
+  for (const d of [mcp, settings, oc, bob, bobMcp, piMcp, piSettings]) {
     if (seenDocs.has(d.abs)) continue;
     seenDocs.add(d.abs);
     const body = finalText(d);
@@ -1189,7 +1322,7 @@ export function writeAgentConfig(
     if (!p.t.exists) created.push(p.t.rel);
   }
   // The nested files' directories, so `sbx rm` can remove one it created.
-  for (const d of [settings, bob, bobMcp]) {
+  for (const d of [settings, bob, bobMcp, piMcp, piSettings]) {
     if (d.exists || !writes.some((w) => w.t.rel === d.rel)) continue;
     const dir = dirname(d.rel);
     if (!existsSync(join(root, dir))) dirs.push(dir);
@@ -1275,7 +1408,7 @@ export function takeBackAgentConfig(root: string): TakeBack {
   // A record names a file after following links (target()), so a linked opencode.json is recorded
   // as its target's path. Only OpenCode's is JSONC; the rest are strict JSON: decide by resolving.
   const strict = new Set<string>();
-  for (const f of [MCP_JSON, SETTINGS, BOB_SETTINGS, BOB_MCP]) {
+  for (const f of [MCP_JSON, SETTINGS, BOB_SETTINGS, BOB_MCP, PI_MCP, PI_SETTINGS]) {
     try {
       strict.add(target(root, f, RM_HINT).rel);
     } catch {
@@ -1414,6 +1547,8 @@ export function checkAgentConfig(root: string, mode?: SandboxModeName): string[]
   const oc = load(ocFile, true);
   const bob = load(BOB_SETTINGS, false);
   const bobMcp = load(BOB_MCP, false);
+  const piMcp = load(PI_MCP, false);
+  const piSettings = load(PI_SETTINGS, false);
   const local = readLocalSettings(root);
 
   if (!isClaudeServer(at(mcp, ['mcpServers', SERVER]))) {
@@ -1497,6 +1632,23 @@ export function checkAgentConfig(root: string, mode?: SandboxModeName): string[]
     problems.push(
       `IBM Bob: neither ${BOB_SETTINGS} nor ${BOB_MCP} has a ${SERVER} MCP server (mocactl sbx mcp)`,
     );
+  }
+  // Pi, like Claude Code and OpenCode and unlike Bob, has a real deny: `defaultTools` names what
+  // starts, so the tools not named never reach the model at all. Unconditional, also in Cortex
+  // mode: Cortex wraps Claude Code, not Pi.
+  if (!isPiServer(at(piMcp, ['mcpServers', SERVER]))) {
+    problems.push(`Pi: ${PI_MCP} has no ${SERVER} MCP server (mocactl sbx mcp)`);
+  }
+  const piToolsThere = at(piSettings, ['defaultTools']);
+  if (piToolsThere !== undefined && !Array.isArray(piToolsThere)) {
+    problems.push(`Pi: ${PI_SETTINGS} defaultTools is not a list`);
+  } else {
+    const piOn = piLocalToolsOn(piSettings);
+    if (piOn.length) {
+      problems.push(
+        `Pi: ${PI_SETTINGS} defaultTools leaves local built-in tools on: ${piOn.join(', ')}`,
+      );
+    }
   }
   const seen = new Set<string>();
   for (const f of ['CLAUDE.md', 'AGENTS.md']) {
