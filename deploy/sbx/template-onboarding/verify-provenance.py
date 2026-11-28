@@ -167,6 +167,12 @@ USAGE = "usage: verify-provenance.py EXPORT.json [--head STREAM=sha256:HEX ...] 
 
 
 def main(argv):
+    # A report line echoes fields of the export (a stream, a head, a blob's sha256), and a string
+    # read from it may hold a lone surrogate, which a UTF-8 stream refuses to write: escape it
+    # instead, so every line is printed and no field can stop the report with a traceback.
+    for out in (sys.stdout, sys.stderr):
+        if hasattr(out, "reconfigure"):
+            out.reconfigure(errors="backslashreplace")
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip(), file=sys.stderr)
         return 2

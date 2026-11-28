@@ -266,7 +266,7 @@ describe.skipIf(!havePython)('verify-provenance.py agrees with verifyExport', ()
     expect(r.status).toBe(0);
   });
 
-  it('refuses a lone surrogate as canonicalJson does, never with a traceback', async () => {
+  it("reports a lone surrogate with canonicalJson's refusal, not a codec error", async () => {
     const s = store();
     await onboard(s);
     const doc = JSON.parse(JSON.stringify(await s.export(['template/demo-app'])));
@@ -280,6 +280,34 @@ describe.skipIf(!havePython)('verify-provenance.py agrees with verifyExport', ()
     );
     expect(r.out).not.toContain('Traceback');
     expect(r.status).toBe(1);
+  });
+
+  it('prints every report line when a printed field holds a lone surrogate, never a traceback', async () => {
+    const s = store();
+    await onboard(s);
+    const exported = await s.export(['template/demo-app']);
+    const good = (): ProvenanceExport => JSON.parse(JSON.stringify(exported)) as ProvenanceExport;
+    // A record's stream: its refusal names the stream.
+    const inStream = good();
+    inStream.records[0]!.stream = 'template/x\ud800y';
+    // A blob's sha256, a stream's head, and a head-only stream on the success path.
+    const inBlob = good();
+    inBlob.blobs.push({ sha256: 'sha256:x\ud800y', base64: '' });
+    const inHead = good();
+    inHead.streams[0]!.head = 'sha256:x\ud800y';
+    const okPath = good();
+    okPath.streams.push({ stream: 'template/x\ud800y', count: 0, head: null } as never);
+    for (const [doc, line, status] of [
+      [inStream, 'FAIL a record of template/x\\ud800y is not canonical JSON', 1],
+      [inBlob, 'FAIL blob sha256:x\\ud800y', 1],
+      [inHead, 'the last record is', 1],
+      [okPath, 'ok template/x\\ud800y: 0 records', 0],
+    ] as const) {
+      const r = runVerifier(doc);
+      expect(r.out).not.toContain('Traceback');
+      expect(r.out).toContain(line);
+      expect(r.status).toBe(status);
+    }
   });
 
   it('verifies a store holding the sandbox kind, with its lease a record digest', async () => {
