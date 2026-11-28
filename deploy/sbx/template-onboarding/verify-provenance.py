@@ -36,6 +36,8 @@ KINDS = {"policy", "create", "gate", "build", "check", "activate", "deactivate",
          "owner", "retire", "reject", "use", "sandbox", "session", "member", "role"}
 MEMBER_KINDS = {"member", "role"}  # the members stream's kinds, and the only ones it holds
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# A surrogate code point: in a Python str, only ever a lone one (canonical() refuses it).
+LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
 
 
 def canonical(value):
@@ -49,6 +51,11 @@ def canonical(value):
     if isinstance(value, float):
         raise ValueError("canonical JSON holds integers only")
     if isinstance(value, str):
+        # provenance.ts refuses a lone surrogate (LONE_SURROGATE_RE). json.loads turns a "\ud800"
+        # escape into one, and a Python str holds a surrogate code point only when it is lone (a pair
+        # decodes to one astral character), so any such code point is refused here as there.
+        if LONE_SURROGATE_RE.search(value):
+            raise ValueError("canonical JSON refuses a string holding a lone surrogate")
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, list):
         return "[" + ",".join(canonical(v) for v in value) + "]"
@@ -160,6 +167,12 @@ USAGE = "usage: verify-provenance.py EXPORT.json [--head STREAM=sha256:HEX ...] 
 
 
 def main(argv):
+    # A report line echoes fields of the export (a stream, a head, a blob's sha256), and a string
+    # read from it may hold a lone surrogate, which a UTF-8 stream refuses to write: escape it
+    # instead, so every line is printed and no field can stop the report with a traceback.
+    for out in (sys.stdout, sys.stderr):
+        if hasattr(out, "reconfigure"):
+            out.reconfigure(errors="backslashreplace")
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__.strip(), file=sys.stderr)
         return 2
